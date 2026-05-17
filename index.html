@@ -2517,6 +2517,12 @@ function _dbMatchToClient(r) {
 refreshSession().then(() => {
   Pb.ready = true;
   emit('ready');
+  // Le main script (regular <script>) a déjà appelé render() avant que ce
+  // module soit évalué (module = deferred). On retrigger un render() ici
+  // pour que _initPlayersSync() puisse voir window.PbStore / window.PbSync.
+  if (typeof window.render === 'function') {
+    try { window.render(); } catch (e) { console.warn('[sync] post-init render:', e.message); }
+  }
 });
 
 // ============================================================
@@ -2822,6 +2828,26 @@ async function _flushAll(state) {
   }
 }
 
+// Helper : calcule la clé PK d'une row remote (single ou composite)
+function _rowKey(entity, row) {
+  if (Array.isArray(entity.pk)) return entity.pk.map(c => row[c]).join('|');
+  return String(row[entity.pk]);
+}
+
+// Helper : init le cache à partir des rows remote (PAS du state). Comme ça,
+// items locaux pas encore dans remote → absents du cache → next flush les push.
+function _seedCacheFromRemote(entity, rows, state) {
+  // On dump le state APRÈS apply pour avoir le format exact que dump produirait
+  const map = entity.dump(state);
+  const remoteKeys = new Set(rows.map(r => _rowKey(entity, r)));
+  const cache = {};
+  Object.entries(map).forEach(([k, row]) => {
+    if (remoteKeys.has(k)) cache[k] = _stableJson(row);
+    // sinon : pas dans cache → sera pushé au prochain flush
+  });
+  _lastSeen[entity.key] = cache;
+}
+
 window.PbSync = {
   schedule(state) {
     if (_flushPending) return;
@@ -2834,12 +2860,14 @@ window.PbSync = {
       try {
         const { data, error } = await sb.from(entity.table).select('*');
         if (error) { console.warn(`[sync] fetch ${entity.table}:`, error.message); continue; }
-        entity.apply(state, data || []);
-        // Initialiser le cache avec ce qu'on vient de charger pour éviter un re-push complet
-        const map = entity.dump(state);
-        const cache = {};
-        Object.entries(map).forEach(([k, row]) => { cache[k] = _stableJson(row); });
-        _lastSeen[entity.key] = cache;
+        const rows = data || [];
+        // CRITIQUE : n'apply QUE si remote a des données. Sinon on garde le seed
+        // local et on laisse le prochain flush pousser local → remote.
+        if (rows.length > 0) {
+          try { entity.apply(state, rows); }
+          catch (e) { console.warn(`[sync] apply ${entity.key}:`, e.message); }
+        }
+        _seedCacheFromRemote(entity, rows, state);
       } catch (e) { console.warn(`[sync] fetch ${entity.key}:`, e.message); }
     }
   },
@@ -2847,16 +2875,15 @@ window.PbSync = {
     ENTITIES.filter(e => e.realtime).forEach(entity => {
       const ch = sb.channel('sync-' + entity.table)
         .on('postgres_changes', { event: '*', schema: 'public', table: entity.table }, async () => {
-          // Re-fetch toute la table (simple et fiable plutôt que merger par ligne)
           try {
             const { data, error } = await sb.from(entity.table).select('*');
             if (error) return;
-            entity.apply(state, data || []);
-            // Update cache pour éviter un re-push en boucle
-            const map = entity.dump(state);
-            const cache = {};
-            Object.entries(map).forEach(([k, row]) => { cache[k] = _stableJson(row); });
-            _lastSeen[entity.key] = cache;
+            const rows = data || [];
+            // En realtime aussi : si remote vidé entre temps (rare), on ne wipe pas le state local.
+            if (rows.length > 0) {
+              try { entity.apply(state, rows); } catch(e) {}
+            }
+            _seedCacheFromRemote(entity, rows, state);
             if (onApplied) onApplied(entity.key);
           } catch(e) { /* swallow */ }
         });
