@@ -78,21 +78,16 @@ L'app reste **offline-first** : si Supabase est indisponible, on retombe sur loc
 | `offseason_program`       | programme intersaison                              | non      | oui             | coach L2 |
 | `offseason_logs`          | logs perso d'intersaison                           | non      | propriétaire L2 | propriétaire L2 |
 
-### RLS — règles synthétiques (état après 20260518_001)
+### RLS — règles synthétiques
 - Toutes les tables ont **RLS activée**.
-- **Lecture publique (`anon` + `authenticated`)** pour le data partagé.
-- **Écriture anon ALL** pour les 13 entités équipe (`plays`, `custom_concepts`,
-  `matches`, `match_player_stats`, `match_feedback`, `live_events`, `challenges`,
-  `challenge_scores`, `convocations`, `convocation_responses`, `lineups`,
-  `ffbb_config`, `offseason_program`). Le contrôle d'accès est fait côté front
-  via PIN coach L1, cohérent avec le pattern initialement appliqué à
-  `live_events`. C'est un compromis pragmatique pour permettre la sync
-  multi-device sans imposer Supabase Auth à chaque coach.
-- **Triggers de garde** :
-  - `players.pin_hash` protégé : anon ne peut pas modifier (forcé bcrypt('0000') à l'INSERT, préservé à l'UPDATE).
-  - `live_events` : trigger `enforce_live_event_open_match` empêche INSERT si le match n'est pas en `public_live=true`.
-- **Personal data — L2 strict** : `team_reviews`, `offseason_logs`, `profiles`.
-- **Inaccessible direct** : `team_pins` (pas de policy SELECT, RPC seulement).
+- **Lecture publique (`anon` + `authenticated`)** pour le data partagé : `plays`, `players` (vue sans hash), `matches`, `match_player_stats`, `match_feedback`, `live_events`, `challenges`, `challenge_scores`, `convocations`, `convocation_responses`, `lineups`, `ffbb_config`, `custom_concepts`, `offseason_program`.
+- **Écriture restreinte L2 coach** pour : `plays`, `custom_concepts`, `matches` (sauf cas live), `match_feedback`, `players`, `challenges`, `convocations`, `lineups`, `ffbb_config`, `offseason_program`.
+- **Écriture anon autorisée — uniquement pour le live score** :
+  - `live_events` : INSERT autorisé si la ligne `matches` ciblée a `public_live = true`.
+  - `matches` : UPDATE autorisé sur les colonnes `score_us`, `score_opp`, `last_live_update` si `public_live = true`.
+  - `match_player_stats` : INSERT/UPDATE autorisé si `matches.public_live = true`.
+  - C'est le compromis pragmatique pour que le stat'man (L1) puisse pousser le score sans compte. Le risque résiduel (un visiteur du portail public pourrait falsifier le score) est accepté — c'est un projet d'équipe interne, le PIN stat'man reste sur le client.
+- **Personal data (L2 only)** : `team_reviews`, `offseason_logs`, `profiles`, `challenge_scores` (UPDATE par joueuse).
 
 ### Realtime
 - Activé sur `matches`, `match_player_stats`, `live_events` via `alter publication supabase_realtime add table ...`.
