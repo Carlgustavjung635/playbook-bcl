@@ -2267,7 +2267,6 @@ const Pb = {
   profile: null,       // ligne profiles
   liveChannel: null,   // realtime channel actif (#public)
   statChannel: null,   // realtime channel stat'man (pour matches updates)
-  playersChannel: null,// realtime channel sync effectif
   _dirtyQueue: [],     // ops à retry quand on revient online
   listeners: new Set(),
 };
@@ -2459,30 +2458,6 @@ window.PbStore = {
   },
   unsubscribeLive() {
     if (Pb.liveChannel) { sb.removeChannel(Pb.liveChannel); Pb.liveChannel = null; }
-  },
-
-  // ---- PLAYERS (effectif, sync multi-device) ----
-  async upsertPlayer(p) {
-    // On n'envoie JAMAIS pin_hash depuis le client : trigger protect_player_pin_hash
-    // forcerait sa réinitialisation à bcrypt('0000') sur INSERT. Pour modifier
-    // un PIN il faut passer par l'RPC set_player_pin (L2 coach uniquement).
-    const row = { id: p.id, name: p.name, num: p.num|0 };
-    if (p.photo !== undefined) row.photo = p.photo || null;
-    const { error } = await sb.from('players').upsert(row);
-    if (error) throw error;
-  },
-  async deletePlayer(pid) {
-    const { error } = await sb.from('players').delete().eq('id', pid);
-    if (error) throw error;
-  },
-  subscribePlayers(onChange) {
-    if (Pb.playersChannel) { sb.removeChannel(Pb.playersChannel); Pb.playersChannel = null; }
-    const ch = sb.channel('players-sync')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'players' },
-        (p) => onChange({ event: p.eventType, new: p.new, old: p.old }));
-    ch.subscribe();
-    Pb.playersChannel = ch;
-    return ch;
   },
 
   // ---- FETCH (lecture initiale) ----
@@ -12910,10 +12885,8 @@ function addNewPlayer() {
   const name = document.getElementById('pl-new-name').value.trim();
   const num = parseInt(document.getElementById('pl-new-num').value) || 0;
   if (!name) return;
-  const newP = { id: uid(), name, num, pin: '0000' };
-  state.players.push(newP);
+  state.players.push({ id: uid(), name, num, pin: '0000' });
   persist();
-  if (window.PbStore) PbStore.upsertPlayer(newP).catch(e => console.warn('[sync] upsertPlayer:', e.message));
   managePlayers();
 }
 function removePlayer(pid) {
@@ -12924,7 +12897,6 @@ function removePlayer(pid) {
   state.convocations.forEach(c => { if (c.responses) delete c.responses[pid]; });
   state.matches.forEach(m => { if (m.playerStats) delete m.playerStats[pid]; });
   persist();
-  if (window.PbStore) PbStore.deletePlayer(pid).catch(e => console.warn('[sync] deletePlayer:', e.message));
   managePlayers();
 }
 function editPlayer(pid) {
@@ -13036,21 +13008,10 @@ function savePlayerEdit(pid) {
   const pin = document.getElementById('edp-pin').value.trim();
   if (!name) { alert('Le nom est requis'); return; }
   if (!/^\d{4}$/.test(pin)) { alert('Le PIN doit être 4 chiffres'); return; }
-  const pinChanged = (p.pin !== pin);
   p.name = name;
   p.num = num;
   p.pin = pin;
   persist();
-  if (window.PbStore) {
-    PbStore.upsertPlayer(p).catch(e => console.warn('[sync] upsertPlayer:', e.message));
-    // Le PIN ne peut être changé côté serveur que via l'RPC set_player_pin
-    // (L2 coach requis). En L1, on change uniquement en local — multi-device
-    // ne syncera pas le PIN tant que le coach ne s'est pas connecté L2.
-    if (pinChanged && window.sb && Pb.user) {
-      sb.rpc('set_player_pin', { p_player_id: pid, p_new_pin: pin })
-        .then(({ error }) => { if (error) console.warn('[sync] set_player_pin:', error.message); });
-    }
-  }
   closeModal();
   setTimeout(() => managePlayers(), 50);
 }
@@ -13064,7 +13025,6 @@ async function changePlayerPhoto(pid, event) {
     const compressed = await compressImage(file, 400, 0.8);
     p.photo = compressed;
     persist();
-    if (window.PbStore) PbStore.upsertPlayer(p).catch(e => console.warn('[sync] upsertPlayer photo:', e.message));
     closeModal();
     setTimeout(() => editPlayer(pid), 50);
   } catch (e) {
@@ -13078,7 +13038,6 @@ function removePlayerPhoto(pid) {
   if (!confirm('Retirer la photo ?')) return;
   delete p.photo;
   persist();
-  if (window.PbStore) PbStore.upsertPlayer({ ...p, photo: null }).catch(e => console.warn('[sync] upsertPlayer remove photo:', e.message));
   closeModal();
   setTimeout(() => editPlayer(pid), 50);
 }
@@ -13785,52 +13744,11 @@ window.addEventListener('hashchange', () => render());
 // ============================================================
 // MAIN RENDER
 // ============================================================
-// ---- Sync effectif (players) avec Supabase ----
-// One-shot init : fetch initial + subscribe Realtime.
-function _initPlayersSync() {
-  if (window._playersSyncInit || !window.PbStore) return;
-  window._playersSyncInit = true;
-
-  // 1) Fetch initial : remote wins pour name/num/photo ; local préserve pin + extras.
-  PbStore.fetchPlayers().then(remote => {
-    if (!remote || !remote.length) return;
-    const localById = Object.fromEntries(state.players.map(p => [p.id, p]));
-    const merged = remote.map(rp => {
-      const lp = localById[rp.id] || {};
-      return { ...lp, id: rp.id, name: rp.name, num: rp.num, photo: rp.photo || lp.photo || null, pin: lp.pin || '0000' };
-    });
-    // Joueuses locales pas encore push (id qui commence par 'x' = uid client) → on les pousse
-    const remoteIds = new Set(remote.map(r => r.id));
-    const localOnly = state.players.filter(p => !remoteIds.has(p.id));
-    state.players = [...merged, ...localOnly];
-    persist();
-    localOnly.forEach(p => PbStore.upsertPlayer(p).catch(()=>{}));
-    if (state.section === 'team' || document.querySelector('.modal-body')) render();
-  }).catch(e => console.warn('[sync] fetchPlayers:', e.message));
-
-  // 2) Subscribe Realtime : autres devices mettent à jour ce client en live
-  PbStore.subscribePlayers(({ event, new: row, old }) => {
-    if (event === 'INSERT' || event === 'UPDATE') {
-      const i = state.players.findIndex(p => p.id === row.id);
-      const lp = i >= 0 ? state.players[i] : {};
-      const patched = { ...lp, id: row.id, name: row.name, num: row.num, photo: row.photo || lp.photo || null, pin: lp.pin || '0000' };
-      if (i >= 0) state.players[i] = patched;
-      else state.players.push(patched);
-    } else if (event === 'DELETE' && old) {
-      state.players = state.players.filter(p => p.id !== old.id);
-    }
-    persist();
-    if (state.section === 'team' || document.querySelector('.modal-body')) render();
-  });
-}
-
 function render() {
   // Cleanup : convoc match orphelines + création auto convoc pour matchs sans convoc
   if (typeof cleanupOrphanMatchConvocs === 'function') cleanupOrphanMatchConvocs();
   // Vérifier l'attribution automatique des badges pour les défis terminés
   if (typeof checkAndAwardBadges === 'function') checkAndAwardBadges();
-  // Sync effectif au premier render (idempotent : flag interne)
-  _initPlayersSync();
   // Portail public via hash #public
   if (window.location.hash === '#public') {
     // 1) Fetch initial des matches depuis Supabase (si dispo) puis re-render
