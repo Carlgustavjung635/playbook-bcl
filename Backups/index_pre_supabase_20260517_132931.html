@@ -2239,262 +2239,6 @@
 
 <div id="root"></div>
 
-<!-- ============================================================
-     SUPABASE BACKEND — couche d'abstraction
-     - L1 PIN : reste piloté côté client (verify_pin RPC en bonus)
-     - L2 email/password : pour les données perso joueuse
-     - Realtime : live score multi-device (#public)
-     - Fallback : localStorage si Supabase indisponible
-     ============================================================ -->
-<script type="module">
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-
-const SUPABASE_URL = 'https://orertxlsvkdqayybgwaq.supabase.co';
-const SUPABASE_ANON_KEY = 'sb_publishable_pJwgqWwDDhhST6xh9IbzbA_a0ANDwUt';
-
-const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  auth: { persistSession: true, autoRefreshToken: true, storageKey: 'pb8_sb_auth' },
-  realtime: { params: { eventsPerSecond: 10 } }
-});
-
-window.sb = sb;
-
-// ---- État connectivité ----
-const Pb = {
-  ready: false,
-  online: navigator.onLine,
-  user: null,          // session Supabase (L2)
-  profile: null,       // ligne profiles
-  liveChannel: null,   // realtime channel actif (#public)
-  statChannel: null,   // realtime channel stat'man (pour matches updates)
-  _dirtyQueue: [],     // ops à retry quand on revient online
-  listeners: new Set(),
-};
-window.Pb = Pb;
-
-function emit(evt, payload) {
-  Pb.listeners.forEach(fn => { try { fn(evt, payload); } catch(e){ console.warn(e); } });
-}
-
-window.addEventListener('online',  () => { Pb.online = true;  emit('online');  flushQueue(); });
-window.addEventListener('offline', () => { Pb.online = false; emit('offline'); });
-
-async function flushQueue() {
-  if (!Pb._dirtyQueue.length) return;
-  const q = Pb._dirtyQueue.splice(0);
-  for (const op of q) { try { await op(); } catch(e){ Pb._dirtyQueue.push(op); break; } }
-}
-
-// ---- Auth L2 ----
-async function refreshSession() {
-  const { data: { session } } = await sb.auth.getSession();
-  Pb.user = session?.user || null;
-  if (Pb.user) {
-    const { data } = await sb.from('profiles').select('*').eq('user_id', Pb.user.id).maybeSingle();
-    Pb.profile = data || null;
-  } else {
-    Pb.profile = null;
-  }
-  emit('auth', { user: Pb.user, profile: Pb.profile });
-}
-
-sb.auth.onAuthStateChange((_evt, _session) => { refreshSession(); });
-
-window.SbAuth = {
-  isAuthed: () => !!Pb.user,
-  current: () => ({ user: Pb.user, profile: Pb.profile }),
-  async signIn(email, password) {
-    const { data, error } = await sb.auth.signInWithPassword({ email, password });
-    if (error) throw error;
-    await refreshSession();
-    return data;
-  },
-  async signUp(email, password, { displayName, role = 'player', playerId = null } = {}) {
-    const { data, error } = await sb.auth.signUp({ email, password });
-    if (error) throw error;
-    // Le profil sera créé au premier login si la session est immédiate
-    if (data.user) {
-      await sb.from('profiles').upsert({
-        user_id: data.user.id,
-        display_name: displayName || email.split('@')[0],
-        role, player_id: playerId
-      });
-    }
-    await refreshSession();
-    return data;
-  },
-  async signOut() { await sb.auth.signOut(); await refreshSession(); },
-  onChange(fn) { Pb.listeners.add(fn); return () => Pb.listeners.delete(fn); },
-};
-
-// ---- PIN verification (RPC) — fallback local si échec ----
-window.SbPin = {
-  async verify(role, playerId, pin) {
-    try {
-      const { data, error } = await sb.rpc('verify_pin', {
-        p_role: role, p_player_id: playerId, p_pin: pin
-      });
-      if (error) throw error;
-      return { ok: !!data, source: 'remote' };
-    } catch (e) {
-      return { ok: null, source: 'offline', error: e?.message };
-    }
-  }
-};
-
-// ---- Store : push entités vers Supabase (best-effort, queue si offline) ----
-function _wrap(op) {
-  return async () => {
-    if (!Pb.online) { Pb._dirtyQueue.push(op); return; }
-    try { await op(); }
-    catch (e) {
-      console.warn('[Pb] push failed, queued:', e?.message || e);
-      Pb._dirtyQueue.push(op);
-    }
-  };
-}
-
-window.PbStore = {
-  // ---- MATCHES ----
-  async upsertMatch(m) {
-    await _wrap(async () => {
-      const row = {
-        id: m.id, date: m.date, opponent: m.opponent, home: !!m.home,
-        score_us: m.scoreUs|0, score_opp: m.scoreOpp|0,
-        quarters: m.quarters || {}, notes: m.notes || null,
-        video_url: m.videoUrl || null,
-        is_live: !!m.isLive, live_stream_url: m.liveStreamUrl || null,
-        public_live: !!m.publicLive,
-        public_live_started_at: m.publicLiveStartedAt ? new Date(m.publicLiveStartedAt).toISOString() : null,
-        last_live_update: m.lastLiveUpdate ? new Date(m.lastLiveUpdate).toISOString() : null,
-      };
-      const { error } = await sb.from('matches').upsert(row);
-      if (error) throw error;
-    })();
-  },
-  async pushMatchScore(matchId, { scoreUs, scoreOpp, publicLive }) {
-    await _wrap(async () => {
-      const patch = {
-        score_us: scoreUs|0, score_opp: scoreOpp|0,
-        last_live_update: new Date().toISOString(),
-      };
-      if (publicLive !== undefined) patch.public_live = !!publicLive;
-      const { error } = await sb.from('matches').update(patch).eq('id', matchId);
-      if (error) throw error;
-    })();
-  },
-  async upsertPlayerStats(matchId, playerId, stats) {
-    await _wrap(async () => {
-      const { error } = await sb.from('match_player_stats').upsert({
-        match_id: matchId, player_id: playerId, stats
-      });
-      if (error) throw error;
-    })();
-  },
-  async pushLiveEvent({ matchId, playerId, key, inc, value, label }) {
-    await _wrap(async () => {
-      const { error } = await sb.from('live_events').insert({
-        match_id: matchId, player_id: playerId || null,
-        key, inc: inc|0 || 1, value: value ?? null, label: label || null
-      });
-      if (error) throw error;
-    })();
-  },
-
-  // ---- TEAM REVIEWS (perso, L2 only) ----
-  async upsertTeamReview(r) {
-    if (!Pb.user) throw new Error('Authentification requise (compte personnel)');
-    const { error } = await sb.from('team_reviews').upsert({
-      id: r.id, player_id: r.pid, date: r.date,
-      ambiance: r.ambiance, role_clarity: r.roleClarity,
-      playtime: r.playtime, physique: r.physique, comment: r.comment
-    });
-    if (error) throw error;
-  },
-  async listMyTeamReviews(playerId) {
-    if (!Pb.user) return [];
-    const { data } = await sb.from('team_reviews').select('*').eq('player_id', playerId).order('date', { ascending: false });
-    return data || [];
-  },
-
-  // ---- OFFSEASON LOGS (perso, L2 only) ----
-  async upsertOffseasonLog(playerId, isoWeek, exerciseId, { done, value }) {
-    if (!Pb.user) throw new Error('Authentification requise');
-    const { error } = await sb.from('offseason_logs').upsert({
-      player_id: playerId, iso_week: isoWeek, exercise_id: exerciseId,
-      done: !!done, value: value ?? null, logged_at: new Date().toISOString()
-    });
-    if (error) throw error;
-  },
-
-  // ---- LIVE REALTIME (spectateur #public) ----
-  subscribeLive(matchId, onUpdate) {
-    if (Pb.liveChannel) { sb.removeChannel(Pb.liveChannel); Pb.liveChannel = null; }
-    const ch = sb.channel('match-live-' + matchId)
-      .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'matches', filter: 'id=eq.' + matchId },
-        (p) => onUpdate({ type: 'match', new: p.new, old: p.old }))
-      .on('postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'live_events', filter: 'match_id=eq.' + matchId },
-        (p) => onUpdate({ type: 'event', row: p.new }))
-      .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'match_player_stats', filter: 'match_id=eq.' + matchId },
-        (p) => onUpdate({ type: 'stat', new: p.new, old: p.old }));
-    ch.subscribe();
-    Pb.liveChannel = ch;
-    return ch;
-  },
-  // Variante : subscribe à TOUS les matchs en live public (pour le portail)
-  subscribeAnyLive(onUpdate) {
-    if (Pb.liveChannel) { sb.removeChannel(Pb.liveChannel); Pb.liveChannel = null; }
-    const ch = sb.channel('any-live')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'matches' },
-        (p) => onUpdate({ type: 'match', new: p.new, old: p.old }))
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'live_events' },
-        (p) => onUpdate({ type: 'event', row: p.new }));
-    ch.subscribe();
-    Pb.liveChannel = ch;
-    return ch;
-  },
-  unsubscribeLive() {
-    if (Pb.liveChannel) { sb.removeChannel(Pb.liveChannel); Pb.liveChannel = null; }
-  },
-
-  // ---- FETCH (lecture initiale) ----
-  async fetchMatches() {
-    const { data } = await sb.from('matches').select('*').order('date', { ascending: false });
-    return (data || []).map(_dbMatchToClient);
-  },
-  async fetchPlayers() {
-    const { data } = await sb.from('players').select('id,name,num,photo').order('num');
-    return data || [];
-  },
-  async fetchLiveMatch() {
-    const { data } = await sb.from('matches').select('*').eq('public_live', true).maybeSingle();
-    return data ? _dbMatchToClient(data) : null;
-  }
-};
-
-function _dbMatchToClient(r) {
-  return {
-    id: r.id, date: r.date, opponent: r.opponent, home: r.home,
-    scoreUs: r.score_us, scoreOpp: r.score_opp,
-    quarters: r.quarters || {}, notes: r.notes || '', videoUrl: r.video_url || '',
-    isLive: r.is_live, liveStreamUrl: r.live_stream_url || '',
-    publicLive: r.public_live,
-    publicLiveStartedAt: r.public_live_started_at ? Date.parse(r.public_live_started_at) : null,
-    lastLiveUpdate: r.last_live_update ? Date.parse(r.last_live_update) : null,
-    positives: [], negatives: [], playerStats: {}
-  };
-}
-
-// Initialisation
-refreshSession().then(() => {
-  Pb.ready = true;
-  emit('ready');
-});
-</script>
-
 <script>
 // ============================================================
 // DATA
@@ -3216,7 +2960,7 @@ function getRemainingLockMs(key) {
   return Math.max(0, att.lockedUntil - Date.now());
 }
 
-async function tryPin() {
+function tryPin() {
   const { role, playerId, pinInput } = state.authFlow;
   const key = getRateLimitKey(role, playerId);
 
@@ -3229,21 +2973,11 @@ async function tryPin() {
   }
 
   let valid = false;
-  // 1) Tentative RPC Supabase (source de vérité si en ligne)
-  if (window.SbPin) {
-    try {
-      const res = await SbPin.verify(role, playerId || null, pinInput);
-      if (res.source === 'remote') valid = !!res.ok;
-    } catch(e) { /* on retombe sur local */ }
-  }
-  // 2) Fallback local (compat 100 % avec l'existant si offline ou pas encore migré)
-  if (!valid) {
-    if (role === 'coach' && pinInput === (state.pins.coach || '1234')) valid = true;
-    else if (role === 'stat' && pinInput === (state.pins.stat || '1234')) valid = true;
-    else if (role === 'player') {
-      const p = state.players.find(p => p.id === playerId);
-      if (p && p.pin === pinInput) valid = true;
-    }
+  if (role === 'coach' && pinInput === (state.pins.coach || '1234')) valid = true;
+  else if (role === 'stat' && pinInput === (state.pins.stat || '1234')) valid = true;
+  else if (role === 'player') {
+    const p = state.players.find(p => p.id === playerId);
+    if (p && p.pin === pinInput) valid = true;
   }
 
   if (valid) {
@@ -3484,18 +3218,7 @@ function openSettings() {
         </button>
       ` : ''}
 
-      <div style="margin-top:14px;padding:12px 14px;background:var(--bg-3);border-radius:8px;border:1px solid var(--border-soft)">
-        <div class="eyebrow-muted" style="margin-bottom:6px">Compte personnel (cloud)</div>
-        ${window.SbAuth && window.SbAuth.isAuthed() ? `
-          <div style="font-size:12px;color:var(--ink-2);margin-bottom:8px">${esc(window.SbAuth.current().user.email)}</div>
-          <button class="btn btn-secondary btn-block" onclick="closeModal();setTimeout(()=>sbAccountSignOut(),50)">Se déconnecter du compte cloud</button>
-        ` : `
-          <div style="font-size:11px;color:var(--ink-3);margin-bottom:8px;line-height:1.4">Optionnel — requis uniquement pour synchroniser tes données perso entre appareils.</div>
-          <button class="btn btn-secondary btn-block" onclick="closeModal();setTimeout(()=>openSbAccountModal(),50)">🔐 Connexion / inscription</button>
-        `}
-      </div>
-
-      <button class="btn btn-secondary btn-block mb-2 mt-3" onclick="closeModal();setTimeout(()=>confirmLogout(),50)" style="color:var(--orange)">
+      <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>confirmLogout(),50)" style="color:var(--orange)">
         ← Changer d'utilisateur
       </button>
 
@@ -3523,83 +3246,6 @@ function confirmLogout() {
       <button class="btn btn-primary" onclick="doLogout()">Déconnexion</button>
     </div>
   `);
-}
-
-// ---- Compte L2 (Supabase Auth) ----
-function openSbAccountModal(mode) {
-  const m = mode || 'signin';
-  const isPlayer = state.auth && state.auth.role === 'player';
-  const players = state.players;
-  openModal(`
-    <div class="modal-header">
-      <div class="modal-title">${m === 'signin' ? 'Connexion compte' : 'Créer un compte'}</div>
-      <button class="modal-close" onclick="closeModal()">✕</button>
-    </div>
-    <div class="modal-body">
-      <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:14px;font-size:12px;color:var(--ink-2);line-height:1.5">
-        Un compte personnel permet de retrouver tes données perso (stats, retours, programme intersaison) sur n'importe quel appareil. Aucun impact sur le PIN d'équipe.
-      </div>
-      <div class="fld">
-        <label class="fld-label">Email</label>
-        <input id="sb-email" type="email" autocomplete="email" placeholder="ex: prenom@exemple.fr">
-      </div>
-      <div class="fld mt-2">
-        <label class="fld-label">Mot de passe</label>
-        <input id="sb-password" type="password" autocomplete="${m === 'signin' ? 'current-password' : 'new-password'}" placeholder="Min. 8 caractères">
-      </div>
-      ${m === 'signup' ? `
-        <div class="fld mt-2">
-          <label class="fld-label">Nom affiché</label>
-          <input id="sb-displayname" type="text" placeholder="Prénom Nom">
-        </div>
-        ${isPlayer ? `
-          <div class="fld mt-2">
-            <label class="fld-label">Lier à ma fiche joueuse</label>
-            <select id="sb-playerid">
-              <option value="">— (aucune) —</option>
-              ${players.map(p => `<option value="${p.id}" ${state.auth.playerId===p.id?'selected':''}>#${p.num} ${esc(p.name)}</option>`).join('')}
-            </select>
-          </div>
-        ` : ''}
-      ` : ''}
-      <div id="sb-err" style="margin-top:10px;color:var(--red);font-size:12px"></div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-secondary" onclick="openSbAccountModal('${m === 'signin' ? 'signup' : 'signin'}')">${m === 'signin' ? 'Créer un compte' : 'J’ai déjà un compte'}</button>
-      <button class="btn btn-primary" onclick="sbAccountSubmit('${m}')">${m === 'signin' ? 'Se connecter' : "S'inscrire"}</button>
-    </div>
-  `);
-  setTimeout(() => document.getElementById('sb-email')?.focus(), 100);
-}
-
-async function sbAccountSubmit(mode) {
-  const email = document.getElementById('sb-email').value.trim();
-  const password = document.getElementById('sb-password').value;
-  const errEl = document.getElementById('sb-err');
-  errEl.textContent = '';
-  if (!email || !password) { errEl.textContent = 'Email et mot de passe requis.'; return; }
-  if (!window.SbAuth) { errEl.textContent = 'Backend indisponible.'; return; }
-  try {
-    if (mode === 'signin') {
-      await SbAuth.signIn(email, password);
-    } else {
-      const displayName = document.getElementById('sb-displayname')?.value.trim();
-      const playerId = document.getElementById('sb-playerid')?.value || null;
-      const role = state.auth ? state.auth.role : 'player';
-      await SbAuth.signUp(email, password, { displayName, role, playerId });
-    }
-    closeModal();
-    alert(mode === 'signin' ? 'Connecté.' : 'Compte créé.');
-    render();
-  } catch (e) {
-    errEl.textContent = e?.message || 'Erreur';
-  }
-}
-
-async function sbAccountSignOut() {
-  if (window.SbAuth) await SbAuth.signOut();
-  alert('Compte cloud déconnecté.');
-  render();
 }
 
 function doLogout() {
@@ -7054,22 +6700,14 @@ function liveActionFor(playerId, key, increment) {
     to: 'Perte', fouls: 'Faute', min: '+1 minute',
   };
   const points = { p2i: 2, p2e: 2, p3: 3, ft: 1, ca: 2 };
-  const entryLabel = `#${player.num} ${player.name} · ${labels[key] || key}`;
-  const entryValue = points[key] || (increment || 1);
   state.live.log.push({
     time: new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-    label: entryLabel,
-    value: entryValue,
+    label: `#${player.num} ${player.name} · ${labels[key] || key}`,
+    value: points[key] || (increment || 1),
     playerId, key, inc,
   });
   save(K.liveSession + '_' + state.live.matchId, state.live.log);
   persist();
-  // Realtime broadcast (uniquement si match en diffusion publique)
-  if (m.publicLive && window.PbStore) {
-    PbStore.upsertPlayerStats(m.id, playerId, s);
-    PbStore.pushLiveEvent({ matchId: m.id, playerId, key, inc, value: entryValue, label: entryLabel });
-    pushLiveScore(m);
-  }
   render();
 }
 
@@ -7078,14 +6716,6 @@ function recalcMatchScore(m) {
   Object.values(m.playerStats || {}).forEach(s => total += (s.pts || 0));
   m.scoreUs = total;
   m.lastLiveUpdate = Date.now();
-}
-
-// Push score live vers Supabase (no-op si pas connecté)
-function pushLiveScore(m) {
-  if (!window.PbStore || !m) return;
-  try {
-    PbStore.pushMatchScore(m.id, { scoreUs: m.scoreUs, scoreOpp: m.scoreOpp });
-  } catch(e) {}
 }
 
 // Incrémenter le score adverse (boutons -1, +1, +2, +3)
@@ -7103,11 +6733,6 @@ function oppScoreAdd(delta) {
   });
   save(K.liveSession + '_' + state.live.matchId, state.live.log);
   persist();
-  // Realtime broadcast
-  if (m.publicLive && window.PbStore) {
-    PbStore.pushLiveEvent({ matchId: m.id, playerId: null, key: 'opp', inc: delta, value: delta, label: `Adversaire ${delta > 0 ? '+' : ''}${delta}` });
-    pushLiveScore(m);
-  }
   render();
 }
 
@@ -7118,8 +6743,6 @@ function togglePublicLive() {
   if (m.publicLive) {
     m.publicLive = false;
     persist();
-    // Coupe la diffusion côté backend
-    if (window.PbStore) PbStore.pushMatchScore(m.id, { scoreUs: m.scoreUs, scoreOpp: m.scoreOpp, publicLive: false });
     render();
     return;
   }
@@ -7128,13 +6751,6 @@ function togglePublicLive() {
   m.publicLive = true;
   m.publicLiveStartedAt = Date.now();
   persist();
-  // Upsert le match dans Supabase pour que RLS autorise les events live
-  if (window.PbStore) {
-    PbStore.upsertMatch(m).then(() => {
-      // Push initial des stats par joueuse pour pré-remplir
-      Object.entries(m.playerStats || {}).forEach(([pid, s]) => PbStore.upsertPlayerStats(m.id, pid, s));
-    });
-  }
   render();
   setTimeout(() => {
     if (confirm('Diffusion activée ! Veux-tu copier le lien à partager ?')) copyPublicLink();
@@ -13730,6 +13346,11 @@ function renderPublic() {
           </div>
         `}
 
+        <div style="margin:24px 18px 12px;padding:14px 16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);text-align:center">
+          <div class="eyebrow-muted mb-2">Accès équipe</div>
+          <a href="#" onclick="event.preventDefault();window.location.hash='';window.location.reload();" style="color:var(--orange);font-family:'JetBrains Mono';font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;text-decoration:none">→ Connexion coach / joueuse</a>
+        </div>
+
         <div style="text-align:center;padding:20px;color:var(--ink-4);font-size:10px;font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.15em">
           IE-Basket Club L'Islois · D2 Féminine IDF2
         </div>
@@ -13751,44 +13372,18 @@ function render() {
   if (typeof checkAndAwardBadges === 'function') checkAndAwardBadges();
   // Portail public via hash #public
   if (window.location.hash === '#public') {
-    // 1) Fetch initial des matches depuis Supabase (si dispo) puis re-render
-    if (window.PbStore && !window._publicInitDone) {
-      window._publicInitDone = true;
-      PbStore.fetchMatches().then(remote => {
-        if (remote && remote.length) {
-          // Merge : on garde les positives/negatives/playerStats locaux si déjà présents
-          const byId = Object.fromEntries(state.matches.map(m => [m.id, m]));
-          state.matches = remote.map(rm => ({ ...(byId[rm.id] || {}), ...rm }));
-          document.getElementById('root').innerHTML = renderPublic();
-        }
-      }).catch(()=>{});
-    }
-    // 2) Realtime : subscribe pour MAJ live (remplace le polling)
-    if (window.PbStore && !window._publicLiveSub) {
-      window._publicLiveSub = PbStore.subscribeAnyLive((evt) => {
-        if (evt.type === 'match' && evt.new) {
-          const i = state.matches.findIndex(m => m.id === evt.new.id);
-          const patched = {
-            id: evt.new.id, date: evt.new.date, opponent: evt.new.opponent, home: evt.new.home,
-            scoreUs: evt.new.score_us, scoreOpp: evt.new.score_opp,
-            quarters: evt.new.quarters || {},
-            isLive: evt.new.is_live, liveStreamUrl: evt.new.live_stream_url || '',
-            publicLive: evt.new.public_live,
-            lastLiveUpdate: evt.new.last_live_update ? Date.parse(evt.new.last_live_update) : Date.now(),
-          };
-          if (i >= 0) state.matches[i] = { ...state.matches[i], ...patched };
-          else state.matches.push({ positives: [], negatives: [], playerStats: {}, ...patched });
-          document.getElementById('root').innerHTML = renderPublic();
-        }
-      });
-    }
     document.getElementById('root').innerHTML = renderPublic();
+    // Auto-refresh toutes les 5 sec si un match est diffusé
+    if (state.matches.some(m => m.publicLive)) {
+      if (!window._publicRefresh) {
+        window._publicRefresh = setInterval(() => {
+          // Recharger l'état depuis localStorage (changements faits par le stat'man)
+          state.matches = load(K.matches, []);
+          document.getElementById('root').innerHTML = renderPublic();
+        }, 5000);
+      }
+    }
     return;
-  } else if (window._publicLiveSub && window.PbStore) {
-    // On a quitté le portail public → unsubscribe
-    PbStore.unsubscribeLive();
-    window._publicLiveSub = null;
-    window._publicInitDone = false;
   }
 
   if (!state.auth) {
