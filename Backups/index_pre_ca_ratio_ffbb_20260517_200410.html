@@ -7624,17 +7624,13 @@ function renderLiveCounter(m, players) {
             <div class="eyebrow-muted" style="margin:8px 0 4px;font-size:9px;color:var(--red)">MANQUÉS</div>
             <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">
               ${[
-                { k: 'p2iA', made: 'p2i', l: '✕ 2 INT' },
-                { k: 'p2eA', made: 'p2e', l: '✕ 2 MID' },
-                { k: 'p3A',  made: 'p3',  l: '✕ 3PT' },
-                { k: 'ftA',  made: 'ft',  l: '✕ LF' },
-              ].map(b => {
-                // Affiche le NB DE MANQUÉS réel = tentatives - réussis (≥ 0).
-                // Évite le bug visuel "ça incrémente +1 réussi mais aussi
-                // +1 dans MANQUÉS" qui faisait croire à un ratio cassé.
-                const miss = Math.max(0, (s[b.k] || 0) - (s[b.made] || 0));
-                return `<button class="counter-btn" onclick="liveActionFor('${p.id}','${b.k}', 1)" style="height:38px;font-size:11px;font-family:'JetBrains Mono';font-weight:700;border-color:var(--red);color:var(--red)">${b.l}<br><span style="font-size:9px;opacity:0.6">${miss}</span></button>`;
-              }).join('')}
+                { k: 'p2iA', l: '✕ 2 INT' },
+                { k: 'p2eA', l: '✕ 2 MID' },
+                { k: 'p3A', l: '✕ 3PT' },
+                { k: 'ftA', l: '✕ LF' },
+              ].map(b => `
+                <button class="counter-btn" onclick="liveActionFor('${p.id}','${b.k}', 1)" style="height:38px;font-size:11px;font-family:'JetBrains Mono';font-weight:700;border-color:var(--red);color:var(--red)">${b.l}<br><span style="font-size:9px;opacity:0.6">${s[b.k] || 0}</span></button>
+              `).join('')}
             </div>
             <div class="eyebrow-muted" style="margin:8px 0 4px;font-size:9px">AUTRES</div>
             <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:6px">
@@ -14088,30 +14084,6 @@ function parseClubMatchesFromHTML(html, clubTeamHint) {
 function parseStandingsFromHTML(html) {
   return [];
 }
-
-// La page CLUB FFBB n'affiche que ~1 match par équipe (résumé).
-// Pour avoir le CALENDRIER COMPLET d'une équipe, il faut aller sur sa
-// page dédiée. On cherche son URL dans le payload JSON Next.js imbriqué
-// dans le HTML de la page club.
-function extractTeamUrlFromClubHtml(html, teamName) {
-  if (!html || !teamName) return null;
-  // L'HTML escape les guillemets en \" dans le payload JSON.
-  // On cherche : "name":"<teamName>" ... "url":{"url":"/ligues/.../equipes/<id>"
-  // En passant par regex sur la forme escaped.
-  const escName = teamName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const re = new RegExp(
-    '\\\\?"name\\\\?":\\\\?"' + escName + '\\\\?"[\\s\\S]{0,800}?' +
-    '\\\\?"url\\\\?":\\s*\\{\\\\?"url\\\\?":\\\\?"([^"\\\\]+/equipes/[^"\\\\]+)',
-    'i'
-  );
-  const m = html.match(re);
-  if (m && m[1]) return m[1];
-  // Fallback : essayer sans tenir compte des guillemets échappés (cas non-escapé)
-  const re2 = new RegExp('"name":"' + escName + '"[\\s\\S]{0,800}?"url":\\s*\\{"url":"([^"]+/equipes/[^"]+)', 'i');
-  const m2 = html.match(re2);
-  return m2 && m2[1] ? m2[1] : null;
-}
-
 async function syncFFBB() {
   const url = (state.ffbb.clubUrl || '').trim();
   if (!url) { alert('URL du club FFBB requise'); return; }
@@ -14120,41 +14092,17 @@ async function syncFFBB() {
   render();
 
   try {
-    const clubHtml = await fetchViaProxy(url);
-    if (!clubHtml || clubHtml.length < 500) throw new Error('Page FFBB vide ou trop courte');
+    const html = await fetchViaProxy(url);
+    if (!html || html.length < 500) throw new Error('Page FFBB vide ou trop courte');
 
-    // Stratégie : si on a un teamName, on essaie d'aller chercher la page
-    // DÉDIÉE de l'équipe (= calendrier complet, ~20 matches au lieu de ~1
-    // visible sur la page club résumé).
+    // Nouveau parser HTML direct (FFBB 2026 = Next.js App Router)
     const teamHint = (state.ffbb.teamName || '').trim();
-    let matchesHtml = clubHtml;
-    let teamPageUsed = false;
-    if (teamHint) {
-      const teamPath = extractTeamUrlFromClubHtml(clubHtml, teamHint);
-      if (teamPath) {
-        const teamUrl = teamPath.startsWith('http')
-          ? teamPath
-          : 'https://competitions.ffbb.com' + teamPath;
-        try {
-          const teamHtml = await fetchViaProxy(teamUrl);
-          if (teamHtml && teamHtml.length >= 500) {
-            matchesHtml = teamHtml;
-            teamPageUsed = true;
-          }
-        } catch (e) {
-          console.warn('[ffbb] team page fetch failed, fallback to club page', e.message);
-        }
-      }
-    }
-
-    // Si on est sur la page équipe : tous les matches sont à elle → pas de filtre.
-    // Sinon (fallback page club) : filtre par hint pour garder uniquement
-    // ceux mentionnant le nom de l'équipe.
-    const matches = parseClubMatchesFromHTML(matchesHtml, teamPageUsed ? null : (teamHint || null));
-    const standings = parseStandingsFromHTML(matchesHtml);
+    const matches = parseClubMatchesFromHTML(html, teamHint || null);
+    const standings = parseStandingsFromHTML(html);
 
     if (matches.length === 0) {
-      const snippet = matchesHtml.replace(/\s+/g, ' ').slice(0, 300);
+      // Diag : extraire un échantillon de HTML pour comprendre la structure
+      const snippet = html.replace(/\s+/g, ' ').slice(0, 300);
       throw new Error('Aucun match trouvé sur cette page. Vérifie l\'URL du club FFBB. Aperçu : ' + snippet);
     }
 
