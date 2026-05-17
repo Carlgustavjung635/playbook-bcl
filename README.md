@@ -36,14 +36,53 @@ publishable Supabase est hardcodée dans le HTML (elle est faite pour ça).
 
 ## Setup
 
+### 0) Configurer `.env.local` (déjà ignoré par git)
+
+```bash
+SUPABASE_URL=https://orertxlsvkdqayybgwaq.supabase.co
+SUPABASE_PROJECT_REF=orertxlsvkdqayybgwaq
+SUPABASE_PUBLISHABLE_KEY=sb_publishable_...    # OK à hardcoder, RLS-protégée
+SUPABASE_SECRET_KEY=sb_secret_...              # NE JAMAIS commiter
+# Pour exécuter scripts/migrate.mjs : choisir A ou B
+# SUPABASE_ACCESS_TOKEN=sbp_...                # (A) PAT — recommandé
+# SUPABASE_DB_URL=postgresql://postgres:<pwd>@db.<ref>.supabase.co:5432/postgres  # (B)
+```
+
+> ⚠️ Le `sb_secret_*` (service_role) **ne suffit pas** pour exécuter du DDL via API.
+> Il sert uniquement aux scripts qui lisent/écrivent dans des tables déjà créées
+> (`scripts/smoke.mjs`, futurs scripts admin). Pour la migration, fournir un PAT
+> (`sbp_*`, créé en 30 sec à https://app.supabase.com/account/tokens) ou l'URL DB.
+
 ### 1) Exécuter la migration SQL dans Supabase
 
+**Trois options, choisir une seule :**
+
+**A. Automatique — Management API (recommandé)**
+```bash
+# Ajouter SUPABASE_ACCESS_TOKEN=sbp_... dans .env.local, puis :
+node scripts/migrate.mjs
+```
+
+**B. Automatique — connexion Postgres directe**
+```bash
+# Ajouter SUPABASE_DB_URL=postgresql://... dans .env.local, puis :
+npm install pg
+node scripts/migrate.mjs
+```
+
+**C. Manuel — SQL Editor du dashboard**
 1. Aller sur https://app.supabase.com/project/orertxlsvkdqayybgwaq/sql/new
-2. Coller le contenu de [`supabase/migrations/20260517_initial.sql`](supabase/migrations/20260517_initial.sql)
-3. Cliquer **Run**
-4. Vérifier dans **Database → Tables** que les 17 tables sont créées
-5. Vérifier dans **Database → Replication** que `matches`, `match_player_stats`
-   et `live_events` apparaissent dans la publication `supabase_realtime`
+2. Coller le contenu de [`supabase/migrations/20260517_initial.sql`](supabase/migrations/20260517_initial.sql) → **Run**
+
+### 1bis) Vérifier le déploiement
+
+```bash
+node scripts/smoke.mjs
+```
+
+Le script vérifie : 17 tables exposées par PostgREST, INSERT/SELECT/DELETE sur
+`matches`, déclenchement du trigger `enforce_live_event_open_match`, RPC
+`verify_pin` avec les PINs par défaut.
 
 ### 2) Activer Email/Password dans Supabase Auth
 
@@ -98,8 +137,12 @@ Le repo est déjà configuré pour Netlify (`netlify.toml`). Le hosting du
 ├── netlify/functions/ffbb-scraper.js       # Scraper FFBB
 ├── supabase/migrations/
 │   └── 20260517_initial.sql                # Schéma + RLS + seed initial
+├── scripts/
+│   ├── migrate.mjs                         # Runner migrations (PAT ou pg)
+│   └── smoke.mjs                           # Smoke test post-migration
 ├── MIGRATION_PLAN.md                       # Design détaillé du backend
 ├── Backups/index_pre_supabase_*.html       # Sauvegarde avant refacto
+├── .env.local                              # Secrets locaux (gitignored)
 ├── .gitignore
 └── README.md
 ```

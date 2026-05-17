@@ -133,12 +133,35 @@ Le spectateur n'a besoin d'aucun compte ; la clé publishable suffit.
 
 ## 6. Plan d'application des migrations
 
-L'utilisateur doit exécuter manuellement, dans cet ordre :
+Trois chemins disponibles, choisir un seul :
+
+### A. Automatique — Management API (recommandé)
+```bash
+# .env.local : ajouter SUPABASE_ACCESS_TOKEN=sbp_... (Personal Access Token,
+# créé à https://app.supabase.com/account/tokens — 30 sec)
+node scripts/migrate.mjs
+```
+
+### B. Automatique — connexion Postgres directe
+```bash
+# .env.local : ajouter SUPABASE_DB_URL=postgresql://postgres:<pwd>@db.<ref>.supabase.co:5432/postgres
+npm install pg
+node scripts/migrate.mjs
+```
+
+### C. Manuel — SQL Editor (1 minute)
 1. Aller sur https://app.supabase.com/project/orertxlsvkdqayybgwaq/sql/new
 2. Coller le contenu de `supabase/migrations/20260517_initial.sql` → **Run**
-3. Vérifier dans **Database → Tables** que les 17 tables sont créées
-4. Vérifier dans **Database → Replication** que `matches`, `match_player_stats`, `live_events` sont dans la publication `supabase_realtime`
-5. (Optionnel) Créer un premier compte coach via **Authentication → Add user** ou via le formulaire signup de l'app
+
+### Validation post-migration
+```bash
+node scripts/smoke.mjs   # 23 assertions sur tables + triggers + RPC
+```
+
+> ⚠️ **Note clé** : le `sb_secret_*` (project service_role) **ne peut pas**
+> exécuter du DDL via l'API. Il sert uniquement à PostgREST et à l'Auth Admin
+> API sur des objets déjà existants. Pour DDL, il faut un PAT (`sbp_*`) OU
+> l'URL Postgres directe (avec mot de passe DB).
 
 ---
 

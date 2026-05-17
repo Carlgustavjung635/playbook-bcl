@@ -1,7 +1,10 @@
 # Secrets locaux (jamais committer)
 .env
+.env.*
 .env.local
 .env.*.local
+*.secret
+*.key
 
 # Dépendances
 node_modules/
