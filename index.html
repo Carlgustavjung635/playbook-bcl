@@ -259,12 +259,45 @@
 
   /* VIDEO TILE */
   .v-tile {
-    width: 160px;
+    width: 100%;
     background: var(--surface); border: 1px solid var(--border);
     border-radius: var(--radius); overflow: hidden;
     cursor: pointer; transition: transform 0.15s, border-color 0.15s;
   }
+  .v-tile:hover { border-color: var(--orange); }
   .v-tile:active { transform: scale(0.96); }
+  /* Grid responsive : 2 col mobile par défaut, 3 col >= 720px, 4 col >= 1100px */
+  .plays-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+    padding: 0 18px;
+  }
+  @media (min-width: 720px) { .plays-grid { grid-template-columns: repeat(3, 1fr); gap: 14px; } }
+  @media (min-width: 1100px) { .plays-grid { grid-template-columns: repeat(4, 1fr); gap: 16px; } }
+  /* Lazy YouTube embed : thumbnail + bouton play, devient iframe au clic */
+  .yt-lazy {
+    position: relative; width: 100%; height: 100%;
+    cursor: pointer; background: #000; border: 0;
+    padding: 0; margin: 0; display: block; overflow: hidden;
+  }
+  .yt-lazy img {
+    width: 100%; height: 100%; object-fit: cover;
+    transition: transform 0.4s, opacity 0.2s;
+  }
+  .yt-lazy:hover img { transform: scale(1.04); opacity: 0.85; }
+  .yt-lazy-play {
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: 68px; height: 48px;
+    background: rgba(0, 0, 0, 0.75);
+    border-radius: 14px;
+    display: flex; align-items: center; justify-content: center;
+    color: white; font-size: 22px;
+    pointer-events: none;
+    transition: background 0.2s;
+  }
+  .yt-lazy:hover .yt-lazy-play { background: rgba(255, 0, 0, 0.92); }
   .v-tile-media {
     aspect-ratio: 9/16;
     background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
@@ -3304,29 +3337,24 @@ function videoPlayer(url, defaultVertical) {
     `;
   }
 
-  // === YOUTUBE : card preview style WhatsApp (embed peu fiable) ===
-  const providerLabel = v.provider === 'youtube' ? 'YouTube' : 'Vidéo';
-  const providerIcon = v.provider === 'youtube' ? '▶' : '🎬';
+  // === YOUTUBE : lazy embed (thumbnail + bouton play → iframe au clic) ===
+  // Économise les requêtes YT/cookies tant que la vidéo n'est pas lue.
+  // Click handler inline : remplace le bouton par l'iframe avec autoplay=1.
+  const thumb = v.thumb || `https://img.youtube.com/vi/${v.id}/hqdefault.jpg`;
+  const thumbHQ = v.thumbHQ || `https://img.youtube.com/vi/${v.id}/maxresdefault.jpg`;
+  const embedAutoplay = `${v.embed}${v.embed.includes('?') ? '&' : '?'}autoplay=1`;
   return `
     <div class="video-wrap">
-      <a class="video-preview-card ${vertical ? 'vertical' : 'horizontal'}" href="${esc(v.watchUrl)}" target="_blank" rel="noopener">
-        <div class="video-preview-thumb">
-          ${v.thumb
-            ? `<img src="${v.thumb}" alt="" onerror="this.onerror=null;this.src='https://img.youtube.com/vi/${v.id}/mqdefault.jpg'">`
-            : `<div class="video-preview-fallback">${providerIcon}</div>`}
-          <div class="video-preview-play-overlay">
-            <div class="video-preview-play-btn">▶</div>
-          </div>
-        </div>
-        <div class="video-preview-info">
-          <div class="video-preview-provider">
-            <span class="video-preview-provider-icon">${providerIcon}</span>
-            <span class="video-preview-provider-name">${providerLabel}</span>
-            ${vertical ? '<span class="video-preview-format-tag">Short</span>' : ''}
-          </div>
-          <div class="video-preview-action">↗ Ouvrir</div>
-        </div>
-      </a>
+      <div class="video-player ${vertical ? 'vertical' : 'horizontal'}">
+        <button class="yt-lazy" type="button" aria-label="Lire la vidéo YouTube"
+          onclick="this.outerHTML='&lt;iframe src=&quot;${esc(embedAutoplay)}&quot; allowfullscreen allow=&quot;accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture&quot;&gt;&lt;/iframe&gt;'">
+          <img src="${esc(thumbHQ)}" alt=""
+            onerror="this.onerror=null;this.src='${esc(thumb)}'"
+            loading="lazy" decoding="async">
+          <span class="yt-lazy-play">▶</span>
+        </button>
+      </div>
+      <a class="video-open-link" href="${esc(v.watchUrl)}" target="_blank" rel="noopener">↗ Ouvrir sur YouTube</a>
     </div>
   `;
 }
@@ -4835,7 +4863,7 @@ function renderPlays() {
           <div class="empty-desc">${isCoach ? 'Crée ton premier play' : 'Aucun play dans cette catégorie'}</div>
         </div>
       ` : `
-        <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;padding:0 18px">
+        <div class="plays-grid">
           ${items.map(p => playTile(p)).join('')}
         </div>
       `}
