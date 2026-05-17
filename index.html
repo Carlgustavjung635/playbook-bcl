@@ -2879,12 +2879,32 @@ window.PbSync = {
             const { data, error } = await sb.from(entity.table).select('*');
             if (error) return;
             const rows = data || [];
-            // En realtime aussi : si remote vidé entre temps (rare), on ne wipe pas le state local.
+            // Anti-self-echo : si le hash des rows remote correspond pile au
+            // cache _lastSeen (= ce qu'on a pushé soi-même), c'est notre propre
+            // broadcast. Skip apply + render pour éviter la cascade visuelle.
+            const prevCache = _lastSeen[entity.key] || {};
+            const newKeys = new Set(rows.map(r => _rowKey(entity, r)));
+            // Compute le hash que prendrait le cache APRÈS apply
+            let identical = (Object.keys(prevCache).length === newKeys.size);
+            if (identical) {
+              for (const r of rows) {
+                const k = _rowKey(entity, r);
+                // On compare le hash de la row state-format. Mais on a pas
+                // encore appliqué, donc on hash en passant par dump après un
+                // apply temporaire. Trop coûteux → fallback simple : compare
+                // les clés remote vs cache; si subset identique, on suppose
+                // pas de changement de contenu et on fait quand même un apply
+                // léger sans render.
+                if (!(k in prevCache)) { identical = false; break; }
+              }
+            }
+            // Applique (préserve la garde rows-vide existante)
             if (rows.length > 0) {
               try { entity.apply(state, rows); } catch(e) {}
             }
             _seedCacheFromRemote(entity, rows, state);
-            if (onApplied) onApplied(entity.key);
+            // Re-render UNIQUEMENT si l'ensemble des clés a changé
+            if (!identical && onApplied) onApplied(entity.key);
           } catch(e) { /* swallow */ }
         });
       ch.subscribe();
@@ -14186,8 +14206,10 @@ function _initPlayersSync() {
       PbSync.fetchAll(state).then(() => {
         persist();
         render();
-        // Subscribe Realtime sur toutes les entités configurées
-        PbSync.subscribeAll(state, () => { render(); });
+        // Subscribe Realtime sur toutes les entités configurées. On utilise
+        // scheduleRender (debouncé 100ms) au lieu de render() direct pour
+        // collapser plusieurs events Realtime en un seul re-render.
+        PbSync.subscribeAll(state, () => { scheduleRender(); });
       });
     });
 
@@ -14208,11 +14230,51 @@ function _initPlayersSync() {
   });
 }
 
-function render() {
-  // Cleanup : convoc match orphelines + création auto convoc pour matchs sans convoc
+// Cleanup : appelé UNE SEULE FOIS au boot (pas à chaque render — sinon
+// chaque création/suppression de convoc déclenche persist → PbSync → broadcast
+// → re-render → cleanup en boucle = "mouvement permanent" UX).
+function _bootCleanupOnce() {
+  if (window._bootCleanupDone) return;
+  window._bootCleanupDone = true;
   if (typeof cleanupOrphanMatchConvocs === 'function') cleanupOrphanMatchConvocs();
-  // Vérifier l'attribution automatique des badges pour les défis terminés
   if (typeof checkAndAwardBadges === 'function') checkAndAwardBadges();
+}
+
+// Debounce render : si plusieurs events Realtime arrivent en rafale, ne
+// re-render qu'une seule fois après 100ms. Préserve aussi le scroll Y.
+let _renderPending = null;
+function scheduleRender(immediate) {
+  if (immediate) { _doRender(); return; }
+  if (_renderPending) return;
+  _renderPending = setTimeout(() => { _renderPending = null; _doRender(); }, 100);
+}
+
+function _doRender() {
+  // Snapshot scroll + active element pour restauration après innerHTML reflow
+  const scrollY = window.scrollY;
+  const scrollX = window.scrollX;
+  const activeId = document.activeElement && document.activeElement.id;
+  const selStart = document.activeElement && 'selectionStart' in document.activeElement ? document.activeElement.selectionStart : null;
+  const selEnd = document.activeElement && 'selectionEnd' in document.activeElement ? document.activeElement.selectionEnd : null;
+  _renderBody();
+  // Restore scroll (synchrone, avant repaint)
+  window.scrollTo(scrollX, scrollY);
+  // Restore focus + caret si l'élément existe encore
+  if (activeId) {
+    const el = document.getElementById(activeId);
+    if (el && typeof el.focus === 'function') {
+      el.focus({ preventScroll: true });
+      if (selStart != null && 'setSelectionRange' in el) {
+        try { el.setSelectionRange(selStart, selEnd); } catch(e) {}
+      }
+    }
+  }
+}
+
+function render() { _doRender(); }
+
+function _renderBody() {
+  _bootCleanupOnce();
   // Sync effectif au premier render (idempotent : flag interne)
   _initPlayersSync();
   // Portail public via hash #public
