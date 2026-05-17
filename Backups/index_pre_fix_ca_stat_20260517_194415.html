@@ -6879,17 +6879,7 @@ function addPlayerStat(matchId, playerId) {
   m.playerStats = m.playerStats || {};
   const isNew = !playerId;
   const existing = playerId ? m.playerStats[playerId] : null;
-  // En stockage, p2i/p2iA incluent les contre-attaques (cohérent avec
-  // liveActionFor + savePlayerStat). Pour l'affichage du formulaire,
-  // on inverse le merge : l'user voit p2i SANS la part ca dans son champ
-  // dédié. La sauvegarde re-merge automatiquement.
-  const _src = existing || { min: 0, pts: 0, p2i: 0, p2iA: 0, p2e: 0, p2eA: 0, p3: 0, p3A: 0, ft: 0, ftA: 0, reb: 0, ast: 0, stl: 0, def: 0, to: 0, fouls: 0 };
-  const _ca = _src.ca || 0;
-  const s = {
-    ..._src,
-    p2i:  Math.max(0, (_src.p2i  || 0) - _ca),
-    p2iA: Math.max(0, (_src.p2iA || 0) - _ca),
-  };
+  const s = existing || { min: 0, pts: 0, p2i: 0, p2iA: 0, p2e: 0, p2eA: 0, p3: 0, p3A: 0, ft: 0, ftA: 0, reb: 0, ast: 0, stl: 0, def: 0, to: 0, fouls: 0 };
   const available = state.players.filter(p => !m.playerStats[p.id] || p.id === playerId);
   const playerName = playerId ? (state.players.find(p => p.id === playerId) || {}).name : '';
 
@@ -6910,12 +6900,11 @@ function addPlayerStat(matchId, playerId) {
         <div class="fld"><label class="fld-label">Fautes</label><input id="ps-fouls" type="number" value="${s.fouls}" min="0" max="5"></div>
       </div>
 
-      <div class="fld-label" style="margin-top:6px">2 pts intérieurs sur attaque placée (R / T)</div>
+      <div class="fld-label" style="margin-top:6px">2 pts intérieurs (R / T)</div>
       <div class="fld-row">
         <div class="fld"><input id="ps-p2i" type="number" value="${s.p2i}" min="0" placeholder="R"></div>
         <div class="fld"><input id="ps-p2iA" type="number" value="${s.p2iA}" min="0" placeholder="T"></div>
       </div>
-      <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';margin:-6px 0 6px;line-height:1.4">Hors contre-attaque (champ dédié plus bas).</div>
       <div class="fld-label">2 pts extérieurs / mid-range</div>
       <div class="fld-row">
         <div class="fld"><input id="ps-p2e" type="number" value="${s.p2e}" min="0" placeholder="R"></div>
@@ -6943,9 +6932,8 @@ function addPlayerStat(matchId, playerId) {
       </div>
       <div class="fld-row">
         <div class="fld"><label class="fld-label">Pertes de balle</label><input id="ps-to" type="number" value="${s.to||0}" min="0"></div>
-        <div class="fld"><label class="fld-label">Contre-attaques ✓</label><input id="ps-ca" type="number" value="${s.ca||0}" min="0"></div>
+        <div class="fld"><label class="fld-label">Pts contre-attaque</label><input id="ps-ca" type="number" value="${s.ca||0}" min="0"></div>
       </div>
-      <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';margin:-6px 0 4px;line-height:1.4">Paniers en contre-attaque (auto-ajoutés aux 2pts INT + au total points).</div>
     </div>
     <div class="modal-footer">
       ${!isNew ? `<button class="btn btn-danger" onclick="deletePlayerStat('${matchId}','${playerId}')">Supprimer</button>` : ''}
@@ -6959,29 +6947,15 @@ function savePlayerStat(matchId, isNew) {
   const pid = document.getElementById('ps-pid').value;
   if (!pid) return alert('Joueuse requise');
   const g = id => parseInt(document.getElementById(id).value) || 0;
-  // Champs bruts du formulaire (p2i ici = 2pts INT en attaque placée,
-  // hors contre-attaque ; ca = contre-attaques marquées, en plus)
-  const formP2i  = g('ps-p2i'),  formP2iA = g('ps-p2iA');
-  const formP2e  = g('ps-p2e'),  formP2eA = g('ps-p2eA');
-  const formP3   = g('ps-p3'),   formP3A  = g('ps-p3A');
-  const formFt   = g('ps-ft'),   formFtA  = g('ps-ftA');
-  const formCa   = g('ps-ca');
-  // Contre-attaque = panier 2pts INT marqué. On la merge dans p2i/p2iA
-  // pour rester cohérent avec le live tracker (liveActionFor incrémente
-  // p2i + p2iA quand CA est tappée) et avec la perception basket :
-  // un panier en contre-attaque EST un panier 2pts intérieur réussi.
-  const p2i  = formP2i  + formCa;
-  const p2iA = formP2iA + formCa;
-  const p2e = formP2e, p2eA = formP2eA;
-  const p3  = formP3,  p3A  = formP3A;
-  const ft  = formFt,  ftA  = formFtA;
+  const p2i = g('ps-p2i'), p2e = g('ps-p2e'), p3 = g('ps-p3'), ft = g('ps-ft');
   const pts = (p2i + p2e) * 2 + p3 * 3 + ft;
   m.playerStats = m.playerStats || {};
   m.playerStats[pid] = {
     min: g('ps-min'), pts, fouls: g('ps-fouls'),
-    p2i, p2iA, p2e, p2eA, p3, p3A, ft, ftA,
+    p2i, p2iA: g('ps-p2iA'), p2e, p2eA: g('ps-p2eA'),
+    p3, p3A: g('ps-p3A'), ft, ftA: g('ps-ftA'),
     reb: g('ps-reb'), ast: g('ps-ast'), stl: g('ps-stl'), def: g('ps-def'), to: g('ps-to'),
-    ca: formCa,
+    ca: g('ps-ca'),
   };
   persist(); closeModal(); render();
 }
