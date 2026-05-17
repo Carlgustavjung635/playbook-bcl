@@ -4951,12 +4951,11 @@ function setPlaysCat(c) { state.playsCat = c; state.playsTag = null; render(); }
 function setPlaysTag(t) { state.playsTag = t; render(); }
 
 function openPlay(id) {
-  // Important : forcer la section 'plays' (sinon un click depuis le
-  // carousel home garde section='home' et le détail n'est jamais rendu).
-  state.section = 'plays';
   state.view = { type: 'play', id };
   state._playVideoIdx = 0;
   render(); window.scrollTo(0, 0);
+  // Auto-détecte l'orientation des vidéos Vimeo qui n'en ont pas (oEmbed API).
+  // Évite à l'utilisateur d'avoir à toggle manuellement 16:9 → 9:16 par vidéo.
   _autoDetectVimeoOrientations(id);
 }
 
@@ -5499,9 +5498,6 @@ function matchRow(m) {
 }
 
 function openMatch(id) {
-  // Idem openPlay : forcer la section 'matches' pour que le détail soit rendu
-  // même quand on clique sur un matchRow depuis le carousel home.
-  state.section = 'matches';
   state.view = { type: 'match', id };
   render(); window.scrollTo(0, 0);
 }
@@ -14187,8 +14183,8 @@ function parseClubMatchesFromHTML(html, clubTeamHint) {
       time: timeStr,
       home: homeTeam,
       away: awayTeam,
-      scoreHome,
-      scoreAway,
+      homeScore: scoreHome,
+      awayScore: scoreAway,
       played,
       competition,
       journee,
@@ -14304,12 +14300,8 @@ function renderFFBB() {
   const standings = f.standings || [];
   // Un match est "joué" seulement si scores valides existent
   const isPlayed = m => m.played && m.scoreHome != null && m.scoreAway != null && !isNaN(m.scoreHome) && !isNaN(m.scoreAway);
-  // Pas de cap : on affiche TOUS les matches (calendrier + résultats complets).
-  // Une saison FFBB fait ~22 matches, c'est largement scrollable.
-  const upcoming = matches.filter(m => !isPlayed(m))
-    .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
-  const recent = matches.filter(m => isPlayed(m))
-    .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  const upcoming = matches.filter(m => !isPlayed(m)).slice(0, 10);
+  const recent = matches.filter(m => isPlayed(m)).reverse().slice(0, 10);
   const teamLower = (f.teamName || '').toLowerCase();
   const myMatches = matches.filter(m =>
     (m.home || '').toLowerCase().includes(teamLower) ||
