@@ -12836,11 +12836,19 @@ function parseClubMatchesFromHTML(html, clubTeamHint) {
           scoreHome = b[0]; scoreAway = b[1];
         }
       }
-      if (scoreHome !== null && scoreAway !== null && (scoreHome > 0 || scoreAway > 0)) {
+      if (scoreHome !== null && scoreAway !== null && !isNaN(scoreHome) && !isNaN(scoreAway) && (scoreHome > 0 || scoreAway > 0)) {
         played = true;
       } else {
         scoreHome = null; scoreAway = null;
+        played = false;
       }
+    }
+
+    // Sécurité supplémentaire : si played mais l'un des deux scores est null, on annule
+    if (played && (scoreHome === null || scoreAway === null || isNaN(scoreHome) || isNaN(scoreAway))) {
+      played = false;
+      scoreHome = null;
+      scoreAway = null;
     }
 
     // Remonter dans le DOM pour récupérer le contexte (équipes + date + compétition + salle)
@@ -13009,8 +13017,10 @@ function renderFFBB() {
   const isCoach = state.auth.role === 'coach';
   const matches = f.matches || [];
   const standings = f.standings || [];
-  const upcoming = matches.filter(m => !m.played).slice(0, 10);
-  const recent = matches.filter(m => m.played).reverse().slice(0, 10);
+  // Un match est "joué" seulement si scores valides existent
+  const isPlayed = m => m.played && m.scoreHome != null && m.scoreAway != null && !isNaN(m.scoreHome) && !isNaN(m.scoreAway);
+  const upcoming = matches.filter(m => !isPlayed(m)).slice(0, 10);
+  const recent = matches.filter(m => isPlayed(m)).reverse().slice(0, 10);
   const teamLower = (f.teamName || '').toLowerCase();
   const myMatches = matches.filter(m =>
     (m.home || '').toLowerCase().includes(teamLower) ||
@@ -13122,25 +13132,38 @@ function ffbbMatchRow(m, myTeamName) {
   const myScore = isHome ? m.scoreHome : m.scoreAway;
   const oppScore = isHome ? m.scoreAway : m.scoreHome;
   const opp = isHome ? m.away : m.home;
-  const win = m.played && myScore > oppScore;
-  const loss = m.played && myScore < oppScore;
-  const badge = m.played ? (win ? '<div class="match-result-badge match-result-w">V</div>' : '<div class="match-result-badge match-result-l">D</div>') : '<div class="match-result-badge" style="background:var(--bg-3);color:var(--ink-3)">→</div>';
+  // Détermine résultat seulement si on a 2 scores valides
+  const hasValidScores = m.played && myScore != null && oppScore != null && !isNaN(myScore) && !isNaN(oppScore);
+  const win = hasValidScores && myScore > oppScore;
+  const loss = hasValidScores && myScore < oppScore;
+  const badge = hasValidScores
+    ? (win ? '<div class="match-result-badge match-result-w">V</div>' : '<div class="match-result-badge match-result-l">D</div>')
+    : '<div class="match-result-badge" style="background:var(--bg-3);color:var(--ink-3)">→</div>';
 
   // Date formatée
-  let dateLabel = m.date;
-  if (m.date && m.date.match(/^\d{4}-\d{2}-\d{2}$/)) {
+  let dateLabel = '';
+  if (m.date && typeof m.date === 'string' && m.date.match(/^\d{4}-\d{2}-\d{2}$/)) {
     const d = new Date(m.date + 'T00:00:00');
     dateLabel = d.toLocaleDateString('fr-FR', { day: '2-digit', month: 'short' });
+  } else if (m.date) {
+    dateLabel = String(m.date);
+  } else {
+    dateLabel = 'Date inconnue';
   }
 
   return `
     <div class="match-row" style="cursor:default">
       ${badge}
       <div style="flex:1;min-width:0">
-        <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;letter-spacing:0.02em">${isHome ? '' : '@ '}${esc(opp)}</div>
+        <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;letter-spacing:0.02em">${isHome ? '' : '@ '}${esc(opp || 'Adversaire inconnu')}</div>
         <div style="font-size:11px;color:var(--ink-3);margin-top:2px;font-family:'JetBrains Mono';text-transform:uppercase">${dateLabel}${m.time ? ' · ' + m.time : ''}${isHome ? ' · DOM' : ' · EXT'}</div>
       </div>
-      ${m.played ? `<div class="match-score">${myScore}–${oppScore}</div>` : `<div style="font-family:'JetBrains Mono';font-size:10px;color:var(--ink-3);text-transform:uppercase">À venir</div>`}
+      ${hasValidScores
+        ? `<div class="match-score">${myScore}–${oppScore}</div>`
+        : (m.time
+          ? `<div style="font-family:'JetBrains Mono';font-size:11px;color:var(--orange);text-transform:uppercase">${esc(m.time)}</div>`
+          : `<div style="font-family:'JetBrains Mono';font-size:10px;color:var(--ink-3);text-transform:uppercase">À venir</div>`
+        )}
     </div>
   `;
 }
