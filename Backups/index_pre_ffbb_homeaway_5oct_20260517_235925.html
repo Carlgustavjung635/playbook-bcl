@@ -13942,11 +13942,7 @@ function parseClubMatchesFromHTML(html, clubTeamHint) {
       if (!/^\d{1,3}$/.test(txt)) return;
       const n = parseInt(txt);
       const cls = (sp.getAttribute('class') || '').toLowerCase();
-      // Couleurs FFBB :
-      //   #00288e (bleu navy) = NOTRE score quand on a GAGNÉ
-      //   #dd031f (rouge)     = NOTRE score quand on a PERDU
-      //   #8a8fa2 (gris)      = score de l'ADVERSAIRE (toujours)
-      if (cls.includes('#00288e') || cls.includes('#dd031f')) myScore = n;
+      if (cls.includes('#00288e')) myScore = n;
       else if (cls.includes('#8a8fa2')) oppScore = n;
       else if (oppScore === null) oppScore = n;       // ordre de fallback : 1er = adv
       else if (myScore === null) myScore = n;          // 2e = nous
@@ -14029,13 +14025,10 @@ function parseClubMatchesFromHTML(html, clubTeamHint) {
       return cleaned;
     }
 
-    // Détection Domicile/Extérieur depuis le texte de contexte.
-    // NB : pas de \b — le textContent FFBB colle souvent les mots
-    // ("21h30Extérieur"), ce qui empêche les frontières \b de matcher
-    // → tous les matches finissaient marqués Extérieur par défaut.
+    // Détection Domicile/Extérieur depuis le texte de contexte
     const ctxTextRaw = (context.textContent || '').replace(/\s+/g, ' ');
-    const isExterieur = /Ext[eé]rieur/i.test(ctxTextRaw);
-    const isDomicile  = /Domicile/i.test(ctxTextRaw);
+    const isExterieur = /\bExt[eé]rieur\b/i.test(ctxTextRaw);
+    const isDomicile  = /\bDomicile\b/i.test(ctxTextRaw);
 
     let homeTeam, awayTeam;
     if (teamLinks.length >= 2) {
