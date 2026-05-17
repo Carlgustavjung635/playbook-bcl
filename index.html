@@ -12739,7 +12739,10 @@ function savePlayerPin(pid) {
 // Utilise allorigins.win comme proxy CORS (gratuit, instable)
 // À terme, remplacer par /.netlify/functions/ffbb-scraper
 
+// Proxy 1 : notre fonction Netlify (fiable, hébergée avec l'app)
+// Proxy 2-4 : proxies publics en fallback (peuvent tomber en panne)
 const FFBB_PROXIES = [
+  url => '/api/ffbb?url=' + encodeURIComponent(url), // Netlify Function (notre proxy)
   url => 'https://api.allorigins.win/get?url=' + encodeURIComponent(url),
   url => 'https://corsproxy.io/?' + encodeURIComponent(url),
   url => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(url),
