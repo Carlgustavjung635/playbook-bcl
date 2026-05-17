@@ -3380,16 +3380,17 @@ function videoPlayer(url, defaultVertical) {
   const vertical = v.vertical || defaultVertical || false;
 
   // === VIMEO : embed iframe inline (fiable, pas de blocage) ===
-  // Respecte la classe vertical/horizontal selon `defaultVertical` (passé
-  // depuis l'éditeur de play). Vimeo URL ne porte PAS l'orientation, donc
-  // pour un play marqué "vertical" dans son data, on utilise .vertical
-  // (aspect 9:16) sinon .horizontal (aspect 16:9, default). Évite le
-  // "50% width letterboxé" quand le video réel est portrait.
+  // Default 16:9. Vimeo URL ne porte pas l'orientation, on ne force PAS vertical
+  // (le bug "vidéo en 50% de largeur" venait d'une mauvaise détection + d'un
+  // max-width: 320px sur .vertical, désormais 100%). Params Vimeo additionnels
+  // pour cacher les chrome (byline/portrait/title) et activer la lecture mobile.
   if (v.provider === 'vimeo') {
+    // Force horizontal 16:9 pour Vimeo : Vimeo gère lui-même le letterbox
+    // si le contenu est portrait. Évite la régression "vertical = 50% width".
     const sep = v.embed.includes('?') ? '&' : '?';
     return `
       <div class="video-wrap">
-        <div class="video-player ${vertical ? 'vertical' : 'horizontal'}">
+        <div class="video-player horizontal">
           <iframe
             src="${v.embed}${sep}playsinline=1&dnt=1&byline=0&portrait=0&title=0"
             width="100%" height="100%"
@@ -5039,7 +5040,7 @@ function renderPlayDetail() {
               `).join('')}
             </div>
           ` : ''}
-          ${videoPlayer(videos[vIdx].url, videos[vIdx].orientation === 'vertical')}
+          ${videoPlayer(videos[vIdx].url, false)}
         </div>
       ` : ''}
 
@@ -5112,11 +5113,7 @@ function editPlay(id) {
     images: [...(p.images || [])],
     concepts: [...(p.concepts || [])],
     attachments: [...(p.attachments || [])],
-    videos: videos.map(v => ({
-      url: v.url || '',
-      label: v.label || '',
-      orientation: v.orientation === 'vertical' ? 'vertical' : 'horizontal'
-    }))
+    videos: videos.map(v => ({ url: v.url || '', label: v.label || '' }))
   };
   renderPlayEditor(isNew);
 }
@@ -5125,7 +5122,7 @@ function addPlayVideoRow() {
   if (!state._editingPlay) return;
   // Lire les valeurs des inputs avant re-render pour ne pas les perdre
   _syncPlayEditorVideoInputs();
-  state._editingPlay.videos.push({ url: '', label: '', orientation: 'horizontal' });
+  state._editingPlay.videos.push({ url: '', label: '' });
   renderPlayEditor(state.plays.findIndex(x => x.id === state._editingPlay.id) === -1);
 }
 
@@ -5137,15 +5134,13 @@ function removePlayVideoRow(i) {
 }
 
 function _syncPlayEditorVideoInputs() {
-  // Copie les valeurs des inputs URL/label/orientation vers state._editingPlay.videos
+  // Copie les valeurs des inputs URL/label vers state._editingPlay.videos
   if (!state._editingPlay) return;
   state._editingPlay.videos.forEach((v, i) => {
     const urlEl = document.getElementById('p-video-url-' + i);
     const labelEl = document.getElementById('p-video-label-' + i);
-    const orientEl = document.getElementById('p-video-orient-' + i);
     if (urlEl) v.url = urlEl.value.trim();
     if (labelEl) v.label = labelEl.value.trim();
-    if (orientEl) v.orientation = orientEl.value === 'vertical' ? 'vertical' : 'horizontal';
   });
 }
 
@@ -5196,15 +5191,11 @@ function renderPlayEditor(isNew) {
         <label class="fld-label">🎬 Vidéos (${p.videos.length})</label>
         <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-bottom:8px;line-height:1.5">Une ou plusieurs vidéos par play (YouTube, Vimeo, .mp4). Label optionnel pour identifier (ex: "Caméra 1", "Slow-mo").</div>
         ${p.videos.length === 0 ? '' : `
-          <div style="display:flex;flex-direction:column;gap:6px">
+          <div style="display:flex;flex-direction:column;gap:2px">
             ${p.videos.map((v, i) => `
-              <div class="video-edit-row" style="flex-wrap:wrap">
+              <div class="video-edit-row">
                 <input id="p-video-url-${i}" value="${esc(v.url)}" placeholder="https://vimeo.com/… ou https://youtube.com/…">
                 <input id="p-video-label-${i}" class="label-input" value="${esc(v.label || '')}" placeholder="Label">
-                <select id="p-video-orient-${i}" style="max-width:74px;flex-shrink:0;font-family:'JetBrains Mono';font-size:11px" title="Orientation de la vidéo">
-                  <option value="horizontal" ${(v.orientation||'horizontal')==='horizontal'?'selected':''}>16:9</option>
-                  <option value="vertical" ${v.orientation==='vertical'?'selected':''}>9:16</option>
-                </select>
                 <button class="btn btn-icon btn-danger" style="width:32px;height:32px;flex-shrink:0" onclick="removePlayVideoRow(${i})" title="Supprimer">✕</button>
               </div>
             `).join('')}
@@ -5361,11 +5352,7 @@ function savePlay(id, isNew) {
   // Lire les vidéos depuis le DOM (les rows ont pu être ajoutées/supprimées)
   _syncPlayEditorVideoInputs();
   const videos = (e.videos || []).filter(v => v.url && v.url.trim())
-    .map(v => ({
-      url: v.url.trim(),
-      ...(v.label ? { label: v.label.trim() } : {}),
-      orientation: v.orientation === 'vertical' ? 'vertical' : 'horizontal'
-    }));
+    .map(v => ({ url: v.url.trim(), ...(v.label ? { label: v.label.trim() } : {}) }));
   const obj = {
     id, title,
     cat: document.getElementById('p-cat').value,
@@ -5999,7 +5986,7 @@ function renderMatchDetail() {
           ${isCoach ? `
             <label class="section-action" style="cursor:pointer">
               ${m.winSelfie ? '✎ Changer' : '+ Ajouter'}
-              <input type="file" accept="image/*" style="display:none" onchange="changeWinSelfie('${m.id}', event)">
+              <input type="file" accept="image/*" capture="environment" style="display:none" onchange="changeWinSelfie('${m.id}', event)">
             </label>
           ` : ''}
         </div>
@@ -6020,7 +6007,7 @@ function renderMatchDetail() {
               ${isCoach ? `
                 <label class="btn btn-secondary" style="cursor:pointer;margin-top:10px;display:inline-block">
                   📷 Prendre / Choisir une photo
-                  <input type="file" accept="image/*" style="display:none" onchange="changeWinSelfie('${m.id}', event)">
+                  <input type="file" accept="image/*" capture="environment" style="display:none" onchange="changeWinSelfie('${m.id}', event)">
                 </label>
               ` : ''}
             </div>
