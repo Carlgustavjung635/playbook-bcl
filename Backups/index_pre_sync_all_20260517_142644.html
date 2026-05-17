@@ -2517,380 +2517,7 @@ function _dbMatchToClient(r) {
 refreshSession().then(() => {
   Pb.ready = true;
   emit('ready');
-  // Le main script (regular <script>) a déjà appelé render() avant que ce
-  // module soit évalué (module = deferred). On retrigger un render() ici
-  // pour que _initPlayersSync() puisse voir window.PbStore / window.PbSync.
-  if (typeof window.render === 'function') {
-    try { window.render(); } catch (e) { console.warn('[sync] post-init render:', e.message); }
-  }
 });
-
-// ============================================================
-// SYNC ENGINE GÉNÉRIQUE — toutes les entités équipe
-// Hooké sur persist(), debouncé. Diff par hash JSON → upsert/delete.
-// Realtime sur le sous-ensemble configuré. Anti-loop via _lastSeen.
-// ============================================================
-
-// Sérialisation déterministe pour le hash de diff
-function _stableJson(o) {
-  if (o === null || typeof o !== 'object') return JSON.stringify(o);
-  if (Array.isArray(o)) return '[' + o.map(_stableJson).join(',') + ']';
-  return '{' + Object.keys(o).sort().map(k => JSON.stringify(k) + ':' + _stableJson(o[k])).join(',') + '}';
-}
-
-// Définition déclarative des entités synchronisées
-// dump(state) → { rowKey: rowObjet } : produit les lignes DB à partir du state
-// apply(state, rows) : applique rows reçus (fetch/realtime) dans state
-// pk : nom de colonne PK ou tableau de colonnes (composite)
-// realtime : bool, auto-subscribe
-// auth : 'anon' (toutes les entités équipe) ou 'l2' (perso)
-const ENTITIES = [
-  {
-    key: 'plays', table: 'plays', pk: 'id', realtime: true, auth: 'anon',
-    dump: (state) => Object.fromEntries((state.plays || []).map(p => [p.id, {
-      id: p.id, cat: p.cat || 'off', title: p.title || '',
-      descr: p.desc || null, tags: p.tags || [], video_url: p.videoUrl || null
-    }])),
-    apply: (state, rows) => {
-      const arr = rows.map(r => ({ id: r.id, cat: r.cat, title: r.title,
-        desc: r.descr || '', tags: r.tags || [], videoUrl: r.video_url || '' }));
-      state.plays = arr;
-    }
-  },
-  {
-    key: 'customConcepts', table: 'custom_concepts', pk: 'label', realtime: true, auth: 'anon',
-    dump: (state) => Object.fromEntries((state.customConcepts || []).map(label => [label, { label }])),
-    apply: (state, rows) => { state.customConcepts = rows.map(r => r.label); }
-  },
-  {
-    key: 'matches', table: 'matches', pk: 'id', realtime: true, auth: 'anon',
-    dump: (state) => Object.fromEntries((state.matches || []).map(m => [m.id, {
-      id: m.id, date: m.date, opponent: m.opponent || '', home: !!m.home,
-      score_us: m.scoreUs | 0, score_opp: m.scoreOpp | 0,
-      quarters: m.quarters || {},
-      notes: m.notes || null, video_url: m.videoUrl || null,
-      is_live: !!m.isLive, live_stream_url: m.liveStreamUrl || null,
-      public_live: !!m.publicLive,
-      public_live_started_at: m.publicLiveStartedAt ? new Date(m.publicLiveStartedAt).toISOString() : null,
-      last_live_update: m.lastLiveUpdate ? new Date(m.lastLiveUpdate).toISOString() : null
-    }])),
-    apply: (state, rows) => {
-      const byId = Object.fromEntries((state.matches || []).map(m => [m.id, m]));
-      state.matches = rows.map(r => {
-        const local = byId[r.id] || {};
-        return {
-          ...local, // préserve playerStats/positives/negatives chargés via leurs propres entités
-          id: r.id, date: r.date, opponent: r.opponent, home: r.home,
-          scoreUs: r.score_us, scoreOpp: r.score_opp,
-          quarters: r.quarters || {},
-          notes: r.notes || '', videoUrl: r.video_url || '',
-          isLive: r.is_live, liveStreamUrl: r.live_stream_url || '',
-          publicLive: r.public_live,
-          publicLiveStartedAt: r.public_live_started_at ? Date.parse(r.public_live_started_at) : null,
-          lastLiveUpdate: r.last_live_update ? Date.parse(r.last_live_update) : null,
-          positives: local.positives || [], negatives: local.negatives || [],
-          playerStats: local.playerStats || {}
-        };
-      });
-    }
-  },
-  {
-    key: 'matchFeedback', table: 'match_feedback', pk: 'id', realtime: true, auth: 'anon',
-    dump: (state) => {
-      const out = {};
-      (state.matches || []).forEach(m => {
-        (m.positives || []).forEach(f => out[f.id] = { id: f.id, match_id: m.id, kind: 'positive',
-          text: f.text || '', minute: f.minute || null, images: f.images || [] });
-        (m.negatives || []).forEach(f => out[f.id] = { id: f.id, match_id: m.id, kind: 'negative',
-          text: f.text || '', minute: f.minute || null, images: f.images || [] });
-      });
-      return out;
-    },
-    apply: (state, rows) => {
-      const byMatch = {};
-      rows.forEach(r => {
-        byMatch[r.match_id] = byMatch[r.match_id] || { positives: [], negatives: [] };
-        const arr = r.kind === 'positive' ? byMatch[r.match_id].positives : byMatch[r.match_id].negatives;
-        arr.push({ id: r.id, text: r.text || '', minute: r.minute || '', images: r.images || [] });
-      });
-      (state.matches || []).forEach(m => {
-        if (byMatch[m.id]) { m.positives = byMatch[m.id].positives; m.negatives = byMatch[m.id].negatives; }
-      });
-    }
-  },
-  {
-    key: 'matchPlayerStats', table: 'match_player_stats', pk: ['match_id', 'player_id'], realtime: true, auth: 'anon',
-    dump: (state) => {
-      const out = {};
-      (state.matches || []).forEach(m => {
-        Object.entries(m.playerStats || {}).forEach(([pid, stats]) => {
-          out[`${m.id}|${pid}`] = { match_id: m.id, player_id: pid, stats: stats || {} };
-        });
-      });
-      return out;
-    },
-    apply: (state, rows) => {
-      const byMatch = {};
-      rows.forEach(r => {
-        byMatch[r.match_id] = byMatch[r.match_id] || {};
-        byMatch[r.match_id][r.player_id] = r.stats || {};
-      });
-      (state.matches || []).forEach(m => {
-        if (byMatch[m.id]) m.playerStats = byMatch[m.id];
-      });
-    }
-  },
-  {
-    key: 'challenges', table: 'challenges', pk: 'id', realtime: true, auth: 'anon',
-    dump: (state) => Object.fromEntries((state.challenges || []).map(c => [c.id, {
-      id: c.id, title: c.title || '', descr: c.desc || null,
-      type: c.type || 'skill', metric: c.metric || null,
-      end_date: c.endDate || null, scope: c.scope || 'individual',
-      auto_count: !!c.autoCount, lower_is_better: !!c.lowerIsBetter
-    }])),
-    apply: (state, rows) => {
-      const byId = Object.fromEntries((state.challenges || []).map(c => [c.id, c]));
-      state.challenges = rows.map(r => ({
-        ...(byId[r.id] || {}), // préserve scores (entité séparée)
-        id: r.id, title: r.title, desc: r.descr || '', type: r.type,
-        metric: r.metric || '', endDate: r.end_date || '',
-        scope: r.scope, autoCount: r.auto_count, lowerIsBetter: r.lower_is_better,
-        scores: (byId[r.id] || {}).scores || {}
-      }));
-    }
-  },
-  {
-    key: 'challengeScores', table: 'challenge_scores', pk: ['challenge_id', 'player_id'], realtime: true, auth: 'anon',
-    dump: (state) => {
-      const out = {};
-      (state.challenges || []).forEach(c => {
-        Object.entries(c.scores || {}).forEach(([pid, val]) => {
-          out[`${c.id}|${pid}`] = { challenge_id: c.id, player_id: pid, score: Number(val) || 0 };
-        });
-      });
-      return out;
-    },
-    apply: (state, rows) => {
-      const byChallenge = {};
-      rows.forEach(r => {
-        byChallenge[r.challenge_id] = byChallenge[r.challenge_id] || {};
-        byChallenge[r.challenge_id][r.player_id] = Number(r.score) || 0;
-      });
-      (state.challenges || []).forEach(c => { if (byChallenge[c.id]) c.scores = byChallenge[c.id]; });
-    }
-  },
-  {
-    key: 'convocations', table: 'convocations', pk: 'id', realtime: true, auth: 'anon',
-    dump: (state) => Object.fromEntries((state.convocations || []).map(c => [c.id, {
-      id: c.id, type: c.type || 'training', title: c.title || '',
-      date: c.date, time: c.time || null, location: c.location || null, note: c.note || null,
-      recurrence: c.recurrence || null,
-      cancelled_instances: c.cancelledInstances || [],
-      instance_overrides: c.instanceOverrides || {},
-      attachments: c.attachments || []
-    }])),
-    apply: (state, rows) => {
-      const byId = Object.fromEntries((state.convocations || []).map(c => [c.id, c]));
-      state.convocations = rows.map(r => ({
-        ...(byId[r.id] || {}),
-        id: r.id, type: r.type, title: r.title, date: r.date,
-        time: r.time || '', location: r.location || '', note: r.note || '',
-        recurrence: r.recurrence || null,
-        cancelledInstances: r.cancelled_instances || [],
-        instanceOverrides: r.instance_overrides || {},
-        attachments: r.attachments || [],
-        responses: (byId[r.id] || {}).responses || {}
-      }));
-    }
-  },
-  {
-    key: 'convocationResponses', table: 'convocation_responses',
-    pk: ['convocation_id', 'player_id', 'instance_date'], realtime: true, auth: 'anon',
-    dump: (state) => {
-      const out = {};
-      (state.convocations || []).forEach(c => {
-        Object.entries(c.responses || {}).forEach(([pid, resp]) => {
-          if (!resp) return;
-          const idate = resp.instanceDate || c.date;
-          out[`${c.id}|${pid}|${idate}`] = {
-            convocation_id: c.id, player_id: pid, instance_date: idate,
-            status: resp.status || null, reason: resp.reason || null,
-            late_minutes: resp.lateMinutes != null ? Number(resp.lateMinutes) : null
-          };
-        });
-      });
-      return out;
-    },
-    apply: (state, rows) => {
-      const byConv = {};
-      rows.forEach(r => {
-        byConv[r.convocation_id] = byConv[r.convocation_id] || {};
-        byConv[r.convocation_id][r.player_id] = {
-          status: r.status, reason: r.reason,
-          lateMinutes: r.late_minutes != null ? Number(r.late_minutes) : null,
-          instanceDate: r.instance_date
-        };
-      });
-      (state.convocations || []).forEach(c => { if (byConv[c.id]) c.responses = byConv[c.id]; });
-    }
-  },
-  {
-    key: 'lineups', table: 'lineups', pk: 'id', realtime: true, auth: 'anon',
-    dump: (state) => Object.fromEntries((state.lineups || []).map(l => {
-      const { id, name, ...rest } = l;
-      return [id, { id, name: name || null, data: rest }];
-    })),
-    apply: (state, rows) => {
-      state.lineups = rows.map(r => ({ id: r.id, name: r.name || '', ...(r.data || {}) }));
-    }
-  },
-  {
-    key: 'ffbb', table: 'ffbb_config', pk: 'id', realtime: false, auth: 'anon',
-    dump: (state) => {
-      if (!state.ffbb) return {};
-      const f = state.ffbb;
-      return { 1: { id: 1, club_url: f.clubUrl || null, team_name: f.teamName || null,
-        matches: f.matches || [], standings: f.standings || [],
-        last_sync: f.lastSync ? new Date(f.lastSync).toISOString() : null } };
-    },
-    apply: (state, rows) => {
-      const r = rows.find(x => x.id === 1);
-      if (r) state.ffbb = { clubUrl: r.club_url || '', teamName: r.team_name || '',
-        matches: r.matches || [], standings: r.standings || [],
-        lastSync: r.last_sync ? Date.parse(r.last_sync) : null };
-    }
-  },
-  {
-    key: 'offseason', table: 'offseason_program', pk: 'id', realtime: true, auth: 'anon',
-    dump: (state) => {
-      if (!state.offseason) return {};
-      const o = state.offseason;
-      return { 1: { id: 1, start_date: o.startDate || null, end_date: o.endDate || null,
-        title: o.title || null, exercises: o.exercises || [] } };
-    },
-    apply: (state, rows) => {
-      const r = rows.find(x => x.id === 1);
-      if (r) state.offseason = { startDate: r.start_date || '', endDate: r.end_date || '',
-        title: r.title || '', exercises: r.exercises || [] };
-    }
-  }
-];
-
-// Caches : { entityKey: { rowKey: hash } }
-const _lastSeen = Object.fromEntries(ENTITIES.map(e => [e.key, {}]));
-let _flushPending = null;
-
-// PK composite : compose la clé string PostgREST (col1=eq.v1&col2=eq.v2…)
-function _pkFilter(entity, row) {
-  const cols = Array.isArray(entity.pk) ? entity.pk : [entity.pk];
-  return cols.map(c => `${c}=eq.${encodeURIComponent(row[c])}`).join('&');
-}
-
-// Pousse les deltas d'une entité vers Supabase
-async function _flushEntity(entity, currentMap) {
-  const cache = _lastSeen[entity.key];
-  const toUpsert = [];
-  const newCache = {};
-  Object.entries(currentMap).forEach(([k, row]) => {
-    const h = _stableJson(row);
-    newCache[k] = h;
-    if (cache[k] !== h) toUpsert.push(row);
-  });
-  const toDelete = Object.keys(cache).filter(k => !(k in currentMap));
-
-  if (toUpsert.length) {
-    const { error } = await sb.from(entity.table).upsert(toUpsert, {
-      onConflict: Array.isArray(entity.pk) ? entity.pk.join(',') : entity.pk
-    });
-    if (error) { console.warn(`[sync] upsert ${entity.table}:`, error.message); return; }
-  }
-  for (const k of toDelete) {
-    // Reconstruire les valeurs PK à partir de la clé "v1|v2|v3"
-    const cols = Array.isArray(entity.pk) ? entity.pk : [entity.pk];
-    const vals = k.split('|');
-    let q = sb.from(entity.table).delete();
-    cols.forEach((c, i) => { q = q.eq(c, vals[i]); });
-    const { error } = await q;
-    if (error) { console.warn(`[sync] delete ${entity.table}:`, error.message); }
-  }
-  _lastSeen[entity.key] = newCache;
-}
-
-// Hook public : appelé après chaque persist() côté main script
-async function _flushAll(state) {
-  if (!Pb.online) return;
-  for (const entity of ENTITIES) {
-    if (entity.auth === 'l2' && !Pb.user) continue;
-    try {
-      const map = entity.dump(state);
-      await _flushEntity(entity, map);
-    } catch (e) { console.warn(`[sync] dump ${entity.key}:`, e.message); }
-  }
-}
-
-// Helper : calcule la clé PK d'une row remote (single ou composite)
-function _rowKey(entity, row) {
-  if (Array.isArray(entity.pk)) return entity.pk.map(c => row[c]).join('|');
-  return String(row[entity.pk]);
-}
-
-// Helper : init le cache à partir des rows remote (PAS du state). Comme ça,
-// items locaux pas encore dans remote → absents du cache → next flush les push.
-function _seedCacheFromRemote(entity, rows, state) {
-  // On dump le state APRÈS apply pour avoir le format exact que dump produirait
-  const map = entity.dump(state);
-  const remoteKeys = new Set(rows.map(r => _rowKey(entity, r)));
-  const cache = {};
-  Object.entries(map).forEach(([k, row]) => {
-    if (remoteKeys.has(k)) cache[k] = _stableJson(row);
-    // sinon : pas dans cache → sera pushé au prochain flush
-  });
-  _lastSeen[entity.key] = cache;
-}
-
-window.PbSync = {
-  schedule(state) {
-    if (_flushPending) return;
-    _flushPending = setTimeout(() => { _flushPending = null; _flushAll(state); }, 400);
-  },
-  async fetchAll(state) {
-    if (!Pb.online) return;
-    for (const entity of ENTITIES) {
-      if (entity.auth === 'l2' && !Pb.user) continue;
-      try {
-        const { data, error } = await sb.from(entity.table).select('*');
-        if (error) { console.warn(`[sync] fetch ${entity.table}:`, error.message); continue; }
-        const rows = data || [];
-        // CRITIQUE : n'apply QUE si remote a des données. Sinon on garde le seed
-        // local et on laisse le prochain flush pousser local → remote.
-        if (rows.length > 0) {
-          try { entity.apply(state, rows); }
-          catch (e) { console.warn(`[sync] apply ${entity.key}:`, e.message); }
-        }
-        _seedCacheFromRemote(entity, rows, state);
-      } catch (e) { console.warn(`[sync] fetch ${entity.key}:`, e.message); }
-    }
-  },
-  subscribeAll(state, onApplied) {
-    ENTITIES.filter(e => e.realtime).forEach(entity => {
-      const ch = sb.channel('sync-' + entity.table)
-        .on('postgres_changes', { event: '*', schema: 'public', table: entity.table }, async () => {
-          try {
-            const { data, error } = await sb.from(entity.table).select('*');
-            if (error) return;
-            const rows = data || [];
-            // En realtime aussi : si remote vidé entre temps (rare), on ne wipe pas le state local.
-            if (rows.length > 0) {
-              try { entity.apply(state, rows); } catch(e) {}
-            }
-            _seedCacheFromRemote(entity, rows, state);
-            if (onApplied) onApplied(entity.key);
-          } catch(e) { /* swallow */ }
-        });
-      ch.subscribe();
-    });
-  }
-};
 </script>
 
 <script>
@@ -3204,8 +2831,6 @@ function persist() {
   save(K.teamReviews, state.teamReviews);
   save(K.offseason, state.offseason);
   save(K.offseasonLogs, state.offseasonLogs);
-  // Push toutes les entités équipe vers Supabase (debounced 400ms)
-  if (window.PbSync) PbSync.schedule(state);
 }
 
 // ============================================================
@@ -14160,38 +13785,30 @@ window.addEventListener('hashchange', () => render());
 // ============================================================
 // MAIN RENDER
 // ============================================================
-// ---- Sync globale toutes entités équipe ----
-// 1) players reste géré séparément (RPC verify_pin + protect pin_hash)
-// 2) tout le reste est piloté par window.PbSync (sync engine générique)
+// ---- Sync effectif (players) avec Supabase ----
+// One-shot init : fetch initial + subscribe Realtime.
 function _initPlayersSync() {
-  if (window._syncInitDone || !window.PbStore || !window.PbSync) return;
-  window._syncInitDone = true;
+  if (window._playersSyncInit || !window.PbStore) return;
+  window._playersSyncInit = true;
 
-  // --- A) Players (logique spécifique, conserve la fusion pin + extras) ---
+  // 1) Fetch initial : remote wins pour name/num/photo ; local préserve pin + extras.
   PbStore.fetchPlayers().then(remote => {
-    if (remote && remote.length) {
-      const localById = Object.fromEntries(state.players.map(p => [p.id, p]));
-      const merged = remote.map(rp => {
-        const lp = localById[rp.id] || {};
-        return { ...lp, id: rp.id, name: rp.name, num: rp.num, photo: rp.photo || lp.photo || null, pin: lp.pin || '0000' };
-      });
-      const remoteIds = new Set(remote.map(r => r.id));
-      const localOnly = state.players.filter(p => !remoteIds.has(p.id));
-      state.players = [...merged, ...localOnly];
-      localOnly.forEach(p => PbStore.upsertPlayer(p).catch(()=>{}));
-    }
-  }).catch(e => console.warn('[sync] fetchPlayers:', e.message))
-    .finally(() => {
-      // --- B) Toutes les autres entités via PbSync ---
-      PbSync.fetchAll(state).then(() => {
-        persist();
-        render();
-        // Subscribe Realtime sur toutes les entités configurées
-        PbSync.subscribeAll(state, () => { render(); });
-      });
+    if (!remote || !remote.length) return;
+    const localById = Object.fromEntries(state.players.map(p => [p.id, p]));
+    const merged = remote.map(rp => {
+      const lp = localById[rp.id] || {};
+      return { ...lp, id: rp.id, name: rp.name, num: rp.num, photo: rp.photo || lp.photo || null, pin: lp.pin || '0000' };
     });
+    // Joueuses locales pas encore push (id qui commence par 'x' = uid client) → on les pousse
+    const remoteIds = new Set(remote.map(r => r.id));
+    const localOnly = state.players.filter(p => !remoteIds.has(p.id));
+    state.players = [...merged, ...localOnly];
+    persist();
+    localOnly.forEach(p => PbStore.upsertPlayer(p).catch(()=>{}));
+    if (state.section === 'team' || document.querySelector('.modal-body')) render();
+  }).catch(e => console.warn('[sync] fetchPlayers:', e.message));
 
-  // --- C) Players Realtime (pattern dédié) ---
+  // 2) Subscribe Realtime : autres devices mettent à jour ce client en live
   PbStore.subscribePlayers(({ event, new: row, old }) => {
     if (event === 'INSERT' || event === 'UPDATE') {
       const i = state.players.findIndex(p => p.id === row.id);
@@ -14202,9 +13819,8 @@ function _initPlayersSync() {
     } else if (event === 'DELETE' && old) {
       state.players = state.players.filter(p => p.id !== old.id);
     }
-    // Pas de persist() ici : on évite la cascade PbSync (cache pas concerné par players)
-    save(K.players, state.players);
-    render();
+    persist();
+    if (state.section === 'team' || document.querySelector('.modal-body')) render();
   });
 }
 
