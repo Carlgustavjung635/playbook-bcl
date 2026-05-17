@@ -13909,11 +13909,6 @@ function parseClubMatchesFromHTML(html, clubTeamHint) {
   // On cherche tous les liens vers une page de match : .../match/<id>
   const matchLinks = Array.from(doc.querySelectorAll('a[href*="/match/"]'));
   const processedMatchIds = new Set();
-  // Compteur de matchs uniques traités (1-indexé) — sert de fallback de journée
-  // pour la page équipe : les matchs sont listés en ordre J1, J2, ..., JN.
-  // Quand le texte est glué ("J229 mai" ambigu entre 22+9 ou 2+29), on utilise
-  // cet index pour stripper la journée correctement avant de parser le jour.
-  let sequentialJourneeIdx = 0;
 
   matchLinks.forEach(link => {
     const href = link.getAttribute('href') || '';
@@ -13921,202 +13916,93 @@ function parseClubMatchesFromHTML(html, clubTeamHint) {
     if (!idMatch) return;
     const matchId = idMatch[1];
     if (processedMatchIds.has(matchId)) return;
-    sequentialJourneeIdx++;
     processedMatchIds.add(matchId);
 
+    // Le lien contient le score ou "Voir la feuille de match"
+    const linkText = (link.textContent || '').trim();
+    // Le score est sous la forme "AABB" sans séparateur (ex: "9914" = 99-14) ou avec séparateur
     let scoreHome = null, scoreAway = null, played = false;
-
-    // === Méthode 1 (la + fiable, page équipe FFBB 2026) ===
-    // Les scores sont dans 2 <span> distincts à l'intérieur du <a> :
-    //   - span text-[#8A8FA2] gris = score adversaire
-    //   - span text-[#00288e] bleu = score de notre équipe (couleur d'identité club)
-    // Ordre dans le DOM : adversaire d'abord, nous ensuite (avec un SVG "versus" entre).
-    let myScore = null, oppScore = null;
-    const innerSpans = Array.from(link.querySelectorAll('span'));
-    innerSpans.forEach(sp => {
-      const txt = (sp.textContent || '').trim();
-      if (!/^\d{1,3}$/.test(txt)) return;
-      const n = parseInt(txt);
-      const cls = (sp.getAttribute('class') || '').toLowerCase();
-      if (cls.includes('#00288e')) myScore = n;
-      else if (cls.includes('#8a8fa2')) oppScore = n;
-      else if (oppScore === null) oppScore = n;       // ordre de fallback : 1er = adv
-      else if (myScore === null) myScore = n;          // 2e = nous
-    });
-    if (myScore !== null && oppScore !== null) {
+    const scoreMatch = linkText.match(/^(\d{1,3})\s*[-–]?\s*(\d{1,3})$/);
+    if (scoreMatch) {
+      scoreHome = parseInt(scoreMatch[1]);
+      scoreAway = parseInt(scoreMatch[2]);
       played = true;
-      // On range home/away après avoir détecté la perspective (Domicile/Extérieur)
-      // plus bas dans le code après extraction du contexte ; on stocke pour l'instant
-      // dans des var temporaires.
-    }
-
-    // === Méthode 2 (fallback : page club ou format collé) ===
-    if (!played) {
-      const linkText = (link.textContent || '').trim().replace(/\s+/g, '');
-      const scoreMatch = linkText.match(/^(\d{1,3})\s*[-–]?\s*(\d{1,3})$/);
-      if (scoreMatch) {
-        scoreHome = parseInt(scoreMatch[1]);
-        scoreAway = parseInt(scoreMatch[2]);
-        played = true;
-      } else if (/^\d{4,6}$/.test(linkText)) {
-        const len = linkText.length;
-        if (len === 4) {
-          scoreHome = parseInt(linkText.slice(0, 2));
-          scoreAway = parseInt(linkText.slice(2));
-        } else if (len === 6) {
-          scoreHome = parseInt(linkText.slice(0, 3));
-          scoreAway = parseInt(linkText.slice(3));
-        } else if (len === 5) {
-          const a = [parseInt(linkText.slice(0, 2)), parseInt(linkText.slice(2))];
-          const b = [parseInt(linkText.slice(0, 3)), parseInt(linkText.slice(3))];
-          if (a[0] >= 20 && a[0] <= 200 && a[1] >= 20 && a[1] <= 200) {
-            scoreHome = a[0]; scoreAway = a[1];
-          } else {
-            scoreHome = b[0]; scoreAway = b[1];
-          }
-        }
-        if (scoreHome !== null && scoreAway !== null && !isNaN(scoreHome) && !isNaN(scoreAway) && (scoreHome > 0 || scoreAway > 0)) {
-          played = true;
+    } else if (/^\d{4,6}$/.test(linkText)) {
+      // Format collé style "9914" → on prend la moitié de chaque côté en supposant 2 ou 3 chiffres
+      const len = linkText.length;
+      if (len === 4) {
+        scoreHome = parseInt(linkText.slice(0, 2));
+        scoreAway = parseInt(linkText.slice(2));
+      } else if (len === 6) {
+        scoreHome = parseInt(linkText.slice(0, 3));
+        scoreAway = parseInt(linkText.slice(3));
+      } else if (len === 5) {
+        // Ambigü - on tente 2+3 et 3+2, on prend celui qui a des scores plausibles
+        const a = [parseInt(linkText.slice(0, 2)), parseInt(linkText.slice(2))];
+        const b = [parseInt(linkText.slice(0, 3)), parseInt(linkText.slice(3))];
+        // Préférence : scores entre 20 et 200
+        if (a[0] >= 20 && a[0] <= 200 && a[1] >= 20 && a[1] <= 200) {
+          scoreHome = a[0]; scoreAway = a[1];
         } else {
-          scoreHome = null; scoreAway = null;
-          played = false;
+          scoreHome = b[0]; scoreAway = b[1];
         }
+      }
+      if (scoreHome !== null && scoreAway !== null && !isNaN(scoreHome) && !isNaN(scoreAway) && (scoreHome > 0 || scoreAway > 0)) {
+        played = true;
+      } else {
+        scoreHome = null; scoreAway = null;
+        played = false;
       }
     }
 
     // Sécurité supplémentaire : si played mais l'un des deux scores est null, on annule
-    if (played && scoreHome !== null && (scoreHome === null || scoreAway === null || isNaN(scoreHome) || isNaN(scoreAway))) {
+    if (played && (scoreHome === null || scoreAway === null || isNaN(scoreHome) || isNaN(scoreAway))) {
       played = false;
       scoreHome = null;
       scoreAway = null;
     }
 
     // Remonter dans le DOM pour récupérer le contexte (équipes + date + compétition + salle)
-    // Critère : un ancêtre qui contient
-    //  - soit ≥2 /equipes/ (page club),
-    //  - soit ≥1 /equipes/ + une indication "Domicile|Extérieur" (page équipe)
-    // NB : on n'utilise PAS \b parce que la textContent du DOM colle souvent
-    // les mots adjacents sans espace (ex: "21h30Extérieur").
     let context = link.parentElement;
-    for (let i = 0; i < 8 && context; i++) {
+    for (let i = 0; i < 6 && context; i++) {
+      // On cherche une zone qui contient au moins 2 liens vers /equipes/
       const teamLinks = context.querySelectorAll('a[href*="/equipes/"]');
-      const txt = context.textContent || '';
-      const hasLieu = /Domicile|Ext[eé]rieur/i.test(txt);
-      if (teamLinks.length >= 2 && hasLieu) break;          // page club : 2 équipes nommées + lieu
-      if (teamLinks.length >= 1 && hasLieu) break;          // page équipe : 1 lien adversaire + lieu
+      if (teamLinks.length >= 2) break;
       context = context.parentElement;
     }
     if (!context) return;
 
-    // Récupérer les liens vers les équipes — sur la page club il y en a
-    // typiquement 2 (home/away). Sur la page équipe il peut n'y en avoir
-    // qu'1 (l'adversaire) car notre équipe est implicite (c'est sa page).
+    // Récupérer les 2 équipes (par les liens /equipes/)
     const teamLinks = Array.from(context.querySelectorAll('a[href*="/equipes/"]'));
+    if (teamLinks.length < 2) return;
 
+    // Le nom de l'équipe est dans le title ou le texte du lien (souvent dupliqué image + texte)
     function extractTeamName(a) {
       const title = a.getAttribute('title') || '';
       if (title) return title.trim();
       const txt = (a.textContent || '').trim();
+      // Souvent "URL_image Nom Equipe" — on prend après le dernier slash si présent
       const cleaned = txt.replace(/^https?:[^\s]+\s*/, '').trim();
       return cleaned;
     }
 
-    // Détection Domicile/Extérieur depuis le texte de contexte
-    const ctxTextRaw = (context.textContent || '').replace(/\s+/g, ' ');
-    const isExterieur = /\bExt[eé]rieur\b/i.test(ctxTextRaw);
-    const isDomicile  = /\bDomicile\b/i.test(ctxTextRaw);
-
-    let homeTeam, awayTeam;
-    if (teamLinks.length >= 2) {
-      homeTeam = extractTeamName(teamLinks[0]);
-      awayTeam = extractTeamName(teamLinks[1]);
-    } else if (teamLinks.length === 1) {
-      // Page équipe : 1 seul lien = adversaire. Notre équipe = clubTeamHint
-      // si fourni, sinon "Mon équipe" (fallback générique).
-      const opp = extractTeamName(teamLinks[0]);
-      const us  = clubTeamHint || 'Mon équipe';
-      if (isDomicile) { homeTeam = us; awayTeam = opp; }
-      else { homeTeam = opp; awayTeam = us; }   // Extérieur par défaut
-    } else {
-      return; // pas assez d'info, on saute ce match
-    }
+    const homeTeam = extractTeamName(teamLinks[0]);
+    const awayTeam = extractTeamName(teamLinks[1]);
     if (!homeTeam || !awayTeam) return;
 
-    // Sanity check sur les scores : un score > 200 est aberrant en basket.
-    // Origine probable : placeholder, format mal parsé, journée concaténée.
-    if (played && ((scoreHome != null && scoreHome > 200) || (scoreAway != null && scoreAway > 200))) {
-      played = false;
-      scoreHome = null;
-      scoreAway = null;
-      myScore = null;
-      oppScore = null;
-    }
-
-    // Remettre scoreHome/scoreAway selon la perspective (uniquement si extraction
-    // par spans colorés ; sinon scoreHome/scoreAway ont déjà été assignés par
-    // la méthode fallback ci-dessus).
-    if (played && myScore !== null && oppScore !== null && scoreHome === null) {
-      if (isDomicile) { scoreHome = myScore; scoreAway = oppScore; }
-      else { scoreHome = oppScore; scoreAway = myScore; }
-    }
-
     // Chercher la date / heure dans le contexte (avant ou juste avant le score)
-    // On strippe "J<sequentialJourneeIdx>" du texte pour désambiguer le jour
-    // (FFBB colle "J229 mai" : sans strip, regex pourrait lire "29 mai" au
-    // lieu de "9 mai"). Si le strip ne trouve rien, le texte reste intact.
-    let ctxText = context.textContent || '';
-    if (sequentialJourneeIdx > 0) {
-      const expectedJ = 'J' + sequentialJourneeIdx;
-      // Remplace l'occurrence par un espace pour préserver les frontières
-      const idx0 = ctxText.indexOf(expectedJ);
-      if (idx0 >= 0) {
-        ctxText = ctxText.slice(0, idx0) + ' ' + ctxText.slice(idx0 + expectedJ.length);
-      }
-    }
-    // Patterns : "9 mai 13h00", "27 sept. 22h30", "5 oct. 15h00", "9 nov. 16h30",
-    // "15 mars 18:30", "9/05/2025". Accepte les abréviations FFBB
-    // ("sept.", "oct.", "nov.", "déc.", "fév.", "avr.", "juil.")
-    // f[ée]vr?\\.? = "fév", "fév.", "févr", "févr." (FFBB utilise "févr.")
-    const monthPat = '(janvier|janv\\.?|f[ée]vrier|f[ée]vr?\\.?|mars|avril|avr\\.?|mai|juin|juillet|juil\\.?|ao[uû]t|septembre|sept\\.?|sep\\.?|octobre|oct\\.?|novembre|nov\\.?|d[ée]cembre|d[ée]c\\.?)';
-    // Préfixe "J<journee>" optionnel et collé devant le jour (FFBB 2026
-    // sort le textContent sans espace : "#130J229 mai" → journée=22, jour=9).
-    // Le greedy sur \\d+ assure que la journée prend le maximum, puis
-    // backtrack pour que (\\d{1,2})\\s+ se cale sur le jour réel.
-    const dateMatch = ctxText.match(new RegExp(
-      '(?:J(\\d+)\\s*)?(\\d{1,2})\\s+' + monthPat + '(?:\\s+(\\d{4}))?\\s*(?:à\\s*)?(\\d{1,2})[h:](\\d{2})?',
-      'i'
-    ));
+    const ctxText = context.textContent || '';
+    // Patterns possibles : "9 mai 13h00", "9/05/2025", "9 mai 2025 13:00", "15 mars 18:30"
+    const dateMatch = ctxText.match(/(\d{1,2})\s+(janvier|f[ée]vrier|mars|avril|mai|juin|juillet|ao[uû]t|septembre|octobre|novembre|d[ée]cembre)(?:\s+(\d{4}))?\s*(?:à\s*)?(\d{1,2})[h:](\d{2})?/i);
     let dateStr = null, timeStr = null;
-    const MONTHS = {
-      'janvier':1, 'janv':1,
-      'fevrier':2, 'fev':2,
-      'mars':3,
-      'avril':4, 'avr':4,
-      'mai':5,
-      'juin':6,
-      'juillet':7, 'juil':7,
-      'aout':8,
-      'septembre':9, 'sept':9, 'sep':9,
-      'octobre':10, 'oct':10,
-      'novembre':11, 'nov':11,
-      'decembre':12, 'dec':12
-    };
-    // Capture groups : [1]=journ\u00e9e optionnelle, [2]=jour, [3]=mois,
-    // [4]=ann\u00e9e optionnelle, [5]=heure, [6]=minutes
-    let journeeFromDate = null;
+    const MONTHS = { 'janvier':1,'fevrier':2,'fevrier':2,'mars':3,'avril':4,'mai':5,'juin':6,'juillet':7,'aout':8,'aout':8,'septembre':9,'octobre':10,'novembre':11,'decembre':12 };
     if (dateMatch) {
-      if (dateMatch[1]) journeeFromDate = parseInt(dateMatch[1]);
-      const day = parseInt(dateMatch[2]);
-      const monthRaw = dateMatch[3].toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\./g, '').trim();
-      let month = MONTHS[monthRaw];
-      if (!month) {
-        // Fallback : essayer un pr\u00e9fixe (au cas o\u00f9 l'abr\u00e9viation est partielle)
-        const key = Object.keys(MONTHS).find(k => monthRaw.startsWith(k) || k.startsWith(monthRaw));
-        if (key) month = MONTHS[key];
-      }
-      let year = dateMatch[4] ? parseInt(dateMatch[4]) : null;
-      const hour = parseInt(dateMatch[5]);
-      const minutes = dateMatch[6] ? parseInt(dateMatch[6]) : 0;
+      const day = parseInt(dateMatch[1]);
+      const monthName = dateMatch[2].toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      const month = MONTHS[monthName];
+      let year = dateMatch[3] ? parseInt(dateMatch[3]) : null;
+      const hour = parseInt(dateMatch[4]);
+      const minutes = dateMatch[5] ? parseInt(dateMatch[5]) : 0;
       // Si pas d'année : deviner d'après la saison sportive en cours (sept-juin)
       if (!year) {
         const now = new Date();
@@ -14147,17 +14033,10 @@ function parseClubMatchesFromHTML(html, clubTeamHint) {
     // Nettoyer : "U13M HON P2 | Journée 8" → on garde tout, "Inter-départementale masculine U13 - Division 2" si dispo
     competition = competition.replace(/\s*\|\s*Journée\s*\d+/i, '').trim();
 
-    // Numéro de journée : priorité
-    //   1. Mot complet "Journée X" (page club, sans ambiguïté)
-    //   2. Capture du préfixe "J<journee>" dans le pattern de date
-    //   3. Index séquentiel (page équipe, ordre d'affichage J1..JN)
-    // Valeur > 30 considérée comme erreur de parsing → fallback.
+    // Chercher le numéro de journée
     let journee = null;
     const jMatch = ctxText.match(/Journée\s*(\d+)/i);
     if (jMatch) journee = parseInt(jMatch[1]);
-    if (!journee && journeeFromDate && journeeFromDate <= 30) journee = journeeFromDate;
-    if (!journee && sequentialJourneeIdx > 0) journee = sequentialJourneeIdx;
-    if (journee && journee > 99) journee = sequentialJourneeIdx || null;
 
     // Salle : souvent le dernier élément de texte non-link (genre "CENTRE ANDRE GIRARD")
     let venue = '';
