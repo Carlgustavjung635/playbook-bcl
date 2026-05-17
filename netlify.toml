@@ -1,0 +1,12 @@
+[build]
+  publish = "."
+  functions = "netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
+
+# Redirection pour avoir une URL propre /api/ffbb
+[[redirects]]
+  from = "/api/ffbb"
+  to = "/.netlify/functions/ffbb-scraper"
+  status = 200
