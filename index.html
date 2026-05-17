@@ -326,9 +326,37 @@
   }
   .video-player.vertical {
     aspect-ratio: 9 / 16;
-    max-width: 320px;
+    max-width: 100%;
     margin: 0 auto;
   }
+  /* Onglets vidéos pour les plays multi-vidéos */
+  .video-tabs {
+    display: flex; gap: 6px; padding: 0 18px 8px;
+    overflow-x: auto; scrollbar-width: none;
+  }
+  .video-tabs::-webkit-scrollbar { display: none; }
+  .video-tab {
+    flex-shrink: 0;
+    padding: 7px 12px;
+    background: var(--bg-2); border: 1px solid var(--border);
+    color: var(--ink-2);
+    border-radius: 999px;
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    font-weight: 600; letter-spacing: 0.04em;
+    cursor: pointer; transition: all 0.15s;
+  }
+  .video-tab:hover { border-color: var(--orange); color: var(--ink); }
+  .video-tab.active {
+    background: var(--orange); border-color: var(--orange);
+    color: black;
+  }
+  /* Lignes URL+label pour l'édition multi-vidéos */
+  .video-edit-row {
+    display: flex; gap: 6px; margin-bottom: 6px;
+    align-items: center;
+  }
+  .video-edit-row input { flex: 1; min-width: 0; }
+  .video-edit-row input.label-input { max-width: 130px; }
   .video-player iframe,
   .video-player video {
     position: absolute;
@@ -2580,14 +2608,33 @@ function _stableJson(o) {
 const ENTITIES = [
   {
     key: 'plays', table: 'plays', pk: 'id', realtime: true, auth: 'anon',
-    dump: (state) => Object.fromEntries((state.plays || []).map(p => [p.id, {
-      id: p.id, cat: p.cat || 'off', title: p.title || '',
-      descr: p.desc || null, tags: p.tags || [], video_url: p.videoUrl || null
-    }])),
+    dump: (state) => Object.fromEntries((state.plays || []).map(p => {
+      // Normalise : videos[] est la source de vérité. Backward compat avec videoUrl.
+      const videos = (p.videos && p.videos.length) ? p.videos
+        : (p.videoUrl ? [{ url: p.videoUrl }] : []);
+      return [p.id, {
+        id: p.id, cat: p.cat || 'off', title: p.title || '',
+        descr: p.desc || null, tags: p.tags || [],
+        video_url: videos[0] ? videos[0].url : null,  // legacy pour backward compat
+        videos: videos
+      }];
+    })),
     apply: (state, rows) => {
-      const arr = rows.map(r => ({ id: r.id, cat: r.cat, title: r.title,
-        desc: r.descr || '', tags: r.tags || [], videoUrl: r.video_url || '' }));
-      state.plays = arr;
+      // Préserve les extras locaux (images, concepts, attachments)
+      const byId = Object.fromEntries((state.plays || []).map(p => [p.id, p]));
+      state.plays = rows.map(r => {
+        const local = byId[r.id] || {};
+        // videos remote prioritaire, fallback sur video_url legacy
+        const videos = (r.videos && r.videos.length) ? r.videos
+          : (r.video_url ? [{ url: r.video_url }] : (local.videos || []));
+        return {
+          ...local,
+          id: r.id, cat: r.cat, title: r.title,
+          desc: r.descr || '', tags: r.tags || [],
+          videoUrl: videos[0] ? videos[0].url : '',  // legacy
+          videos: videos
+        };
+      });
     }
   },
   {
@@ -3312,13 +3359,22 @@ function videoPlayer(url, defaultVertical) {
   const vertical = v.vertical || defaultVertical || false;
 
   // === VIMEO : embed iframe inline (fiable, pas de blocage) ===
+  // Default 16:9. Vimeo URL ne porte pas l'orientation, on ne force PAS vertical
+  // (le bug "vidéo en 50% de largeur" venait d'une mauvaise détection + d'un
+  // max-width: 320px sur .vertical, désormais 100%). Params Vimeo additionnels
+  // pour cacher les chrome (byline/portrait/title) et activer la lecture mobile.
   if (v.provider === 'vimeo') {
+    // Force horizontal 16:9 pour Vimeo : Vimeo gère lui-même le letterbox
+    // si le contenu est portrait. Évite la régression "vertical = 50% width".
+    const sep = v.embed.includes('?') ? '&' : '?';
     return `
       <div class="video-wrap">
-        <div class="video-player ${vertical ? 'vertical' : 'horizontal'}">
+        <div class="video-player horizontal">
           <iframe
-            src="${v.embed}?playsinline=1&dnt=1"
-            allow="autoplay; fullscreen; picture-in-picture"
+            src="${v.embed}${sep}playsinline=1&dnt=1&byline=0&portrait=0&title=0"
+            width="100%" height="100%"
+            frameborder="0"
+            allow="autoplay; fullscreen; picture-in-picture; clipboard-write; encrypted-media"
             allowfullscreen
             loading="lazy"></iframe>
         </div>
@@ -4876,7 +4932,13 @@ function setPlaysTag(t) { state.playsTag = t; render(); }
 
 function openPlay(id) {
   state.view = { type: 'play', id };
+  state._playVideoIdx = 0;
   render(); window.scrollTo(0, 0);
+}
+
+function setPlayVideoIdx(i) {
+  state._playVideoIdx = i;
+  render();
 }
 
 function renderPlayDetail() {
@@ -4886,8 +4948,13 @@ function renderPlayDetail() {
   const images = p.images || [];
   const concepts = p.concepts || [];
   const hasGallery = images.length > 0;
-  const hasVideo = !!p.videoUrl;
+  // Normalise videos[] avec backward compat sur videoUrl legacy
+  const videos = (p.videos && p.videos.length) ? p.videos
+    : (p.videoUrl ? [{ url: p.videoUrl }] : []);
+  const hasVideo = videos.length > 0;
   const hasDesc = !!(p.desc || '').trim();
+  // Index vidéo actif (transient UI state)
+  const vIdx = Math.max(0, Math.min((state._playVideoIdx || 0), videos.length - 1));
 
   return `
     <div class="fade-up">
@@ -4941,9 +5008,18 @@ function renderPlayDetail() {
       ${hasVideo ? `
         <div class="list-section">
           <div style="padding:14px 16px 0">
-            <div class="eyebrow-muted mb-2">🎬 ${hasGallery ? 'Vidéo associée' : 'Vidéo'}</div>
+            <div class="eyebrow-muted mb-2">🎬 ${videos.length > 1 ? `Vidéos (${videos.length})` : (hasGallery ? 'Vidéo associée' : 'Vidéo')}</div>
           </div>
-          ${videoPlayer(p.videoUrl, false)}
+          ${videos.length > 1 ? `
+            <div class="video-tabs">
+              ${videos.map((v, i) => `
+                <button class="video-tab ${i === vIdx ? 'active' : ''}" onclick="setPlayVideoIdx(${i})">
+                  ${esc(v.label || ('Vidéo ' + (i + 1)))}
+                </button>
+              `).join('')}
+            </div>
+          ` : ''}
+          ${videoPlayer(videos[vIdx].url, false)}
         </div>
       ` : ''}
 
@@ -5006,15 +5082,45 @@ function navPlayFull(playId, delta) {
 function editPlay(id) {
   const isNew = !id;
   const p = isNew
-    ? { id: uid(), cat: 'off', title: '', desc: '', tags: [], videoUrl: '', images: [], concepts: [], attachments: [] }
+    ? { id: uid(), cat: 'off', title: '', desc: '', tags: [], videoUrl: '', videos: [], images: [], concepts: [], attachments: [] }
     : state.plays.find(x => x.id === id);
+  // Backward compat : si videos vide mais videoUrl existant, créer 1 entrée
+  const videos = (p.videos && p.videos.length) ? p.videos
+    : (p.videoUrl ? [{ url: p.videoUrl, label: '' }] : []);
   state._editingPlay = {
     ...p,
     images: [...(p.images || [])],
     concepts: [...(p.concepts || [])],
-    attachments: [...(p.attachments || [])]
+    attachments: [...(p.attachments || [])],
+    videos: videos.map(v => ({ url: v.url || '', label: v.label || '' }))
   };
   renderPlayEditor(isNew);
+}
+
+function addPlayVideoRow() {
+  if (!state._editingPlay) return;
+  // Lire les valeurs des inputs avant re-render pour ne pas les perdre
+  _syncPlayEditorVideoInputs();
+  state._editingPlay.videos.push({ url: '', label: '' });
+  renderPlayEditor(state.plays.findIndex(x => x.id === state._editingPlay.id) === -1);
+}
+
+function removePlayVideoRow(i) {
+  if (!state._editingPlay) return;
+  _syncPlayEditorVideoInputs();
+  state._editingPlay.videos.splice(i, 1);
+  renderPlayEditor(state.plays.findIndex(x => x.id === state._editingPlay.id) === -1);
+}
+
+function _syncPlayEditorVideoInputs() {
+  // Copie les valeurs des inputs URL/label vers state._editingPlay.videos
+  if (!state._editingPlay) return;
+  state._editingPlay.videos.forEach((v, i) => {
+    const urlEl = document.getElementById('p-video-url-' + i);
+    const labelEl = document.getElementById('p-video-label-' + i);
+    if (urlEl) v.url = urlEl.value.trim();
+    if (labelEl) v.label = labelEl.value.trim();
+  });
 }
 
 function renderPlayEditor(isNew) {
@@ -5059,11 +5165,22 @@ function renderPlayEditor(isNew) {
         </label>
       </div>
 
-      <!-- LIEN VIDÉO -->
+      <!-- LIENS VIDÉO (multi) -->
       <div class="fld" style="padding-top:14px;border-top:1px solid var(--border-soft);margin-top:14px">
-        <label class="fld-label">🎬 Lien vidéo (optionnel)</label>
-        <input id="p-video" value="${esc(p.videoUrl)}" placeholder="https://vimeo.com/... ou https://youtube.com/...">
-        <div style="margin-top:6px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';line-height:1.5">Vimeo recommandé (lecture intégrée fiable). YouTube ouvre l'app native.</div>
+        <label class="fld-label">🎬 Vidéos (${p.videos.length})</label>
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-bottom:8px;line-height:1.5">Une ou plusieurs vidéos par play (YouTube, Vimeo, .mp4). Label optionnel pour identifier (ex: "Caméra 1", "Slow-mo").</div>
+        ${p.videos.length === 0 ? '' : `
+          <div style="display:flex;flex-direction:column;gap:2px">
+            ${p.videos.map((v, i) => `
+              <div class="video-edit-row">
+                <input id="p-video-url-${i}" value="${esc(v.url)}" placeholder="https://vimeo.com/… ou https://youtube.com/…">
+                <input id="p-video-label-${i}" class="label-input" value="${esc(v.label || '')}" placeholder="Label">
+                <button class="btn btn-icon btn-danger" style="width:32px;height:32px;flex-shrink:0" onclick="removePlayVideoRow(${i})" title="Supprimer">✕</button>
+              </div>
+            `).join('')}
+          </div>
+        `}
+        <button class="btn btn-secondary btn-block" style="margin-top:6px" onclick="addPlayVideoRow()">+ Ajouter une vidéo</button>
       </div>
 
       <!-- CONCEPTS -->
@@ -5211,10 +5328,15 @@ function savePlay(id, isNew) {
   const title = document.getElementById('p-title').value.trim();
   if (!title) return alert('Titre requis');
   const e = state._editingPlay;
+  // Lire les vidéos depuis le DOM (les rows ont pu être ajoutées/supprimées)
+  _syncPlayEditorVideoInputs();
+  const videos = (e.videos || []).filter(v => v.url && v.url.trim())
+    .map(v => ({ url: v.url.trim(), ...(v.label ? { label: v.label.trim() } : {}) }));
   const obj = {
     id, title,
     cat: document.getElementById('p-cat').value,
-    videoUrl: document.getElementById('p-video').value.trim(),
+    videos: videos,
+    videoUrl: videos[0] ? videos[0].url : '',  // legacy : 1re vidéo
     desc: document.getElementById('p-desc').value.trim(),
     tags: document.getElementById('p-tags').value.split(',').map(t => t.trim().toLowerCase()).filter(Boolean),
     images: e.images || [],
