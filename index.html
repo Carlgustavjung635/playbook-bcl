@@ -14268,10 +14268,11 @@ async function syncFFBB() {
       }
     }
 
-    // Si on est sur la page équipe : tous les matches sont à elle → pas de filtre.
-    // Sinon (fallback page club) : filtre par hint pour garder uniquement
-    // ceux mentionnant le nom de l'équipe.
-    const matches = parseClubMatchesFromHTML(matchesHtml, teamPageUsed ? null : (teamHint || null));
+    // On passe TOUJOURS le hint au parser : il en a besoin pour nommer
+    // correctement notre équipe dans les rows à 1 seul lien /equipes/
+    // (page équipe FFBB). Le filtre final reste actif mais devient un
+    // no-op puisque chaque match contient déjà le nom dans home OU away.
+    const matches = parseClubMatchesFromHTML(matchesHtml, teamHint || null);
     const standings = parseStandingsFromHTML(matchesHtml);
 
     if (matches.length === 0) {
