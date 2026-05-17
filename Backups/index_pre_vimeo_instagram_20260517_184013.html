@@ -4954,41 +4954,11 @@ function openPlay(id) {
   state.view = { type: 'play', id };
   state._playVideoIdx = 0;
   render(); window.scrollTo(0, 0);
-  // Auto-détecte l'orientation des vidéos Vimeo qui n'en ont pas (oEmbed API).
-  // Évite à l'utilisateur d'avoir à toggle manuellement 16:9 → 9:16 par vidéo.
-  _autoDetectVimeoOrientations(id);
 }
 
 function setPlayVideoIdx(i) {
   state._playVideoIdx = i;
   render();
-}
-
-// Pour les vidéos Vimeo sans orientation, fetch oEmbed pour deviner
-// (height > width = vertical). Persiste le résultat dans state + Supabase.
-async function _autoDetectVimeoOrientations(playId) {
-  const p = state.plays.find(x => x.id === playId);
-  if (!p || !p.videos || !p.videos.length) return;
-  let changed = false;
-  for (const video of p.videos) {
-    if (video.orientation) continue; // déjà set
-    if (!video.url) continue;
-    if (!/vimeo\.com/i.test(video.url)) continue;
-    try {
-      const oembedUrl = 'https://vimeo.com/api/oembed.json?url=' + encodeURIComponent(video.url);
-      const res = await fetch(oembedUrl);
-      if (!res.ok) continue;
-      const data = await res.json();
-      if (data.width && data.height) {
-        video.orientation = data.height > data.width ? 'vertical' : 'horizontal';
-        changed = true;
-      }
-    } catch (e) { /* swallow : oEmbed peut échouer si vidéo privée */ }
-  }
-  if (changed) {
-    persist();
-    if (typeof scheduleRender === 'function') scheduleRender(); else render();
-  }
 }
 
 function renderPlayDetail() {
@@ -12074,12 +12044,12 @@ function openExportMenu(matchId) {
         </div>
       </button>
 
-      <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>exportSelfieWithText('${matchId}'),50)" style="padding:14px;text-align:left;opacity:${hasSelfie?1:0.4}" ${!hasSelfie ? 'disabled' : ''}>
+      <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>exportStory('${matchId}','selfie'),50)" style="padding:14px;text-align:left;opacity:${hasSelfie?1:0.4}" ${!hasSelfie ? 'disabled' : ''}>
         <div style="display:flex;align-items:center;gap:10px">
           <span style="font-size:24px">🏆</span>
           <div style="flex:1">
             <div style="font-family:'Anton';font-size:14px;text-transform:uppercase">Selfie + score</div>
-            <div style="font-size:10px;opacity:0.7;margin-top:2px;font-family:'JetBrains Mono'">${hasSelfie ? 'Photo équipe + texte optionnel' : '⚠ Pas de selfie sur ce match'}</div>
+            <div style="font-size:10px;opacity:0.7;margin-top:2px;font-family:'JetBrains Mono'">${hasSelfie ? 'Photo équipe en grand' : '⚠ Pas de selfie sur ce match'}</div>
           </div>
         </div>
       </button>
@@ -12140,37 +12110,6 @@ function exportStoryCustom(matchId) {
     </div>
   `);
   setTimeout(() => document.getElementById('story-msg')?.focus(), 100);
-}
-
-// Saisie d'un texte optionnel à afficher par-dessus le selfie victoire
-function exportSelfieWithText(matchId) {
-  const m = state.matches.find(x => x.id === matchId);
-  if (!m) return;
-  const win = m.scoreUs > m.scoreOpp;
-  const defaultMsg = win
-    ? 'Belle victoire !'
-    : '';
-  openModal(`
-    <div class="modal-header">
-      <div class="modal-title">🏆 Selfie + score</div>
-      <button class="modal-close" onclick="closeModal()">✕</button>
-    </div>
-    <div class="modal-body">
-      <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:14px;font-size:11px;color:var(--ink-2);line-height:1.5">
-        Optionnel : ajoute un mot ou une légende qui s'affichera en bas de la story.
-      </div>
-      <div class="fld">
-        <label class="fld-label">Légende (optionnel · 2-3 lignes max)</label>
-        <textarea id="selfie-msg" placeholder="Ex: Quelle équipe !" maxlength="140" style="min-height:80px;font-size:14px;line-height:1.5">${esc(defaultMsg)}</textarea>
-        <div style="margin-top:4px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">Laisse vide pour générer sans texte.</div>
-      </div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-secondary btn-block" onclick="closeModal();setTimeout(()=>openExportMenu('${matchId}'),50)">Retour</button>
-      <button class="btn btn-primary btn-block" onclick="const msg = document.getElementById('selfie-msg').value.trim(); closeModal(); setTimeout(() => exportStory('${matchId}', 'selfie', msg), 50)">Générer</button>
-    </div>
-  `);
-  setTimeout(() => document.getElementById('selfie-msg')?.focus(), 100);
 }
 
 // =========== STORY INSTAGRAM 9:16 ===========
@@ -12268,22 +12207,6 @@ async function exportStory(matchId, style, customMessage) {
     ctx.fillStyle = '#666';
     ctx.font = '22px monospace';
     ctx.fillText(m.home ? 'À DOMICILE' : 'À L\'EXTÉRIEUR', 540, 1280);
-
-    // Légende optionnelle (texte custom passé via exportSelfieWithText)
-    if (customMessage && customMessage.trim()) {
-      ctx.fillStyle = '#ff6b00';
-      ctx.font = 'bold 22px monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText('— LÉGENDE —', 540, 1400);
-      ctx.fillStyle = '#fff';
-      ctx.font = 'bold 42px sans-serif';
-      const lines = wrapText(ctx, customMessage.trim(), 920);
-      const startY = 1480;
-      const lh = 60;
-      lines.slice(0, 4).forEach((line, idx) => {
-        ctx.fillText(line, 540, startY + idx * lh);
-      });
-    }
   } else {
     // === BANDEAU VICTOIRE/DÉFAITE ===
     ctx.fillStyle = win ? '#22c55e' : '#ef4444';
