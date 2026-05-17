@@ -1,0 +1,22 @@
+# Secrets locaux (jamais committer)
+.env
+.env.local
+.env.*.local
+
+# Dépendances
+node_modules/
+.netlify/
+
+# Logs
+*.log
+npm-debug.log*
+
+# IDE / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Sorties
+dist/
+build/
