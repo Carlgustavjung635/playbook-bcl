@@ -12774,109 +12774,201 @@ async function fetchViaProxy(targetUrl) {
   throw new Error('Tous les proxies ont échoué : ' + lastErr);
 }
 
-// Le site competitions.ffbb.com est en Next.js, donc il injecte un JSON
-// dans la balise <script id="__NEXT_DATA__">. C'est notre cible idéale.
-function extractNextData(html) {
-  const match = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-  if (!match) return null;
-  try {
-    return JSON.parse(match[1]);
-  } catch (e) {
-    console.error('NEXT_DATA parse error', e);
-    return null;
-  }
-}
+// FFBB v2 (2026) : Next.js App Router → plus de __NEXT_DATA__.
+// On parse directement le HTML rendu côté serveur. Les matchs apparaissent avec
+// une structure régulière (compétition + date + équipes + score/heure + salle).
 
-// Tente d'extraire les matchs depuis le JSON Next.js
-function parseClubMatches(nextData) {
+// Parser principal : extrait les matchs depuis le HTML brut de la page club
+function parseClubMatchesFromHTML(html, clubTeamHint) {
   const matches = [];
-  if (!nextData || !nextData.props) return matches;
+  if (!html) return matches;
 
-  // Walk recursivement pour trouver des structures match
-  function walk(obj, depth) {
-    if (!obj || depth > 8) return;
-    if (Array.isArray(obj)) {
-      obj.forEach(item => walk(item, depth + 1));
-      return;
-    }
-    if (typeof obj !== 'object') return;
-
-    // Détection heuristique d'un match
-    if (obj.date && (obj.equipe1 || obj.equipe2 || obj.equipeA || obj.equipeB || obj.homeTeam || obj.awayTeam)) {
-      matches.push(normalizeMatch(obj));
-    }
-    if (obj.numeroRencontre || obj.numero) {
-      // Probable rencontre
-      if (obj.date) matches.push(normalizeMatch(obj));
-    }
-
-    Object.values(obj).forEach(v => walk(v, depth + 1));
+  // On utilise un DOMParser pour naviguer le HTML proprement
+  let doc;
+  try {
+    doc = new DOMParser().parseFromString(html, 'text/html');
+  } catch (e) {
+    console.error('DOMParser failed', e);
+    return matches;
   }
-  walk(nextData.props, 0);
 
-  // Déduplication par date+équipes
-  const seen = new Set();
-  return matches.filter(m => {
-    const key = m.date + '|' + m.home + '|' + m.away;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  }).sort((a,b) => (a.date||'').localeCompare(b.date||''));
-}
+  // Méthode 1 : chercher les blocs "Match" qui contiennent les images d'équipes + score/heure
+  // Pattern observé : un titre h3/h4 avec "Journée X", suivi d'une date+heure, puis 2 liens vers équipes avec image, et un lien score/feuille de match.
+  
+  // On cherche tous les liens vers une page de match : .../match/<id>
+  const matchLinks = Array.from(doc.querySelectorAll('a[href*="/match/"]'));
+  const processedMatchIds = new Set();
 
-function normalizeMatch(raw) {
-  const home = raw.equipe1?.nom || raw.equipeA?.nom || raw.homeTeam?.nom || raw.equipe1Nom || raw.equipeAName || '';
-  const away = raw.equipe2?.nom || raw.equipeB?.nom || raw.awayTeam?.nom || raw.equipe2Nom || raw.equipeBName || '';
-  const score1 = raw.score1 ?? raw.scoreA ?? raw.equipe1Score ?? raw.homeScore;
-  const score2 = raw.score2 ?? raw.scoreB ?? raw.equipe2Score ?? raw.awayScore;
-  let date = raw.date || raw.dateRencontre || raw.matchDate || '';
-  // Normaliser ISO
-  if (date && date.includes('T')) date = date.slice(0, 10);
-  return {
-    date,
-    time: raw.heure || raw.time || raw.heureRencontre || '',
-    home: typeof home === 'string' ? home : (home?.nom || ''),
-    away: typeof away === 'string' ? away : (away?.nom || ''),
-    scoreHome: score1,
-    scoreAway: score2,
-    location: raw.salle?.nom || raw.location || raw.lieu || '',
-    played: (score1 !== null && score1 !== undefined && score2 !== null && score2 !== undefined),
-  };
-}
+  matchLinks.forEach(link => {
+    const href = link.getAttribute('href') || '';
+    const idMatch = href.match(/\/match\/(\d+)/);
+    if (!idMatch) return;
+    const matchId = idMatch[1];
+    if (processedMatchIds.has(matchId)) return;
+    processedMatchIds.add(matchId);
 
-// Tente d'extraire le classement de poule
-function parseStandings(nextData) {
-  if (!nextData || !nextData.props) return [];
-  const standings = [];
-  function walk(obj, depth) {
-    if (!obj || depth > 8) return;
-    if (Array.isArray(obj)) {
-      // Une liste d'objets avec rang/nom/points -> classement
-      if (obj.length > 3 && obj[0] && (obj[0].rang !== undefined || obj[0].position !== undefined || obj[0].rank !== undefined)) {
-        obj.forEach(row => {
-          standings.push({
-            rank: row.rang ?? row.position ?? row.rank,
-            team: row.equipe?.nom || row.team || row.nom || '',
-            played: row.matchsJoues ?? row.played ?? row.mj,
-            wins: row.victoires ?? row.wins ?? row.v,
-            losses: row.defaites ?? row.losses ?? row.d,
-            points: row.points ?? row.pts,
-            for: row.pointsMarques ?? row.scoreFor,
-            against: row.pointsEncaisses ?? row.scoreAgainst,
-          });
-        });
-        return;
+    // Le lien contient le score ou "Voir la feuille de match"
+    const linkText = (link.textContent || '').trim();
+    // Le score est sous la forme "AABB" sans séparateur (ex: "9914" = 99-14) ou avec séparateur
+    let scoreHome = null, scoreAway = null, played = false;
+    const scoreMatch = linkText.match(/^(\d{1,3})\s*[-–]?\s*(\d{1,3})$/);
+    if (scoreMatch) {
+      scoreHome = parseInt(scoreMatch[1]);
+      scoreAway = parseInt(scoreMatch[2]);
+      played = true;
+    } else if (/^\d{4,6}$/.test(linkText)) {
+      // Format collé style "9914" → on prend la moitié de chaque côté en supposant 2 ou 3 chiffres
+      const len = linkText.length;
+      if (len === 4) {
+        scoreHome = parseInt(linkText.slice(0, 2));
+        scoreAway = parseInt(linkText.slice(2));
+      } else if (len === 6) {
+        scoreHome = parseInt(linkText.slice(0, 3));
+        scoreAway = parseInt(linkText.slice(3));
+      } else if (len === 5) {
+        // Ambigü - on tente 2+3 et 3+2, on prend celui qui a des scores plausibles
+        const a = [parseInt(linkText.slice(0, 2)), parseInt(linkText.slice(2))];
+        const b = [parseInt(linkText.slice(0, 3)), parseInt(linkText.slice(3))];
+        // Préférence : scores entre 20 et 200
+        if (a[0] >= 20 && a[0] <= 200 && a[1] >= 20 && a[1] <= 200) {
+          scoreHome = a[0]; scoreAway = a[1];
+        } else {
+          scoreHome = b[0]; scoreAway = b[1];
+        }
       }
-      obj.forEach(item => walk(item, depth + 1));
-      return;
+      if (scoreHome !== null && scoreAway !== null && (scoreHome > 0 || scoreAway > 0)) {
+        played = true;
+      } else {
+        scoreHome = null; scoreAway = null;
+      }
     }
-    if (typeof obj !== 'object') return;
-    Object.values(obj).forEach(v => walk(v, depth + 1));
+
+    // Remonter dans le DOM pour récupérer le contexte (équipes + date + compétition + salle)
+    let context = link.parentElement;
+    for (let i = 0; i < 6 && context; i++) {
+      // On cherche une zone qui contient au moins 2 liens vers /equipes/
+      const teamLinks = context.querySelectorAll('a[href*="/equipes/"]');
+      if (teamLinks.length >= 2) break;
+      context = context.parentElement;
+    }
+    if (!context) return;
+
+    // Récupérer les 2 équipes (par les liens /equipes/)
+    const teamLinks = Array.from(context.querySelectorAll('a[href*="/equipes/"]'));
+    if (teamLinks.length < 2) return;
+
+    // Le nom de l'équipe est dans le title ou le texte du lien (souvent dupliqué image + texte)
+    function extractTeamName(a) {
+      const title = a.getAttribute('title') || '';
+      if (title) return title.trim();
+      const txt = (a.textContent || '').trim();
+      // Souvent "URL_image Nom Equipe" — on prend après le dernier slash si présent
+      const cleaned = txt.replace(/^https?:[^\s]+\s*/, '').trim();
+      return cleaned;
+    }
+
+    const homeTeam = extractTeamName(teamLinks[0]);
+    const awayTeam = extractTeamName(teamLinks[1]);
+    if (!homeTeam || !awayTeam) return;
+
+    // Chercher la date / heure dans le contexte (avant ou juste avant le score)
+    const ctxText = context.textContent || '';
+    // Patterns possibles : "9 mai 13h00", "9/05/2025", "9 mai 2025 13:00", "15 mars 18:30"
+    const dateMatch = ctxText.match(/(\d{1,2})\s+(janvier|f[ée]vrier|mars|avril|mai|juin|juillet|ao[uû]t|septembre|octobre|novembre|d[ée]cembre)(?:\s+(\d{4}))?\s*(?:à\s*)?(\d{1,2})[h:](\d{2})?/i);
+    let dateStr = null, timeStr = null;
+    const MONTHS = { 'janvier':1,'fevrier':2,'fevrier':2,'mars':3,'avril':4,'mai':5,'juin':6,'juillet':7,'aout':8,'aout':8,'septembre':9,'octobre':10,'novembre':11,'decembre':12 };
+    if (dateMatch) {
+      const day = parseInt(dateMatch[1]);
+      const monthName = dateMatch[2].toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      const month = MONTHS[monthName];
+      let year = dateMatch[3] ? parseInt(dateMatch[3]) : null;
+      const hour = parseInt(dateMatch[4]);
+      const minutes = dateMatch[5] ? parseInt(dateMatch[5]) : 0;
+      // Si pas d'année : deviner d'après la saison sportive en cours (sept-juin)
+      if (!year) {
+        const now = new Date();
+        const currentMonth = now.getMonth() + 1;
+        const currentYear = now.getFullYear();
+        // Si on est en sept-dec → match peut être de cette année (sept-dec) ou suivante (jan-juin)
+        if (currentMonth >= 9) {
+          year = month >= 9 ? currentYear : currentYear + 1;
+        } else {
+          year = month >= 9 ? currentYear - 1 : currentYear;
+        }
+      }
+      dateStr = year + '-' + String(month).padStart(2, '0') + '-' + String(day).padStart(2, '0');
+      timeStr = String(hour).padStart(2, '0') + ':' + String(minutes).padStart(2, '0');
+    }
+
+    // Chercher la compétition (h3, h4 ou texte avant le match)
+    let competition = '';
+    let cur = context;
+    for (let i = 0; i < 8 && cur; i++) {
+      const heading = cur.querySelector('h2, h3, h4');
+      if (heading) {
+        const t = (heading.textContent || '').trim();
+        if (t && !competition) competition = t;
+      }
+      cur = cur.parentElement;
+    }
+    // Nettoyer : "U13M HON P2 | Journée 8" → on garde tout, "Inter-départementale masculine U13 - Division 2" si dispo
+    competition = competition.replace(/\s*\|\s*Journée\s*\d+/i, '').trim();
+
+    // Chercher le numéro de journée
+    let journee = null;
+    const jMatch = ctxText.match(/Journée\s*(\d+)/i);
+    if (jMatch) journee = parseInt(jMatch[1]);
+
+    // Salle : souvent le dernier élément de texte non-link (genre "CENTRE ANDRE GIRARD")
+    let venue = '';
+    // On cherche un élément de texte court en majuscules après les liens (heuristique)
+    const allText = ctxText;
+    const lines = allText.split(/\n+/).map(s => s.trim()).filter(Boolean);
+    for (const line of lines) {
+      if (line.length > 4 && line.length < 80
+          && line === line.toUpperCase()
+          && !/^\d/.test(line)
+          && !line.includes('JOURNÉE')
+          && !line.includes('JOURNEE')
+          && line !== homeTeam.toUpperCase()
+          && line !== awayTeam.toUpperCase()) {
+        venue = line;
+        break;
+      }
+    }
+
+    matches.push({
+      id: matchId,
+      date: dateStr,
+      time: timeStr,
+      home: homeTeam,
+      away: awayTeam,
+      homeScore: scoreHome,
+      awayScore: scoreAway,
+      played,
+      competition,
+      journee,
+      venue,
+      matchUrl: 'https://competitions.ffbb.com' + (href.startsWith('http') ? new URL(href).pathname : href),
+    });
+  });
+
+  // Filtrer par hint d'équipe si fourni (ne garder que les matchs de cette équipe)
+  if (clubTeamHint) {
+    const hint = clubTeamHint.toLowerCase();
+    return matches.filter(m =>
+      (m.home || '').toLowerCase().includes(hint) ||
+      (m.away || '').toLowerCase().includes(hint)
+    );
   }
-  walk(nextData.props, 0);
-  return standings;
+
+  return matches;
 }
 
+// Stub vide pour standings (à implémenter plus tard si besoin)
+function parseStandingsFromHTML(html) {
+  return [];
+}
 async function syncFFBB() {
   const url = (state.ffbb.clubUrl || '').trim();
   if (!url) { alert('URL du club FFBB requise'); return; }
@@ -12886,16 +12978,22 @@ async function syncFFBB() {
 
   try {
     const html = await fetchViaProxy(url);
-    const nextData = extractNextData(html);
-    if (!nextData) throw new Error('JSON Next.js introuvable dans la page');
+    if (!html || html.length < 500) throw new Error('Page FFBB vide ou trop courte');
 
-    const matches = parseClubMatches(nextData);
-    const standings = parseStandings(nextData);
+    // Nouveau parser HTML direct (FFBB 2026 = Next.js App Router)
+    const teamHint = (state.ffbb.teamName || '').trim();
+    const matches = parseClubMatchesFromHTML(html, teamHint || null);
+    const standings = parseStandingsFromHTML(html);
+
+    if (matches.length === 0) {
+      // Diag : extraire un échantillon de HTML pour comprendre la structure
+      const snippet = html.replace(/\s+/g, ' ').slice(0, 300);
+      throw new Error('Aucun match trouvé sur cette page. Vérifie l\'URL du club FFBB. Aperçu : ' + snippet);
+    }
 
     state.ffbb.matches = matches;
     state.ffbb.standings = standings;
     state.ffbb.lastSync = new Date().toISOString();
-    state.ffbb.rawDataSnippet = JSON.stringify(nextData).slice(0, 200);
     state.ffbb.syncing = false;
     persist();
     render();
