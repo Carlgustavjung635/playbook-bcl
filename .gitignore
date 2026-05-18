@@ -19,7 +19,10 @@ npm-debug.log*
 Thumbs.db
 .vscode/
 .idea/
+.claude/
 
 # Sorties
 dist/
 build/
+Backups/
+*.tmp
