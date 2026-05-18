@@ -68,34 +68,45 @@
     background: var(--bg); color: var(--ink);
     font-family: 'Inter', -apple-system, sans-serif;
     -webkit-font-smoothing: antialiased;
-    overscroll-behavior-y: none;
   }
-  html { background: #000000; }
-  body { min-height: 100dvh; }
+  html { background: #000000; height: 100%; }
+  /* CRITIQUE (fix scroll past footer iOS) : on lock le BODY à la hauteur
+     du viewport et on désactive son overflow. Le scroll vertical est délégué
+     au container .app (interne). Avant : body avait min-height:100dvh, donc
+     pouvait grandir au-delà → iOS Safari révélait une zone vide sous le
+     footer fixed quand l'URL bar collapse / au rebond. Avec body en height
+     fixé + overflow:hidden, plus rien ne dépasse car le body ne scrolle pas. */
+  body {
+    height: 100dvh;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
   .font-display { font-family: 'Anton', sans-serif; letter-spacing: 0.01em; }
   .font-mono { font-family: 'JetBrains Mono', monospace; }
 
   /* ========== APP SHELL ========== */
+  /* .app devient le container scrollable principal. Sa hauteur = viewport
+     dynamic (dvh) donc s'adapte quand URL bar iOS collapse/expand. */
   .app {
     max-width: 480px; margin: 0 auto;
-    min-height: 100vh; min-height: 100dvh;
+    height: 100dvh;
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
     background: var(--bg);
     padding-bottom: calc(72px + env(safe-area-inset-bottom));
-    overflow-x: hidden;
-    /* Empêche le scroll de "dépasser" le footer (rebond iOS + zone vide) */
-    overscroll-behavior: contain;
   }
   @media (min-width: 768px) {
-    .app { max-width: 560px; border-left: 1px solid var(--border); border-right: 1px solid var(--border); min-height: 100vh; min-height: 100dvh; }
+    .app {
+      max-width: 560px;
+      border-left: 1px solid var(--border);
+      border-right: 1px solid var(--border);
+    }
   }
-  /* Sécurité : pas de scroll horizontal global */
-  body { overflow-x: hidden; }
-  /* Spacer final pour garantir que la dernière section reste visible au-dessus du footer */
-  main::after {
-    content: '';
-    display: block;
-    height: 8px;
-  }
+  /* Bottom nav reste fixed : il flotte au-dessus du scroll interne du .app.
+     Comme .app a padding-bottom pour réserver la zone, le contenu ne passe
+     jamais sous la nav. */
 
   /* ========== TOP BAR ========== */
   .topbar {
@@ -2915,6 +2926,113 @@ const ENTITIES = [
       if (r) state.offseason = { startDate: r.start_date || '', endDate: r.end_date || '',
         title: r.title || '', exercises: r.exercises || [] };
     }
+  },
+  {
+    // Ressentis équipe : joueuses écrivent, coach lit. Sync anon pour que le
+    // dashboard coach se MAJ live quand une joueuse soumet (avant : team_reviews
+    // n'était dans NI ENTITIES NI realtime → reload obligatoire côté coach).
+    key: 'teamReviews', table: 'team_reviews', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.teamReviews || []).map(r => [r.id, {
+      id: r.id, player_id: r.pid, date: r.date,
+      ambiance: r.ambiance ?? null, role_clarity: r.roleClarity ?? null,
+      playtime: r.playtime ?? null, physique: r.physique ?? null,
+      comment: r.comment || null
+    }])),
+    apply: (state, rows) => {
+      state.teamReviews = rows.map(r => ({
+        id: r.id, pid: r.player_id, date: r.date,
+        ambiance: r.ambiance, roleClarity: r.role_clarity,
+        playtime: r.playtime, physique: r.physique,
+        comment: r.comment || '',
+        updatedAt: r.updated_at ? Date.parse(r.updated_at) : Date.now()
+      }));
+    }
+  },
+  {
+    // Match feedback joueuse (ressenti post-match : note + commentaire).
+    // Source de vérité state JS = m.playerReviews[pid] = { rating, positives,
+    // negatives, comment, updatedAt }. Pour la sync DB, on flatten en
+    // (rating, note) — les arrays positives/negatives restent locaux car
+    // schema simple. Coach peut consulter la note + commentaire multi-device.
+    key: 'playerMatchFeedback', table: 'player_match_feedback', pk: ['match_id', 'player_id'], realtime: true, auth: 'anon',
+    dump: (state) => {
+      const out = {};
+      (state.matches || []).forEach(m => {
+        const reviews = m.playerReviews || {};
+        Object.entries(reviews).forEach(([pid, r]) => {
+          if (r == null) return;
+          out[`${m.id}|${pid}`] = {
+            match_id: m.id, player_id: pid,
+            rating: r.rating ?? null,
+            note: r.comment || null
+          };
+        });
+      });
+      return out;
+    },
+    apply: (state, rows) => {
+      const byMatch = {};
+      rows.forEach(r => {
+        byMatch[r.match_id] = byMatch[r.match_id] || {};
+        byMatch[r.match_id][r.player_id] = {
+          rating: r.rating,
+          comment: r.note || '',
+          // positives/negatives non-sync : on préserve les valeurs locales si existantes
+          positives: [], negatives: [],
+          updatedAt: r.updated_at ? Date.parse(r.updated_at) : Date.now()
+        };
+      });
+      (state.matches || []).forEach(m => {
+        if (byMatch[m.id]) {
+          // Merge : préserver les positives/negatives locales par joueuse
+          const existing = m.playerReviews || {};
+          const merged = {};
+          Object.keys(byMatch[m.id]).forEach(pid => {
+            const remote = byMatch[m.id][pid];
+            const local = existing[pid] || {};
+            merged[pid] = {
+              ...remote,
+              positives: local.positives || [],
+              negatives: local.negatives || []
+            };
+          });
+          m.playerReviews = merged;
+        }
+      });
+    }
+  },
+  {
+    // Wellness journalier joueuse (forme physique + mental). 1 row par
+    // (player_id, date). Coach lit, joueuse écrit self.
+    key: 'playerWellness', table: 'player_wellness_log', pk: ['player_id', 'date'], realtime: true, auth: 'anon',
+    dump: (state) => {
+      const out = {};
+      const logs = state.wellnessLogs || {};
+      Object.entries(logs).forEach(([pid, byDate]) => {
+        Object.entries(byDate || {}).forEach(([date, w]) => {
+          if (w == null) return;
+          out[`${pid}|${date}`] = {
+            player_id: pid, date,
+            physical: w.physical ?? null,
+            mental: w.mental ?? null,
+            note: w.note || null
+          };
+        });
+      });
+      return out;
+    },
+    apply: (state, rows) => {
+      const logs = {};
+      rows.forEach(r => {
+        logs[r.player_id] = logs[r.player_id] || {};
+        logs[r.player_id][r.date] = {
+          physical: r.physical, mental: r.mental,
+          note: r.note || '',
+          updatedAt: r.updated_at ? Date.parse(r.updated_at) : Date.now()
+        };
+      });
+      state.wellnessLogs = logs;
+    }
   }
 ];
 
@@ -3311,6 +3429,7 @@ const K = {
   teamReviews: 'pb8_team_reviews',
   offseason: 'pb8_offseason',
   offseasonLogs: 'pb8_offseason_logs',
+  wellnessLogs: 'pb8_wellness_logs',
 };
 function load(k, d) { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : d; } catch { return d; } }
 function save(k, v) { localStorage.setItem(k, JSON.stringify(v)); }
@@ -3341,6 +3460,7 @@ let state = {
   teamReviews: load(K.teamReviews, []), // [{ id, pid, date, ambiance, roleClarity, playtime, physique, comment, updatedAt }]
   offseason: load(K.offseason, null), // { startDate, endDate, title, exercises: [{ id, label, target, unit, notes }] }
   offseasonLogs: load(K.offseasonLogs, {}), // { pid: { 'YYYY-Www': { exerciseId: { done: bool, value, at } } } }
+  wellnessLogs: load(K.wellnessLogs, {}), // { pid: { 'YYYY-MM-DD': { physical, mental, note, updatedAt } } }
 
   // UI state
   view: null, // { type: 'play'|'match'|'live', id }
@@ -3371,6 +3491,7 @@ function persist() {
   save(K.teamReviews, state.teamReviews);
   save(K.offseason, state.offseason);
   save(K.offseasonLogs, state.offseasonLogs);
+  save(K.wellnessLogs, state.wellnessLogs);
   // Push toutes les entités équipe vers Supabase (debounced 400ms)
   if (window.PbSync) PbSync.schedule(state);
 }
@@ -4439,7 +4560,7 @@ function goSection(id) {
   state.view = null;
   persist();
   render();
-  window.scrollTo(0, 0);
+  _scrollTopApp();
 }
 
 // ============================================================
@@ -4524,52 +4645,59 @@ function renderHomeCoach() {
       </div>
 
       ${(() => {
-        const reviews = state.teamReviews || [];
-        if (reviews.length === 0) return '';
-        // Dernière par joueuse
-        const latestByPlayer = {};
-        reviews.forEach(r => {
-          if (!latestByPlayer[r.pid] || r.updatedAt > latestByPlayer[r.pid].updatedAt) latestByPlayer[r.pid] = r;
-        });
-        const latest = Object.values(latestByPlayer);
-        // Moyennes
-        const avg = {};
-        TEAM_REVIEW_FIELDS.forEach(f => {
-          const vals = latest.map(r => r[f.key]).filter(v => v != null);
-          avg[f.key] = vals.length > 0 ? (vals.reduce((a,b)=>a+b,0)/vals.length) : null;
-        });
-        const overallAvg = (avg.ambiance + avg.roleClarity + avg.playtime + avg.physique) / 4;
-        const color = overallAvg >= 4 ? 'var(--green)' : overallAvg <= 2.5 ? 'var(--red)' : 'var(--orange)';
-        return `
-          <div class="section-header">
-            <div>
-              <div class="eyebrow">${latest.length}/${state.players.length} joueuses</div>
-              <h2 class="display-md mt-2">État d'esprit équipe</h2>
-            </div>
-            <button class="section-action" onclick="openTeamReviewsDashboard()">Détail →</button>
-          </div>
-          <div style="padding:0 18px;margin-bottom:18px">
-            <div onclick="openTeamReviewsDashboard()" style="padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer">
-              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-                <div style="font-family:'JetBrains Mono';font-size:10px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em">Moyenne équipe</div>
-                <div style="font-family:'Anton';font-size:28px;color:${color};line-height:1">${overallAvg.toFixed(1)}<span style="color:var(--ink-4);font-size:14px">/5</span></div>
+        try {
+          const reviews = state.teamReviews || [];
+          if (reviews.length === 0) return '';
+          // Dernière par joueuse
+          const latestByPlayer = {};
+          reviews.forEach(r => {
+            if (!latestByPlayer[r.pid] || (r.updatedAt || 0) > (latestByPlayer[r.pid].updatedAt || 0)) latestByPlayer[r.pid] = r;
+          });
+          const latest = Object.values(latestByPlayer);
+          // Moyennes (null-safe : un champ sans valeur → avg = null pour ce champ)
+          const avg = {};
+          TEAM_REVIEW_FIELDS.forEach(f => {
+            const vals = latest.map(r => r[f.key]).filter(v => v != null && !isNaN(v));
+            avg[f.key] = vals.length > 0 ? (vals.reduce((a,b)=>a+b,0)/vals.length) : null;
+          });
+          // Overall : moyenne des moyennes non-null uniquement (évite NaN/crash)
+          const filledAvgs = Object.values(avg).filter(v => v != null);
+          const overallAvg = filledAvgs.length > 0 ? filledAvgs.reduce((a,b)=>a+b,0) / filledAvgs.length : null;
+          const color = overallAvg == null ? 'var(--ink-3)' : overallAvg >= 4 ? 'var(--green)' : overallAvg <= 2.5 ? 'var(--red)' : 'var(--orange)';
+          return `
+            <div class="section-header">
+              <div>
+                <div class="eyebrow">${latest.length}/${state.players.length} joueuses</div>
+                <h2 class="display-md mt-2">État d'esprit équipe</h2>
               </div>
-              <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">
-                ${TEAM_REVIEW_FIELDS.map(f => {
-                  const v = avg[f.key];
-                  const c = v >= 4 ? 'var(--green)' : v <= 2 ? 'var(--red)' : 'var(--orange)';
-                  return `
-                    <div style="text-align:center">
-                      <div style="font-size:16px;margin-bottom:2px">${f.icon}</div>
-                      <div style="font-family:'Anton';font-size:18px;color:${c};line-height:1">${v.toFixed(1)}</div>
-                      <div style="font-size:8px;color:var(--ink-4);font-family:'JetBrains Mono';text-transform:uppercase;margin-top:2px">${f.label.slice(0,8)}</div>
-                    </div>
-                  `;
-                }).join('')}
+              <button class="section-action" onclick="openTeamReviewsDashboard()">Détail →</button>
+            </div>
+            <div style="padding:0 18px;margin-bottom:18px">
+              <div onclick="openTeamReviewsDashboard()" style="padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+                  <div style="font-family:'JetBrains Mono';font-size:10px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em">Moyenne équipe</div>
+                  <div style="font-family:'Anton';font-size:28px;color:${color};line-height:1">${overallAvg == null ? '—' : overallAvg.toFixed(1)}<span style="color:var(--ink-4);font-size:14px">/5</span></div>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">
+                  ${TEAM_REVIEW_FIELDS.map(f => {
+                    const v = avg[f.key];
+                    const c = v == null ? 'var(--ink-4)' : v >= 4 ? 'var(--green)' : v <= 2 ? 'var(--red)' : 'var(--orange)';
+                    return `
+                      <div style="text-align:center">
+                        <div style="font-size:16px;margin-bottom:2px">${f.icon}</div>
+                        <div style="font-family:'Anton';font-size:18px;color:${c};line-height:1">${v == null ? '—' : v.toFixed(1)}</div>
+                        <div style="font-size:8px;color:var(--ink-4);font-family:'JetBrains Mono';text-transform:uppercase;margin-top:2px">${f.label.slice(0,8)}</div>
+                      </div>
+                    `;
+                  }).join('')}
+                </div>
               </div>
             </div>
-          </div>
-        `;
+          `;
+        } catch (e) {
+          console.warn('[home/ressenti] render error:', e.message);
+          return '';
+        }
       })()}
 
       ${(() => {
@@ -4862,7 +4990,19 @@ function renderHomePlayer() {
 function renderPlayerChallenges() {
   const p = currentPlayer();
   if (!p) return renderHomeCoach();
-  const active = (state.challenges || []).filter(c => !c.badgesAwarded);
+  const isAuto = c => !!c.autoCount || c.scope === 'season';
+  const sortRecent = (a, b) => {
+    if (a.endDate && b.endDate) return b.endDate.localeCompare(a.endDate);
+    if (a.endDate) return -1;
+    if (b.endDate) return 1;
+    return (b.updatedAt || 0) - (a.updatedAt || 0);
+  };
+  // Cohérence vue coach : collectif + individuel manuel en haut, auto en bas
+  const activeAll = (state.challenges || []).filter(c => !c.badgesAwarded);
+  const collective = activeAll.filter(c => c.scope === 'collective' && !isAuto(c)).sort(sortRecent);
+  const individual = activeAll.filter(c => c.scope === 'individual' && !isAuto(c)).sort(sortRecent);
+  const auto       = activeAll.filter(isAuto).sort(sortRecent);
+  const orderedActive = [...collective, ...individual, ...auto];
   const finished = (state.challenges || []).filter(c => c.badgesAwarded);
   const myBadges = (p.badges || []).slice().sort((a,b) => (b.date || '').localeCompare(a.date || ''));
 
@@ -4870,19 +5010,35 @@ function renderPlayerChallenges() {
     <div class="fade-up">
       <div class="section-header">
         <div>
-          <div class="eyebrow">${active.length} en cours · ${myBadges.length} trophée${myBadges.length>1?'s':''}</div>
+          <div class="eyebrow">${orderedActive.length} en cours · ${myBadges.length} trophée${myBadges.length>1?'s':''}</div>
           <h2 class="display-lg mt-2">Défis</h2>
         </div>
       </div>
 
-      ${active.length > 0 ? `
-        <div class="section-header"><div><div class="eyebrow">En cours</div><h2 class="display-md mt-2">Mes challenges</h2></div></div>
+      ${collective.length > 0 ? `
+        <div class="section-header"><div><div class="eyebrow" style="color:var(--orange)">🤝 Collectif</div><h2 class="display-md mt-2">Équipe</h2></div></div>
         <div style="padding:0 18px;display:flex;flex-direction:column;gap:8px;margin-bottom:18px">
-          ${active.map(c => playerChallengeRow(c, p.id)).join('')}
+          ${collective.map(c => playerChallengeRow(c, p.id)).join('')}
         </div>
-      ` : `
+      ` : ''}
+
+      ${individual.length > 0 ? `
+        <div class="section-header"><div><div class="eyebrow" style="color:var(--orange)">🎯 Individuel</div><h2 class="display-md mt-2">Perso</h2></div></div>
+        <div style="padding:0 18px;display:flex;flex-direction:column;gap:8px;margin-bottom:18px">
+          ${individual.map(c => playerChallengeRow(c, p.id)).join('')}
+        </div>
+      ` : ''}
+
+      ${auto.length > 0 ? `
+        <div class="section-header"><div><div class="eyebrow" style="color:var(--ink-3)">⚙ Auto</div><h2 class="display-md mt-2" style="color:var(--ink-2)">Compteurs</h2></div></div>
+        <div style="padding:0 18px;display:flex;flex-direction:column;gap:8px;margin-bottom:18px">
+          ${auto.map(c => playerChallengeRow(c, p.id)).join('')}
+        </div>
+      ` : ''}
+
+      ${orderedActive.length === 0 ? `
         <div class="empty"><div class="empty-icon">🎯</div><div class="empty-title">Aucun défi actif</div><div class="empty-desc">Reviens plus tard, ton coach va en lancer.</div></div>
-      `}
+      ` : ''}
 
       ${myBadges.length > 0 ? `
         <div class="section-header">
@@ -5027,19 +5183,23 @@ function renderPlayerProgramme() {
   if (!p) return renderHomeCoach();
   const o = state.offseason;
   const myBadges = (p.badges || []).length;
+  const todayStr = new Date().toISOString().slice(0,10);
+
+  // Wellness header : visible TOUJOURS, même sans programme estival actif
+  const wellnessCard = playerWellnessCard(p, todayStr);
 
   if (!o) {
     return `
       <div class="fade-up">
         <div class="section-header">
-          <div><div class="eyebrow">Prépa physique</div><h2 class="display-lg mt-2">Forme</h2></div>
+          <div><div class="eyebrow">Forme du jour</div><h2 class="display-lg mt-2">Forme</h2></div>
         </div>
-        <div class="empty"><div class="empty-icon">💪</div><div class="empty-title">Aucun programme</div><div class="empty-desc">Ton coach n'a pas encore configuré la prépa.</div></div>
+        ${wellnessCard}
+        <div class="empty"><div class="empty-icon">💪</div><div class="empty-title">Aucun programme physique</div><div class="empty-desc">Ton coach n'a pas encore configuré la prépa estivale.</div></div>
       </div>
     `;
   }
 
-  const todayStr = new Date().toISOString().slice(0,10);
   const beforeStart = o.startDate && todayStr < o.startDate;
   const afterEnd = o.endDate && todayStr > o.endDate;
   const active = !beforeStart && !afterEnd;
@@ -5067,6 +5227,8 @@ function renderPlayerProgramme() {
           <h2 class="display-lg mt-2">☀ ${esc(o.title)}</h2>
         </div>
       </div>
+
+      ${wellnessCard}
 
       ${banner}
 
@@ -5126,6 +5288,137 @@ function renderPlayerProgramme() {
   `;
 }
 
+// ============================================================
+// PLAYER · Wellness journalier (forme physique + mental)
+// Stocké dans state.wellnessLogs[playerId][date] = { physical, mental, note, updatedAt }
+// Synchronisé via PbSync (table player_wellness_log) → visible coach.
+// ============================================================
+
+function playerWellnessCard(p, todayStr) {
+  state.wellnessLogs = state.wellnessLogs || {};
+  state.wellnessLogs[p.id] = state.wellnessLogs[p.id] || {};
+  const today = state.wellnessLogs[p.id][todayStr] || null;
+  const phys = today ? today.physical : null;
+  const ment = today ? today.mental : null;
+  const filled = phys != null && ment != null;
+  const colorFor = v => v == null ? 'var(--ink-4)' : v >= 4 ? 'var(--green)' : v <= 2 ? 'var(--red)' : 'var(--orange)';
+
+  // Streak : nb de jours consécutifs avec entrée jusqu'à aujourd'hui
+  let streak = 0;
+  const cursor = new Date();
+  while (true) {
+    const k = cursor.toISOString().slice(0,10);
+    if (state.wellnessLogs[p.id][k]) { streak++; cursor.setDate(cursor.getDate() - 1); }
+    else break;
+  }
+
+  return `
+    <div style="padding:0 18px;margin-bottom:14px">
+      <div onclick="openPlayerWellness()" style="padding:14px;background:linear-gradient(135deg,${filled?'rgba(34,197,94,0.10)':'rgba(255,107,0,0.10)'},var(--surface));border:1.5px solid ${filled?'var(--green)':'var(--orange)'};border-radius:var(--radius);cursor:pointer">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:${filled?'12':'4'}px">
+          <span style="font-size:22px">💭</span>
+          <div style="flex:1;min-width:0">
+            <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;letter-spacing:0.04em">Mon ressenti du jour</div>
+            <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase;letter-spacing:0.04em">${filled ? `✓ Saisi · ${streak} jour${streak>1?'s':''} d'affilée` : '🔒 Visible coach uniquement'}</div>
+          </div>
+          <span style="color:var(--orange);font-family:'Anton';font-size:18px">${filled ? '✎' : '+'}</span>
+        </div>
+        ${filled ? `
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <div style="text-align:center;padding:8px;background:var(--bg-1);border-radius:6px">
+              <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px">💪 Physique</div>
+              <div style="font-family:'Anton';font-size:22px;color:${colorFor(phys)};line-height:1">${phys}<span style="font-size:10px;color:var(--ink-4)">/5</span></div>
+            </div>
+            <div style="text-align:center;padding:8px;background:var(--bg-1);border-radius:6px">
+              <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px">🧠 Mental</div>
+              <div style="font-family:'Anton';font-size:22px;color:${colorFor(ment)};line-height:1">${ment}<span style="font-size:10px;color:var(--ink-4)">/5</span></div>
+            </div>
+          </div>
+        ` : ''}
+      </div>
+    </div>
+  `;
+}
+
+function openPlayerWellness() {
+  if (state.auth.role !== 'player') return;
+  const p = currentPlayer();
+  if (!p) return;
+  const todayStr = new Date().toISOString().slice(0,10);
+  state.wellnessLogs = state.wellnessLogs || {};
+  state.wellnessLogs[p.id] = state.wellnessLogs[p.id] || {};
+  const existing = state.wellnessLogs[p.id][todayStr] || { physical: 3, mental: 3, note: '' };
+  state._editingWellness = {
+    date: todayStr,
+    physical: existing.physical ?? 3,
+    mental: existing.mental ?? 3,
+    note: existing.note || ''
+  };
+  renderPlayerWellnessEditor();
+}
+
+function renderPlayerWellnessEditor() {
+  const w = state._editingWellness;
+  if (!w) return;
+  const ratingPicker = (key, label, icon, color) => `
+    <div class="fld">
+      <label class="fld-label" style="font-size:13px">${icon} ${label}</label>
+      <div style="display:flex;gap:8px;margin-top:6px">
+        ${[1,2,3,4,5].map(n => `
+          <button type="button" onclick="state._editingWellness.${key}=${n};renderPlayerWellnessEditor()"
+            style="flex:1;aspect-ratio:1;border-radius:8px;border:1.5px solid ${w[key]===n?color:'var(--border)'};background:${w[key]===n?color:'var(--surface)'};color:${w[key]===n?'#000':'var(--ink-2)'};font-family:'Anton';font-size:20px;cursor:pointer;transition:all 0.15s">${n}</button>
+        `).join('')}
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em;margin-top:6px">
+        <span>Mauvais</span><span>Top forme</span>
+      </div>
+    </div>
+  `;
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">${formatDate(w.date, 'long')}</div>
+        <div class="modal-title">💭 Mon ressenti du jour</div>
+      </div>
+      <button class="modal-close" onclick="closeModal();state._editingWellness=null">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:14px;font-size:11px;color:var(--ink-2);line-height:1.5">
+        Note ton état physique (fatigue / douleurs / forme) et mental (motivation / stress). <strong style="color:var(--orange)">Visible uniquement par le coach.</strong>
+      </div>
+      ${ratingPicker('physical', 'État physique', '💪', 'var(--orange)')}
+      ${ratingPicker('mental', 'État mental', '🧠', 'var(--orange)')}
+      <div class="fld">
+        <label class="fld-label" style="font-size:13px">Note libre (optionnel)</label>
+        <textarea id="wellness-note" placeholder="Détails : zones de douleur, raisons fatigue, météo morale..." style="min-height:70px" oninput="state._editingWellness.note=this.value">${esc(w.note)}</textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal();state._editingWellness=null">Annuler</button>
+      <button class="btn btn-primary" onclick="savePlayerWellness()">Enregistrer</button>
+    </div>
+  `);
+}
+
+function savePlayerWellness() {
+  const w = state._editingWellness;
+  if (!w) return;
+  const p = currentPlayer();
+  if (!p) return;
+  state.wellnessLogs = state.wellnessLogs || {};
+  state.wellnessLogs[p.id] = state.wellnessLogs[p.id] || {};
+  state.wellnessLogs[p.id][w.date] = {
+    physical: w.physical,
+    mental: w.mental,
+    note: (w.note || '').trim(),
+    updatedAt: Date.now()
+  };
+  state._editingWellness = null;
+  persist();
+  closeModal();
+  render();
+}
+
 // Toggle exo programme intégré dans la page (pas modal) — render() suffit
 function togglePlayerProgrammeExercise(exId) {
   if (state.auth.role !== 'player') return;
@@ -5139,10 +5432,8 @@ function togglePlayerProgrammeExercise(exId) {
   log[exId].done = !log[exId].done;
   if (log[exId].done) log[exId].at = Date.now();
   persist();
-  // Préserver position de scroll lors du re-render
-  const scroll = window.scrollY;
+  // Scroll position préservé automatiquement par _doRender (snapshot .app.scrollTop)
   render();
-  window.scrollTo(0, scroll);
 }
 
 function playerChallengeRow(c, playerId) {
@@ -5202,14 +5493,24 @@ function playerEventRow(ev, playerId) {
   const month = d.toLocaleDateString('fr-FR', { month: 'short' });
   const parentId = ev._parentId || ev.id;
   const instanceDate = ev._instanceDate || ev.date;
+  const isMatch = ev.type === 'match';
+  // Si match avec un matchId lié, on route vers la vue détail Match riche
+  // (stats + selfie + vidéo + ressenti joueuse). Sinon (entraînement / match
+  // sans lien), fallback sur le modal d'événement générique.
+  const linkedMatchId = isMatch && ev.matchId ? ev.matchId : null;
+  const onClick = linkedMatchId
+    ? `openMatch('${linkedMatchId}')`
+    : `openEventInstance('${parentId}','${instanceDate}')`;
+  // Badge "MATCH" pour différencier visuellement
+  const matchBadge = isMatch ? '<span class="chip chip-orange" style="font-size:8px;padding:2px 5px;margin-left:6px;vertical-align:middle">MATCH</span>' : '';
   return `
-    <div class="list-row" onclick="openEventInstance('${parentId}','${instanceDate}')">
+    <div class="list-row" onclick="${onClick}">
       <div class="event-date-badge" style="background:${isPresent ? 'var(--green-soft)' : 'var(--red-soft)'};border-color:${isPresent ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)'}">
         <div class="event-date-day" style="color:${isPresent ? 'var(--green)' : 'var(--red)'}">${day}</div>
         <div class="event-date-month">${month}</div>
       </div>
       <div class="list-row-content">
-        <div class="list-row-title">${esc(ev.title)}</div>
+        <div class="list-row-title">${esc(ev.title)}${matchBadge}</div>
         <div class="list-row-subtitle">${ev.time ? ev.time + ' · ' : ''}<span style="color:${isPresent?'var(--green)':'var(--red)'}">${isPresent ? '✓ Présente' : '✕ Absente'}</span></div>
       </div>
       <span class="list-row-trail">›</span>
@@ -5331,7 +5632,7 @@ function openPlay(id) {
   state.section = 'plays';
   state.view = { type: 'play', id };
   state._playVideoIdx = 0;
-  render(); window.scrollTo(0, 0);
+  render(); _scrollTopApp();
   _autoDetectVimeoOrientations(id);
 }
 
@@ -5874,11 +6175,18 @@ function matchRow(m) {
 }
 
 function openMatch(id) {
-  // Idem openPlay : forcer la section 'matches' pour que le détail soit rendu
-  // même quand on clique sur un matchRow depuis le carousel home.
-  state.section = 'matches';
+  // Le détail match (renderMatchDetail) est accessible depuis :
+  // - coach/stat : section 'matches'
+  // - joueuse : section 'calendrier' (les matches sont dans son agenda)
+  // La vue détail est lue depuis state.view = { type:'match', id } et le
+  // dispatcher de render() gère la priorité view > section.
+  if (state.auth && state.auth.role === 'player') {
+    state.section = 'calendrier';
+  } else {
+    state.section = 'matches';
+  }
   state.view = { type: 'match', id };
-  render(); window.scrollTo(0, 0);
+  render(); _scrollTopApp();
 }
 
 // ============================================================
@@ -6165,7 +6473,7 @@ function renderMatchDetail() {
 
   return `
     <div class="fade-up">
-      <button class="detail-back" onclick="state.view=null;render()">← Tous les matchs</button>
+      <button class="detail-back" onclick="state.view=null;render()">← ${state.auth.role === 'player' ? 'Agenda' : 'Tous les matchs'}</button>
 
       <div class="px" style="padding-top:6px">
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
@@ -6486,6 +6794,49 @@ function renderMatchDetail() {
         </div>
         ${negatives.length === 0 ? `<div style="padding:16px;color:var(--ink-3);font-size:13px;font-style:italic">Aucun point noté</div>` : negatives.map(p => focusItem(m.id, 'negatives', p, 'red', isCoach)).join('')}
       </div>
+
+      ${(() => {
+        // Bloc compact "Mes stats" pour la joueuse — au-dessus du box score
+        // complet pour qu'elle voie SES chiffres en premier sans avoir à
+        // scanner toute la table. N'apparaît que si elle a des stats.
+        if (state.auth.role !== 'player') return '';
+        const myPid = state.auth.playerId;
+        const s = (m.playerStats || {})[myPid];
+        if (!s) return '';
+        const gs = gameScore(s);
+        const tirsTotal = (s.p2iA||0) + (s.p2eA||0) + (s.p3A||0);
+        const tirsReus = (s.p2i||0) + (s.p2e||0) + (s.p3||0);
+        return `
+          <div class="section-header">
+            <div>
+              <div class="eyebrow" style="color:var(--orange)">⭐ Toi</div>
+              <h2 class="display-md mt-2">Mes stats</h2>
+            </div>
+          </div>
+          <div class="stat-grid mb-3">
+            <div class="stat-tile">
+              <div class="stat-tile-label">Points</div>
+              <div class="stat-tile-value" style="color:var(--orange)">${s.pts || 0}</div>
+              <div class="stat-tile-sub">${s.min || 0} min jouées</div>
+            </div>
+            <div class="stat-tile">
+              <div class="stat-tile-label">Tirs</div>
+              <div class="stat-tile-value">${tirsReus}<span style="color:var(--ink-4);font-size:18px">/${tirsTotal}</span></div>
+              <div class="stat-tile-sub">${tirsTotal > 0 ? Math.round(100*tirsReus/tirsTotal) : 0}% adresse</div>
+            </div>
+            <div class="stat-tile">
+              <div class="stat-tile-label">REB · PD</div>
+              <div class="stat-tile-value">${s.reb || 0}<span style="color:var(--ink-4)"> · ${s.ast || 0}</span></div>
+              <div class="stat-tile-sub">${s.stl || 0} INT · ${s.to || 0} PB</div>
+            </div>
+            <div class="stat-tile">
+              <div class="stat-tile-label">Note match</div>
+              <div class="stat-tile-value" style="color:${gs>=15?'var(--green)':gs<5?'var(--red)':'var(--orange)'}">${gs>0?'+':''}${gs.toFixed(1)}</div>
+              <div class="stat-tile-sub">Game Score</div>
+            </div>
+          </div>
+        `;
+      })()}
 
       <div class="section-header">
         <div>
@@ -10300,7 +10651,7 @@ function goToPlayFromTraining(playId) {
   state.section = 'plays';
   state.view = { type: 'play', id: playId };
   // 4. Re-render après un délai court pour laisser la modale se fermer
-  setTimeout(() => { render(); window.scrollTo(0, 0); }, 80);
+  setTimeout(() => { render(); _scrollTopApp(); }, 80);
 }
 
 // === CÔTÉ JOUEUSE : voir le plan validé + cocher ===
@@ -11154,11 +11505,32 @@ function restoreInstancePresent(parentId, dateStr, playerId) {
 function renderChallenges() {
   const isCoach = state.auth.role === 'coach';
   const todayStr = new Date().toISOString().slice(0,10);
-  // Grouper par scope
-  const season = state.challenges.filter(c => c.scope === 'season');
-  const individual = state.challenges.filter(c => c.scope === 'individual' && (!c.endDate || c.endDate >= todayStr));
-  const collective = state.challenges.filter(c => c.scope === 'collective' && (!c.endDate || c.endDate >= todayStr));
-  const archived = state.challenges.filter(c => c.scope !== 'season' && c.endDate && c.endDate < todayStr);
+  // Tri : Collectif + Individuel manuel en haut, Auto (compteurs auto) en bas.
+  // - "Auto" = c.autoCount === true (peu importe le scope) OU scope === 'season'
+  //   qui historiquement = compteurs auto sur stats live.
+  // - Dans chaque groupe : non-archivés d'abord, triés par endDate desc (plus
+  //   urgent en haut), puis par updatedAt desc en fallback.
+  const isAuto = c => !!c.autoCount || c.scope === 'season';
+  const isArchived = c => c.scope !== 'season' && c.endDate && c.endDate < todayStr;
+  const sortRecent = (a, b) => {
+    if (a.endDate && b.endDate) return b.endDate.localeCompare(a.endDate);
+    if (a.endDate) return -1;
+    if (b.endDate) return 1;
+    return (b.updatedAt || 0) - (a.updatedAt || 0);
+  };
+  // Manuels (non-auto) actifs : collectif d'abord, individuel ensuite — cohérent
+  // avec la priorité produit (engagement collectif > perso > compteurs auto).
+  const collective = state.challenges
+    .filter(c => c.scope === 'collective' && !isArchived(c) && !isAuto(c))
+    .sort(sortRecent);
+  const individual = state.challenges
+    .filter(c => c.scope === 'individual' && !isArchived(c) && !isAuto(c))
+    .sort(sortRecent);
+  // Auto (= season ou autoCount), en bas
+  const autoChallenges = state.challenges
+    .filter(c => isAuto(c) && !isArchived(c))
+    .sort(sortRecent);
+  const archived = state.challenges.filter(isArchived);
 
   // Incitation : si coach et aucun challenge actif (individuel/collectif), on suggère
   const hasActive = individual.length > 0 || collective.length > 0;
@@ -11218,11 +11590,11 @@ function renderChallenges() {
       ${individual.map(c => challengeCard(c, isCoach)).join('')}
     ` : ''}
 
-    ${season.length > 0 ? `
+    ${autoChallenges.length > 0 ? `
       <div class="section-header" style="margin-top:8px">
-        <div><div class="eyebrow" style="color:var(--orange)">📅 Saison</div><h2 class="display-md mt-2">Compteurs auto</h2></div>
+        <div><div class="eyebrow" style="color:var(--ink-3)">⚙ Auto</div><h2 class="display-md mt-2" style="color:var(--ink-2)">Compteurs auto</h2></div>
       </div>
-      ${season.map(c => challengeCard(c, isCoach)).join('')}
+      ${autoChallenges.map(c => challengeCard(c, isCoach)).join('')}
     ` : ''}
 
     ${archived.length > 0 ? `
@@ -12172,10 +12544,11 @@ function renderTeamReviewEditor() {
 function saveTeamReview() {
   const r = state._editingTeamReview;
   if (!r) return;
+  const today = new Date().toISOString().slice(0,10);
   const review = {
     id: r.id,
     pid: r.pid,
-    date: new Date().toISOString().slice(0,10),
+    date: today,
     ambiance: r.ambiance,
     roleClarity: r.roleClarity,
     playtime: r.playtime,
@@ -12184,12 +12557,24 @@ function saveTeamReview() {
     updatedAt: Date.now(),
   };
   state.teamReviews = state.teamReviews || [];
-  state.teamReviews.push(review);
+  // Dedupe : une seule entrée par (player, date). Si la joueuse soumet
+  // 2× le même jour, on remplace son entrée existante au lieu d'empiler.
+  // Avant : push() systématique → state grossit + sync upsert PK conflict.
+  const existingIdx = state.teamReviews.findIndex(x => x.pid === r.pid && x.date === today);
+  if (existingIdx >= 0) {
+    review.id = state.teamReviews[existingIdx].id; // garder l'ID pour upsert idempotent
+    state.teamReviews[existingIdx] = review;
+  } else {
+    state.teamReviews.push(review);
+  }
   state._editingTeamReview = null;
   persist();
+  // Render AVANT alert : la home/dashboard reflète l'update immédiatement,
+  // même si l'alert bloque (ex. en PWA standalone). Avant : alert d'abord
+  // donc render différé jusqu'au clic OK → impression de "MAJ pas dynamique".
   closeModal();
-  alert('✓ Ressenti envoyé au coach. Merci !');
   render();
+  setTimeout(() => alert('✓ Ressenti envoyé au coach. Merci !'), 0);
 }
 
 // ============================================================
@@ -13655,6 +14040,50 @@ function openOffseasonPlayerDetail(pid) {
   const logs = (state.offseasonLogs || {})[pid] || {};
   const weeks = Object.keys(logs).sort().reverse().slice(0, 8); // 8 semaines max
 
+  // Wellness logs (ressentis quotidiens) sur 14 derniers jours pour aperçu coach
+  const wellnessAll = ((state.wellnessLogs || {})[pid]) || {};
+  const wellnessDays = Object.keys(wellnessAll).sort().reverse().slice(0, 14);
+  const wellnessSection = wellnessDays.length === 0 ? '' : (() => {
+    const avg = key => {
+      const vals = wellnessDays.map(d => wellnessAll[d][key]).filter(v => v != null);
+      return vals.length > 0 ? vals.reduce((a,b)=>a+b,0)/vals.length : null;
+    };
+    const physAvg = avg('physical');
+    const mentAvg = avg('mental');
+    const colorFor = v => v == null ? 'var(--ink-4)' : v >= 4 ? 'var(--green)' : v <= 2 ? 'var(--red)' : 'var(--orange)';
+    return `
+      <div style="margin-bottom:14px;padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+          <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;letter-spacing:0.04em">💭 Ressenti · ${wellnessDays.length} jours</div>
+          <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">Moyenne 14j</div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+          <div style="text-align:center;padding:8px;background:var(--bg-1);border-radius:6px">
+            <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;margin-bottom:3px">💪 Physique</div>
+            <div style="font-family:'Anton';font-size:20px;color:${colorFor(physAvg)};line-height:1">${physAvg == null ? '—' : physAvg.toFixed(1)}<span style="font-size:10px;color:var(--ink-4)">/5</span></div>
+          </div>
+          <div style="text-align:center;padding:8px;background:var(--bg-1);border-radius:6px">
+            <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;margin-bottom:3px">🧠 Mental</div>
+            <div style="font-family:'Anton';font-size:20px;color:${colorFor(mentAvg)};line-height:1">${mentAvg == null ? '—' : mentAvg.toFixed(1)}<span style="font-size:10px;color:var(--ink-4)">/5</span></div>
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px;max-height:200px;overflow-y:auto">
+          ${wellnessDays.slice(0, 7).map(d => {
+            const w = wellnessAll[d];
+            return `
+              <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--bg-2);border-radius:4px;font-size:11px">
+                <span style="font-family:'JetBrains Mono';color:var(--ink-3);min-width:62px">${formatDate(d, 'short')}</span>
+                <span style="color:${colorFor(w.physical)};font-family:'Anton'">💪 ${w.physical ?? '—'}</span>
+                <span style="color:${colorFor(w.mental)};font-family:'Anton'">🧠 ${w.mental ?? '—'}</span>
+                ${w.note ? `<span style="flex:1;color:var(--ink-2);font-style:italic;font-size:10px;line-height:1.3;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(w.note)}">"${esc(w.note)}"</span>` : ''}
+              </div>
+            `;
+          }).join('')}
+        </div>
+      </div>
+    `;
+  })();
+
   openModal(`
     <div class="modal-header">
       <div>
@@ -13664,7 +14093,8 @@ function openOffseasonPlayerDetail(pid) {
       <button class="modal-close" onclick="closeModal();setTimeout(()=>openOffseasonDashboard(),50)">✕</button>
     </div>
     <div class="modal-body">
-      ${weeks.length === 0 ? `<div class="empty" style="padding:30px"><div class="empty-icon">○</div><div class="empty-title">Aucun suivi</div><div class="empty-desc">Cette joueuse n'a coché aucun exercice</div></div>` : `
+      ${wellnessSection}
+      ${weeks.length === 0 ? `<div class="empty" style="padding:30px"><div class="empty-icon">○</div><div class="empty-title">Aucun suivi prépa</div><div class="empty-desc">Cette joueuse n'a coché aucun exercice</div></div>` : `
         <div style="display:flex;flex-direction:column;gap:10px">
           ${weeks.map(wk => {
             const wLog = logs[wk] || {};
@@ -15139,15 +15569,22 @@ function scheduleRender(immediate) {
 }
 
 function _doRender() {
-  // Snapshot scroll + active element pour restauration après innerHTML reflow
+  // Snapshot scroll + active element pour restauration après innerHTML reflow.
+  // IMPORTANT : depuis le fix scroll-past-footer, le scroll est sur .app
+  // (overflow-y:auto interne), pas sur window. On capture les deux pour
+  // backward compat.
   const scrollY = window.scrollY;
   const scrollX = window.scrollX;
+  const appEl = document.querySelector('.app');
+  const appScrollTop = appEl ? appEl.scrollTop : 0;
   const activeId = document.activeElement && document.activeElement.id;
   const selStart = document.activeElement && 'selectionStart' in document.activeElement ? document.activeElement.selectionStart : null;
   const selEnd = document.activeElement && 'selectionEnd' in document.activeElement ? document.activeElement.selectionEnd : null;
   _renderBody();
   // Restore scroll (synchrone, avant repaint)
   window.scrollTo(scrollX, scrollY);
+  const newAppEl = document.querySelector('.app');
+  if (newAppEl) newAppEl.scrollTop = appScrollTop;
   // Restore focus + caret si l'élément existe encore
   if (activeId) {
     const el = document.getElementById(activeId);
@@ -15161,6 +15598,15 @@ function _doRender() {
 }
 
 function render() { _doRender(); }
+
+// Scroll to top : depuis le fix scroll-past-footer, le scroll est interne au
+// .app. window.scrollTo ne fait plus rien. Helper centralisé pour cibler le
+// bon élément. Appelé par goSection / openPlay / openMatch / etc.
+function _scrollTopApp() {
+  const a = document.querySelector('.app');
+  if (a) a.scrollTop = 0;
+  window.scrollTo(0, 0); // fallback no-op
+}
 
 function _renderBody() {
   _bootCleanupOnce();
@@ -15234,7 +15680,11 @@ function _renderBody() {
     if (state.section === 'mystats') state.section = 'home';
     if (state.section === 'team') state.section = 'calendrier';
     if (state.section === 'ffbb') state.section = 'calendrier';
-    if (state.section === 'home') content = renderHomePlayer();
+    // Priorité state.view : détail Match (depuis click joueuse dans Agenda),
+    // détail Play (depuis click carrousel home). Sinon rendu par section.
+    if (state.view && state.view.type === 'match') content = renderMatchDetail();
+    else if (state.view && state.view.type === 'play') content = renderPlayDetail();
+    else if (state.section === 'home') content = renderHomePlayer();
     else if (state.section === 'plays') content = renderPlays();
     else if (state.section === 'challenges') content = renderPlayerChallenges();
     else if (state.section === 'calendrier') content = renderPlayerCalendrier();
