@@ -2,27 +2,12 @@
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-<title>Playbook BCL</title>
-<meta name="description" content="Playbook BCL — IE-Basket Club l'Islois : plays, matchs, convocations, stats.">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Playbook BCL v8</title>
 <meta name="theme-color" content="#000000">
-<meta name="background-color" content="#000000">
-<meta name="color-scheme" content="dark">
-<!-- PWA manifest -->
-<link rel="manifest" href="/manifest.json">
-<!-- iOS / Safari standalone -->
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Playbook BCL">
-<!-- Android Chrome -->
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="application-name" content="Playbook BCL">
-<!-- Icons -->
-<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
-<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
-<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
-<link rel="apple-touch-icon" sizes="192x192" href="/icon-192.png">
-<link rel="apple-touch-icon" sizes="512x512" href="/icon-512.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Anton&family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -70,8 +55,6 @@
     -webkit-font-smoothing: antialiased;
     overscroll-behavior-y: none;
   }
-  html { background: #000000; }
-  body { min-height: 100dvh; }
   .font-display { font-family: 'Anton', sans-serif; letter-spacing: 0.01em; }
   .font-mono { font-family: 'JetBrains Mono', monospace; }
 
@@ -81,20 +64,9 @@
     min-height: 100vh; min-height: 100dvh;
     background: var(--bg);
     padding-bottom: calc(72px + env(safe-area-inset-bottom));
-    overflow-x: hidden;
-    /* Empêche le scroll de "dépasser" le footer (rebond iOS + zone vide) */
-    overscroll-behavior: contain;
   }
   @media (min-width: 768px) {
-    .app { max-width: 560px; border-left: 1px solid var(--border); border-right: 1px solid var(--border); min-height: 100vh; min-height: 100dvh; }
-  }
-  /* Sécurité : pas de scroll horizontal global */
-  body { overflow-x: hidden; }
-  /* Spacer final pour garantir que la dernière section reste visible au-dessus du footer */
-  main::after {
-    content: '';
-    display: block;
-    height: 8px;
+    .app { max-width: 560px; border-left: 1px solid var(--border); border-right: 1px solid var(--border); min-height: 100vh; }
   }
 
   /* ========== TOP BAR ========== */
@@ -293,11 +265,6 @@
     cursor: pointer; transition: transform 0.15s, border-color 0.15s;
   }
   .v-tile:hover { border-color: var(--orange); }
-  /* Dans un carousel horizontal : largeur fixe pour effet "peek" cohérent */
-  .scroll-row .v-tile { width: 138px; flex-shrink: 0; }
-  @media (min-width: 768px) {
-    .scroll-row .v-tile { width: 150px; }
-  }
   .v-tile:active { transform: scale(0.96); }
   /* Grid responsive : 2 col mobile par défaut, 3 col >= 720px, 4 col >= 1100px */
   .plays-grid {
@@ -634,7 +601,6 @@
     text-transform: uppercase; letter-spacing: 0.08em;
   }
   .v-tile-cat.def { background: var(--blue); color: white; }
-  .v-tile-cat.rem { background: var(--red); color: white; }
   .v-tile-cat.sp { background: var(--purple); color: white; }
   .v-tile-cat.exo { background: var(--yellow); color: black; }
   .v-tile-cat.con { background: var(--green); color: black; }
@@ -1127,7 +1093,6 @@
   .pin-pad {
     display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
     max-width: 280px; margin: 0 auto;
-    touch-action: manipulation;
   }
   .pin-btn {
     aspect-ratio: 1; border-radius: 50%;
@@ -1136,12 +1101,6 @@
     color: var(--ink); cursor: pointer;
     transition: all 0.1s;
     display: flex; align-items: center; justify-content: center;
-    /* Désactive double-tap zoom natif iOS / Android */
-    touch-action: manipulation;
-    -webkit-user-select: none;
-    user-select: none;
-    /* Empêche le tap-highlight et le callout iOS */
-    -webkit-touch-callout: none;
   }
   .pin-btn:active {
     background: var(--orange); color: black;
@@ -3021,39 +2980,36 @@ window.PbSync = {
             const { data, error } = await sb.from(entity.table).select('*');
             if (error) return;
             const rows = data || [];
+            // Anti-self-echo : si le hash des rows remote correspond pile au
+            // cache _lastSeen (= ce qu'on a pushé soi-même), c'est notre propre
+            // broadcast. Skip apply + render pour éviter la cascade visuelle.
             const prevCache = _lastSeen[entity.key] || {};
-            // Apply d'abord pour avoir l'état post-merge (préserve les extras
-            // locaux non synchronisés comme images/concepts/attachments).
+            const newKeys = new Set(rows.map(r => _rowKey(entity, r)));
+            // Compute le hash que prendrait le cache APRÈS apply
+            let identical = (Object.keys(prevCache).length === newKeys.size);
+            if (identical) {
+              for (const r of rows) {
+                const k = _rowKey(entity, r);
+                // On compare le hash de la row state-format. Mais on a pas
+                // encore appliqué, donc on hash en passant par dump après un
+                // apply temporaire. Trop coûteux → fallback simple : compare
+                // les clés remote vs cache; si subset identique, on suppose
+                // pas de changement de contenu et on fait quand même un apply
+                // léger sans render.
+                if (!(k in prevCache)) { identical = false; break; }
+              }
+            }
+            // Applique (préserve la garde rows-vide existante)
             if (rows.length > 0) {
               try { entity.apply(state, rows); } catch(e) {}
             }
-            // Anti-self-echo : compare le hash COMPLET (clés + contenu) du
-            // dump post-apply au cache _lastSeen. Si tout matche pile, c'est
-            // notre propre broadcast → skip render. Si une row a changé de
-            // contenu (UPDATE par un autre browser), ou un INSERT/DELETE est
-            // arrivé, on render. Avant : comparait seulement les clés, donc
-            // les UPDATE sur le même set de clés n'étaient JAMAIS rendus.
-            const newMap = entity.dump(state);
-            const newKeys = Object.keys(newMap);
-            let identical = (Object.keys(prevCache).length === newKeys.length);
-            if (identical) {
-              for (const k of newKeys) {
-                if (prevCache[k] !== _stableJson(newMap[k])) { identical = false; break; }
-              }
-            }
             _seedCacheFromRemote(entity, rows, state);
+            // Re-render UNIQUEMENT si l'ensemble des clés a changé
             if (!identical && onApplied) onApplied(entity.key);
           } catch(e) { /* swallow */ }
         });
       ch.subscribe();
     });
-  },
-  // Force un flush immédiat (utilisé sur pagehide pour ne pas perdre les
-  // écritures encore dans la fenêtre de debounce 400ms si l'utilisateur ferme
-  // l'onglet rapidement après avoir créé/modifié un play).
-  flushNow(state) {
-    if (_flushPending) { clearTimeout(_flushPending); _flushPending = null; }
-    return _flushAll(state);
   }
 };
 </script>
@@ -3082,17 +3038,15 @@ const SECTIONS_STAT = [
   { id: 'ffbb', icon: 'F', label: 'FFBB' },
 ];
 const SECTIONS_PLAYER = [
-  { id: 'home', icon: '◆', label: 'Accueil' },
+  { id: 'home', icon: 'H', label: 'Home' },
   { id: 'plays', icon: 'P', label: 'Plays' },
-  { id: 'challenges', icon: 'T', label: 'Défis' },
-  { id: 'calendrier', icon: 'D', label: 'Agenda' },
-  { id: 'programme', icon: 'F', label: 'Forme' },
+  { id: 'matches', icon: 'M', label: 'Matchs' },
+  { id: 'mystats', icon: 'S', label: 'Mes stats' },
 ];
 
 const PLAY_CATEGORIES = [
   { id: 'off', label: 'Offensif', color: 'orange', class: '' },
   { id: 'def', label: 'Défensif', color: 'blue', class: 'def' },
-  { id: 'rem', label: 'Remise', color: 'red', class: 'rem' },
   { id: 'sp', label: 'Spécial', color: 'purple', class: 'sp' },
   { id: 'exo', label: 'Exercice', color: 'yellow', class: 'exo' },
   { id: 'con', label: 'Concept', color: 'green', class: 'con' },
@@ -3115,8 +3069,8 @@ const DEFAULT_PLAYS = [
   { id: 'p4', cat: 'off', title: 'Spain PnR', desc: 'Pick and roll avec back-screen sur roller', tags: ['pick & roll', 'spain'], videoUrl: '' },
   { id: 'p5', cat: 'def', title: 'Zone 2-3', desc: 'Défense compacte, force tirs extérieurs', tags: ['zone'], videoUrl: '' },
   { id: 'p6', cat: 'def', title: 'Switch 1-5', desc: 'Switch sur tous les écrans', tags: ['switch'], videoUrl: '' },
-  { id: 'p7', cat: 'rem', title: 'BLOB Stack', desc: 'Remise ligne de fond, 4 alignées', tags: ['blob'], videoUrl: '' },
-  { id: 'p8', cat: 'rem', title: 'SLOB Winner', desc: 'Remise latérale fin de match', tags: ['slob', 'clutch'], videoUrl: '' },
+  { id: 'p7', cat: 'sp', title: 'BLOB Stack', desc: 'Remise ligne de fond, 4 alignées', tags: ['blob'], videoUrl: '' },
+  { id: 'p8', cat: 'sp', title: 'SLOB Winner', desc: 'Remise latérale fin de match', tags: ['slob', 'clutch'], videoUrl: '' },
   { id: 'p9', cat: 'exo', title: 'Mikan Drill', desc: 'Layups alternés, 30 reps/côté', tags: ['warmup', 'finishing'], videoUrl: '' },
   { id: 'p10', cat: 'exo', title: '3-Man Weave', desc: 'Tissage à 3 avec passes sans dribble', tags: ['transition', 'passing'], videoUrl: '' },
   { id: 'p11', cat: 'exo', title: 'Shell Defense', desc: '4v4 demi-terrain, rotations', tags: ['conditioning'], videoUrl: '' },
@@ -3344,7 +3298,7 @@ let state = {
 
   // UI state
   view: null, // { type: 'play'|'match'|'live', id }
-  playsCat: 'off',
+  playsCat: 'all',
   playsTag: null,
   teamTab: 'convoc',
 
@@ -3388,10 +3342,14 @@ function parseVideo(url) {
   let m = url.match(/(?:youtube(?:-nocookie)?\.com\/(?:watch\?(?:.*?&)?v=|embed\/|shorts\/|v\/|live\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})(?:[?&#\/]|$)/);
   if (m) {
     const id = m[1];
+    // URL d'embed standard sans origin (origin pose parfois problème sur les Shorts mobiles)
+    // playsinline=1 essentiel pour iOS Safari
     const embed = `https://www.youtube.com/embed/${id}?rel=0&modestbranding=1&playsinline=1`;
+    // Pour les Shorts : URL de lecture qui ouvre directement YouTube en mobile
     const watchUrl = isVertical
       ? `https://www.youtube.com/shorts/${id}`
       : `https://www.youtube.com/watch?v=${id}`;
+    // Thumbnail : on prend maxresdefault avec fallback hqdefault (la maxres peut être absente pour certaines vidéos)
     return {
       provider: 'youtube', id,
       embed,
@@ -3403,48 +3361,6 @@ function parseVideo(url) {
   }
   m = url.match(/vimeo\.com\/(?:video\/)?(\d+)/);
   if (m) return { provider: 'vimeo', id: m[1], embed: `https://player.vimeo.com/video/${m[1]}`, watchUrl: `https://vimeo.com/${m[1]}`, thumb: null, vertical: isVertical };
-
-  // === INSTAGRAM (posts, reels, IGTV) ===
-  // Accepte instagram.com/p/<id>/, /reel/<id>/, /reels/<id>/, /tv/<id>/
-  m = url.match(/instagram\.com\/(?:p|reel|reels|tv)\/([A-Za-z0-9_-]+)/i);
-  if (m) {
-    const id = m[1];
-    const isReel = /\/reels?\//i.test(url);
-    return {
-      provider: 'instagram', id,
-      embed: `https://www.instagram.com/p/${id}/embed/`,
-      watchUrl: `https://www.instagram.com/${isReel ? 'reel' : 'p'}/${id}/`,
-      thumb: null,
-      vertical: isReel || isVertical
-    };
-  }
-
-  // === TIKTOK ===
-  // Format long : tiktok.com/@user/video/<numeric_id>
-  m = url.match(/tiktok\.com\/@[^\/]+\/video\/(\d+)/i);
-  if (m) {
-    const id = m[1];
-    return {
-      provider: 'tiktok', id,
-      embed: `https://www.tiktok.com/embed/v2/${id}`,
-      watchUrl: url,
-      thumb: null,
-      vertical: true
-    };
-  }
-  // Format court : vm.tiktok.com/<code> ou tiktok.com/t/<code>
-  m = url.match(/(?:vm\.tiktok\.com\/([A-Za-z0-9]+)|tiktok\.com\/t\/([A-Za-z0-9]+))/i);
-  if (m) {
-    const code = m[1] || m[2];
-    return {
-      provider: 'tiktok', id: code,
-      embed: null, // pas d'ID numérique : on ouvre dans l'app
-      watchUrl: url,
-      thumb: null,
-      vertical: true
-    };
-  }
-
   if (/\.(mp4|webm|ogg)(\?|$)/i.test(url)) return { provider: 'direct', id: url, embed: url, watchUrl: url, thumb: null, vertical: isVertical };
   return null;
 }
@@ -3456,8 +3372,8 @@ function videoEmbed(url) {
   return `<iframe src="${v.embed}" allowfullscreen loading="lazy" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"></iframe>`;
 }
 
-// Lecteur vidéo : Vimeo / Instagram / TikTok = iframe embed inline,
-// YouTube = card preview (embed peu fiable sur mobile), fichiers directs = <video>
+// Lecteur vidéo : card preview style WhatsApp/iMessage qui ouvre YouTube au tap
+// Lecteur vidéo : embed iframe direct (simple, sans bricolage)
 function videoPlayer(url, defaultVertical) {
   const v = parseVideo(url);
   if (!v) return '';
@@ -3467,7 +3383,8 @@ function videoPlayer(url, defaultVertical) {
   // Respecte la classe vertical/horizontal selon `defaultVertical` (passé
   // depuis l'éditeur de play). Vimeo URL ne porte PAS l'orientation, donc
   // pour un play marqué "vertical" dans son data, on utilise .vertical
-  // (aspect 9:16) sinon .horizontal (aspect 16:9, default).
+  // (aspect 9:16) sinon .horizontal (aspect 16:9, default). Évite le
+  // "50% width letterboxé" quand le video réel est portrait.
   if (v.provider === 'vimeo') {
     const sep = v.embed.includes('?') ? '&' : '?';
     return `
@@ -3481,62 +3398,6 @@ function videoPlayer(url, defaultVertical) {
             allowfullscreen
             loading="lazy"></iframe>
         </div>
-      </div>
-    `;
-  }
-
-  // === INSTAGRAM : iframe embed officiel (post + reel) ===
-  if (v.provider === 'instagram') {
-    return `
-      <div class="video-wrap">
-        <div class="video-player ${vertical ? 'vertical' : 'horizontal'}">
-          <iframe
-            src="${v.embed}"
-            allow="autoplay; encrypted-media; picture-in-picture; web-share"
-            allowfullscreen
-            loading="lazy"
-            scrolling="no"></iframe>
-        </div>
-        <a class="video-open-link" href="${esc(v.watchUrl)}" target="_blank" rel="noopener">↗ Ouvrir sur Instagram</a>
-      </div>
-    `;
-  }
-
-  // === TIKTOK : iframe si ID numérique, sinon card preview (URL courte) ===
-  if (v.provider === 'tiktok') {
-    if (v.embed) {
-      return `
-        <div class="video-wrap">
-          <div class="video-player vertical">
-            <iframe
-              src="${v.embed}"
-              allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
-              allowfullscreen
-              loading="lazy"></iframe>
-          </div>
-          <a class="video-open-link" href="${esc(v.watchUrl)}" target="_blank" rel="noopener">↗ Ouvrir sur TikTok</a>
-        </div>
-      `;
-    }
-    // URL courte vm.tiktok.com : pas d'ID numérique → preview card seulement
-    return `
-      <div class="video-wrap">
-        <a class="video-preview-card vertical" href="${esc(v.watchUrl)}" target="_blank" rel="noopener">
-          <div class="video-preview-thumb">
-            <div class="video-preview-fallback">🎵</div>
-            <div class="video-preview-play-overlay">
-              <div class="video-preview-play-btn">▶</div>
-            </div>
-          </div>
-          <div class="video-preview-info">
-            <div class="video-preview-provider">
-              <span class="video-preview-provider-icon">🎵</span>
-              <span class="video-preview-provider-name">TikTok</span>
-              <span class="video-preview-format-tag">Short</span>
-            </div>
-            <div class="video-preview-action">↗ Ouvrir</div>
-          </div>
-        </a>
       </div>
     `;
   }
@@ -3699,7 +3560,7 @@ function restoreInstance(parentId, dateStr) {
 function getCatLabel(cat) { return (PLAY_CATEGORIES.find(c => c.id === cat) || {}).label || ''; }
 function getCatClass(cat) { return (PLAY_CATEGORIES.find(c => c.id === cat) || {}).class || ''; }
 function getCatShort(cat) {
-  return { off: 'OFF', def: 'DÉF', rem: 'REM', sp: 'SP', exo: 'EXO', con: 'CON' }[cat] || 'OFF';
+  return { off: 'OFF', def: 'DÉF', sp: 'SP', exo: 'EXO', con: 'CON' }[cat] || 'OFF';
 }
 
 function currentSections() {
@@ -4723,14 +4584,8 @@ function playTile(p) {
 }
 
 // ============================================================
-// PLAYER VIEW — Architecture 5 onglets (v2)
-// 1. home (Mon Playbook = dashboard compact)
-// 2. plays (catalogue — utilise renderPlays)
-// 3. challenges (renderPlayerChallenges)
-// 4. calendrier (renderPlayerCalendrier : convoc + matchs + FFBB)
-// 5. programme (renderPlayerProgramme : prépa estivale)
+// HOME (Player)
 // ============================================================
-
 function renderHomePlayer() {
   const p = currentPlayer();
   if (!p) return renderHomeCoach();
@@ -4739,19 +4594,14 @@ function renderHomePlayer() {
   const todayStr = isoDate(today);
   const threeWeeksLater = new Date(today.getTime() + 21 * 86400000);
   const upcoming = getAllEventsBetween(todayStr, isoDate(threeWeeksLater));
-  const nextEvent = upcoming[0];
 
-  // Dernières stats persos (compact)
+  // Ses dernières stats
   const myMatches = state.matches
     .filter(m => m.playerStats && m.playerStats[p.id])
     .sort((a,b) => b.date.localeCompare(a.date));
   const lastStats = myMatches.length > 0 ? myMatches[0].playerStats[p.id] : null;
 
-  // Challenges actifs (non clôturés)
-  const myActiveChallenges = (state.challenges || []).filter(c => !c.badgesAwarded).slice(0, 3);
-  const myBadgesCount = (p.badges || []).length;
-
-  // Carrousel plays récents
+  // Featured plays
   const featuredPlays = state.plays.slice(0, 6);
 
   return `
@@ -4763,34 +4613,30 @@ function renderHomePlayer() {
         </div>
       </div>
 
-      <!-- 1. Prochain événement (RSVP en 1 clic via heroCard / openEventInstance) -->
-      ${nextEvent ? heroCard(nextEvent) : `
-        <div style="padding:0 18px;margin-bottom:14px">
-          <div class="card" style="padding:14px;display:flex;align-items:center;gap:12px;cursor:default">
-            <div style="font-size:32px">📅</div>
-            <div style="flex:1">
-              <div style="font-family:'Anton';font-size:15px;text-transform:uppercase">Aucun match prévu</div>
-              <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">Ton coach te préviendra</div>
-            </div>
-          </div>
-        </div>
-      `}
+      ${upcoming[0] ? heroCard(upcoming[0]) : ''}
 
-      <!-- 2. Challenges actifs (preview 2-3, lien Tout → onglet) -->
-      ${myActiveChallenges.length > 0 ? `
+      ${lastStats ? `
         <div class="section-header">
           <div>
-            <div class="eyebrow">Défis en cours</div>
-            <h2 class="display-md mt-2">Challenges</h2>
+            <div class="eyebrow">Mes stats</div>
+            <h2 class="display-md mt-2">Dernier match</h2>
           </div>
-          <button class="section-action" onclick="goSection('challenges')">Tout →</button>
+          <button class="section-action" onclick="goSection('mystats')">Tout →</button>
         </div>
-        <div style="padding:0 18px;display:flex;flex-direction:column;gap:8px;margin-bottom:18px">
-          ${myActiveChallenges.map(c => playerChallengeRow(c, p.id)).join('')}
+        <div class="stat-grid mb-3">
+          <div class="stat-tile">
+            <div class="stat-tile-label">Points</div>
+            <div class="stat-tile-value">${lastStats.pts || 0}</div>
+            <div class="stat-tile-sub">${lastStats.min || 0} min jouées</div>
+          </div>
+          <div class="stat-tile">
+            <div class="stat-tile-label">Rebonds · PD</div>
+            <div class="stat-tile-value">${lastStats.reb || 0}<span style="color:var(--ink-4)"> · ${lastStats.ast || 0}</span></div>
+            <div class="stat-tile-sub">vs ${esc(myMatches[0].opponent)}</div>
+          </div>
         </div>
       ` : ''}
 
-      <!-- 3. Carrousel plays récents (lien → onglet Plays) -->
       <div class="section-header">
         <div>
           <div class="eyebrow">Plays à revoir</div>
@@ -4802,347 +4648,128 @@ function renderHomePlayer() {
         ${featuredPlays.map(pl => playTile(pl)).join('')}
       </div>
 
-      <!-- 4. Mini stats persos (en arrière-plan, compact) -->
-      ${lastStats ? `
+      <div class="section-header">
+        <div>
+          <div class="eyebrow">Mes convocations</div>
+          <h2 class="display-md mt-2">À venir</h2>
+        </div>
+      </div>
+      <div class="list-section">
+        ${upcoming.length === 0 ? `
+          <div class="empty" style="padding:24px"><div class="empty-icon">○</div><div class="empty-title">Aucun événement</div></div>
+        ` : upcoming.slice(0, 5).map(ev => playerEventRow(ev, p.id)).join('')}
+      </div>
+
+      ${state.challenges.length > 0 ? `
         <div class="section-header">
           <div>
-            <div class="eyebrow-muted">Dernier match · vs ${esc(myMatches[0].opponent)}</div>
-            <h2 class="display-md mt-2" style="font-size:18px;color:var(--ink-2)">Mes stats</h2>
+            <div class="eyebrow">Mes défis</div>
+            <h2 class="display-md mt-2">Challenges</h2>
           </div>
+          <button class="section-action" onclick="openAllChallenges()">Tout →</button>
         </div>
-        <div class="stat-grid mb-3">
-          <div class="stat-tile">
-            <div class="stat-tile-label">PTS</div>
-            <div class="stat-tile-value" style="font-size:24px">${lastStats.pts || 0}</div>
-            <div class="stat-tile-sub">${lastStats.min || 0} min</div>
-          </div>
-          <div class="stat-tile">
-            <div class="stat-tile-label">REB · PD</div>
-            <div class="stat-tile-value" style="font-size:24px">${lastStats.reb || 0}<span style="color:var(--ink-4)"> · ${lastStats.ast || 0}</span></div>
-            <div class="stat-tile-sub">${myBadgesCount} trophée${myBadgesCount>1?'s':''}</div>
-          </div>
+        <div style="padding:0 18px;display:flex;flex-direction:column;gap:8px;margin-bottom:18px">
+          ${state.challenges.slice(0, 4).map(c => playerChallengeRow(c, p.id)).join('')}
         </div>
-      ` : (myBadgesCount > 0 ? `
-        <div style="padding:0 18px;margin-bottom:18px">
-          <div onclick="openAllBadges()" style="padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);display:flex;align-items:center;gap:10px;cursor:pointer">
-            <div style="font-size:28px">🏆</div>
-            <div style="flex:1">
-              <div style="font-family:'Anton';font-size:14px;text-transform:uppercase">Mon palmarès</div>
-              <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${myBadgesCount} trophée${myBadgesCount>1?'s':''}</div>
-            </div>
-            <div style="color:var(--orange);font-family:'Anton';font-size:18px">›</div>
-          </div>
-        </div>
-      ` : '')}
+      ` : ''}
 
-      <!-- 5. Ressenti équipe (CTA discret) -->
+      <!-- Ressenti général équipe (carte cliquable) -->
       ${(() => {
         const myReviews = (state.teamReviews || []).filter(r => r.pid === p.id);
         const last = myReviews.length > 0 ? myReviews[myReviews.length - 1] : null;
         return `
+          <div class="section-header">
+            <div>
+              <div class="eyebrow">Confidentiel</div>
+              <h2 class="display-md mt-2">💭 Mon ressenti</h2>
+            </div>
+            ${myReviews.length > 0 ? `<button class="section-action" onclick="openMyTeamReviewHistory()">Historique →</button>` : ''}
+          </div>
           <div style="padding:0 18px;margin-bottom:18px">
-            <div onclick="openTeamReview()" style="padding:12px 14px;background:var(--bg-2);border:1px dashed var(--border);border-radius:var(--radius);display:flex;align-items:center;gap:10px;cursor:pointer">
-              <div style="font-size:22px">💭</div>
-              <div style="flex:1;min-width:0">
-                <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;letter-spacing:0.02em">Mon ressenti équipe</div>
-                <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${last ? 'Dernière : ' + formatDate(last.date, 'short') : 'Confidentiel · visible coach uniquement'}</div>
+            <div class="team-review-cta">
+              <div style="font-size:12px;color:var(--ink-2);line-height:1.5;margin-bottom:12px">
+                Donne ton ressenti général sur l'équipe : ambiance, ton rôle, temps de jeu, état physique. <strong style="color:var(--orange)">Visible uniquement par le coach.</strong> Tu peux en envoyer à tout moment de la saison.
               </div>
-              <div style="color:var(--orange);font-family:'Anton';font-size:16px">${last ? '✎' : '+'}</div>
+              ${last ? `
+                <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:10px">
+                  ${TEAM_REVIEW_FIELDS.map(f => {
+                    const v = last[f.key];
+                    const c = v >= 4 ? 'var(--green)' : v <= 2 ? 'var(--red)' : 'var(--orange)';
+                    return `
+                      <div style="text-align:center;padding:6px 4px;background:var(--bg-1);border-radius:6px">
+                        <div style="font-size:14px;margin-bottom:2px">${f.icon}</div>
+                        <div style="font-family:'Anton';font-size:16px;color:${c};line-height:1">${v}</div>
+                      </div>
+                    `;
+                  }).join('')}
+                </div>
+                <div style="text-align:center;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em;margin-bottom:10px">
+                  Dernière entrée · ${formatDate(last.date)}
+                </div>
+              ` : ''}
+              <button class="btn btn-primary btn-block" onclick="openTeamReview()">
+                ${last ? '+ Nouvelle entrée' : '📝 Donner mon ressenti'}
+              </button>
             </div>
           </div>
         `;
       })()}
-    </div>
-  `;
-}
 
-// ============================================================
-// PLAYER · Onglet "Défis" — challenges actifs / terminés + palmarès
-// ============================================================
-function renderPlayerChallenges() {
-  const p = currentPlayer();
-  if (!p) return renderHomeCoach();
-  const active = (state.challenges || []).filter(c => !c.badgesAwarded);
-  const finished = (state.challenges || []).filter(c => c.badgesAwarded);
-  const myBadges = (p.badges || []).slice().sort((a,b) => (b.date || '').localeCompare(a.date || ''));
+      ${(() => {
+        const o = state.offseason;
+        if (!o) return ''; // Pas de programme du tout
+        const todayStr = new Date().toISOString().slice(0,10);
+        const beforeStart = o.startDate && todayStr < o.startDate;
+        const afterEnd = o.endDate && todayStr > o.endDate;
+        const active = !beforeStart && !afterEnd;
+        const weekKey = getWeekKey();
+        const pLog = ((state.offseasonLogs || {})[p.id] || {})[weekKey] || {};
+        const doneCount = active ? o.exercises.filter(ex => pLog[ex.id] && pLog[ex.id].done).length : 0;
+        const pct = active && o.exercises.length > 0 ? Math.round((doneCount / o.exercises.length) * 100) : 0;
+        const color = pct >= 70 ? 'var(--green)' : pct >= 40 ? 'var(--orange)' : pct > 0 ? 'var(--orange)' : 'var(--red)';
 
-  return `
-    <div class="fade-up">
-      <div class="section-header">
-        <div>
-          <div class="eyebrow">${active.length} en cours · ${myBadges.length} trophée${myBadges.length>1?'s':''}</div>
-          <h2 class="display-lg mt-2">Défis</h2>
-        </div>
-      </div>
+        let statusLabel, statusEyebrow;
+        if (beforeStart) { statusLabel = '⏳ Bientôt'; statusEyebrow = `☀ Démarre le ${formatDate(o.startDate)}`; }
+        else if (afterEnd) { statusLabel = '✓ Terminé'; statusEyebrow = `☀ Terminé le ${formatDate(o.endDate)}`; }
+        else { statusLabel = pct === 100 ? '🔥 Parfait !' : pct === 0 ? '○ À démarrer' : '✎ Cocher mes exos'; statusEyebrow = `☀ ${formatWeekRange()}`; }
 
-      ${active.length > 0 ? `
-        <div class="section-header"><div><div class="eyebrow">En cours</div><h2 class="display-md mt-2">Mes challenges</h2></div></div>
-        <div style="padding:0 18px;display:flex;flex-direction:column;gap:8px;margin-bottom:18px">
-          ${active.map(c => playerChallengeRow(c, p.id)).join('')}
-        </div>
-      ` : `
-        <div class="empty"><div class="empty-icon">🎯</div><div class="empty-title">Aucun défi actif</div><div class="empty-desc">Reviens plus tard, ton coach va en lancer.</div></div>
-      `}
-
-      ${myBadges.length > 0 ? `
-        <div class="section-header">
-          <div><div class="eyebrow">${myBadges.length} trophée${myBadges.length>1?'s':''}</div><h2 class="display-md mt-2">🏆 Mon palmarès</h2></div>
-          ${myBadges.length > 5 ? `<button class="section-action" onclick="openAllBadges()">Tout →</button>` : ''}
-        </div>
-        <div style="padding:0 18px;display:flex;flex-direction:column;gap:6px;margin-bottom:18px">
-          ${myBadges.slice(0, 5).map(b => renderBadge(b)).join('')}
-        </div>
-      ` : ''}
-
-      ${finished.length > 0 ? `
-        <div class="section-header"><div><div class="eyebrow">Archivés</div><h2 class="display-md mt-2">Terminés</h2></div></div>
-        <div style="padding:0 18px;display:flex;flex-direction:column;gap:8px;margin-bottom:18px">
-          ${finished.slice(0, 8).map(c => playerChallengeRow(c, p.id)).join('')}
-        </div>
-      ` : ''}
-    </div>
-  `;
-}
-
-// ============================================================
-// PLAYER · Onglet "Agenda" — convocations / matchs + FFBB read-only
-// ============================================================
-function renderPlayerCalendrier() {
-  const p = currentPlayer();
-  if (!p) return renderHomeCoach();
-  const today = new Date(); today.setHours(0,0,0,0);
-  const todayStr = isoDate(today);
-  const fourWeeksLater = new Date(today.getTime() + 28 * 86400000);
-  const upcoming = getAllEventsBetween(todayStr, isoDate(fourWeeksLater));
-  // Événements passés sur 30j
-  const pastStart = new Date(today.getTime() - 30 * 86400000);
-  const past = getAllEventsBetween(isoDate(pastStart), todayStr).reverse();
-
-  const f = state.ffbb || {};
-  const ffbbMatches = f.matches || [];
-  const ffbbStandings = f.standings || [];
-  const isPlayed = m => m.played && m.scoreHome != null && m.scoreAway != null && !isNaN(m.scoreHome) && !isNaN(m.scoreAway);
-  const teamLower = (f.teamName || '').toLowerCase();
-  const ffbbUpcoming = ffbbMatches.filter(m => !isPlayed(m) && (
-    (m.home || '').toLowerCase().includes(teamLower) ||
-    (m.away || '').toLowerCase().includes(teamLower)
-  )).slice(0, 6);
-  const ffbbRecent = ffbbMatches.filter(m => isPlayed(m) && (
-    (m.home || '').toLowerCase().includes(teamLower) ||
-    (m.away || '').toLowerCase().includes(teamLower)
-  )).reverse().slice(0, 6);
-
-  return `
-    <div class="fade-up">
-      <div class="section-header">
-        <div>
-          <div class="eyebrow">${upcoming.length} à venir · ${past.length} récent${past.length>1?'s':''}</div>
-          <h2 class="display-lg mt-2">Agenda</h2>
-        </div>
-      </div>
-
-      ${upcoming.length > 0 ? `
-        <div class="section-header"><div><div class="eyebrow">4 prochaines semaines</div><h2 class="display-md mt-2">À venir</h2></div></div>
-        <div class="list-section">
-          ${upcoming.slice(0, 10).map(ev => playerEventRow(ev, p.id)).join('')}
-        </div>
-      ` : `
-        <div class="empty" style="padding:24px"><div class="empty-icon">○</div><div class="empty-title">Aucun événement prévu</div></div>
-      `}
-
-      ${past.length > 0 ? `
-        <div class="section-header"><div><div class="eyebrow">30 derniers jours</div><h2 class="display-md mt-2">Récent</h2></div></div>
-        <div class="list-section">
-          ${past.slice(0, 6).map(ev => playerEventRow(ev, p.id)).join('')}
-        </div>
-      ` : ''}
-
-      <!-- FFBB read-only -->
-      ${(ffbbUpcoming.length > 0 || ffbbRecent.length > 0 || ffbbStandings.length > 0) ? `
-        <div class="section-header" style="margin-top:8px">
-          <div>
-            <div class="eyebrow">Championnat</div>
-            <h2 class="display-md mt-2">FFBB</h2>
-          </div>
-        </div>
-        ${f.teamName ? `
-          <div style="padding:0 18px;margin-bottom:12px">
-            <div style="padding:10px 12px;background:var(--bg-2);border:1px solid var(--border);border-radius:8px;display:flex;align-items:center;gap:10px">
-              <div style="width:28px;height:28px;border-radius:6px;background:var(--orange-soft);display:flex;align-items:center;justify-content:center;font-family:'Anton';color:var(--orange);font-size:13px">F</div>
-              <div style="flex:1;min-width:0">
-                <div style="font-family:'Anton';font-size:12px;text-transform:uppercase;letter-spacing:0.02em">${esc(f.teamName)}</div>
-                <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono'">${f.lastSync ? 'Sync ' + new Date(f.lastSync).toLocaleString('fr-FR', {dateStyle:'short', timeStyle:'short'}) : '○ Non synchro'}</div>
-              </div>
+        return `
+          <div class="section-header">
+            <div>
+              <div class="eyebrow" style="color:var(--orange)">${statusEyebrow}</div>
+              <h2 class="display-md mt-2">${esc(o.title)}</h2>
             </div>
           </div>
-        ` : ''}
-
-        ${ffbbUpcoming.length > 0 ? `
-          <div class="section-header"><div><div class="eyebrow-muted">Calendrier FFBB</div><h2 class="display-md mt-2" style="font-size:16px;color:var(--ink-2)">Prochains</h2></div></div>
-          <div class="list-section">
-            ${ffbbUpcoming.map(m => ffbbMatchRow(m, f.teamName)).join('')}
-          </div>
-        ` : ''}
-
-        ${ffbbRecent.length > 0 ? `
-          <div class="section-header"><div><div class="eyebrow-muted">Résultats FFBB</div><h2 class="display-md mt-2" style="font-size:16px;color:var(--ink-2)">Derniers</h2></div></div>
-          <div class="list-section">
-            ${ffbbRecent.map(m => ffbbMatchRow(m, f.teamName)).join('')}
-          </div>
-        ` : ''}
-
-        ${ffbbStandings.length > 0 ? `
-          <div class="section-header"><div><div class="eyebrow-muted">Classement</div><h2 class="display-md mt-2" style="font-size:16px;color:var(--ink-2)">Poule</h2></div></div>
-          <div class="list-section">
-            <div class="stats-wrap">
-              <table class="stats-table">
-                <thead><tr><th>#</th><th>Équipe</th><th>MJ</th><th>V</th><th>D</th><th>Pts</th></tr></thead>
-                <tbody>
-                  ${ffbbStandings.map(s => {
-                    const isMe = (s.team || '').toLowerCase().includes(teamLower);
-                    return `<tr style="${isMe ? 'background:var(--orange-soft)' : ''}">
-                      <td class="num">${s.rank ?? '-'}</td>
-                      <td style="font-family:'Anton';font-size:12px;text-transform:uppercase">${esc(s.team)}</td>
-                      <td>${s.played ?? '-'}</td>
-                      <td>${s.wins ?? '-'}</td>
-                      <td>${s.losses ?? '-'}</td>
-                      <td class="num">${s.points ?? '-'}</td>
-                    </tr>`;
-                  }).join('')}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        ` : ''}
-      ` : ''}
-    </div>
-  `;
-}
-
-// ============================================================
-// PLAYER · Onglet "Forme" — programme estival + exercices à valider
-// ============================================================
-function renderPlayerProgramme() {
-  const p = currentPlayer();
-  if (!p) return renderHomeCoach();
-  const o = state.offseason;
-  const myBadges = (p.badges || []).length;
-
-  if (!o) {
-    return `
-      <div class="fade-up">
-        <div class="section-header">
-          <div><div class="eyebrow">Prépa physique</div><h2 class="display-lg mt-2">Forme</h2></div>
-        </div>
-        <div class="empty"><div class="empty-icon">💪</div><div class="empty-title">Aucun programme</div><div class="empty-desc">Ton coach n'a pas encore configuré la prépa.</div></div>
-      </div>
-    `;
-  }
-
-  const todayStr = new Date().toISOString().slice(0,10);
-  const beforeStart = o.startDate && todayStr < o.startDate;
-  const afterEnd = o.endDate && todayStr > o.endDate;
-  const active = !beforeStart && !afterEnd;
-  const weekKey = getWeekKey();
-  state.offseasonLogs = state.offseasonLogs || {};
-  state.offseasonLogs[p.id] = state.offseasonLogs[p.id] || {};
-  state.offseasonLogs[p.id][weekKey] = state.offseasonLogs[p.id][weekKey] || {};
-  const log = state.offseasonLogs[p.id][weekKey];
-  const doneCount = active ? o.exercises.filter(ex => log[ex.id] && log[ex.id].done).length : 0;
-  const pct = active && o.exercises.length > 0 ? Math.round((doneCount / o.exercises.length) * 100) : 0;
-  const color = pct >= 70 ? 'var(--green)' : pct >= 40 ? 'var(--orange)' : pct > 0 ? 'var(--orange)' : 'var(--red)';
-
-  let banner;
-  if (beforeStart) banner = `<div style="padding:10px 12px;background:rgba(99,102,241,0.10);border-left:3px solid #6366f1;border-radius:6px;margin:0 18px 14px;font-size:12px;color:var(--ink-2);line-height:1.5">📅 <strong>Démarre le ${formatDate(o.startDate)}</strong>. Découvre le programme dès maintenant.</div>`;
-  else if (afterEnd) banner = `<div style="padding:10px 12px;background:rgba(34,197,94,0.10);border-left:3px solid var(--green);border-radius:6px;margin:0 18px 14px;font-size:12px;color:var(--ink-2);line-height:1.5">🏁 <strong>Programme terminé le ${formatDate(o.endDate)}</strong>.</div>`;
-  else banner = `<div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin:0 18px 14px;font-size:11px;color:var(--ink-2);line-height:1.5">Coche chaque exercice fait cette semaine. Reset auto chaque lundi.</div>`;
-
-  const allWeeks = Object.keys(state.offseasonLogs[p.id] || {}).filter(w => w !== weekKey).sort().reverse().slice(0, 4);
-
-  return `
-    <div class="fade-up">
-      <div class="section-header">
-        <div>
-          <div class="eyebrow" style="color:var(--orange)">${active ? formatWeekRange() : (beforeStart ? 'À venir' : 'Terminé')}</div>
-          <h2 class="display-lg mt-2">☀ ${esc(o.title)}</h2>
-        </div>
-      </div>
-
-      ${banner}
-
-      ${active ? `
-        <div style="padding:0 18px;margin-bottom:14px">
-          <div style="text-align:center;padding:14px;background:var(--bg-2);border-radius:10px;border:1px solid ${pct===100?'var(--green)':'var(--border)'}">
-            <div style="font-family:'Anton';font-size:36px;color:${pct===100?'var(--green)':color};line-height:1">${doneCount}<span style="font-size:18px;color:var(--ink-4)">/${o.exercises.length}</span></div>
-            <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em;margin:6px 0 10px">Exercices · ${pct}%</div>
-            <div style="height:6px;background:var(--bg-1);border-radius:3px;overflow:hidden">
-              <div style="height:100%;width:${pct}%;background:linear-gradient(90deg,var(--orange),${pct===100?'var(--green)':'#cc5400'});transition:width 0.3s"></div>
-            </div>
-          </div>
-        </div>
-      ` : ''}
-
-      <div style="padding:0 18px;display:flex;flex-direction:column;gap:8px">
-        ${o.exercises.map(ex => {
-          const entry = log[ex.id] || {};
-          const isDone = active && !!entry.done;
-          const clickAttr = active ? `onclick="togglePlayerProgrammeExercise('${ex.id}')"` : '';
-          return `
-            <div class="warmup-step-do ${isDone ? 'done' : ''}" ${clickAttr} style="${active ? '' : 'cursor:default;opacity:0.85'}">
-              <div style="font-family:'Anton';font-size:18px;color:${isDone?'var(--green)':'var(--orange)'};min-width:32px;text-align:center">${isDone ? '✓' : '○'}</div>
-              <div style="flex:1;min-width:0">
-                <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;${isDone?'text-decoration:line-through;color:var(--ink-3)':''}">${esc(ex.label)}</div>
-                <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:3px">
-                  ${ex.target > 0 ? `<span style="font-size:10px;color:var(--orange);font-family:'JetBrains Mono';text-transform:uppercase">🎯 ${ex.target} ${esc(ex.unit || '')}</span>` : ''}
-                  ${ex.notes ? `<span style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';font-style:italic">${esc(ex.notes)}</span>` : ''}
+          <div style="padding:0 18px;margin-bottom:18px">
+            <div onclick="openMyOffseason()" style="padding:14px;background:linear-gradient(135deg,rgba(255,107,0,0.10),var(--surface));border:1.5px solid var(--orange);border-radius:var(--radius);cursor:pointer">
+              ${active ? `
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+                  <div style="font-family:'JetBrains Mono';font-size:10px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em">Cette semaine</div>
+                  <div style="font-family:'Anton';font-size:28px;color:${color};line-height:1">${doneCount}<span style="font-size:14px;color:var(--ink-4)">/${o.exercises.length}</span></div>
                 </div>
+                <div style="height:6px;background:var(--bg-1);border-radius:3px;overflow:hidden;margin-bottom:8px">
+                  <div style="height:100%;width:${pct}%;background:${color};transition:width 0.3s"></div>
+                </div>
+              ` : `
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+                  <span style="font-size:28px">${beforeStart ? '📅' : '🏁'}</span>
+                  <div style="flex:1">
+                    <div style="font-family:'Anton';font-size:14px;text-transform:uppercase">${o.exercises.length} exos × semaine</div>
+                    <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${beforeStart ? 'Découvre le programme avant le démarrage' : 'Consulte ton historique'}</div>
+                  </div>
+                </div>
+              `}
+              <div style="display:flex;align-items:center;justify-content:space-between">
+                <div style="font-size:11px;color:var(--ink-2);font-family:'JetBrains Mono';text-transform:uppercase">${statusLabel}</div>
+                <div style="color:var(--orange);font-size:16px;font-family:'Anton'">›</div>
               </div>
             </div>
-          `;
-        }).join('')}
-      </div>
+          </div>
+        `;
+      })()}
 
-      ${allWeeks.length > 0 ? `
-        <div class="section-header"><div><div class="eyebrow-muted">Historique</div><h2 class="display-md mt-2" style="font-size:16px;color:var(--ink-2)">Semaines passées</h2></div></div>
-        <div style="padding:0 18px;display:flex;flex-direction:column;gap:4px;margin-bottom:18px">
-          ${allWeeks.map(wk => {
-            const wLog = state.offseasonLogs[p.id][wk] || {};
-            const wDone = o.exercises.filter(ex => wLog[ex.id] && wLog[ex.id].done).length;
-            const wPct = o.exercises.length > 0 ? Math.round((wDone / o.exercises.length) * 100) : 0;
-            const c = wPct >= 80 ? 'var(--green)' : wPct >= 50 ? 'var(--orange)' : 'var(--red)';
-            return `
-              <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--bg-2);border-radius:6px">
-                <div style="font-family:'JetBrains Mono';font-size:10px;color:var(--ink-3);text-transform:uppercase;min-width:60px">${wk}</div>
-                <div style="flex:1;height:5px;background:var(--bg-1);border-radius:3px;overflow:hidden">
-                  <div style="height:100%;width:${wPct}%;background:${c}"></div>
-                </div>
-                <div style="font-family:'Anton';font-size:13px;color:${c};min-width:50px;text-align:right">${wDone}/${o.exercises.length}</div>
-              </div>
-            `;
-          }).join('')}
-        </div>
-      ` : ''}
     </div>
   `;
-}
-
-// Toggle exo programme intégré dans la page (pas modal) — render() suffit
-function togglePlayerProgrammeExercise(exId) {
-  if (state.auth.role !== 'player') return;
-  const pid = state.auth.playerId;
-  const weekKey = getWeekKey();
-  state.offseasonLogs = state.offseasonLogs || {};
-  state.offseasonLogs[pid] = state.offseasonLogs[pid] || {};
-  state.offseasonLogs[pid][weekKey] = state.offseasonLogs[pid][weekKey] || {};
-  const log = state.offseasonLogs[pid][weekKey];
-  log[exId] = log[exId] || {};
-  log[exId].done = !log[exId].done;
-  if (log[exId].done) log[exId].at = Date.now();
-  persist();
-  // Préserver position de scroll lors du re-render
-  const scroll = window.scrollY;
-  render();
-  window.scrollTo(0, scroll);
 }
 
 function playerChallengeRow(c, playerId) {
@@ -5272,14 +4899,11 @@ function confirmPlayerAbsence(cid) {
 function renderPlays() {
   if (state.view && state.view.type === 'play') return renderPlayDetail();
 
-  // Fallback : si state.playsCat est invalide (legacy 'all' ou cat supprimée), revenir à 'off'
-  if (!PLAY_CATEGORIES.some(c => c.id === state.playsCat)) state.playsCat = 'off';
-
-  let items = state.plays.filter(p => p.cat === state.playsCat);
+  let items = state.plays;
+  if (state.playsCat !== 'all') items = items.filter(p => p.cat === state.playsCat);
   if (state.playsTag) items = items.filter(p => (p.tags || []).includes(state.playsTag));
 
-  // Tags pertinents seulement pour la catégorie courante
-  const usedTags = [...new Set(state.plays.filter(p => p.cat === state.playsCat).flatMap(p => p.tags || []))].sort();
+  const usedTags = [...new Set(state.plays.flatMap(p => p.tags || []))].sort();
   const isCoach = state.auth.role === 'coach';
 
   return `
@@ -5293,6 +4917,7 @@ function renderPlays() {
       </div>
 
       <div class="segmented">
+        <button class="segmented-btn ${state.playsCat === 'all' ? 'active' : ''}" onclick="setPlaysCat('all')">Tout</button>
         ${PLAY_CATEGORIES.map(c => `
           <button class="segmented-btn ${state.playsCat === c.id ? 'active' : ''}" onclick="setPlaysCat('${c.id}')">${c.label}</button>
         `).join('')}
@@ -7784,7 +7409,7 @@ function exitLive() {
     if (!confirm('Quitter le mode délégation ?')) return;
     state.auth = state._delegationFrom;
     state._delegationFrom = null;
-    state.section = state.auth.role === 'coach' ? 'home' : (state.auth.role === 'player' ? 'calendrier' : 'matches');
+    state.section = state.auth.role === 'coach' ? 'home' : 'matches';
     persist();
     render();
     return;
@@ -11516,23 +11141,6 @@ function openCollectiveAddAmount(cid, pid) {
 }
 
 // Clôturer un défi manuellement : attribuer les badges immédiatement
-const BADGE_MEDALS = ['🥇', '🥈', '🥉'];
-
-function renderBadge(b) {
-  const medal = BADGE_MEDALS[(b.rank || 1) - 1] || '🏆';
-  const rankLabel = b.rank === 1 ? '1ère' : b.rank === 2 ? '2ème' : b.rank === 3 ? '3ème' : '';
-  const dateLabel = b.date ? formatDate(b.date, 'short') : '';
-  return `
-    <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)">
-      <div style="font-size:26px;line-height:1">${medal}</div>
-      <div style="flex:1;min-width:0">
-        <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;letter-spacing:0.02em;line-height:1.2">${esc(b.challengeTitle || 'Trophée')}</div>
-        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.04em;margin-top:3px">${rankLabel}${rankLabel ? ' · ' : ''}${b.score || 0} ${esc(b.metric || '')}${dateLabel ? ' · ' + dateLabel : ''}</div>
-      </div>
-    </div>
-  `;
-}
-
 function closeChallengeNow(cid) {
   const c = state.challenges.find(x => x.id === cid);
   if (!c) return;
@@ -13546,16 +13154,7 @@ function toggleOffseasonExercise(exId) {
   log[exId].done = !log[exId].done;
   if (log[exId].done) log[exId].at = Date.now();
   persist();
-  // 1. MAJ home en arrière-plan (carte progression)
-  render();
-  // 2. Préserver scroll dans le modal avant re-render
-  const mb = document.querySelector('#modal-root .modal-body');
-  const prevScroll = mb ? mb.scrollTop : 0;
-  // 3. Re-monter le modal avec le nouvel état
   openMyOffseason();
-  // 4. Restaurer scroll
-  const newMb = document.querySelector('#modal-root .modal-body');
-  if (newMb) newMb.scrollTop = prevScroll;
 }
 
 // === COACH : dashboard de suivi ===
@@ -14343,11 +13942,7 @@ function parseClubMatchesFromHTML(html, clubTeamHint) {
       if (!/^\d{1,3}$/.test(txt)) return;
       const n = parseInt(txt);
       const cls = (sp.getAttribute('class') || '').toLowerCase();
-      // Couleurs FFBB :
-      //   #00288e (bleu navy) = NOTRE score quand on a GAGNÉ
-      //   #dd031f (rouge)     = NOTRE score quand on a PERDU
-      //   #8a8fa2 (gris)      = score de l'ADVERSAIRE (toujours)
-      if (cls.includes('#00288e') || cls.includes('#dd031f')) myScore = n;
+      if (cls.includes('#00288e')) myScore = n;
       else if (cls.includes('#8a8fa2')) oppScore = n;
       else if (oppScore === null) oppScore = n;       // ordre de fallback : 1er = adv
       else if (myScore === null) myScore = n;          // 2e = nous
@@ -14430,13 +14025,10 @@ function parseClubMatchesFromHTML(html, clubTeamHint) {
       return cleaned;
     }
 
-    // Détection Domicile/Extérieur depuis le texte de contexte.
-    // NB : pas de \b — le textContent FFBB colle souvent les mots
-    // ("21h30Extérieur"), ce qui empêche les frontières \b de matcher
-    // → tous les matches finissaient marqués Extérieur par défaut.
+    // Détection Domicile/Extérieur depuis le texte de contexte
     const ctxTextRaw = (context.textContent || '').replace(/\s+/g, ' ');
-    const isExterieur = /Ext[eé]rieur/i.test(ctxTextRaw);
-    const isDomicile  = /Domicile/i.test(ctxTextRaw);
+    const isExterieur = /\bExt[eé]rieur\b/i.test(ctxTextRaw);
+    const isDomicile  = /\bDomicile\b/i.test(ctxTextRaw);
 
     let homeTeam, awayTeam;
     if (teamLinks.length >= 2) {
@@ -15087,18 +14679,6 @@ function _initPlayersSync() {
         // scheduleRender (debouncé 100ms) au lieu de render() direct pour
         // collapser plusieurs events Realtime en un seul re-render.
         PbSync.subscribeAll(state, () => { scheduleRender(); });
-        // Filet de sécurité : si l'utilisateur ferme l'onglet avant la fin
-        // du debounce 400ms du PbSync, on flush immédiatement pour ne pas
-        // perdre un play qui vient d'être créé/modifié.
-        if (!window._pbSyncUnloadGuard) {
-          window._pbSyncUnloadGuard = true;
-          const flush = () => { try { PbSync.flushNow(state); } catch(e){} };
-          window.addEventListener('pagehide', flush);
-          window.addEventListener('beforeunload', flush);
-          document.addEventListener('visibilitychange', () => {
-            if (document.visibilityState === 'hidden') flush();
-          });
-        }
       });
     });
 
@@ -15229,17 +14809,11 @@ function _renderBody() {
     else if (state.section === 'team') content = renderTeam();
     else if (state.section === 'ffbb') content = renderFFBB();
   } else if (role === 'player') {
-    // Legacy section IDs → redirection vers la nouvelle archi 5 onglets
-    if (state.section === 'matches') state.section = 'calendrier';
-    if (state.section === 'mystats') state.section = 'home';
-    if (state.section === 'team') state.section = 'calendrier';
-    if (state.section === 'ffbb') state.section = 'calendrier';
     if (state.section === 'home') content = renderHomePlayer();
     else if (state.section === 'plays') content = renderPlays();
-    else if (state.section === 'challenges') content = renderPlayerChallenges();
-    else if (state.section === 'calendrier') content = renderPlayerCalendrier();
-    else if (state.section === 'programme') content = renderPlayerProgramme();
-    else content = renderHomePlayer();
+    else if (state.section === 'matches') content = renderMatches();
+    else if (state.section === 'mystats') content = renderMyStats();
+    else if (state.section === 'inspire') content = renderInspire();
   }
 
   document.getElementById('root').innerHTML = `
