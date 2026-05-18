@@ -2980,36 +2980,39 @@ window.PbSync = {
             const { data, error } = await sb.from(entity.table).select('*');
             if (error) return;
             const rows = data || [];
-            // Anti-self-echo : si le hash des rows remote correspond pile au
-            // cache _lastSeen (= ce qu'on a pushé soi-même), c'est notre propre
-            // broadcast. Skip apply + render pour éviter la cascade visuelle.
             const prevCache = _lastSeen[entity.key] || {};
-            const newKeys = new Set(rows.map(r => _rowKey(entity, r)));
-            // Compute le hash que prendrait le cache APRÈS apply
-            let identical = (Object.keys(prevCache).length === newKeys.size);
-            if (identical) {
-              for (const r of rows) {
-                const k = _rowKey(entity, r);
-                // On compare le hash de la row state-format. Mais on a pas
-                // encore appliqué, donc on hash en passant par dump après un
-                // apply temporaire. Trop coûteux → fallback simple : compare
-                // les clés remote vs cache; si subset identique, on suppose
-                // pas de changement de contenu et on fait quand même un apply
-                // léger sans render.
-                if (!(k in prevCache)) { identical = false; break; }
-              }
-            }
-            // Applique (préserve la garde rows-vide existante)
+            // Apply d'abord pour avoir l'état post-merge (préserve les extras
+            // locaux non synchronisés comme images/concepts/attachments).
             if (rows.length > 0) {
               try { entity.apply(state, rows); } catch(e) {}
             }
+            // Anti-self-echo : compare le hash COMPLET (clés + contenu) du
+            // dump post-apply au cache _lastSeen. Si tout matche pile, c'est
+            // notre propre broadcast → skip render. Si une row a changé de
+            // contenu (UPDATE par un autre browser), ou un INSERT/DELETE est
+            // arrivé, on render. Avant : comparait seulement les clés, donc
+            // les UPDATE sur le même set de clés n'étaient JAMAIS rendus.
+            const newMap = entity.dump(state);
+            const newKeys = Object.keys(newMap);
+            let identical = (Object.keys(prevCache).length === newKeys.length);
+            if (identical) {
+              for (const k of newKeys) {
+                if (prevCache[k] !== _stableJson(newMap[k])) { identical = false; break; }
+              }
+            }
             _seedCacheFromRemote(entity, rows, state);
-            // Re-render UNIQUEMENT si l'ensemble des clés a changé
             if (!identical && onApplied) onApplied(entity.key);
           } catch(e) { /* swallow */ }
         });
       ch.subscribe();
     });
+  },
+  // Force un flush immédiat (utilisé sur pagehide pour ne pas perdre les
+  // écritures encore dans la fenêtre de debounce 400ms si l'utilisateur ferme
+  // l'onglet rapidement après avoir créé/modifié un play).
+  flushNow(state) {
+    if (_flushPending) { clearTimeout(_flushPending); _flushPending = null; }
+    return _flushAll(state);
   }
 };
 </script>
@@ -14686,6 +14689,18 @@ function _initPlayersSync() {
         // scheduleRender (debouncé 100ms) au lieu de render() direct pour
         // collapser plusieurs events Realtime en un seul re-render.
         PbSync.subscribeAll(state, () => { scheduleRender(); });
+        // Filet de sécurité : si l'utilisateur ferme l'onglet avant la fin
+        // du debounce 400ms du PbSync, on flush immédiatement pour ne pas
+        // perdre un play qui vient d'être créé/modifié.
+        if (!window._pbSyncUnloadGuard) {
+          window._pbSyncUnloadGuard = true;
+          const flush = () => { try { PbSync.flushNow(state); } catch(e){} };
+          window.addEventListener('pagehide', flush);
+          window.addEventListener('beforeunload', flush);
+          document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'hidden') flush();
+          });
+        }
       });
     });
 
