@@ -179,6 +179,13 @@
     font-family: 'JetBrains Mono', monospace;
     font-size: 9px; font-weight: 600;
     text-transform: uppercase; letter-spacing: 0.05em;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* Très petits écrans (< 360px) : 6 onglets joueuse → rogne le letter-spacing
+     pour ne pas wrap le label. */
+  @media (max-width: 359px) {
+    .nav-btn { padding: 8px 2px; }
+    .nav-btn-label { font-size: 8px; letter-spacing: 0.02em; }
   }
 
   /* ========== TYPOGRAPHY ========== */
@@ -2685,20 +2692,26 @@ const ENTITIES = [
       // Normalise : videos[] est la source de vérité. Backward compat avec videoUrl.
       const videos = (p.videos && p.videos.length) ? p.videos
         : (p.videoUrl ? [{ url: p.videoUrl }] : []);
+      // images : on ne pousse que les URLs Storage (http/https). Les anciennes
+      // entrées base64 (data:image/...) restent en localStorage uniquement
+      // pour ne pas exploser le 1 MB / cellule jsonb. À la prochaine édition
+      // du play, addPlayImages uploadera les nouvelles dans le bucket.
+      const imageUrls = (p.images || []).filter(s => typeof s === 'string' && /^https?:\/\//i.test(s));
       return [p.id, {
         id: p.id, cat: p.cat || 'off', title: p.title || '',
         descr: p.desc || null, tags: p.tags || [],
         video_url: videos[0] ? videos[0].url : null,  // legacy pour backward compat
-        videos: videos
+        videos: videos,
+        images: imageUrls
       }];
     })),
     apply: (state, rows) => {
-      // Préserve les extras locaux (images, concepts, attachments) ET les
-      // plays locaux pas encore pushés (race : un realtime event d'un autre
-      // browser arrive pendant la fenêtre de debounce 400ms de NOTRE push →
-      // sinon le play est wipé avant son upsert). Heuristique : tout play
-      // local non présent dans rows ET dont l'id commence par 'x' (uid()
-      // format) est considéré "pending push" et conservé.
+      // Préserve les extras locaux (concepts, attachments, images base64
+      // legacy) ET les plays locaux pas encore pushés (race : un realtime
+      // event d'un autre browser arrive pendant la fenêtre de debounce 400ms
+      // de NOTRE push → sinon le play est wipé avant son upsert). Heuristique
+      // : tout play local non présent dans rows ET dont l'id commence par 'x'
+      // (uid() format) est considéré "pending push" et conservé.
       const localList = state.plays || [];
       const byId = Object.fromEntries(localList.map(p => [p.id, p]));
       const remoteIds = new Set(rows.map(r => r.id));
@@ -2707,12 +2720,21 @@ const ENTITIES = [
         // videos remote prioritaire, fallback sur video_url legacy
         const videos = (r.videos && r.videos.length) ? r.videos
           : (r.video_url ? [{ url: r.video_url }] : (local.videos || []));
+        // Merge images : remote (URLs Storage, source de vérité cross-device)
+        // + base64 legacy locales (pas encore migrées, vivent en localStorage).
+        const remoteImgs = Array.isArray(r.images) ? r.images : [];
+        const localImgs = Array.isArray(local.images) ? local.images : [];
+        const legacyBase64 = localImgs.filter(s => typeof s === 'string' && s.startsWith('data:'));
+        // Dédup au cas où une URL remote est déjà dans local
+        const merged = [...remoteImgs];
+        legacyBase64.forEach(b => { if (!merged.includes(b)) merged.push(b); });
         return {
           ...local,
           id: r.id, cat: r.cat, title: r.title,
           desc: r.descr || '', tags: r.tags || [],
           videoUrl: videos[0] ? videos[0].url : '',  // legacy
-          videos: videos
+          videos: videos,
+          images: merged
         };
       });
       // Préserve les locaux récents non encore push (id format uid() = 'x...')
@@ -3223,6 +3245,7 @@ const SECTIONS_PLAYER = [
   { id: 'home', icon: '◆', label: 'Accueil' },
   { id: 'plays', icon: 'P', label: 'Plays' },
   { id: 'challenges', icon: 'T', label: 'Défis' },
+  { id: 'match', icon: 'M', label: 'Match' },
   { id: 'calendrier', icon: 'D', label: 'Agenda' },
   { id: 'programme', icon: 'F', label: 'Forme' },
 ];
@@ -5021,23 +5044,26 @@ function renderHomePlayer() {
         </div>
       ` : '')}
 
-      <!-- 5. Ressenti équipe (CTA discret) -->
-      ${(() => {
-        const myReviews = (state.teamReviews || []).filter(r => r.pid === p.id);
-        const last = myReviews.length > 0 ? myReviews[myReviews.length - 1] : null;
-        return `
-          <div style="padding:0 18px;margin-bottom:18px">
-            <div onclick="openTeamReview()" style="padding:12px 14px;background:var(--bg-2);border:1px dashed var(--border);border-radius:var(--radius);display:flex;align-items:center;gap:10px;cursor:pointer">
-              <div style="font-size:22px">💭</div>
-              <div style="flex:1;min-width:0">
-                <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;letter-spacing:0.02em">Mon ressenti équipe</div>
-                <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${last ? 'Dernière : ' + formatDate(last.date, 'short') : 'Confidentiel · visible coach uniquement'}</div>
-              </div>
-              <div style="color:var(--orange);font-family:'Anton';font-size:16px">${last ? '✎' : '+'}</div>
-            </div>
-          </div>
-        `;
-      })()}
+    </div>
+  `;
+}
+
+// Ressenti équipe : CTA réutilisable (rendu dans l'onglet Forme). Demande
+// utilisatrice : relocaliser depuis Accueil vers Forme, où il prend tout
+// son sens (à côté du ressenti physique / mental).
+function teamReviewCta(p) {
+  const myReviews = (state.teamReviews || []).filter(r => r.pid === p.id);
+  const last = myReviews.length > 0 ? myReviews[myReviews.length - 1] : null;
+  return `
+    <div style="padding:0 18px;margin-bottom:18px">
+      <div onclick="openTeamReview()" style="padding:12px 14px;background:var(--bg-2);border:1px dashed var(--border);border-radius:var(--radius);display:flex;align-items:center;gap:10px;cursor:pointer">
+        <div style="font-size:22px">💭</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;letter-spacing:0.02em">Mon ressenti équipe</div>
+          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${last ? 'Dernière : ' + formatDate(last.date, 'short') : 'Confidentiel · visible coach uniquement'}</div>
+        </div>
+        <div style="color:var(--orange);font-family:'Anton';font-size:16px">${last ? '✎' : '+'}</div>
+      </div>
     </div>
   `;
 }
@@ -5113,6 +5139,114 @@ function renderPlayerChallenges() {
         <div style="padding:0 18px;display:flex;flex-direction:column;gap:8px;margin-bottom:18px">
           ${finished.slice(0, 8).map(c => playerChallengeRow(c, p.id)).join('')}
         </div>
+      ` : ''}
+    </div>
+  `;
+}
+
+// ============================================================
+// PLAYER · Onglet "Match" — focus matchs (à venir + passés avec résultats)
+// L'agenda reste pour la vue mixte (entraînements + matchs). Ici on extrait
+// uniquement les matchs : prochains (depuis les convocations type='match')
+// et passés avec score (depuis state.matches, qui porte les stats + détails).
+// ============================================================
+function renderPlayerMatches() {
+  if (state.view && state.view.type === 'match') return renderMatchDetail();
+  const p = currentPlayer();
+  if (!p) return renderHomeCoach();
+  const today = new Date(); today.setHours(0,0,0,0);
+  const todayStr = isoDate(today);
+  // Horizon prochains matchs : 90 jours (fin de saison typique)
+  const horizon = new Date(today.getTime() + 90 * 86400000);
+  const upcoming = getAllEventsBetween(todayStr, isoDate(horizon))
+    .filter(ev => ev.type === 'match');
+
+  // Passés : on prend state.matches (avec score ou marqué joué). Lien direct
+  // vers la vue détail match riche (stats / selfie / ressenti).
+  const playedMatches = (state.matches || [])
+    .filter(m => (m.scoreUs || 0) > 0 || (m.scoreOpp || 0) > 0)
+    .sort((a, b) => b.date.localeCompare(a.date));
+
+  // FFBB read-only : prochains + résultats (filtrés sur notre équipe)
+  const f = state.ffbb || {};
+  const ffbbMatches = f.matches || [];
+  const isPlayed = m => m.played && m.scoreHome != null && m.scoreAway != null && !isNaN(m.scoreHome) && !isNaN(m.scoreAway);
+  const teamLower = (f.teamName || '').toLowerCase();
+  const isMyTeam = m => (m.home || '').toLowerCase().includes(teamLower) || (m.away || '').toLowerCase().includes(teamLower);
+  const ffbbUpcoming = ffbbMatches.filter(m => !isPlayed(m) && isMyTeam(m)).slice(0, 6);
+  const ffbbRecent = ffbbMatches.filter(m => isPlayed(m) && isMyTeam(m)).reverse().slice(0, 6);
+
+  const pastMatchRow = m => {
+    const win = m.scoreUs > m.scoreOpp;
+    const tie = m.scoreUs === m.scoreOpp;
+    const color = tie ? 'var(--ink-3)' : (win ? 'var(--green)' : 'var(--red)');
+    const tag = tie ? 'NUL' : (win ? 'V' : 'D');
+    const d = new Date(m.date + 'T00:00:00');
+    const day = d.getDate();
+    const month = d.toLocaleDateString('fr-FR', { month: 'short' });
+    const hasMyStats = m.playerStats && m.playerStats[p.id];
+    return `
+      <div class="list-row" onclick="openMatch('${m.id}')">
+        <div class="event-date-badge" style="background:var(--bg-2);border-color:${color}">
+          <div class="event-date-day" style="color:${color}">${day}</div>
+          <div class="event-date-month">${month}</div>
+        </div>
+        <div class="list-row-content">
+          <div class="list-row-title">${m.home ? '🏠 ' : '✈ '}${esc(m.opponent)}</div>
+          <div class="list-row-subtitle">
+            <span style="color:${color};font-family:'Anton';letter-spacing:0.04em">${tag} · ${m.scoreUs}–${m.scoreOpp}</span>
+            ${hasMyStats ? ` · <span style="color:var(--ink-3)">${m.playerStats[p.id].pts || 0} pts · ${m.playerStats[p.id].min || 0}'</span>` : ''}
+          </div>
+        </div>
+        <span class="list-row-trail">›</span>
+      </div>
+    `;
+  };
+
+  return `
+    <div class="fade-up">
+      <div class="section-header">
+        <div>
+          <div class="eyebrow">${upcoming.length} à venir · ${playedMatches.length} joué${playedMatches.length>1?'s':''}</div>
+          <h2 class="display-lg mt-2">Match</h2>
+        </div>
+      </div>
+
+      ${upcoming.length > 0 ? `
+        <div class="section-header"><div><div class="eyebrow">90 prochains jours</div><h2 class="display-md mt-2">À venir</h2></div></div>
+        <div class="list-section">
+          ${upcoming.slice(0, 12).map(ev => playerEventRow(ev, p.id)).join('')}
+        </div>
+      ` : `
+        <div class="empty" style="padding:24px"><div class="empty-icon">🏀</div><div class="empty-title">Aucun match prévu</div><div class="empty-desc">Ton coach va programmer la suite.</div></div>
+      `}
+
+      ${playedMatches.length > 0 ? `
+        <div class="section-header"><div><div class="eyebrow">Bilan saison</div><h2 class="display-md mt-2">Joués</h2></div></div>
+        <div class="list-section">
+          ${playedMatches.slice(0, 20).map(pastMatchRow).join('')}
+        </div>
+      ` : ''}
+
+      ${(ffbbUpcoming.length > 0 || ffbbRecent.length > 0) ? `
+        <div class="section-header" style="margin-top:8px">
+          <div>
+            <div class="eyebrow">Championnat</div>
+            <h2 class="display-md mt-2">FFBB</h2>
+          </div>
+        </div>
+        ${ffbbUpcoming.length > 0 ? `
+          <div class="section-header"><div><div class="eyebrow-muted">Calendrier FFBB</div><h2 class="display-md mt-2" style="font-size:16px;color:var(--ink-2)">Prochains</h2></div></div>
+          <div class="list-section">
+            ${ffbbUpcoming.map(m => ffbbMatchRow(m, f.teamName)).join('')}
+          </div>
+        ` : ''}
+        ${ffbbRecent.length > 0 ? `
+          <div class="section-header"><div><div class="eyebrow-muted">Résultats FFBB</div><h2 class="display-md mt-2" style="font-size:16px;color:var(--ink-2)">Derniers</h2></div></div>
+          <div class="list-section">
+            ${ffbbRecent.map(m => ffbbMatchRow(m, f.teamName)).join('')}
+          </div>
+        ` : ''}
       ` : ''}
     </div>
   `;
@@ -5243,8 +5377,8 @@ function renderPlayerProgramme() {
   const myBadges = (p.badges || []).length;
   const todayStr = new Date().toISOString().slice(0,10);
 
-  // Wellness header : visible TOUJOURS, même sans programme estival actif
-  const wellnessCard = playerWellnessCard(p, todayStr);
+  // Ressenti équipe (relocalisé depuis Accueil)
+  const teamReview = teamReviewCta(p);
 
   if (!o) {
     return `
@@ -5252,7 +5386,7 @@ function renderPlayerProgramme() {
         <div class="section-header">
           <div><div class="eyebrow">Forme du jour</div><h2 class="display-lg mt-2">Forme</h2></div>
         </div>
-        ${wellnessCard}
+        ${teamReview}
         <div class="empty"><div class="empty-icon">💪</div><div class="empty-title">Aucun programme physique</div><div class="empty-desc">Ton coach n'a pas encore configuré la prépa estivale.</div></div>
       </div>
     `;
@@ -5286,7 +5420,7 @@ function renderPlayerProgramme() {
         </div>
       </div>
 
-      ${wellnessCard}
+      ${teamReview}
 
       ${banner}
 
@@ -5344,137 +5478,6 @@ function renderPlayerProgramme() {
       ` : ''}
     </div>
   `;
-}
-
-// ============================================================
-// PLAYER · Wellness journalier (forme physique + mental)
-// Stocké dans state.wellnessLogs[playerId][date] = { physical, mental, note, updatedAt }
-// Synchronisé via PbSync (table player_wellness_log) → visible coach.
-// ============================================================
-
-function playerWellnessCard(p, todayStr) {
-  state.wellnessLogs = state.wellnessLogs || {};
-  state.wellnessLogs[p.id] = state.wellnessLogs[p.id] || {};
-  const today = state.wellnessLogs[p.id][todayStr] || null;
-  const phys = today ? today.physical : null;
-  const ment = today ? today.mental : null;
-  const filled = phys != null && ment != null;
-  const colorFor = v => v == null ? 'var(--ink-4)' : v >= 4 ? 'var(--green)' : v <= 2 ? 'var(--red)' : 'var(--orange)';
-
-  // Streak : nb de jours consécutifs avec entrée jusqu'à aujourd'hui
-  let streak = 0;
-  const cursor = new Date();
-  while (true) {
-    const k = cursor.toISOString().slice(0,10);
-    if (state.wellnessLogs[p.id][k]) { streak++; cursor.setDate(cursor.getDate() - 1); }
-    else break;
-  }
-
-  return `
-    <div style="padding:0 18px;margin-bottom:14px">
-      <div onclick="openPlayerWellness()" style="padding:14px;background:linear-gradient(135deg,${filled?'rgba(34,197,94,0.10)':'rgba(255,107,0,0.10)'},var(--surface));border:1.5px solid ${filled?'var(--green)':'var(--orange)'};border-radius:var(--radius);cursor:pointer">
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:${filled?'12':'4'}px">
-          <span style="font-size:22px">💭</span>
-          <div style="flex:1;min-width:0">
-            <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;letter-spacing:0.04em">Mon ressenti du jour</div>
-            <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase;letter-spacing:0.04em">${filled ? `✓ Saisi · ${streak} jour${streak>1?'s':''} d'affilée` : '🔒 Visible coach uniquement'}</div>
-          </div>
-          <span style="color:var(--orange);font-family:'Anton';font-size:18px">${filled ? '✎' : '+'}</span>
-        </div>
-        ${filled ? `
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-            <div style="text-align:center;padding:8px;background:var(--bg-1);border-radius:6px">
-              <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px">💪 Physique</div>
-              <div style="font-family:'Anton';font-size:22px;color:${colorFor(phys)};line-height:1">${phys}<span style="font-size:10px;color:var(--ink-4)">/5</span></div>
-            </div>
-            <div style="text-align:center;padding:8px;background:var(--bg-1);border-radius:6px">
-              <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px">🧠 Mental</div>
-              <div style="font-family:'Anton';font-size:22px;color:${colorFor(ment)};line-height:1">${ment}<span style="font-size:10px;color:var(--ink-4)">/5</span></div>
-            </div>
-          </div>
-        ` : ''}
-      </div>
-    </div>
-  `;
-}
-
-function openPlayerWellness() {
-  if (state.auth.role !== 'player') return;
-  const p = currentPlayer();
-  if (!p) return;
-  const todayStr = new Date().toISOString().slice(0,10);
-  state.wellnessLogs = state.wellnessLogs || {};
-  state.wellnessLogs[p.id] = state.wellnessLogs[p.id] || {};
-  const existing = state.wellnessLogs[p.id][todayStr] || { physical: 3, mental: 3, note: '' };
-  state._editingWellness = {
-    date: todayStr,
-    physical: existing.physical ?? 3,
-    mental: existing.mental ?? 3,
-    note: existing.note || ''
-  };
-  renderPlayerWellnessEditor();
-}
-
-function renderPlayerWellnessEditor() {
-  const w = state._editingWellness;
-  if (!w) return;
-  const ratingPicker = (key, label, icon, color) => `
-    <div class="fld">
-      <label class="fld-label" style="font-size:13px">${icon} ${label}</label>
-      <div style="display:flex;gap:8px;margin-top:6px">
-        ${[1,2,3,4,5].map(n => `
-          <button type="button" onclick="state._editingWellness.${key}=${n};renderPlayerWellnessEditor()"
-            style="flex:1;aspect-ratio:1;border-radius:8px;border:1.5px solid ${w[key]===n?color:'var(--border)'};background:${w[key]===n?color:'var(--surface)'};color:${w[key]===n?'#000':'var(--ink-2)'};font-family:'Anton';font-size:20px;cursor:pointer;transition:all 0.15s">${n}</button>
-        `).join('')}
-      </div>
-      <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em;margin-top:6px">
-        <span>Mauvais</span><span>Top forme</span>
-      </div>
-    </div>
-  `;
-  openModal(`
-    <div class="modal-header">
-      <div>
-        <div class="eyebrow">${formatDate(w.date, 'long')}</div>
-        <div class="modal-title">💭 Mon ressenti du jour</div>
-      </div>
-      <button class="modal-close" onclick="closeModal();state._editingWellness=null">✕</button>
-    </div>
-    <div class="modal-body">
-      <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:14px;font-size:11px;color:var(--ink-2);line-height:1.5">
-        Note ton état physique (fatigue / douleurs / forme) et mental (motivation / stress). <strong style="color:var(--orange)">Visible uniquement par le coach.</strong>
-      </div>
-      ${ratingPicker('physical', 'État physique', '💪', 'var(--orange)')}
-      ${ratingPicker('mental', 'État mental', '🧠', 'var(--orange)')}
-      <div class="fld">
-        <label class="fld-label" style="font-size:13px">Note libre (optionnel)</label>
-        <textarea id="wellness-note" placeholder="Détails : zones de douleur, raisons fatigue, météo morale..." style="min-height:70px" oninput="state._editingWellness.note=this.value">${esc(w.note)}</textarea>
-      </div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-secondary" onclick="closeModal();state._editingWellness=null">Annuler</button>
-      <button class="btn btn-primary" onclick="savePlayerWellness()">Enregistrer</button>
-    </div>
-  `);
-}
-
-function savePlayerWellness() {
-  const w = state._editingWellness;
-  if (!w) return;
-  const p = currentPlayer();
-  if (!p) return;
-  state.wellnessLogs = state.wellnessLogs || {};
-  state.wellnessLogs[p.id] = state.wellnessLogs[p.id] || {};
-  state.wellnessLogs[p.id][w.date] = {
-    physical: w.physical,
-    mental: w.mental,
-    note: (w.note || '').trim(),
-    updatedAt: Date.now()
-  };
-  state._editingWellness = null;
-  persist();
-  closeModal();
-  render();
 }
 
 // Toggle exo programme intégré dans la page (pas modal) — render() suffit
@@ -6010,11 +6013,20 @@ function renderPlayEditor(isNew) {
 }
 
 // === Gestion images play ===
+// Upload via Supabase Storage (bucket 'play-images') puis push de la PUBLIC URL
+// dans state._editingPlay.images. Avant : on stockait du base64 inline (~100 KB
+// chacune) en localStorage → 5 MB quota → save() silent fail → image perdue
+// au reload, ET aucune sync cross-device (la colonne plays.images n'existait
+// même pas en DB). Maintenant : URL dans la jsonb → ~100 octets / image, sync
+// instant via realtime, pas de quota localStorage.
 async function addPlayImages(event) {
   const files = Array.from(event.target.files || []);
   if (!files.length) return;
-  // Guard quota : max 8 images / play. Au-delà la JSON state explose le
-  // quota localStorage (5 MB) → save() silent fail → modal stays open.
+  if (!window.sb || !window.Pb || !window.Pb.online) {
+    alert('⚠ Hors ligne. Reconnecte-toi pour ajouter des images.');
+    event.target.value = '';
+    return;
+  }
   const remaining = Math.max(0, 8 - (state._editingPlay.images || []).length);
   if (remaining === 0) {
     alert('⚠ Max 8 images par play. Retire-en une pour pouvoir en ajouter.');
@@ -6026,29 +6038,47 @@ async function addPlayImages(event) {
     alert(`⚠ ${files.length - remaining} image(s) ignorée(s) (max 8 / play)`);
   }
   const errors = [];
+  const playId = state._editingPlay.id;
   for (const file of toProcess) {
     try {
-      // Compression conservative : maxDim 900 + quality 0.75 → ~80-120 KB
-      // par image en JPEG. Permet ~30 images cumulées sans flirter avec
-      // la limite 5 MB sur iOS Safari.
-      const compressed = await compressImage(file, 900, 0.75);
-      state._editingPlay.images.push(compressed);
+      // Compression côté client → Blob JPEG. maxDim 900 / 0.75 → ~80-150 KB.
+      const blob = await compressImageBlob(file, 900, 0.75);
+      const fname = `${Date.now()}-${Math.random().toString(36).slice(2,8)}.jpg`;
+      const path = `${playId}/${fname}`;
+      const { error: upErr } = await sb.storage.from('play-images').upload(path, blob, {
+        contentType: 'image/jpeg', cacheControl: '31536000', upsert: false
+      });
+      if (upErr) throw upErr;
+      const { data: pub } = sb.storage.from('play-images').getPublicUrl(path);
+      const url = pub && pub.publicUrl;
+      if (!url) throw new Error('publicUrl manquante');
+      state._editingPlay.images.push(url);
     } catch (e) {
-      console.error('[addPlayImages]', file.name, e);
+      console.error('[addPlayImages]', file.name, e && e.message ? e.message : e);
       errors.push(file.name);
     }
   }
-  // Reset le picker pour permettre de re-sélectionner le même fichier
   event.target.value = '';
   if (errors.length) {
-    alert(`⚠ Échec sur ${errors.length} image(s) : ${errors.slice(0,3).join(', ')}`);
+    alert(`⚠ Échec sur ${errors.length} image(s) : ${errors.slice(0,3).join(', ')}\n\nVérifie ta connexion puis recommence.`);
   }
   const isNew = state.plays.findIndex(x => x.id === state._editingPlay.id) === -1;
   renderPlayEditor(isNew);
 }
 
 function removePlayImage(idx) {
-  state._editingPlay.images.splice(idx, 1);
+  const arr = state._editingPlay.images || [];
+  const url = arr[idx];
+  arr.splice(idx, 1);
+  // Best-effort : si c'est une URL Storage de notre bucket, on tente la suppr
+  // côté serveur pour ne pas accumuler des orphelins. On n'attend pas le
+  // résultat (UI doit rester fluide) et on swallow les erreurs.
+  if (typeof url === 'string' && url.includes('/play-images/') && window.sb) {
+    const m = url.match(/\/play-images\/(.+?)(?:\?|$)/);
+    if (m && m[1]) {
+      sb.storage.from('play-images').remove([decodeURIComponent(m[1])]).catch(() => {});
+    }
+  }
   const isNew = state.plays.findIndex(x => x.id === state._editingPlay.id) === -1;
   renderPlayEditor(isNew);
 }
@@ -6271,11 +6301,15 @@ function matchRow(m) {
 function openMatch(id) {
   // Le détail match (renderMatchDetail) est accessible depuis :
   // - coach/stat : section 'matches'
-  // - joueuse : section 'calendrier' (les matches sont dans son agenda)
+  // - joueuse : section 'match' (nouvel onglet dédié) ou 'calendrier' (agenda)
+  //   On conserve la section courante si c'est déjà l'un des deux ; sinon
+  //   on tombe sur 'match' (plus pertinent que l'agenda pour ce flux).
   // La vue détail est lue depuis state.view = { type:'match', id } et le
   // dispatcher de render() gère la priorité view > section.
   if (state.auth && state.auth.role === 'player') {
-    state.section = 'calendrier';
+    if (state.section !== 'match' && state.section !== 'calendrier') {
+      state.section = 'match';
+    }
   } else {
     state.section = 'matches';
   }
@@ -14155,50 +14189,6 @@ function openOffseasonPlayerDetail(pid) {
   const logs = (state.offseasonLogs || {})[pid] || {};
   const weeks = Object.keys(logs).sort().reverse().slice(0, 8); // 8 semaines max
 
-  // Wellness logs (ressentis quotidiens) sur 14 derniers jours pour aperçu coach
-  const wellnessAll = ((state.wellnessLogs || {})[pid]) || {};
-  const wellnessDays = Object.keys(wellnessAll).sort().reverse().slice(0, 14);
-  const wellnessSection = wellnessDays.length === 0 ? '' : (() => {
-    const avg = key => {
-      const vals = wellnessDays.map(d => wellnessAll[d][key]).filter(v => v != null);
-      return vals.length > 0 ? vals.reduce((a,b)=>a+b,0)/vals.length : null;
-    };
-    const physAvg = avg('physical');
-    const mentAvg = avg('mental');
-    const colorFor = v => v == null ? 'var(--ink-4)' : v >= 4 ? 'var(--green)' : v <= 2 ? 'var(--red)' : 'var(--orange)';
-    return `
-      <div style="margin-bottom:14px;padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-          <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;letter-spacing:0.04em">💭 Ressenti · ${wellnessDays.length} jours</div>
-          <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">Moyenne 14j</div>
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
-          <div style="text-align:center;padding:8px;background:var(--bg-1);border-radius:6px">
-            <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;margin-bottom:3px">💪 Physique</div>
-            <div style="font-family:'Anton';font-size:20px;color:${colorFor(physAvg)};line-height:1">${physAvg == null ? '—' : physAvg.toFixed(1)}<span style="font-size:10px;color:var(--ink-4)">/5</span></div>
-          </div>
-          <div style="text-align:center;padding:8px;background:var(--bg-1);border-radius:6px">
-            <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;margin-bottom:3px">🧠 Mental</div>
-            <div style="font-family:'Anton';font-size:20px;color:${colorFor(mentAvg)};line-height:1">${mentAvg == null ? '—' : mentAvg.toFixed(1)}<span style="font-size:10px;color:var(--ink-4)">/5</span></div>
-          </div>
-        </div>
-        <div style="display:flex;flex-direction:column;gap:4px;max-height:200px;overflow-y:auto">
-          ${wellnessDays.slice(0, 7).map(d => {
-            const w = wellnessAll[d];
-            return `
-              <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--bg-2);border-radius:4px;font-size:11px">
-                <span style="font-family:'JetBrains Mono';color:var(--ink-3);min-width:62px">${formatDate(d, 'short')}</span>
-                <span style="color:${colorFor(w.physical)};font-family:'Anton'">💪 ${w.physical ?? '—'}</span>
-                <span style="color:${colorFor(w.mental)};font-family:'Anton'">🧠 ${w.mental ?? '—'}</span>
-                ${w.note ? `<span style="flex:1;color:var(--ink-2);font-style:italic;font-size:10px;line-height:1.3;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(w.note)}">"${esc(w.note)}"</span>` : ''}
-              </div>
-            `;
-          }).join('')}
-        </div>
-      </div>
-    `;
-  })();
-
   openModal(`
     <div class="modal-header">
       <div>
@@ -14208,7 +14198,6 @@ function openOffseasonPlayerDetail(pid) {
       <button class="modal-close" onclick="closeModal();setTimeout(()=>openOffseasonDashboard(),50)">✕</button>
     </div>
     <div class="modal-body">
-      ${wellnessSection}
       ${weeks.length === 0 ? `<div class="empty" style="padding:30px"><div class="empty-icon">○</div><div class="empty-title">Aucun suivi prépa</div><div class="empty-desc">Cette joueuse n'a coché aucun exercice</div></div>` : `
         <div style="display:flex;flex-direction:column;gap:10px">
           ${weeks.map(wk => {
@@ -14719,7 +14708,10 @@ function removePlayerPhoto(pid) {
   setTimeout(() => editPlayer(pid), 50);
 }
 
-// Compression d'image basique pour rester sous une taille raisonnable
+// Compression d'image basique pour rester sous une taille raisonnable.
+// Renvoie une dataURL base64 — gardée pour les anciens call-sites (selfie
+// match, feedback positifs/négatifs, avatars) qui n'ont pas encore basculé
+// sur Storage.
 function compressImage(file, maxDim, quality) {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -14737,6 +14729,37 @@ function compressImage(file, maxDim, quality) {
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, width, height);
         resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = () => reject(new Error('Image invalide'));
+      img.src = e.target.result;
+    };
+    reader.onerror = () => reject(new Error('Lecture impossible'));
+    reader.readAsDataURL(file);
+  });
+}
+
+// Variante Blob : utilisée par addPlayImages pour upload Supabase Storage.
+// Évite l'overhead base64 (+33%) et permet de passer le content-type au bucket.
+function compressImageBlob(file, maxDim, quality) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const reader = new FileReader();
+    reader.onload = e => {
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > height) {
+          if (width > maxDim) { height *= maxDim / width; width = maxDim; }
+        } else {
+          if (height > maxDim) { width *= maxDim / height; height = maxDim; }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+        canvas.toBlob(b => {
+          if (!b) return reject(new Error('Compression échouée'));
+          resolve(b);
+        }, 'image/jpeg', quality);
       };
       img.onerror = () => reject(new Error('Image invalide'));
       img.src = e.target.result;
@@ -15790,18 +15813,20 @@ function _renderBody() {
     else if (state.section === 'team') content = renderTeam();
     else if (state.section === 'ffbb') content = renderFFBB();
   } else if (role === 'player') {
-    // Legacy section IDs → redirection vers la nouvelle archi 5 onglets
-    if (state.section === 'matches') state.section = 'calendrier';
+    // Legacy section IDs → redirection vers la nouvelle archi
+    if (state.section === 'matches') state.section = 'match';
     if (state.section === 'mystats') state.section = 'home';
     if (state.section === 'team') state.section = 'calendrier';
     if (state.section === 'ffbb') state.section = 'calendrier';
-    // Priorité state.view : détail Match (depuis click joueuse dans Agenda),
-    // détail Play (depuis click carrousel home). Sinon rendu par section.
+    // Priorité state.view : détail Match (depuis click joueuse dans Match
+    // ou Agenda), détail Play (depuis click carrousel home). Sinon rendu
+    // par section.
     if (state.view && state.view.type === 'match') content = renderMatchDetail();
     else if (state.view && state.view.type === 'play') content = renderPlayDetail();
     else if (state.section === 'home') content = renderHomePlayer();
     else if (state.section === 'plays') content = renderPlays();
     else if (state.section === 'challenges') content = renderPlayerChallenges();
+    else if (state.section === 'match') content = renderPlayerMatches();
     else if (state.section === 'calendrier') content = renderPlayerCalendrier();
     else if (state.section === 'programme') content = renderPlayerProgramme();
     else content = renderHomePlayer();
