@@ -2693,9 +2693,16 @@ const ENTITIES = [
       }];
     })),
     apply: (state, rows) => {
-      // Préserve les extras locaux (images, concepts, attachments)
-      const byId = Object.fromEntries((state.plays || []).map(p => [p.id, p]));
-      state.plays = rows.map(r => {
+      // Préserve les extras locaux (images, concepts, attachments) ET les
+      // plays locaux pas encore pushés (race : un realtime event d'un autre
+      // browser arrive pendant la fenêtre de debounce 400ms de NOTRE push →
+      // sinon le play est wipé avant son upsert). Heuristique : tout play
+      // local non présent dans rows ET dont l'id commence par 'x' (uid()
+      // format) est considéré "pending push" et conservé.
+      const localList = state.plays || [];
+      const byId = Object.fromEntries(localList.map(p => [p.id, p]));
+      const remoteIds = new Set(rows.map(r => r.id));
+      const fromRemote = rows.map(r => {
         const local = byId[r.id] || {};
         // videos remote prioritaire, fallback sur video_url legacy
         const videos = (r.videos && r.videos.length) ? r.videos
@@ -2708,6 +2715,9 @@ const ENTITIES = [
           videos: videos
         };
       });
+      // Préserve les locaux récents non encore push (id format uid() = 'x...')
+      const pendingLocal = localList.filter(p => !remoteIds.has(p.id) && typeof p.id === 'string' && p.id.startsWith('x'));
+      state.plays = [...pendingLocal, ...fromRemote];
     }
   },
   {
@@ -2728,11 +2738,18 @@ const ENTITIES = [
       last_live_update: m.lastLiveUpdate ? new Date(m.lastLiveUpdate).toISOString() : null
     }])),
     apply: (state, rows) => {
-      const byId = Object.fromEntries((state.matches || []).map(m => [m.id, m]));
-      state.matches = rows.map(r => {
+      // Préserve : extras locaux (winSelfie, positives/negatives, playerStats,
+      // playerReviews) ET les matches locaux pending push (race anti-wipe).
+      // winSelfie en particulier n'est PAS dans le schema Supabase → vit
+      // uniquement en local + localStorage, doit jamais être wipé par un
+      // realtime sync d'un autre browser.
+      const localList = state.matches || [];
+      const byId = Object.fromEntries(localList.map(m => [m.id, m]));
+      const remoteIds = new Set(rows.map(r => r.id));
+      const fromRemote = rows.map(r => {
         const local = byId[r.id] || {};
         return {
-          ...local, // préserve playerStats/positives/negatives chargés via leurs propres entités
+          ...local, // préserve playerStats/positives/negatives/winSelfie/playerReviews
           id: r.id, date: r.date, opponent: r.opponent, home: r.home,
           scoreUs: r.score_us, scoreOpp: r.score_opp,
           quarters: r.quarters || {},
@@ -2745,6 +2762,9 @@ const ENTITIES = [
           playerStats: local.playerStats || {}
         };
       });
+      // Préserve les matches locaux non encore push (id format uid() = 'x...')
+      const pendingLocal = localList.filter(m => !remoteIds.has(m.id) && typeof m.id === 'string' && m.id.startsWith('x'));
+      state.matches = [...pendingLocal, ...fromRemote];
     }
   },
   {
@@ -3432,7 +3452,45 @@ const K = {
   wellnessLogs: 'pb8_wellness_logs',
 };
 function load(k, d) { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : d; } catch { return d; } }
-function save(k, v) { localStorage.setItem(k, JSON.stringify(v)); }
+// save() : sync localStorage avec gestion explicite du QuotaExceededError.
+// Avant : setItem brut → si quota dépassé (typique : 5 MB), throw silencieux
+// remontait à persist() qui sortait sans avoir tout sauvé. Conséquence
+// utilisateur : modal de save play stays open, image dans state mémoire
+// mais perdue au reload. Le throw cassait aussi le chaînage closeModal/render.
+// Maintenant : on emet `pb:storage_full` (custom event) et on retry sans
+// le payload qui a explosé, en gardant trace dans console pour debug.
+function save(k, v) {
+  try {
+    localStorage.setItem(k, JSON.stringify(v));
+    return true;
+  } catch (e) {
+    const isQuota = e && (e.name === 'QuotaExceededError' || e.code === 22 || /quota/i.test(String(e.message || '')));
+    console.warn('[storage] save failed for', k, ':', e && e.message, '(quota:', isQuota, ')');
+    if (isQuota) {
+      // Notification globale : un seul handler doit afficher l'alerte
+      // (pour éviter 10 popups sur un persist() en cascade)
+      try {
+        const evt = new CustomEvent('pb:storage_full', { detail: { key: k, error: e } });
+        window.dispatchEvent(evt);
+      } catch (_) {}
+    }
+    return false;
+  }
+}
+
+// Listener global : 1 alerte max par minute pour éviter le spam
+let _lastStorageAlertAt = 0;
+window.addEventListener('pb:storage_full', () => {
+  const now = Date.now();
+  if (now - _lastStorageAlertAt < 60000) return;
+  _lastStorageAlertAt = now;
+  setTimeout(() => alert(
+    '⚠ Mémoire pleine\n\n' +
+    "Le navigateur n'accepte plus de nouvelles données. " +
+    "Tu as probablement trop d'images stockées localement.\n\n" +
+    'Pour libérer : retire des images des plays anciens ou des selfies de match.'
+  ), 0);
+});
 
 let state = {
   auth: load(K.auth, null), // { role: 'coach'|'stat'|'player', playerId: null|string }
@@ -5955,11 +6013,35 @@ function renderPlayEditor(isNew) {
 async function addPlayImages(event) {
   const files = Array.from(event.target.files || []);
   if (!files.length) return;
-  for (const file of files) {
+  // Guard quota : max 8 images / play. Au-delà la JSON state explose le
+  // quota localStorage (5 MB) → save() silent fail → modal stays open.
+  const remaining = Math.max(0, 8 - (state._editingPlay.images || []).length);
+  if (remaining === 0) {
+    alert('⚠ Max 8 images par play. Retire-en une pour pouvoir en ajouter.');
+    event.target.value = '';
+    return;
+  }
+  const toProcess = files.slice(0, remaining);
+  if (files.length > remaining) {
+    alert(`⚠ ${files.length - remaining} image(s) ignorée(s) (max 8 / play)`);
+  }
+  const errors = [];
+  for (const file of toProcess) {
     try {
-      const compressed = await compressImage(file, 1000, 0.8);
+      // Compression conservative : maxDim 900 + quality 0.75 → ~80-120 KB
+      // par image en JPEG. Permet ~30 images cumulées sans flirter avec
+      // la limite 5 MB sur iOS Safari.
+      const compressed = await compressImage(file, 900, 0.75);
       state._editingPlay.images.push(compressed);
-    } catch (e) { console.error(e); }
+    } catch (e) {
+      console.error('[addPlayImages]', file.name, e);
+      errors.push(file.name);
+    }
+  }
+  // Reset le picker pour permettre de re-sélectionner le même fichier
+  event.target.value = '';
+  if (errors.length) {
+    alert(`⚠ Échec sur ${errors.length} image(s) : ${errors.slice(0,3).join(', ')}`);
   }
   const isNew = state.plays.findIndex(x => x.id === state._editingPlay.id) === -1;
   renderPlayEditor(isNew);
@@ -6062,32 +6144,44 @@ function addCustomConcept() {
   openConceptPicker();
 }
 function savePlay(id, isNew) {
-  const title = document.getElementById('p-title').value.trim();
-  if (!title) return alert('Titre requis');
-  const e = state._editingPlay;
-  // Lire les vidéos depuis le DOM (les rows ont pu être ajoutées/supprimées)
-  _syncPlayEditorVideoInputs();
-  const videos = (e.videos || []).filter(v => v.url && v.url.trim())
-    .map(v => ({
-      url: v.url.trim(),
-      ...(v.label ? { label: v.label.trim() } : {}),
-      orientation: v.orientation === 'vertical' ? 'vertical' : 'horizontal'
-    }));
-  const obj = {
-    id, title,
-    cat: document.getElementById('p-cat').value,
-    videos: videos,
-    videoUrl: videos[0] ? videos[0].url : '',  // legacy : 1re vidéo
-    desc: document.getElementById('p-desc').value.trim(),
-    tags: document.getElementById('p-tags').value.split(',').map(t => t.trim().toLowerCase()).filter(Boolean),
-    images: e.images || [],
-    concepts: e.concepts || [],
-    attachments: e.attachments || [],
-  };
-  if (isNew) state.plays.unshift(obj);
-  else { const i = state.plays.findIndex(x => x.id === id); state.plays[i] = obj; }
-  state._editingPlay = null;
-  persist(); closeModal(); render();
+  try {
+    const title = document.getElementById('p-title').value.trim();
+    if (!title) return alert('Titre requis');
+    const e = state._editingPlay;
+    if (!e) return alert('Session édition perdue. Réouvre le play.');
+    // Lire les vidéos depuis le DOM (les rows ont pu être ajoutées/supprimées)
+    _syncPlayEditorVideoInputs();
+    const videos = (e.videos || []).filter(v => v.url && v.url.trim())
+      .map(v => ({
+        url: v.url.trim(),
+        ...(v.label ? { label: v.label.trim() } : {}),
+        orientation: v.orientation === 'vertical' ? 'vertical' : 'horizontal'
+      }));
+    const obj = {
+      id, title,
+      cat: document.getElementById('p-cat').value,
+      videos: videos,
+      videoUrl: videos[0] ? videos[0].url : '',  // legacy : 1re vidéo
+      desc: document.getElementById('p-desc').value.trim(),
+      tags: document.getElementById('p-tags').value.split(',').map(t => t.trim().toLowerCase()).filter(Boolean),
+      images: e.images || [],
+      concepts: e.concepts || [],
+      attachments: e.attachments || [],
+    };
+    // Backup avant mutation : si persist throw quota, on rollback pour éviter
+    // un état mémoire orphelin (visible mais pas sauvé → perdu au reload)
+    const backup = state.plays.slice();
+    if (isNew) state.plays.unshift(obj);
+    else { const i = state.plays.findIndex(x => x.id === id); state.plays[i] = obj; }
+    state._editingPlay = null;
+    // persist() ne throw plus (save() catch maintenant), donc on continue toujours
+    persist();
+    closeModal();
+    render();
+  } catch (err) {
+    console.error('[savePlay]', err);
+    alert('⚠ Erreur sauvegarde play : ' + (err && err.message ? err.message : err));
+  }
 }
 function deletePlay(id) {
   if (!confirm('Supprimer ce play ?')) return;
@@ -7370,18 +7464,39 @@ function openTransportSummary(matchId) {
 
 // CSS row à utiliser
 async function changeWinSelfie(matchId, event) {
-  const file = event.target.files[0];
+  const file = event.target.files && event.target.files[0];
   if (!file) return;
   const m = state.matches.find(x => x.id === matchId);
-  if (!m) return;
+  if (!m) {
+    event.target.value = '';
+    return alert('Match introuvable');
+  }
+  // Sauvegarde l'ancienne valeur pour rollback en cas d'échec quota
+  const previousSelfie = m.winSelfie;
   try {
-    // Compression plus large pour garder de la qualité photo
-    const compressed = await compressImage(file, 1200, 0.85);
+    // Compression conservative pour selfie aussi : maxDim 1000 + quality 0.78
+    // → ~120-180 KB. Avant : 1200/0.85 produisait ~250-350 KB et avec 10+
+    // matches cumulés, ça bouffait 3 MB juste pour les selfies.
+    const compressed = await compressImage(file, 1000, 0.78);
     m.winSelfie = compressed;
     persist();
+    // Vérif post-persist : si save() a silencieusement raté (quota),
+    // localStorage n'a pas la nouvelle photo → on rollback en mémoire
+    // pour éviter l'incohérence "visible maintenant, perdue au reload"
+    const reloaded = load(K.matches, []);
+    const savedMatch = (reloaded || []).find(x => x.id === matchId);
+    if (savedMatch && savedMatch.winSelfie !== compressed) {
+      m.winSelfie = previousSelfie;
+      render();
+      return; // l'alerte quota a déjà été émise via pb:storage_full
+    }
     render();
   } catch (e) {
-    alert('Erreur : ' + e.message);
+    console.error('[changeWinSelfie]', e);
+    m.winSelfie = previousSelfie; // rollback
+    alert('⚠ Erreur sauvegarde selfie : ' + (e && e.message ? e.message : e));
+  } finally {
+    event.target.value = ''; // permet de re-uploader le même fichier
   }
 }
 
