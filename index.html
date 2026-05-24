@@ -2650,6 +2650,7 @@ function _dbMatchToClient(r) {
     publicLive: r.public_live,
     publicLiveStartedAt: r.public_live_started_at ? Date.parse(r.public_live_started_at) : null,
     lastLiveUpdate: r.last_live_update ? Date.parse(r.last_live_update) : null,
+    winSelfie: r.win_selfie_url || '',
     positives: [], negatives: [], playerStats: {}
   };
 }
@@ -2749,29 +2750,42 @@ const ENTITIES = [
   },
   {
     key: 'matches', table: 'matches', pk: 'id', realtime: true, auth: 'anon',
-    dump: (state) => Object.fromEntries((state.matches || []).map(m => [m.id, {
-      id: m.id, date: m.date, opponent: m.opponent || '', home: !!m.home,
-      score_us: m.scoreUs | 0, score_opp: m.scoreOpp | 0,
-      quarters: m.quarters || {},
-      notes: m.notes || null, video_url: m.videoUrl || null,
-      is_live: !!m.isLive, live_stream_url: m.liveStreamUrl || null,
-      public_live: !!m.publicLive,
-      public_live_started_at: m.publicLiveStartedAt ? new Date(m.publicLiveStartedAt).toISOString() : null,
-      last_live_update: m.lastLiveUpdate ? new Date(m.lastLiveUpdate).toISOString() : null
-    }])),
+    dump: (state) => Object.fromEntries((state.matches || []).map(m => {
+      // win_selfie_url : on ne pousse que les URLs Storage (http/https).
+      // Les anciens selfies base64 (data:image/...) restent en local et seront
+      // migrés via migrateLocalSelfiesToStorage() au prochain boot coach.
+      const winSelfieUrl = (typeof m.winSelfie === 'string' && /^https?:\/\//i.test(m.winSelfie))
+        ? m.winSelfie : null;
+      return [m.id, {
+        id: m.id, date: m.date, opponent: m.opponent || '', home: !!m.home,
+        score_us: m.scoreUs | 0, score_opp: m.scoreOpp | 0,
+        quarters: m.quarters || {},
+        notes: m.notes || null, video_url: m.videoUrl || null,
+        is_live: !!m.isLive, live_stream_url: m.liveStreamUrl || null,
+        public_live: !!m.publicLive,
+        public_live_started_at: m.publicLiveStartedAt ? new Date(m.publicLiveStartedAt).toISOString() : null,
+        last_live_update: m.lastLiveUpdate ? new Date(m.lastLiveUpdate).toISOString() : null,
+        win_selfie_url: winSelfieUrl
+      }];
+    })),
     apply: (state, rows) => {
-      // Préserve : extras locaux (winSelfie, positives/negatives, playerStats,
-      // playerReviews) ET les matches locaux pending push (race anti-wipe).
-      // winSelfie en particulier n'est PAS dans le schema Supabase → vit
-      // uniquement en local + localStorage, doit jamais être wipé par un
-      // realtime sync d'un autre browser.
+      // Préserve : extras locaux (positives/negatives, playerStats, playerReviews,
+      // transport, roster, onCourt, playerFeedback) ET les matches locaux pending
+      // push (race anti-wipe).
+      // winSelfie : depuis 2026-05-24, vit dans matches.win_selfie_url (Storage
+      // bucket match-selfies). Remote URL = source de vérité cross-device. On
+      // garde le base64 legacy local UNIQUEMENT si remote est null, le temps
+      // que migrateLocalSelfiesToStorage() le pousse en Storage.
       const localList = state.matches || [];
       const byId = Object.fromEntries(localList.map(m => [m.id, m]));
       const remoteIds = new Set(rows.map(r => r.id));
       const fromRemote = rows.map(r => {
         const local = byId[r.id] || {};
+        const localSelfie = typeof local.winSelfie === 'string' ? local.winSelfie : '';
+        const isLocalLegacyBase64 = localSelfie.startsWith('data:');
+        const winSelfie = r.win_selfie_url || (isLocalLegacyBase64 ? localSelfie : '');
         return {
-          ...local, // préserve playerStats/positives/negatives/winSelfie/playerReviews
+          ...local, // préserve playerStats/positives/negatives/playerReviews/transport
           id: r.id, date: r.date, opponent: r.opponent, home: r.home,
           scoreUs: r.score_us, scoreOpp: r.score_opp,
           quarters: r.quarters || {},
@@ -2780,6 +2794,7 @@ const ENTITIES = [
           publicLive: r.public_live,
           publicLiveStartedAt: r.public_live_started_at ? Date.parse(r.public_live_started_at) : null,
           lastLiveUpdate: r.last_live_update ? Date.parse(r.last_live_update) : null,
+          winSelfie,
           positives: local.positives || [], negatives: local.negatives || [],
           playerStats: local.playerStats || {}
         };
@@ -7496,7 +7511,10 @@ function openTransportSummary(matchId) {
   `);
 }
 
-// CSS row à utiliser
+// Upload du selfie victoire dans le bucket Supabase Storage 'match-selfies'.
+// Avant : on stockait du base64 inline (~150 KB) en localStorage → quota 5 MB
+// silencieux + jamais synchronisé cross-device. Maintenant : URL dans
+// matches.win_selfie_url, sync via realtime (cf PR #22 pour plays.images).
 async function changeWinSelfie(matchId, event) {
   const file = event.target.files && event.target.files[0];
   if (!file) return;
@@ -7505,30 +7523,33 @@ async function changeWinSelfie(matchId, event) {
     event.target.value = '';
     return alert('Match introuvable');
   }
-  // Sauvegarde l'ancienne valeur pour rollback en cas d'échec quota
+  if (!window.sb || !window.Pb || !window.Pb.online) {
+    event.target.value = '';
+    return alert('⚠ Hors ligne. Reconnecte-toi pour ajouter une photo.');
+  }
   const previousSelfie = m.winSelfie;
   try {
-    // Compression conservative pour selfie aussi : maxDim 1000 + quality 0.78
-    // → ~120-180 KB. Avant : 1200/0.85 produisait ~250-350 KB et avec 10+
-    // matches cumulés, ça bouffait 3 MB juste pour les selfies.
-    const compressed = await compressImage(file, 1000, 0.78);
-    m.winSelfie = compressed;
+    // Compression conservative : maxDim 1000 + quality 0.78 → ~120-180 KB en Blob.
+    const blob = await compressImageBlob(file, 1000, 0.78);
+    const path = `${matchId}-${Date.now()}.jpg`;
+    const { error: upErr } = await sb.storage.from('match-selfies').upload(path, blob, {
+      contentType: 'image/jpeg', cacheControl: '31536000', upsert: false
+    });
+    if (upErr) throw upErr;
+    const { data: pub } = sb.storage.from('match-selfies').getPublicUrl(path);
+    const url = pub && pub.publicUrl;
+    if (!url) throw new Error('publicUrl manquante');
+    // Best-effort : si l'ancienne valeur était déjà une URL bucket, on supprime
+    // l'orphelin côté serveur pour ne pas accumuler. Swallow erreur.
+    const oldKey = _extractMatchSelfieKey(previousSelfie);
+    if (oldKey) sb.storage.from('match-selfies').remove([oldKey]).catch(() => {});
+    m.winSelfie = url;
     persist();
-    // Vérif post-persist : si save() a silencieusement raté (quota),
-    // localStorage n'a pas la nouvelle photo → on rollback en mémoire
-    // pour éviter l'incohérence "visible maintenant, perdue au reload"
-    const reloaded = load(K.matches, []);
-    const savedMatch = (reloaded || []).find(x => x.id === matchId);
-    if (savedMatch && savedMatch.winSelfie !== compressed) {
-      m.winSelfie = previousSelfie;
-      render();
-      return; // l'alerte quota a déjà été émise via pb:storage_full
-    }
     render();
   } catch (e) {
     console.error('[changeWinSelfie]', e);
-    m.winSelfie = previousSelfie; // rollback
-    alert('⚠ Erreur sauvegarde selfie : ' + (e && e.message ? e.message : e));
+    m.winSelfie = previousSelfie; // rollback mémoire si upload échoue
+    alert('⚠ Erreur upload selfie : ' + (e && e.message ? e.message : e));
   } finally {
     event.target.value = ''; // permet de re-uploader le même fichier
   }
@@ -7538,9 +7559,70 @@ function removeWinSelfie(matchId) {
   const m = state.matches.find(x => x.id === matchId);
   if (!m) return;
   if (!confirm('Retirer la photo de victoire ?')) return;
+  const previous = m.winSelfie;
   delete m.winSelfie;
   persist();
   render();
+  // Best-effort : delete du fichier serveur. Ne bloque pas l'UI, log si KO.
+  const key = _extractMatchSelfieKey(previous);
+  if (key && window.sb) {
+    sb.storage.from('match-selfies').remove([key]).catch(e => {
+      console.warn('[removeWinSelfie] storage cleanup:', e && e.message ? e.message : e);
+    });
+  }
+}
+
+// Extrait la clé fichier d'une URL publique du bucket match-selfies, pour
+// pouvoir appeler storage.remove(). Renvoie null si l'URL n'est pas du bucket
+// (ex: ancien base64 data:, URL externe, undefined).
+function _extractMatchSelfieKey(url) {
+  if (typeof url !== 'string' || !url.includes('/match-selfies/')) return null;
+  const m = url.match(/\/match-selfies\/(.+?)(?:\?|$)/);
+  return m && m[1] ? decodeURIComponent(m[1]) : null;
+}
+
+// Migration one-shot des selfies legacy base64 (vivant en localStorage) vers
+// le bucket Storage. Gate par flag pb8_selfie_migration_done pour pas refaire
+// à chaque reload. Coach uniquement (les joueuses ne voient/éditent pas les
+// selfies victoire). Si une upload échoue, on log et on continue : le flag
+// est posé même en cas d'échec partiel pour pas spammer ; pour retry,
+// supprimer la clé localStorage manuellement.
+async function migrateLocalSelfiesToStorage() {
+  if (!window.sb || !window.Pb || !window.Pb.online) return;
+  if (!state.auth || state.auth.role !== 'coach') return;
+  if (localStorage.getItem('pb8_selfie_migration_done') === '1') return;
+  const candidates = (state.matches || []).filter(m =>
+    typeof m.winSelfie === 'string' && m.winSelfie.startsWith('data:')
+  );
+  if (!candidates.length) {
+    localStorage.setItem('pb8_selfie_migration_done', '1');
+    return;
+  }
+  console.info(`[selfie-migration] ${candidates.length} selfie(s) legacy à migrer vers Storage`);
+  let migrated = 0;
+  for (const m of candidates) {
+    try {
+      const blob = await (await fetch(m.winSelfie)).blob();
+      const path = `${m.id}-${Date.now()}.jpg`;
+      const { error: upErr } = await sb.storage.from('match-selfies').upload(path, blob, {
+        contentType: 'image/jpeg', cacheControl: '31536000', upsert: false
+      });
+      if (upErr) throw upErr;
+      const { data: pub } = sb.storage.from('match-selfies').getPublicUrl(path);
+      const url = pub && pub.publicUrl;
+      if (!url) throw new Error('publicUrl manquante');
+      m.winSelfie = url;
+      migrated++;
+    } catch (e) {
+      console.warn('[selfie-migration] match', m.id, ':', e && e.message ? e.message : e);
+    }
+  }
+  if (migrated > 0) {
+    persist(); // déclenche PbSync.schedule → push win_selfie_url en DB
+    render();
+    console.info(`[selfie-migration] ${migrated}/${candidates.length} selfie(s) migré(s)`);
+  }
+  localStorage.setItem('pb8_selfie_migration_done', '1');
 }
 
 // Visualiseur d'image plein écran pour le selfie
@@ -15666,6 +15748,12 @@ function _initPlayersSync() {
           document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'hidden') flush();
           });
+        }
+        // One-shot : migration des selfies legacy base64 (localStorage) vers
+        // le bucket Storage. Coach uniquement, gate localStorage idempotente.
+        // Délai 500ms pour laisser le render initial respirer.
+        if (typeof migrateLocalSelfiesToStorage === 'function') {
+          setTimeout(() => { migrateLocalSelfiesToStorage().catch(()=>{}); }, 500);
         }
       });
     });
