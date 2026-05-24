@@ -2559,16 +2559,6 @@ window.PbStore = {
     return data || [];
   },
 
-  // ---- OFFSEASON LOGS (perso, L2 only) ----
-  async upsertOffseasonLog(playerId, isoWeek, exerciseId, { done, value }) {
-    if (!Pb.user) throw new Error('Authentification requise');
-    const { error } = await sb.from('offseason_logs').upsert({
-      player_id: playerId, iso_week: isoWeek, exercise_id: exerciseId,
-      done: !!done, value: value ?? null, logged_at: new Date().toISOString()
-    });
-    if (error) throw error;
-  },
-
   // ---- LIVE REALTIME (spectateur #public) ----
   subscribeLive(matchId, onUpdate) {
     if (Pb.liveChannel) { sb.removeChannel(Pb.liveChannel); Pb.liveChannel = null; }
@@ -2982,6 +2972,46 @@ const ENTITIES = [
       const r = rows.find(x => x.id === 1);
       if (r) state.offseason = { startDate: r.start_date || '', endDate: r.end_date || '',
         title: r.title || '', exercises: r.exercises || [] };
+    }
+  },
+  {
+    // Participation joueuse au programme intersaison. 1 row par
+    // (player_id, iso_week, exercise_id). Coach lit le dashboard, joueuse
+    // toggle ses exercices. Avant 2026-05-24, vivait uniquement en
+    // localStorage (pb8_offseason_logs) → perdu à chaque purge Safari iOS
+    // et invisible cross-device. Cf migration 20260524_003.
+    key: 'offseasonLogs', table: 'offseason_logs',
+    pk: ['player_id', 'iso_week', 'exercise_id'], realtime: true, auth: 'anon',
+    dump: (state) => {
+      const out = {};
+      const logs = state.offseasonLogs || {};
+      Object.entries(logs).forEach(([pid, byWeek]) => {
+        Object.entries(byWeek || {}).forEach(([weekKey, byEx]) => {
+          Object.entries(byEx || {}).forEach(([exId, entry]) => {
+            if (entry == null) return;
+            out[`${pid}|${weekKey}|${exId}`] = {
+              player_id: pid, iso_week: weekKey, exercise_id: exId,
+              done: !!entry.done,
+              value: typeof entry.value === 'number' ? entry.value : null,
+              logged_at: entry.at ? new Date(entry.at).toISOString() : null
+            };
+          });
+        });
+      });
+      return out;
+    },
+    apply: (state, rows) => {
+      const next = {};
+      rows.forEach(r => {
+        next[r.player_id] = next[r.player_id] || {};
+        next[r.player_id][r.iso_week] = next[r.player_id][r.iso_week] || {};
+        next[r.player_id][r.iso_week][r.exercise_id] = {
+          done: !!r.done,
+          value: r.value,
+          at: r.logged_at ? Date.parse(r.logged_at) : null
+        };
+      });
+      state.offseasonLogs = next;
     }
   },
   {
