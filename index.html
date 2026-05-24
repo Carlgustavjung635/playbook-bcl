@@ -2641,6 +2641,9 @@ function _dbMatchToClient(r) {
     publicLiveStartedAt: r.public_live_started_at ? Date.parse(r.public_live_started_at) : null,
     lastLiveUpdate: r.last_live_update ? Date.parse(r.last_live_update) : null,
     winSelfie: r.win_selfie_url || '',
+    transport: r.transport || {},
+    roster: r.roster || {},
+    onCourt: Array.isArray(r.on_court) ? r.on_court : [],
     positives: [], negatives: [], playerStats: {}
   };
 }
@@ -2755,17 +2758,24 @@ const ENTITIES = [
         public_live: !!m.publicLive,
         public_live_started_at: m.publicLiveStartedAt ? new Date(m.publicLiveStartedAt).toISOString() : null,
         last_live_update: m.lastLiveUpdate ? new Date(m.lastLiveUpdate).toISOString() : null,
-        win_selfie_url: winSelfieUrl
+        win_selfie_url: winSelfieUrl,
+        // Extras coach : covoiturage, feuille de match, rotation live. Avant
+        // 2026-05-24 vivaient en localStorage seul (m.transport/roster/onCourt
+        // jamais sérialisés). Cf migration 20260524_004.
+        transport: m.transport || {},
+        roster: m.roster || {},
+        on_court: Array.isArray(m.onCourt) ? m.onCourt : []
       }];
     })),
     apply: (state, rows) => {
       // Préserve : extras locaux (positives/negatives, playerStats, playerReviews,
-      // transport, roster, onCourt, playerFeedback) ET les matches locaux pending
-      // push (race anti-wipe).
+      // playerFeedback) ET les matches locaux pending push (race anti-wipe).
       // winSelfie : depuis 2026-05-24, vit dans matches.win_selfie_url (Storage
       // bucket match-selfies). Remote URL = source de vérité cross-device. On
       // garde le base64 legacy local UNIQUEMENT si remote est null, le temps
       // que migrateLocalSelfiesToStorage() le pousse en Storage.
+      // transport / roster / onCourt : depuis 2026-05-24, synchronisés via
+      // matches.transport / roster / on_court (jsonb). Remote = source vérité.
       const localList = state.matches || [];
       const byId = Object.fromEntries(localList.map(m => [m.id, m]));
       const remoteIds = new Set(rows.map(r => r.id));
@@ -2775,7 +2785,7 @@ const ENTITIES = [
         const isLocalLegacyBase64 = localSelfie.startsWith('data:');
         const winSelfie = r.win_selfie_url || (isLocalLegacyBase64 ? localSelfie : '');
         return {
-          ...local, // préserve playerStats/positives/negatives/playerReviews/transport
+          ...local, // préserve playerStats/positives/negatives/playerReviews
           id: r.id, date: r.date, opponent: r.opponent, home: r.home,
           scoreUs: r.score_us, scoreOpp: r.score_opp,
           quarters: r.quarters || {},
@@ -2785,6 +2795,9 @@ const ENTITIES = [
           publicLiveStartedAt: r.public_live_started_at ? Date.parse(r.public_live_started_at) : null,
           lastLiveUpdate: r.last_live_update ? Date.parse(r.last_live_update) : null,
           winSelfie,
+          transport: r.transport || {},
+          roster: r.roster || {},
+          onCourt: Array.isArray(r.on_court) ? r.on_court : [],
           positives: local.positives || [], negatives: local.negatives || [],
           playerStats: local.playerStats || {}
         };
