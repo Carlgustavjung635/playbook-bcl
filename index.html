@@ -4848,6 +4848,328 @@ function confirmArchiveSeason(id) {
   render();
 }
 
+// ============================================================
+// SAISON · ÉDITION EFFECTIF
+// ============================================================
+// Modal dédiée à la gestion de l'effectif d'une saison (draft ou active) :
+// - Liste des joueuses actuelles (link sans leftAt)
+// - Bouton "+ Ajouter joueuse" : sous-modal pour cocher des joueuses du
+//   roster global non encore présentes
+// - Bouton "Créer une nouvelle joueuse" : crée la joueuse globalement ET
+//   l'ajoute à la saison courante
+// - Bouton "Retirer" sur chaque joueuse : met leftAt = today (PAS de
+//   delete : on conserve l'historique de présence saison)
+// - Toggle "Afficher historique" : montre aussi les joueuses parties
+// Lecture seule si la saison est archivée (isCurrentSeasonReadOnly).
+function openSeasonRosterEditor() {
+  const seasonId = state.currentSeasonId;
+  const cur = getCurrentSeason();
+  const readOnly = isCurrentSeasonReadOnly();
+  const showHistory = !!state._seasonRosterShowHistory;
+
+  if (!seasonId) {
+    openModal(`
+      <div class="modal-header">
+        <div class="modal-title">Effectif</div>
+        <button class="modal-close" onclick="closeModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="empty">
+          <div class="empty-icon">📅</div>
+          <div class="empty-title">Aucune saison sélectionnée</div>
+          <div class="empty-desc">Crée ou sélectionne une saison via le badge 📅 dans la topbar.</div>
+        </div>
+      </div>
+    `);
+    return;
+  }
+
+  // Tous les links de la saison (avec leftAt éventuel)
+  const allLinks = (state.seasonPlayers || []).filter(sp => sp.seasonId === seasonId);
+  const activeLinks = allLinks.filter(sp => !sp.leftAt);
+  const leftLinks = allLinks.filter(sp => sp.leftAt);
+
+  // Joueuses présentes (tri par n°)
+  const active = activeLinks
+    .map(link => ({ link, player: (state.players || []).find(p => p.id === link.playerId) }))
+    .filter(x => x.player)
+    .sort((a, b) => (a.player.num || 0) - (b.player.num || 0));
+
+  const left = leftLinks
+    .map(link => ({ link, player: (state.players || []).find(p => p.id === link.playerId) }))
+    .filter(x => x.player)
+    .sort((a, b) => (b.link.leftAt || '').localeCompare(a.link.leftAt || ''));
+
+  const seasonLabel = cur ? cur.name : seasonId;
+  const statusTag = cur && cur.status === 'draft'
+    ? '<span style="font-size:9px;font-family:\'JetBrains Mono\';color:#ff6b00;background:rgba(255,107,0,0.10);padding:2px 6px;border-radius:4px;text-transform:uppercase;letter-spacing:0.06em">Brouillon</span>'
+    : cur && cur.status === 'archived'
+      ? '<span style="font-size:9px;font-family:\'JetBrains Mono\';color:#888;background:rgba(128,128,128,0.10);padding:2px 6px;border-radius:4px;text-transform:uppercase;letter-spacing:0.06em">Archivée</span>'
+      : '<span style="font-size:9px;font-family:\'JetBrains Mono\';color:#22c55e;background:rgba(34,197,94,0.10);padding:2px 6px;border-radius:4px;text-transform:uppercase;letter-spacing:0.06em">● Active</span>';
+
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow-muted" style="margin-bottom:4px">Effectif · ${esc(seasonLabel)}</div>
+        <div class="modal-title">👥 ${active.length} joueuse${active.length>1?'s':''}</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        ${statusTag}
+        ${readOnly ? '<span style="font-size:10px;color:var(--ink-3);font-family:\'JetBrains Mono\';text-transform:uppercase">🔒 Lecture seule</span>' : ''}
+      </div>
+
+      ${readOnly ? '' : `
+        <button class="btn btn-primary btn-block mb-2" onclick="openAddPlayersToSeasonModal()">+ Ajouter joueuse à la saison</button>
+        <button class="btn btn-secondary btn-block mb-3" onclick="openCreateNewPlayerForSeason()">+ Créer une nouvelle joueuse</button>
+      `}
+
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;padding:8px 10px;background:var(--bg-3);border-radius:6px;margin-bottom:10px">
+        <input type="checkbox" ${showHistory ? 'checked' : ''} onchange="toggleSeasonRosterHistory()">
+        <span>Afficher l'historique (joueuses parties)</span>
+      </label>
+
+      ${active.length === 0 ? `
+        <div class="empty" style="padding:18px">
+          <div class="empty-icon">○</div>
+          <div class="empty-title">Aucune joueuse dans cet effectif</div>
+          ${readOnly ? '' : '<div class="empty-desc">Utilise les boutons ci-dessus pour en ajouter</div>'}
+        </div>
+      ` : `
+        <div style="display:flex;flex-direction:column;gap:6px">
+          ${active.map(({ link, player: p }) => `
+            <div style="display:flex;align-items:center;gap:8px;padding:10px;background:var(--bg-1);border-radius:8px;border:1px solid var(--border)">
+              ${p.photo ? `<img src="${p.photo}" style="width:36px;height:36px;border-radius:50%;object-fit:cover;border:2px solid var(--orange)">` : `<div style="width:36px;height:36px;border-radius:50%;background:var(--bg-3);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:14px;color:var(--orange);border:2px solid var(--border)">${esc((p.name||'?').charAt(0).toUpperCase())}</div>`}
+              <div style="font-family:'Anton';font-size:16px;color:var(--orange);min-width:36px">#${p.num}</div>
+              <div style="flex:1;font-family:'Anton';text-transform:uppercase;font-size:13px;min-width:0">${esc(p.name)}</div>
+              ${readOnly ? '' : `<button class="btn btn-ghost" style="font-size:10px;color:var(--red);padding:6px 8px" onclick="removePlayerFromSeason('${esc(p.id)}')" title="Retirer de la saison">↗ Partir</button>`}
+            </div>
+          `).join('')}
+        </div>
+      `}
+
+      ${showHistory && left.length > 0 ? `
+        <div style="margin-top:18px">
+          <div class="eyebrow-muted" style="margin-bottom:8px">Historique · ${left.length} partie${left.length>1?'s':''}</div>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            ${left.map(({ link, player: p }) => `
+              <div style="display:flex;align-items:center;gap:8px;padding:10px;background:var(--bg-1);border-radius:8px;border:1px solid var(--border);opacity:0.6">
+                ${p.photo ? `<img src="${p.photo}" style="width:32px;height:32px;border-radius:50%;object-fit:cover;border:1px solid var(--border);filter:grayscale(50%)">` : `<div style="width:32px;height:32px;border-radius:50%;background:var(--bg-3);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:13px;color:var(--ink-3);border:1px solid var(--border)">${esc((p.name||'?').charAt(0).toUpperCase())}</div>`}
+                <div style="font-family:'Anton';font-size:14px;color:var(--ink-3);min-width:32px">#${p.num}</div>
+                <div style="flex:1;font-family:'Anton';text-transform:uppercase;font-size:12px;color:var(--ink-3);min-width:0">${esc(p.name)}</div>
+                <span style="font-size:9px;background:var(--bg-3);color:var(--ink-3);padding:3px 6px;border-radius:4px;font-family:'JetBrains Mono';text-transform:uppercase">Partie le ${esc(formatLeftDate(link.leftAt))}</span>
+                ${readOnly ? '' : `<button class="btn btn-ghost" style="font-size:10px;color:var(--orange);padding:6px 8px" onclick="restorePlayerInSeason('${esc(p.id)}')" title="Réintégrer">↺</button>`}
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      ` : ''}
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary btn-block" onclick="closeModal();setTimeout(()=>managePlayers(),50)">Gérer PIN / photos (roster global) →</button>
+      <button class="btn btn-primary btn-block" onclick="closeModal();render()">Terminé</button>
+    </div>
+  `);
+}
+
+function toggleSeasonRosterHistory() {
+  state._seasonRosterShowHistory = !state._seasonRosterShowHistory;
+  openSeasonRosterEditor();
+}
+
+// Format court "DD/MM/YYYY" depuis un ISO date "YYYY-MM-DD"
+function formatLeftDate(iso) {
+  if (!iso) return '';
+  const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return iso;
+  return m[3] + '/' + m[2] + '/' + m[1];
+}
+
+// Sous-modal : liste des joueuses du roster global PAS dans la saison
+// courante (ou avec leftAt set). Coche celles à ajouter.
+function openAddPlayersToSeasonModal() {
+  const seasonId = state.currentSeasonId;
+  if (!seasonId) return;
+  if (isCurrentSeasonReadOnly()) return;
+
+  // IDs présents ET non partis dans la saison
+  const presentIds = new Set(
+    (state.seasonPlayers || [])
+      .filter(sp => sp.seasonId === seasonId && !sp.leftAt)
+      .map(sp => sp.playerId)
+  );
+
+  // Roster global moins celles déjà dans la saison (mais on autorise à
+  // re-ajouter celles parties : leur link existe avec leftAt)
+  const candidates = (state.players || [])
+    .filter(p => !presentIds.has(p.id))
+    .sort((a, b) => (a.num || 0) - (b.num || 0));
+
+  closeModal();
+  setTimeout(() => {
+    openModal(`
+      <div class="modal-header">
+        <div class="modal-title">+ Ajouter à la saison</div>
+        <button class="modal-close" onclick="closeModal();setTimeout(()=>openSeasonRosterEditor(),50)">✕</button>
+      </div>
+      <div class="modal-body">
+        <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:14px;font-size:11px;color:var(--ink-2);line-height:1.5">
+          Coche les joueuses à intégrer à la saison courante. Tu peux aussi <strong>créer une nouvelle joueuse</strong> depuis l'écran précédent.
+        </div>
+        ${candidates.length === 0 ? `
+          <div class="empty" style="padding:18px">
+            <div class="empty-icon">✓</div>
+            <div class="empty-title">Toutes les joueuses sont déjà dans la saison</div>
+            <div class="empty-desc">Crée une nouvelle joueuse depuis l'écran précédent</div>
+          </div>
+        ` : `
+          <div style="display:flex;flex-direction:column;gap:6px">
+            ${candidates.map(p => {
+              // Si elle a déjà un link parti, on l'indique
+              const oldLink = (state.seasonPlayers || []).find(sp => sp.seasonId === seasonId && sp.playerId === p.id && sp.leftAt);
+              return `
+                <label style="display:flex;align-items:center;gap:10px;padding:10px;background:var(--bg-1);border-radius:8px;border:1px solid var(--border);cursor:pointer">
+                  <input type="checkbox" class="sp-add-cb" data-pid="${esc(p.id)}" style="width:18px;height:18px">
+                  <div style="font-family:'Anton';font-size:16px;color:var(--orange);min-width:32px">#${p.num}</div>
+                  <div style="flex:1;font-family:'Anton';text-transform:uppercase;font-size:13px">${esc(p.name)}</div>
+                  ${oldLink ? `<span style="font-size:9px;color:var(--orange);font-family:'JetBrains Mono';text-transform:uppercase">↺ Réintégration</span>` : ''}
+                </label>
+              `;
+            }).join('')}
+          </div>
+        `}
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-block" onclick="closeModal();setTimeout(()=>openSeasonRosterEditor(),50)">Annuler</button>
+        ${candidates.length === 0 ? '' : '<button class="btn btn-primary btn-block" onclick="confirmAddSelectedPlayersToSeason()">Ajouter à la saison</button>'}
+      </div>
+    `);
+  }, 50);
+}
+
+function confirmAddSelectedPlayersToSeason() {
+  const seasonId = state.currentSeasonId;
+  if (!seasonId) return;
+  if (isCurrentSeasonReadOnly()) return;
+  const checks = document.querySelectorAll('.sp-add-cb');
+  const ids = [];
+  checks.forEach(cb => { if (cb.checked) ids.push(cb.getAttribute('data-pid')); });
+  if (ids.length === 0) { alert('Aucune joueuse sélectionnée.'); return; }
+  const today = isoDate(new Date());
+  state.seasonPlayers = state.seasonPlayers || [];
+  ids.forEach(pid => {
+    // Si link existant (cas réintégration) : on resette leftAt et on bump joinedAt
+    const existing = state.seasonPlayers.find(sp => sp.seasonId === seasonId && sp.playerId === pid);
+    if (existing) {
+      existing.leftAt = '';
+      if (!existing.joinedAt) existing.joinedAt = today;
+    } else {
+      state.seasonPlayers.push({ seasonId, playerId: pid, joinedAt: today, leftAt: '', role: '' });
+    }
+  });
+  persist();
+  closeModal();
+  setTimeout(() => {
+    alert(`✓ ${ids.length} joueuse${ids.length>1?'s':''} ajoutée${ids.length>1?'s':''} à la saison.`);
+    openSeasonRosterEditor();
+  }, 50);
+}
+
+// Création d'une nouvelle joueuse globale + ajout à la saison courante.
+// Réutilise le pattern de managePlayers / addNewPlayer, mais en plus
+// court (juste prénom + n°). PIN par défaut 0000 — modifiable ensuite via
+// "Gérer PIN / photos".
+function openCreateNewPlayerForSeason() {
+  if (isCurrentSeasonReadOnly()) return;
+  closeModal();
+  setTimeout(() => {
+    openModal(`
+      <div class="modal-header">
+        <div class="modal-title">+ Nouvelle joueuse</div>
+        <button class="modal-close" onclick="closeModal();setTimeout(()=>openSeasonRosterEditor(),50)">✕</button>
+      </div>
+      <div class="modal-body">
+        <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:14px;font-size:11px;color:var(--ink-2);line-height:1.5">
+          La joueuse sera ajoutée au roster global ET à la saison courante. Le PIN sera <strong>0000</strong> par défaut — modifie-le ensuite via "Gérer PIN / photos".
+        </div>
+        <div class="fld-row">
+          <div class="fld">
+            <label class="fld-label">Prénom / Nom</label>
+            <input id="snp-name" placeholder="Prénom" autocomplete="off" onkeydown="if(event.key==='Enter')createNewPlayerForSeason()">
+          </div>
+          <div class="fld" style="max-width:90px">
+            <label class="fld-label">N°</label>
+            <input id="snp-num" type="number" min="0" max="99" placeholder="0" onkeydown="if(event.key==='Enter')createNewPlayerForSeason()">
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-block" onclick="closeModal();setTimeout(()=>openSeasonRosterEditor(),50)">Annuler</button>
+        <button class="btn btn-primary btn-block" onclick="createNewPlayerForSeason()">Créer + Ajouter</button>
+      </div>
+    `);
+    setTimeout(() => document.getElementById('snp-name')?.focus(), 100);
+  }, 50);
+}
+
+function createNewPlayerForSeason() {
+  const seasonId = state.currentSeasonId;
+  if (!seasonId) return;
+  if (isCurrentSeasonReadOnly()) return;
+  const name = (document.getElementById('snp-name').value || '').trim();
+  const num = parseInt(document.getElementById('snp-num').value) || 0;
+  if (!name) { alert('Le prénom est requis.'); return; }
+  const newP = { id: uid(), name, num, pin: '0000' };
+  state.players = state.players || [];
+  state.players.push(newP);
+  // Push roster global (PbStore.upsertPlayer = pattern existant)
+  if (window.PbStore) PbStore.upsertPlayer(newP).catch(e => console.warn('[sync] upsertPlayer:', e.message));
+  // Ajoute à la saison
+  state.seasonPlayers = state.seasonPlayers || [];
+  state.seasonPlayers.push({
+    seasonId, playerId: newP.id,
+    joinedAt: isoDate(new Date()), leftAt: '', role: ''
+  });
+  persist();
+  closeModal();
+  setTimeout(() => {
+    alert(`✓ ${name} créée et ajoutée à la saison.`);
+    openSeasonRosterEditor();
+  }, 50);
+}
+
+// Retire une joueuse de la saison courante (soft = leftAt set). Le roster
+// global n'est PAS touché : la joueuse existe toujours pour les saisons
+// futures / passées.
+function removePlayerFromSeason(playerId) {
+  const seasonId = state.currentSeasonId;
+  if (!seasonId) return;
+  if (isCurrentSeasonReadOnly()) return;
+  const p = (state.players || []).find(x => x.id === playerId);
+  if (!p) return;
+  if (!confirm(`Retirer ${p.name} de la saison ?\n\nLa joueuse reste dans le roster global et son historique est conservé. Tu pourras la réintégrer plus tard.`)) return;
+  const link = (state.seasonPlayers || []).find(sp => sp.seasonId === seasonId && sp.playerId === playerId);
+  if (!link) return;
+  link.leftAt = isoDate(new Date());
+  persist();
+  openSeasonRosterEditor();
+}
+
+// Réintégration : la joueuse était partie (leftAt set), on remet à null.
+function restorePlayerInSeason(playerId) {
+  const seasonId = state.currentSeasonId;
+  if (!seasonId) return;
+  if (isCurrentSeasonReadOnly()) return;
+  const link = (state.seasonPlayers || []).find(sp => sp.seasonId === seasonId && sp.playerId === playerId);
+  if (!link) return;
+  link.leftAt = '';
+  if (!link.joinedAt) link.joinedAt = isoDate(new Date());
+  persist();
+  openSeasonRosterEditor();
+}
+
 function openSettings() {
   const role = state.auth ? state.auth.role : null;
   const player = currentPlayer();
@@ -4874,8 +5196,11 @@ function openSettings() {
       ` : ''}
 
       ${role === 'coach' ? `
+        ${_seasonsLoaded() ? `<button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openSeasonRosterEditor(),50)">
+          👥 Effectif de la saison
+        </button>` : ''}
         <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>managePlayers(),50)">
-          👥 Gérer les joueuses et leurs PIN
+          👤 Gérer les joueuses (PIN, photos…)
         </button>
         <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openSeasonsModal(),50)">
           📅 Gérer les saisons
@@ -5430,16 +5755,31 @@ function heroCard(ev) {
   `;
 }
 
-function playTile(p) {
+function playTile(p, opts) {
+  opts = opts || {};
   const images = p.images || [];
   const hasGallery = images.length > 0;
   const v = p.videoUrl ? parseVideo(p.videoUrl) : null;
   const hasVideo = !!v;
   const previewSrc = hasGallery ? images[0] : (v && v.thumb ? v.thumb : null);
   const concepts = p.concepts || [];
+
+  // SAISON : surcouches optionnelles
+  // opts.seasonActive : true/false/undefined — affiche un badge "Inactif" si false
+  // opts.seasonToggleBtn : HTML pour le bouton toggle (rendu après le body)
+  // opts.seasonOrphan : true → badge "Pas dans cette saison"
+  // opts.dimmed : true → opacity réduite (play inactif sur la saison)
+  const dim = !!opts.dimmed;
+  const inactiveBadge = (opts.seasonActive === false)
+    ? '<div class="v-tile-badge" style="background:rgba(128,128,128,0.85);color:white">⚪ Inactif</div>'
+    : '';
+  const orphanBadge = opts.seasonOrphan
+    ? '<div class="v-tile-badge" style="background:rgba(255,107,0,0.85);color:black">+ saison</div>'
+    : '';
+
   return `
-    <div class="v-tile" onclick="openPlay('${p.id}')">
-      <div class="v-tile-media">
+    <div class="v-tile" style="${dim ? 'opacity:0.55' : ''}">
+      <div class="v-tile-media" onclick="openPlay('${p.id}')" style="cursor:pointer">
         ${previewSrc
           ? `<img src="${previewSrc}" alt="" onerror="this.style.display='none'">`
           : `<div class="v-tile-placeholder">
@@ -5453,13 +5793,16 @@ function playTile(p) {
         <div style="position:absolute;top:6px;left:6px;display:flex;gap:4px;flex-wrap:wrap">
           ${hasGallery ? `<div class="v-tile-badge" style="background:rgba(255,107,0,0.9);color:black">📷 ${images.length}</div>` : ''}
           ${hasVideo ? `<div class="v-tile-badge">▶</div>` : ''}
+          ${inactiveBadge}
+          ${orphanBadge}
         </div>
         <div class="v-tile-cat ${getCatClass(p.cat)}">${getCatShort(p.cat)}</div>
       </div>
-      <div class="v-tile-body">
+      <div class="v-tile-body" onclick="openPlay('${p.id}')" style="cursor:pointer">
         <div class="v-tile-title">${esc(p.title)}</div>
         <div class="v-tile-meta">${esc(p.desc || (concepts.length > 0 ? concepts.slice(0,3).join(' · ') : ''))}</div>
       </div>
+      ${opts.seasonToggleBtn || ''}
     </div>
   `;
 }
@@ -6171,6 +6514,7 @@ function renderPlays() {
   if (!PLAY_CATEGORIES.some(c => c.id === state.playsCat)) state.playsCat = 'off';
 
   const isCoach = state.auth.role === 'coach';
+  const readOnly = isCurrentSeasonReadOnly();
 
   // SAISON : filtre les plays par saison via state.seasonPlays. Si aucune
   // liaison n'existe pour la saison courante (cas migration : DB pas encore
@@ -6178,22 +6522,56 @@ function renderPlays() {
   // peut basculer state._showInactivePlays pour voir aussi les plays
   // désactivés sur cette saison (badge "inactif").
   const includeInactive = isCoach && !!state._showInactivePlays;
-  const hasSeasonLinks = (state.seasonPlays || []).some(sp => sp.seasonId === state.currentSeasonId);
-  const seasonPool = hasSeasonLinks
-    ? currentSeasonPlays({ includeInactive })
+  const seasonId = state.currentSeasonId;
+  const hasSeasonLinks = !!seasonId && (state.seasonPlays || []).some(sp => sp.seasonId === seasonId);
+
+  // Plays "linkés" (présents dans season_plays pour cette saison) — actifs
+  // et éventuellement inactifs. On utilise getSeasonPlays qui ajoute
+  // _seasonActive sur chaque play.
+  const linkedPlays = hasSeasonLinks
+    ? getSeasonPlays(seasonId, { includeInactive })
     : (state.plays || []);
 
-  let items = seasonPool.filter(p => p.cat === state.playsCat);
+  // Plays orphelins : pas de link season_plays pour cette saison. Surfacés
+  // au coach uniquement, dans une section dédiée "Plays disponibles".
+  // Cas typique : un play créé après la saison, ou non cloné.
+  let orphanPlays = [];
+  if (isCoach && hasSeasonLinks && _seasonsLoaded()) {
+    const linkedIds = new Set(
+      (state.seasonPlays || [])
+        .filter(sp => sp.seasonId === seasonId)
+        .map(sp => sp.playId)
+    );
+    orphanPlays = (state.plays || []).filter(p => !linkedIds.has(p.id));
+  }
+
+  let items = linkedPlays.filter(p => p.cat === state.playsCat);
   if (state.playsTag) items = items.filter(p => (p.tags || []).includes(state.playsTag));
 
+  let orphanItems = orphanPlays.filter(p => p.cat === state.playsCat);
+  if (state.playsTag) orphanItems = orphanItems.filter(p => (p.tags || []).includes(state.playsTag));
+
   // Tags pertinents seulement pour la catégorie courante (basé sur le pool saison)
-  const usedTags = [...new Set(seasonPool.filter(p => p.cat === state.playsCat).flatMap(p => p.tags || []))].sort();
+  const usedTags = [...new Set(linkedPlays.filter(p => p.cat === state.playsCat).flatMap(p => p.tags || []))].sort();
+
+  // Constructeur du bouton bascule actif/inactif pour le coach (saison non
+  // archivée + seasons loadés). Le bouton stoppe la propagation pour ne pas
+  // ouvrir le détail du play en même temps.
+  const buildToggleBtn = (p) => {
+    if (!isCoach || readOnly || !hasSeasonLinks) return '';
+    const active = p._seasonActive !== false;
+    return `
+      <button class="btn btn-ghost" style="font-size:10px;padding:8px 10px;border-top:1px solid var(--border);border-radius:0;width:100%;text-align:center;color:${active ? 'var(--green)' : 'var(--ink-3)'}"
+        onclick="event.stopPropagation();toggleSeasonPlayActive('${esc(p.id)}')">
+        ${active ? '🟢 Actif cette saison' : '⚪ Inactif cette saison'}
+      </button>`;
+  };
 
   return `
     <div class="fade-up">
       <div class="section-header">
         <div>
-          <div class="eyebrow-muted">${items.length} ${items.length > 1 ? 'plays' : 'play'}</div>
+          <div class="eyebrow-muted">${items.length} ${items.length > 1 ? 'plays' : 'play'}${orphanItems.length > 0 ? ' · ' + orphanItems.length + ' dispo' : ''}</div>
           <h2 class="display-lg mt-2">Playbook</h2>
         </div>
         ${isCoach ? `<button class="btn btn-primary" onclick="editPlay()">+ NOUVEAU</button>` : ''}
@@ -6204,6 +6582,15 @@ function renderPlays() {
           <button class="segmented-btn ${state.playsCat === c.id ? 'active' : ''}" onclick="setPlaysCat('${c.id}')">${c.label}</button>
         `).join('')}
       </div>
+
+      ${isCoach && hasSeasonLinks ? `
+        <div style="padding:0 18px 10px">
+          <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em">
+            <input type="checkbox" ${state._showInactivePlays ? 'checked' : ''} onchange="toggleShowInactivePlays()">
+            <span>Afficher les plays inactifs</span>
+          </label>
+        </div>
+      ` : ''}
 
       ${usedTags.length > 0 ? `
         <div style="padding:0 18px 14px;display:flex;gap:6px;overflow-x:auto;scrollbar-width:none">
@@ -6222,11 +6609,78 @@ function renderPlays() {
         </div>
       ` : `
         <div class="plays-grid">
-          ${items.map(p => playTile(p)).join('')}
+          ${items.map(p => playTile(p, {
+            seasonActive: p._seasonActive,
+            dimmed: hasSeasonLinks && p._seasonActive === false,
+            seasonToggleBtn: buildToggleBtn(p)
+          })).join('')}
         </div>
       `}
+
+      ${isCoach && orphanItems.length > 0 && !readOnly ? `
+        <div class="section-header" style="margin-top:18px">
+          <div>
+            <div class="eyebrow-muted">Pas dans la saison</div>
+            <h2 class="display-md mt-2">Plays disponibles</h2>
+          </div>
+        </div>
+        <div style="padding:0 18px 10px;font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';line-height:1.5">
+          Ces plays existent dans le catalogue mais ne sont pas rattachés à la saison courante. Ajoute-les pour les rendre visibles aux joueuses.
+        </div>
+        <div class="plays-grid">
+          ${orphanItems.map(p => playTile(p, {
+            seasonOrphan: true,
+            dimmed: true,
+            seasonToggleBtn: `
+              <button class="btn btn-ghost" style="font-size:10px;padding:8px 10px;border-top:1px solid var(--border);border-radius:0;width:100%;text-align:center;color:var(--orange)"
+                onclick="event.stopPropagation();addPlayToCurrentSeason('${esc(p.id)}')">
+                + Ajouter à la saison
+              </button>`
+          })).join('')}
+        </div>
+      ` : ''}
     </div>
   `;
+}
+
+function toggleShowInactivePlays() {
+  state._showInactivePlays = !state._showInactivePlays;
+  render();
+}
+
+// SAISON · Bascule actif/inactif d'un play pour la saison courante.
+// Met à jour le link season_plays.active (true → false ou inverse). Si pas
+// de link existant (cas orphan), on en crée un en actif (cas rare via cette
+// fonction, normalement addPlayToCurrentSeason est utilisée).
+function toggleSeasonPlayActive(playId) {
+  const seasonId = state.currentSeasonId;
+  if (!seasonId) return;
+  if (isCurrentSeasonReadOnly()) return;
+  state.seasonPlays = state.seasonPlays || [];
+  const link = state.seasonPlays.find(sp => sp.seasonId === seasonId && sp.playId === playId);
+  if (link) {
+    link.active = !(link.active !== false); // toggle (default true)
+  } else {
+    state.seasonPlays.push({ seasonId, playId, active: true });
+  }
+  persist();
+  render();
+}
+
+// SAISON · Ajoute un play (orphan) à la saison courante en actif.
+function addPlayToCurrentSeason(playId) {
+  const seasonId = state.currentSeasonId;
+  if (!seasonId) return;
+  if (isCurrentSeasonReadOnly()) return;
+  state.seasonPlays = state.seasonPlays || [];
+  const existing = state.seasonPlays.find(sp => sp.seasonId === seasonId && sp.playId === playId);
+  if (existing) {
+    existing.active = true;
+  } else {
+    state.seasonPlays.push({ seasonId, playId, active: true });
+  }
+  persist();
+  render();
 }
 
 function setPlaysCat(c) { state.playsCat = c; state.playsTag = null; render(); }
@@ -9556,14 +10010,23 @@ function renderMyStats() {
 // ============================================================
 function renderTeam() {
   const isCoach = state.auth.role === 'coach';
+  // SAISON : header affiche le nombre de joueuses de la saison courante.
+  const seasonPlayers = _seasonsLoaded() && state.currentSeasonId
+    ? getSeasonPlayers(state.currentSeasonId)
+    : state.players;
   return `
     <div class="fade-up">
       <div class="section-header">
         <div>
-          <div class="eyebrow-muted">${state.players.length} joueuses</div>
+          <div class="eyebrow-muted">${seasonPlayers.length} joueuse${seasonPlayers.length>1?'s':''}</div>
           <h2 class="display-lg mt-2">Équipe</h2>
         </div>
-        ${isCoach ? `<button class="section-action" onclick="managePlayers()">Gérer →</button>` : ''}
+        ${isCoach ? `
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            ${_seasonsLoaded() ? `<button class="section-action" onclick="openSeasonRosterEditor()">Effectif →</button>` : ''}
+            <button class="section-action" onclick="managePlayers()">Gérer →</button>
+          </div>
+        ` : ''}
       </div>
 
       <div class="segmented">
