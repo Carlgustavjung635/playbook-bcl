@@ -787,15 +787,24 @@
   }
 
   /* ========== FORMS ========== */
-  input, textarea, select {
+  /* Note : on exclut explicitement les checkbox/radio sinon la règle
+     width:100% + padding + background les transforme en gros rectangles
+     sombres (au lieu d'une vraie case native). */
+  input:not([type="checkbox"]):not([type="radio"]), textarea, select {
     width: 100%; padding: 12px 14px;
     background: var(--bg-1); border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     font-family: inherit; font-size: 15px; color: var(--ink);
     transition: border-color 0.15s, box-shadow 0.15s;
   }
+  input[type="checkbox"], input[type="radio"] {
+    width: 18px; height: 18px;
+    accent-color: var(--orange);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
   input::placeholder, textarea::placeholder { color: var(--ink-4); }
-  input:focus, textarea:focus, select:focus {
+  input:not([type="checkbox"]):not([type="radio"]):focus, textarea:focus, select:focus {
     outline: none; border-color: var(--orange);
     box-shadow: 0 0 0 3px rgba(255, 107, 0, 0.15);
   }
@@ -6616,18 +6625,11 @@ function renderPlays() {
   // Tags pertinents seulement pour la catégorie courante (basé sur le pool saison)
   const usedTags = [...new Set(linkedPlays.filter(p => p.cat === state.playsCat).flatMap(p => p.tags || []))].sort();
 
-  // Constructeur du bouton bascule actif/inactif pour le coach (saison non
-  // archivée + seasons loadés). Le bouton stoppe la propagation pour ne pas
-  // ouvrir le détail du play en même temps.
-  const buildToggleBtn = (p) => {
-    if (!isCoach || readOnly || !hasSeasonLinks) return '';
-    const active = p._seasonActive !== false;
-    return `
-      <button class="btn btn-ghost" style="font-size:10px;padding:8px 10px;border-top:1px solid var(--border);border-radius:0;width:100%;text-align:center;color:${active ? 'var(--green)' : 'var(--ink-3)'}"
-        onclick="event.stopPropagation();toggleSeasonPlayActive('${esc(p.id)}')">
-        ${active ? '🟢 Actif cette saison' : '⚪ Inactif cette saison'}
-      </button>`;
-  };
+  // NB: le toggle activer/désactiver par saison a été déplacé dans la modal
+  // d'édition du play (cf renderPlayEditor → togglePlayEditorSeasonActive).
+  // Sur la carte, seul un indicateur visuel discret subsiste (dim opacity +
+  // badge "⚪ Inactif" via playTile.opts.seasonActive). Pour modifier l'état,
+  // ouvrir le play et utiliser le wizard d'édition.
 
   return `
     <div class="fade-up">
@@ -6673,8 +6675,7 @@ function renderPlays() {
         <div class="plays-grid">
           ${items.map(p => playTile(p, {
             seasonActive: p._seasonActive,
-            dimmed: hasSeasonLinks && p._seasonActive === false,
-            seasonToggleBtn: buildToggleBtn(p)
+            dimmed: hasSeasonLinks && p._seasonActive === false
           })).join('')}
         </div>
       `}
@@ -6714,6 +6715,7 @@ function toggleShowInactivePlays() {
 // Met à jour le link season_plays.active (true → false ou inverse). Si pas
 // de link existant (cas orphan), on en crée un en actif (cas rare via cette
 // fonction, normalement addPlayToCurrentSeason est utilisée).
+// NB: variante depuis le wizard d'édition (modal) : togglePlayEditorSeasonActive.
 function toggleSeasonPlayActive(playId) {
   const seasonId = state.currentSeasonId;
   if (!seasonId) return;
@@ -6727,6 +6729,27 @@ function toggleSeasonPlayActive(playId) {
   }
   persist();
   render();
+}
+
+// SAISON · Bascule depuis le wizard d'édition d'un play. Identique à
+// toggleSeasonPlayActive mais re-render la modal d'édition au lieu de la vue
+// (sinon la modal est fermée par render() global).
+function togglePlayEditorSeasonActive() {
+  if (!state._editingPlay) return;
+  const seasonId = state.currentSeasonId;
+  if (!seasonId) return;
+  if (isCurrentSeasonReadOnly()) return;
+  const playId = state._editingPlay.id;
+  state.seasonPlays = state.seasonPlays || [];
+  const link = state.seasonPlays.find(sp => sp.seasonId === seasonId && sp.playId === playId);
+  if (link) {
+    link.active = !(link.active !== false);
+  } else {
+    state.seasonPlays.push({ seasonId, playId, active: true });
+  }
+  persist();
+  const isNew = state.plays.findIndex(x => x.id === playId) === -1;
+  renderPlayEditor(isNew);
 }
 
 // SAISON · Ajoute un play (orphan) à la saison courante en actif.
@@ -7064,6 +7087,34 @@ function renderPlayEditor(isNew) {
         <input id="p-tags" value="${(p.tags||[]).join(', ')}" placeholder="clutch, BLOB, conditioning...">
         <div style="margin-top:6px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">Pour les classements transverses (situation de jeu, intensité...)</div>
       </div>
+
+      <!-- STATUT SAISON (toggle activer/désactiver pour la saison courante) -->
+      ${(() => {
+        if (isNew) return '';
+        if (state.auth.role !== 'coach') return '';
+        const seasonId = state.currentSeasonId;
+        if (!seasonId) return '';
+        const hasSeasonLinks = (state.seasonPlays || []).some(sp => sp.seasonId === seasonId);
+        if (!hasSeasonLinks) return '';
+        const readOnly = isCurrentSeasonReadOnly();
+        const link = (state.seasonPlays || []).find(sp => sp.seasonId === seasonId && sp.playId === p.id);
+        const active = link ? (link.active !== false) : false;
+        return `
+          <div class="fld" style="padding-top:14px;border-top:1px solid var(--border-soft);margin-top:14px">
+            <label class="fld-label">📅 Statut dans la saison courante</label>
+            <button class="btn btn-block" type="button" ${readOnly ? 'disabled' : ''}
+              onclick="togglePlayEditorSeasonActive()"
+              style="font-size:12px;color:${active ? 'var(--green)' : 'var(--ink-3)'};background:var(--bg-3);border:1px solid var(--border);${readOnly ? 'opacity:0.5;cursor:not-allowed' : ''}">
+              ${active ? '🟢 Actif cette saison' : '⚪ Inactif cette saison'}
+            </button>
+            <div style="margin-top:6px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';line-height:1.5">
+              ${readOnly
+                ? 'Saison archivée : le statut ne peut plus être modifié.'
+                : 'Les plays inactifs restent dans le catalogue mais sont masqués aux joueuses dans la liste du playbook de cette saison.'}
+            </div>
+          </div>
+        `;
+      })()}
     </div>
     <div class="modal-footer">
       <button class="btn btn-secondary btn-block" onclick="closeModal();state._editingPlay=null">Annuler</button>
