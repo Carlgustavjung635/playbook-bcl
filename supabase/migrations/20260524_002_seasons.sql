@@ -115,3 +115,37 @@ end $$;
 -- Pour annuler : drop table season_players, season_plays, seasons cascade ;
 -- alter table matches/convocations/challenges drop column season_id.
 -- ============================================================================
+
+-- ============================================================================
+-- 7) RPC activate_season(target_id) — bascule atomique d'activation
+-- ----------------------------------------------------------------------------
+-- Pourquoi : sans ce RPC, le front fait 2 UPDATE séquentiels (archive l'active
+-- puis active la draft). Si le 1er UPDATE passe mais que le 2e échoue (perte
+-- réseau, conflit policy, etc.), on se retrouve sans saison active du tout,
+-- et l'unique partial index `seasons_one_active` bloque toute nouvelle
+-- activation tant que rien n'est `active`. Cette fonction SQL fait les 2
+-- UPDATE dans la même transaction.
+-- ----------------------------------------------------------------------------
+-- Le front (index.html → confirmActivateSeason) tente d'abord cette RPC. Si
+-- elle retourne une erreur (404 = migration non appliquée, ou autre), il
+-- retombe en fallback sur les 2 UPDATE séquentiels (rétrocompat full).
+-- ----------------------------------------------------------------------------
+create or replace function public.activate_season(target_id text)
+  returns void
+  language plpgsql
+  security definer
+as $$
+begin
+  -- 1) Archive la saison active actuelle (si différente de la cible)
+  update public.seasons
+     set status='archived', archived_at=now()
+   where status='active' and id <> target_id;
+  -- 2) Active la saison cible (no-op si déjà active)
+  update public.seasons
+     set status='active', activated_at=now()
+   where id = target_id;
+end;
+$$;
+
+grant execute on function public.activate_season(text) to anon, authenticated;
+-- ============================================================================

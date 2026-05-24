@@ -4787,7 +4787,7 @@ function createSeasonFromModal() {
   }, 50);
 }
 
-function confirmActivateSeason(id) {
+async function confirmActivateSeason(id) {
   const target = (state.seasons || []).find(s => s.id === id);
   if (!target || target.status !== 'draft') return;
   const active = (state.seasons || []).find(s => s.status === 'active');
@@ -4797,22 +4797,43 @@ function confirmActivateSeason(id) {
   if (!confirm(msg)) return;
 
   const now = Date.now();
-  // 1. Archive la saison active si présente
+
+  // SAISON · Activation atomique : on tente d'abord la RPC `activate_season`
+  // (transaction côté BD : archive active + active draft dans le même order).
+  // Si la RPC échoue (migration pas encore appliquée → 404, ou autre erreur),
+  // on retombe sur le pattern legacy 2 UPDATE séquentiels via PbSync.
+  let rpcOk = false;
+  if (window.sb) {
+    try {
+      const { error } = await sb.rpc('activate_season', { target_id: id });
+      if (!error) {
+        rpcOk = true;
+      } else {
+        console.warn('[season] activate_season RPC failed, fallback to 2-step:', error.message);
+      }
+    } catch (e) {
+      console.warn('[season] activate_season RPC threw, fallback to 2-step:', e.message);
+    }
+  }
+
+  // Mise à jour optimiste du state local (que la RPC ait réussi ou non —
+  // dans les deux cas l'état final attendu est le même : target=active,
+  // active=archived). Si la RPC a réussi, PbSync va re-fetcher et corriger
+  // si besoin. Si fallback, PbSync push les 2 UPDATE séquentiels.
   if (active) {
     active.status = 'archived';
     active.archivedAt = now;
   }
-  // 2. Active la draft
   target.status = 'active';
   target.activatedAt = now;
-  // Sync : ces deux UPDATE seront poussés en deux requêtes upsert successives
-  // par PbSync (debouncé 400ms). L'unique partial index DB garantit que si
-  // l'archivage échoue, l'activation échouera aussi (cohérent).
 
   state.currentSeasonId = id;
   persist();
   closeModal();
-  setTimeout(() => alert('✓ Saison activée.'), 50);
+  setTimeout(() => alert(rpcOk
+    ? '✓ Saison activée.'
+    : '✓ Saison activée (mode legacy).'
+  ), 50);
   render();
 }
 
