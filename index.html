@@ -2658,6 +2658,14 @@ function _dbMatchToClient(r) {
     transport: r.transport || {},
     roster: r.roster || {},
     onCourt: Array.isArray(r.on_court) ? r.on_court : [],
+    // Phase 4 — prépa match. DB.location ↔ state.place (le state JS a
+    // toujours utilisé `place`, on garde le naming local pour ne pas
+    // casser editMatch / saveMatch / renderMatchDetail).
+    status: r.status || 'to_play',
+    prepVideos: Array.isArray(r.prep_videos) ? r.prep_videos : [],
+    prepComment: r.prep_comment || '',
+    place: r.location || '',
+    time: r.time || '',
     positives: [], negatives: [], playerStats: {}
   };
 }
@@ -2763,6 +2771,11 @@ const ENTITIES = [
       // migrés via migrateLocalSelfiesToStorage() au prochain boot coach.
       const winSelfieUrl = (typeof m.winSelfie === 'string' && /^https?:\/\//i.test(m.winSelfie))
         ? m.winSelfie : null;
+      // Status : si absent (matches legacy localStorage), on l'infère depuis
+      // les scores au moment du dump pour ne pas pousser un null sur une
+      // colonne NOT NULL. Bascule auto vers 'played' dès qu'un score est saisi.
+      const inferredStatus = m.status
+        || (((m.scoreUs | 0) > 0 || (m.scoreOpp | 0) > 0) ? 'played' : 'to_play');
       return [m.id, {
         id: m.id, date: m.date, opponent: m.opponent || '', home: !!m.home,
         score_us: m.scoreUs | 0, score_opp: m.scoreOpp | 0,
@@ -2779,7 +2792,13 @@ const ENTITIES = [
         transport: m.transport || {},
         roster: m.roster || {},
         on_court: Array.isArray(m.onCourt) ? m.onCourt : [],
-        season_id: m.seasonId || null
+        season_id: m.seasonId || null,
+        // Phase 4 — prépa match (cf. migration 20260524_007).
+        status: inferredStatus,
+        prep_videos: Array.isArray(m.prepVideos) ? m.prepVideos : [],
+        prep_comment: m.prepComment || null,
+        location: m.place || null,
+        time: m.time || null
       }];
     })),
     apply: (state, rows) => {
@@ -2813,6 +2832,14 @@ const ENTITIES = [
           transport: r.transport || {},
           roster: r.roster || {},
           onCourt: Array.isArray(r.on_court) ? r.on_court : [],
+          // Phase 4 — prépa match. DB.location → state.place pour rester
+          // compat avec le code existant (editMatch / saveMatch utilisent
+          // déjà `m.place` / `m.time` depuis longtemps).
+          status: r.status || 'to_play',
+          prepVideos: Array.isArray(r.prep_videos) ? r.prep_videos : [],
+          prepComment: r.prep_comment || '',
+          place: r.location || local.place || '',
+          time: r.time || local.time || '',
           positives: local.positives || [], negatives: local.negatives || [],
           playerStats: local.playerStats || {},
           seasonId: r.season_id || local.seasonId || null
@@ -3225,6 +3252,33 @@ const ENTITIES = [
         active: r.active !== false
       }));
     }
+  },
+  // ==========================================================================
+  // PRÉPA MATCH — plays liés au match avec note coach + ordre.
+  // Cf. migration 20260524_008_match_play_links.sql. Calque exact de
+  // seasonPlays (PK composite anon write-all + realtime).
+  // ==========================================================================
+  {
+    key: 'matchPlayLinks', table: 'match_play_links', pk: ['match_id', 'play_id'], realtime: true, auth: 'anon',
+    dump: (state) => {
+      const out = {};
+      (state.matchPlayLinks || []).forEach(lk => {
+        out[`${lk.matchId}|${lk.playId}`] = {
+          match_id: lk.matchId, play_id: lk.playId,
+          position: Number.isFinite(lk.position) ? lk.position : 0,
+          coach_note: lk.coachNote || null
+        };
+      });
+      return out;
+    },
+    apply: (state, rows) => {
+      state.matchPlayLinks = rows.map(r => ({
+        matchId: r.match_id, playId: r.play_id,
+        position: Number.isFinite(r.position) ? r.position : 0,
+        coachNote: r.coach_note || '',
+        createdAt: r.created_at ? Date.parse(r.created_at) : null
+      }));
+    }
   }
 ];
 
@@ -3627,6 +3681,7 @@ const K = {
   seasonPlayers: 'pb8_season_players',
   seasonPlays: 'pb8_season_plays',
   currentSeasonId: 'pb8_current_season_id',
+  matchPlayLinks: 'pb8_match_play_links',
 };
 function load(k, d) { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : d; } catch { return d; } }
 // save() : sync localStorage avec gestion explicite du QuotaExceededError.
@@ -3711,6 +3766,11 @@ let state = {
   seasonPlays: load(K.seasonPlays, []),
   currentSeasonId: load(K.currentSeasonId, null),
 
+  // === PRÉPA MATCH (Phase 4 — cf. migration 20260524_008_match_play_links) ===
+  // Liens N-N plays↔match avec note coach + position (ordre coach-curated).
+  // [{ matchId, playId, position, coachNote, createdAt }]
+  matchPlayLinks: load(K.matchPlayLinks, []),
+
   // UI state
   view: null, // { type: 'play'|'match'|'live', id }
   playsCat: 'off',
@@ -3745,6 +3805,7 @@ function persist() {
   save(K.seasonPlayers, state.seasonPlayers);
   save(K.seasonPlays, state.seasonPlays);
   save(K.currentSeasonId, state.currentSeasonId);
+  save(K.matchPlayLinks, state.matchPlayLinks);
   // Push toutes les entités équipe vers Supabase (debounced 400ms)
   if (window.PbSync) PbSync.schedule(state);
 }
@@ -7707,15 +7768,24 @@ function renderDashRecords(matches) {
 function renderMatchDetail() {
   const m = state.matches.find(x => x.id === state.view.id);
   if (!m) { state.view = null; return renderMatches(); }
-  const played = (m.scoreUs || 0) > 0 || (m.scoreOpp || 0) > 0;
+  // Phase 4 : `status` est la source de vérité. Migration runtime pour les
+  // matchs legacy (localStorage avant 2026-05-24) sans status → on infère.
+  if (!m.status) {
+    m.status = ((m.scoreUs | 0) > 0 || (m.scoreOpp | 0) > 0) ? 'played' : 'to_play';
+  }
+  const isToPlay = m.status === 'to_play';
+  const scoreEntered = (m.scoreUs || 0) > 0 || (m.scoreOpp || 0) > 0;
+  const played = m.status === 'played';
   const todayStr = new Date().toISOString().slice(0,10);
-  const upcoming = !played && m.date >= todayStr;
+  const upcoming = isToPlay && m.date >= todayStr;
   const win = played && m.scoreUs > m.scoreOpp;
   const positives = m.positives || [];
   const negatives = m.negatives || [];
   const stats = m.playerStats || {};
   const isCoach = state.auth.role === 'coach';
   const isStat = state.auth.role === 'stat';
+  // Toggle UI : "Voir la prépa" pour les matchs déjà joués (historique).
+  const showPrepArchive = isCoach && played && state._showPrepArchive === m.id;
 
   return `
     <div class="fade-up">
@@ -7723,7 +7793,7 @@ function renderMatchDetail() {
 
       <div class="px" style="padding-top:6px">
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
-          ${played ? `<span class="chip ${win ? 'chip-green' : 'chip-red'}">${win ? 'Victoire' : 'Défaite'}</span>` : `<span class="chip" style="background:rgba(255,107,0,0.10);border-color:var(--orange);color:var(--orange)">${upcoming ? '⏳ À venir' : '○ Pas saisi'}</span>`}
+          ${played ? `<span class="chip ${win ? 'chip-green' : 'chip-red'}">${win ? 'Victoire' : 'Défaite'}</span>` : `<span class="chip" style="background:rgba(255,107,0,0.10);border-color:var(--orange);color:var(--orange)">${upcoming ? '⏳ À jouer' : '○ À jouer'}</span>`}
           <span class="chip">${m.home ? 'Domicile' : 'Extérieur'}</span>
           <span class="chip">${formatDate(m.date, 'long')}</span>
         </div>
@@ -7953,157 +8023,180 @@ function renderMatchDetail() {
         `;
       })()}
 
-      ${win || m.winSelfie ? `
+      ${isToPlay && scoreEntered && isCoach ? `
+        <div style="margin:0 18px 12px;padding:12px 14px;background:linear-gradient(135deg,rgba(34,197,94,0.10),var(--surface));border:1.5px solid var(--green);border-radius:10px;display:flex;align-items:center;gap:10px">
+          <span style="font-size:20px">🏁</span>
+          <div style="flex:1;min-width:0">
+            <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;color:var(--green)">Ce match a été joué ?</div>
+            <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">Score saisi mais status = à jouer. Bascule pour débloquer points±, stats, selfie.</div>
+          </div>
+          <button class="btn btn-primary" onclick="markMatchAs('${m.id}','played')">Marquer comme joué</button>
+        </div>
+      ` : ''}
+
+      ${isToPlay ? renderMatchPrep(m) : `
+        ${isCoach ? `
+          <div style="padding:0 18px 6px;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+            <button class="btn btn-ghost" onclick="state._showPrepArchive=${showPrepArchive?'null':`'${m.id}'`};render()" style="font-size:11px">
+              ${showPrepArchive ? '▲ Masquer la prépa' : '▼ Voir la prépa du match'}
+            </button>
+            <button class="btn btn-ghost" onclick="markMatchAs('${m.id}','to_play')" style="font-size:11px;color:var(--ink-3)">↶ Repasser en "à jouer"</button>
+          </div>
+          ${showPrepArchive ? `<div style="opacity:0.85">${renderMatchPrep(m)}</div>` : ''}
+        ` : ''}
+
+        ${win || m.winSelfie ? `
+          <div class="section-header">
+            <div>
+              <div class="eyebrow">${win ? 'Trophée' : 'Souvenir'}</div>
+              <h2 class="display-md mt-2">${win ? '🏆 Selfie de la victoire' : '📸 Selfie d\'équipe'}</h2>
+            </div>
+            ${isCoach ? `
+              <label class="section-action" style="cursor:pointer">
+                ${m.winSelfie ? '✎ Changer' : '+ Ajouter'}
+                <input type="file" accept="image/*" style="display:none" onchange="changeWinSelfie('${m.id}', event)">
+              </label>
+            ` : ''}
+          </div>
+          ${m.winSelfie ? `
+            <div class="win-selfie-wrap">
+              <div class="win-selfie-frame" onclick="openImageViewer('${m.id}_winselfie')">
+                <img src="${m.winSelfie}" class="win-selfie-img" alt="Selfie victoire">
+                ${win ? `<div class="win-selfie-banner">${m.scoreUs} − ${m.scoreOpp} · ${esc(m.opponent)}</div>` : ''}
+              </div>
+              ${isCoach ? `<button class="btn btn-ghost btn-block" style="color:var(--red);margin-top:8px;font-size:11px" onclick="removeWinSelfie('${m.id}')">Retirer la photo</button>` : ''}
+            </div>
+          ` : `
+            <div class="list-section">
+              <div class="empty" style="padding:30px 16px">
+                <div class="empty-icon">📸</div>
+                <div class="empty-title">${win ? 'Capture le moment !' : 'Pas de photo'}</div>
+                <div class="empty-desc">${win ? 'Selfie d\'équipe pour célébrer la victoire' : 'Ajoute un souvenir de match'}</div>
+                ${isCoach ? `
+                  <label class="btn btn-secondary" style="cursor:pointer;margin-top:10px;display:inline-block">
+                    📷 Prendre / Choisir une photo
+                    <input type="file" accept="image/*" style="display:none" onchange="changeWinSelfie('${m.id}', event)">
+                  </label>
+                ` : ''}
+              </div>
+            </div>
+          `}
+        ` : ''}
+
         <div class="section-header">
           <div>
-            <div class="eyebrow">${win ? 'Trophée' : 'Souvenir'}</div>
-            <h2 class="display-md mt-2">${win ? '🏆 Selfie de la victoire' : '📸 Selfie d\'équipe'}</h2>
+            <div class="eyebrow">Replay</div>
+            <h2 class="display-md mt-2">Vidéo</h2>
           </div>
-          ${isCoach ? `
-            <label class="section-action" style="cursor:pointer">
-              ${m.winSelfie ? '✎ Changer' : '+ Ajouter'}
-              <input type="file" accept="image/*" style="display:none" onchange="changeWinSelfie('${m.id}', event)">
-            </label>
-          ` : ''}
+          ${isCoach ? `<button class="section-action" onclick="editMatchVideo('${m.id}')">${m.videoUrl ? 'Modifier' : '+ Ajouter'}</button>` : ''}
         </div>
-        ${m.winSelfie ? `
-          <div class="win-selfie-wrap">
-            <div class="win-selfie-frame" onclick="openImageViewer('${m.id}_winselfie')">
-              <img src="${m.winSelfie}" class="win-selfie-img" alt="Selfie victoire">
-              ${win ? `<div class="win-selfie-banner">${m.scoreUs} − ${m.scoreOpp} · ${esc(m.opponent)}</div>` : ''}
-            </div>
-            ${isCoach ? `<button class="btn btn-ghost btn-block" style="color:var(--red);margin-top:8px;font-size:11px" onclick="removeWinSelfie('${m.id}')">Retirer la photo</button>` : ''}
-          </div>
-        ` : `
+        ${m.videoUrl ? videoPlayer(m.videoUrl, false) : `
           <div class="list-section">
             <div class="empty" style="padding:30px 16px">
-              <div class="empty-icon">📸</div>
-              <div class="empty-title">${win ? 'Capture le moment !' : 'Pas de photo'}</div>
-              <div class="empty-desc">${win ? 'Selfie d\'équipe pour célébrer la victoire' : 'Ajoute un souvenir de match'}</div>
-              ${isCoach ? `
-                <label class="btn btn-secondary" style="cursor:pointer;margin-top:10px;display:inline-block">
-                  📷 Prendre / Choisir une photo
-                  <input type="file" accept="image/*" style="display:none" onchange="changeWinSelfie('${m.id}', event)">
-                </label>
-              ` : ''}
+              <div class="empty-icon">▶</div>
+              <div class="empty-title">Pas de vidéo</div>
+              <div class="empty-desc">Lien YouTube classique 16:9</div>
+              ${isCoach ? `<button class="btn btn-secondary" onclick="editMatchVideo('${m.id}')">+ Ajouter</button>` : ''}
             </div>
           </div>
         `}
-      ` : ''}
 
-      <div class="section-header">
-        <div>
-          <div class="eyebrow">Replay</div>
-          <h2 class="display-md mt-2">Vidéo</h2>
-        </div>
-        ${isCoach ? `<button class="section-action" onclick="editMatchVideo('${m.id}')">${m.videoUrl ? 'Modifier' : '+ Ajouter'}</button>` : ''}
-      </div>
-      ${m.videoUrl ? videoPlayer(m.videoUrl, false) : `
-        <div class="list-section">
-          <div class="empty" style="padding:30px 16px">
-            <div class="empty-icon">▶</div>
-            <div class="empty-title">Pas de vidéo</div>
-            <div class="empty-desc">Lien YouTube classique 16:9</div>
-            ${isCoach ? `<button class="btn btn-secondary" onclick="editMatchVideo('${m.id}')">+ Ajouter</button>` : ''}
-          </div>
-        </div>
-      `}
-
-      ${m.notes ? `
-        <div class="section-header">
-          <h2 class="display-md">Notes</h2>
-        </div>
-        <div class="list-section">
-          <div style="padding:16px;line-height:1.6;color:var(--ink-2);white-space:pre-wrap">${esc(m.notes)}</div>
-        </div>
-      ` : ''}
-
-      <div class="section-header">
-        <div>
-          <div class="eyebrow">Analyse</div>
-          <h2 class="display-md mt-2">Points clés</h2>
-        </div>
-      </div>
-
-      <div class="list-section">
-        <div style="padding:12px 16px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border-soft)">
-          <div style="font-family:'Anton';color:var(--green);font-size:14px;text-transform:uppercase;letter-spacing:0.02em">✓ Positifs (${positives.length})</div>
-          ${isCoach ? `<button class="btn btn-ghost" onclick="addFocus('${m.id}','positives')">+ Ajouter</button>` : ''}
-        </div>
-        ${positives.length === 0 ? `<div style="padding:16px;color:var(--ink-3);font-size:13px;font-style:italic">Aucun point noté</div>` : positives.map(p => focusItem(m.id, 'positives', p, 'green', isCoach)).join('')}
-      </div>
-
-      <div class="list-section">
-        <div style="padding:12px 16px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border-soft)">
-          <div style="font-family:'Anton';color:var(--red);font-size:14px;text-transform:uppercase;letter-spacing:0.02em">✕ À corriger (${negatives.length})</div>
-          ${isCoach ? `<button class="btn btn-ghost" onclick="addFocus('${m.id}','negatives')">+ Ajouter</button>` : ''}
-        </div>
-        ${negatives.length === 0 ? `<div style="padding:16px;color:var(--ink-3);font-size:13px;font-style:italic">Aucun point noté</div>` : negatives.map(p => focusItem(m.id, 'negatives', p, 'red', isCoach)).join('')}
-      </div>
-
-      ${(() => {
-        // Bloc compact "Mes stats" pour la joueuse — au-dessus du box score
-        // complet pour qu'elle voie SES chiffres en premier sans avoir à
-        // scanner toute la table. N'apparaît que si elle a des stats.
-        if (state.auth.role !== 'player') return '';
-        const myPid = state.auth.playerId;
-        const s = (m.playerStats || {})[myPid];
-        if (!s) return '';
-        const gs = gameScore(s);
-        const tirsTotal = (s.p2iA||0) + (s.p2eA||0) + (s.p3A||0);
-        const tirsReus = (s.p2i||0) + (s.p2e||0) + (s.p3||0);
-        return `
+        ${m.notes ? `
           <div class="section-header">
-            <div>
-              <div class="eyebrow" style="color:var(--orange)">⭐ Toi</div>
-              <h2 class="display-md mt-2">Mes stats</h2>
-            </div>
+            <h2 class="display-md">Notes</h2>
           </div>
-          <div class="stat-grid mb-3">
-            <div class="stat-tile">
-              <div class="stat-tile-label">Points</div>
-              <div class="stat-tile-value" style="color:var(--orange)">${s.pts || 0}</div>
-              <div class="stat-tile-sub">${s.min || 0} min jouées</div>
-            </div>
-            <div class="stat-tile">
-              <div class="stat-tile-label">Tirs</div>
-              <div class="stat-tile-value">${tirsReus}<span style="color:var(--ink-4);font-size:18px">/${tirsTotal}</span></div>
-              <div class="stat-tile-sub">${tirsTotal > 0 ? Math.round(100*tirsReus/tirsTotal) : 0}% adresse</div>
-            </div>
-            <div class="stat-tile">
-              <div class="stat-tile-label">REB · PD</div>
-              <div class="stat-tile-value">${s.reb || 0}<span style="color:var(--ink-4)"> · ${s.ast || 0}</span></div>
-              <div class="stat-tile-sub">${s.stl || 0} INT · ${s.to || 0} PB</div>
-            </div>
-            <div class="stat-tile">
-              <div class="stat-tile-label">Note match</div>
-              <div class="stat-tile-value" style="color:${gs>=15?'var(--green)':gs<5?'var(--red)':'var(--orange)'}">${gs>0?'+':''}${gs.toFixed(1)}</div>
-              <div class="stat-tile-sub">Game Score</div>
-            </div>
+          <div class="list-section">
+            <div style="padding:16px;line-height:1.6;color:var(--ink-2);white-space:pre-wrap">${esc(m.notes)}</div>
           </div>
-        `;
-      })()}
+        ` : ''}
 
-      <div class="section-header">
-        <div>
-          <div class="eyebrow">Box score</div>
-          <h2 class="display-md mt-2">Stats joueuses</h2>
+        <div class="section-header">
+          <div>
+            <div class="eyebrow">Analyse</div>
+            <h2 class="display-md mt-2">Points clés</h2>
+          </div>
         </div>
-        ${(isCoach || isStat) ? `<button class="section-action" onclick="addPlayerStat('${m.id}')">+ Ajouter</button>` : ''}
-      </div>
 
-      ${Object.keys(stats).length === 0 ? `
         <div class="list-section">
-          <div class="empty" style="padding:30px 16px">
-            <div class="empty-icon">○</div>
-            <div class="empty-title">Pas de stats</div>
-            ${(isCoach || isStat) ? `<button class="btn btn-secondary" onclick="addPlayerStat('${m.id}')">Saisir</button>` : ''}
+          <div style="padding:12px 16px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border-soft)">
+            <div style="font-family:'Anton';color:var(--green);font-size:14px;text-transform:uppercase;letter-spacing:0.02em">✓ Positifs (${positives.length})</div>
+            ${isCoach ? `<button class="btn btn-ghost" onclick="addFocus('${m.id}','positives')">+ Ajouter</button>` : ''}
           </div>
+          ${positives.length === 0 ? `<div style="padding:16px;color:var(--ink-3);font-size:13px;font-style:italic">Aucun point noté</div>` : positives.map(p => focusItem(m.id, 'positives', p, 'green', isCoach)).join('')}
         </div>
-      ` : `
-        <div class="list-section" style="margin-top:0">
-          <div class="stats-wrap">${renderStatsTable(m, stats, isCoach || isStat)}</div>
+
+        <div class="list-section">
+          <div style="padding:12px 16px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border-soft)">
+            <div style="font-family:'Anton';color:var(--red);font-size:14px;text-transform:uppercase;letter-spacing:0.02em">✕ À corriger (${negatives.length})</div>
+            ${isCoach ? `<button class="btn btn-ghost" onclick="addFocus('${m.id}','negatives')">+ Ajouter</button>` : ''}
+          </div>
+          ${negatives.length === 0 ? `<div style="padding:16px;color:var(--ink-3);font-size:13px;font-style:italic">Aucun point noté</div>` : negatives.map(p => focusItem(m.id, 'negatives', p, 'red', isCoach)).join('')}
         </div>
+
+        ${(() => {
+          // Bloc compact "Mes stats" pour la joueuse — au-dessus du box score
+          // complet pour qu'elle voie SES chiffres en premier sans avoir à
+          // scanner toute la table. N'apparaît que si elle a des stats.
+          if (state.auth.role !== 'player') return '';
+          const myPid = state.auth.playerId;
+          const s = (m.playerStats || {})[myPid];
+          if (!s) return '';
+          const gs = gameScore(s);
+          const tirsTotal = (s.p2iA||0) + (s.p2eA||0) + (s.p3A||0);
+          const tirsReus = (s.p2i||0) + (s.p2e||0) + (s.p3||0);
+          return `
+            <div class="section-header">
+              <div>
+                <div class="eyebrow" style="color:var(--orange)">⭐ Toi</div>
+                <h2 class="display-md mt-2">Mes stats</h2>
+              </div>
+            </div>
+            <div class="stat-grid mb-3">
+              <div class="stat-tile">
+                <div class="stat-tile-label">Points</div>
+                <div class="stat-tile-value" style="color:var(--orange)">${s.pts || 0}</div>
+                <div class="stat-tile-sub">${s.min || 0} min jouées</div>
+              </div>
+              <div class="stat-tile">
+                <div class="stat-tile-label">Tirs</div>
+                <div class="stat-tile-value">${tirsReus}<span style="color:var(--ink-4);font-size:18px">/${tirsTotal}</span></div>
+                <div class="stat-tile-sub">${tirsTotal > 0 ? Math.round(100*tirsReus/tirsTotal) : 0}% adresse</div>
+              </div>
+              <div class="stat-tile">
+                <div class="stat-tile-label">REB · PD</div>
+                <div class="stat-tile-value">${s.reb || 0}<span style="color:var(--ink-4)"> · ${s.ast || 0}</span></div>
+                <div class="stat-tile-sub">${s.stl || 0} INT · ${s.to || 0} PB</div>
+              </div>
+              <div class="stat-tile">
+                <div class="stat-tile-label">Note match</div>
+                <div class="stat-tile-value" style="color:${gs>=15?'var(--green)':gs<5?'var(--red)':'var(--orange)'}">${gs>0?'+':''}${gs.toFixed(1)}</div>
+                <div class="stat-tile-sub">Game Score</div>
+              </div>
+            </div>
+          `;
+        })()}
+
+        <div class="section-header">
+          <div>
+            <div class="eyebrow">Box score</div>
+            <h2 class="display-md mt-2">Stats joueuses</h2>
+          </div>
+          ${(isCoach || isStat) ? `<button class="section-action" onclick="addPlayerStat('${m.id}')">+ Ajouter</button>` : ''}
+        </div>
+
+        ${Object.keys(stats).length === 0 ? `
+          <div class="list-section">
+            <div class="empty" style="padding:30px 16px">
+              <div class="empty-icon">○</div>
+              <div class="empty-title">Pas de stats</div>
+              ${(isCoach || isStat) ? `<button class="btn btn-secondary" onclick="addPlayerStat('${m.id}')">Saisir</button>` : ''}
+            </div>
+          </div>
+        ` : `
+          <div class="list-section" style="margin-top:0">
+            <div class="stats-wrap">${renderStatsTable(m, stats, isCoach || isStat)}</div>
+          </div>
+        `}
       `}
 
       <div style="height:24px"></div>
@@ -8246,7 +8339,7 @@ function renderStatsTable(m, stats, canEdit) {
 function editMatch(id) {
   const isNew = !id;
   const m = isNew
-    ? { id: uid(), date: new Date().toISOString().slice(0,10), opponent: '', home: true, scoreUs: 0, scoreOpp: 0, notes: '', videoUrl: '', positives: [], negatives: [], playerStats: {} }
+    ? { id: uid(), date: new Date().toISOString().slice(0,10), opponent: '', home: true, scoreUs: 0, scoreOpp: 0, notes: '', videoUrl: '', positives: [], negatives: [], playerStats: {}, status: 'to_play', prepVideos: [], prepComment: '' }
     : state.matches.find(x => x.id === id);
   openModal(`
     <div class="modal-header">
@@ -8311,6 +8404,14 @@ function saveMatch(id, isNew) {
     rdvTime = String(h).padStart(2, '0') + ':' + String(mm).padStart(2, '0');
   }
 
+  // Phase 4 : un nouveau match commence en 'to_play'. Sur édition, on
+  // bascule auto 'to_play' → 'played' dès qu'un score est saisi (le coach
+  // peut toujours forcer 'played' / 'to_play' depuis l'UI prépa).
+  const newScoreUs = parseInt(document.getElementById('m-us').value) || 0;
+  const newScoreOpp = parseInt(document.getElementById('m-them').value) || 0;
+  let nextStatus = existing ? (existing.status || 'to_play') : 'to_play';
+  if (nextStatus === 'to_play' && (newScoreUs > 0 || newScoreOpp > 0)) nextStatus = 'played';
+
   const obj = {
     id, opponent: opp,
     date: document.getElementById('m-date').value,
@@ -8319,8 +8420,8 @@ function saveMatch(id, isNew) {
     place: document.getElementById('m-place').value.trim(),
     rdvTime,
     rdvPlace,
-    scoreUs: parseInt(document.getElementById('m-us').value) || 0,
-    scoreOpp: parseInt(document.getElementById('m-them').value) || 0,
+    scoreUs: newScoreUs,
+    scoreOpp: newScoreOpp,
     notes: document.getElementById('m-notes').value.trim(),
     videoUrl: existing ? existing.videoUrl : '',
     positives: existing ? existing.positives : [],
@@ -8337,6 +8438,10 @@ function saveMatch(id, isNew) {
     // préserve le seasonId existant (ne pas écraser même si user a switché
     // de saison en cours d'édition).
     seasonId: existing ? (existing.seasonId || state.currentSeasonId || null) : (state.currentSeasonId || null),
+    // Phase 4 — prépa match.
+    status: nextStatus,
+    prepVideos: existing ? (existing.prepVideos || []) : [],
+    prepComment: existing ? (existing.prepComment || '') : '',
   };
   if (isNew) { state.matches.unshift(obj); state.view = { type: 'match', id: obj.id }; }
   else { const i = state.matches.findIndex(x => x.id === id); state.matches[i] = obj; }
@@ -9090,6 +9195,427 @@ function deleteFocus(matchId, type, focusId) {
   const m = state.matches.find(x => x.id === matchId);
   m[type] = m[type].filter(x => x.id !== focusId);
   persist(); render();
+}
+
+// ============================================================
+// PRÉPA MATCH (Phase 4)
+// Plays liés (state.matchPlayLinks), vidéos prépa (m.prepVideos),
+// notes coach (m.prepComment). UI réservée au coach. Bascule
+// to_play / played via markMatchAs(...).
+// ============================================================
+function getMatchPlayLinks(matchId) {
+  return (state.matchPlayLinks || [])
+    .filter(lk => lk.matchId === matchId)
+    .sort((a, b) => (a.position | 0) - (b.position | 0));
+}
+function addPlayToMatch(matchId, playId, coachNote) {
+  state.matchPlayLinks = state.matchPlayLinks || [];
+  if (state.matchPlayLinks.some(lk => lk.matchId === matchId && lk.playId === playId)) return;
+  const existing = getMatchPlayLinks(matchId);
+  const nextPos = existing.length ? (existing[existing.length - 1].position | 0) + 1 : 0;
+  state.matchPlayLinks.push({
+    matchId, playId,
+    position: nextPos,
+    coachNote: coachNote || '',
+    createdAt: Date.now()
+  });
+  persist();
+}
+function removePlayFromMatch(matchId, playId) {
+  state.matchPlayLinks = (state.matchPlayLinks || []).filter(lk => !(lk.matchId === matchId && lk.playId === playId));
+  // Recompacte les positions pour éviter trous (utile pour reorder ultérieur)
+  const remaining = getMatchPlayLinks(matchId);
+  remaining.forEach((lk, i) => { lk.position = i; });
+  persist();
+}
+function updatePlayLinkNote(matchId, playId, note) {
+  const lk = (state.matchPlayLinks || []).find(x => x.matchId === matchId && x.playId === playId);
+  if (!lk) return;
+  lk.coachNote = note || '';
+  persist();
+}
+function movePlayLink(matchId, playId, dir) {
+  // dir = -1 (up) ou +1 (down). On bouge en swappant les positions.
+  const list = getMatchPlayLinks(matchId);
+  const idx = list.findIndex(lk => lk.playId === playId);
+  const swapIdx = idx + dir;
+  if (idx < 0 || swapIdx < 0 || swapIdx >= list.length) return;
+  const a = list[idx], b = list[swapIdx];
+  const tmp = a.position; a.position = b.position; b.position = tmp;
+  persist(); render();
+}
+
+// Vidéos prépa : édition inline via modal légère. Format identique au
+// match_feedback.videos (Phase 3) pour permettre la réutilisation de
+// parseVideo / viewFocusVideo / formatSecToTimestamp.
+function openAddPrepVideo(matchId) {
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">+ Vidéo prépa</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="fld">
+        <label class="fld-label">URL YouTube</label>
+        <input id="pv-url" placeholder="https://youtu.be/…">
+      </div>
+      <div class="fld-row">
+        <div class="fld">
+          <label class="fld-label">Timestamp début (optionnel)</label>
+          <input id="pv-ts" placeholder="2:30 ou 90s">
+        </div>
+        <div class="fld">
+          <label class="fld-label">Label (optionnel)</label>
+          <input id="pv-label" placeholder="Ex : Pick & roll adverse">
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Annuler</button>
+      <button class="btn btn-primary" onclick="addPrepVideo('${matchId}')">Ajouter</button>
+    </div>
+  `);
+  setTimeout(() => document.getElementById('pv-url')?.focus(), 80);
+}
+function addPrepVideo(matchId) {
+  const m = state.matches.find(x => x.id === matchId);
+  if (!m) return;
+  const url = (document.getElementById('pv-url').value || '').trim();
+  if (!url) return alert('URL YouTube requise');
+  const parsed = parseVideo(url);
+  if (!parsed || parsed.provider !== 'youtube') return alert('URL YouTube invalide');
+  const startSec = parseTimestampToSec(document.getElementById('pv-ts').value) || parsed.startSec || 0;
+  const label = (document.getElementById('pv-label').value || '').trim();
+  const item = { url };
+  if (label) item.label = label;
+  if (startSec > 0) item.startSec = startSec;
+  m.prepVideos = m.prepVideos || [];
+  m.prepVideos.push(item);
+  persist(); closeModal(); render();
+}
+function removePrepVideo(matchId, idx) {
+  const m = state.matches.find(x => x.id === matchId);
+  if (!m || !Array.isArray(m.prepVideos)) return;
+  if (!confirm('Retirer cette vidéo ?')) return;
+  m.prepVideos.splice(idx, 1);
+  persist(); render();
+}
+
+// Notes coach : édition inline via modal textarea simple.
+function editPrepComment(matchId) {
+  const m = state.matches.find(x => x.id === matchId);
+  if (!m) return;
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">📝 Notes coach</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="fld">
+        <label class="fld-label">Consignes / focus tactique</label>
+        <textarea id="pc-text" rows="8" placeholder="Tout ce que l'équipe doit avoir en tête pour ce match…">${esc(m.prepComment || '')}</textarea>
+      </div>
+      <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';line-height:1.5;text-transform:uppercase;letter-spacing:0.04em">
+        🔒 Coach-only. Pas visible côté joueuse.
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Annuler</button>
+      <button class="btn btn-primary" onclick="savePrepComment('${matchId}')">Enregistrer</button>
+    </div>
+  `);
+  setTimeout(() => document.getElementById('pc-text')?.focus(), 80);
+}
+function savePrepComment(matchId) {
+  const m = state.matches.find(x => x.id === matchId);
+  if (!m) return;
+  m.prepComment = (document.getElementById('pc-text').value || '').trim();
+  persist(); closeModal(); render();
+}
+
+// Bascule status d'un match. Coach-only. Confirmation si on quitte 'played'
+// vers 'to_play' (risque de masquer accidentellement les stats déjà saisies).
+function markMatchAs(matchId, nextStatus) {
+  const m = state.matches.find(x => x.id === matchId);
+  if (!m) return;
+  if (m.status === 'played' && nextStatus !== 'played') {
+    if (!confirm('Repasser ce match en "à jouer" ? Les stats restent enregistrées mais seront cachées.')) return;
+  }
+  m.status = nextStatus;
+  persist(); render();
+}
+
+// Picker plays pour rattacher à un match. Réutilise la grille + filtres du
+// picker training (cat/concept/search) avec une signature dédiée pour ne pas
+// rentrer en conflit avec state._editingTraining.
+function openMatchPlayPicker(matchId) {
+  state._matchPlayPicker = { matchId, filter: { cat: 'all', concept: '', search: '' } };
+  renderMatchPlayPicker();
+}
+function renderMatchPlayPicker() {
+  const ctx = state._matchPlayPicker;
+  if (!ctx) return;
+  const filter = ctx.filter;
+  const linkedIds = new Set(getMatchPlayLinks(ctx.matchId).map(lk => lk.playId));
+  let filtered = [...(state.plays || [])];
+  if (filter.cat !== 'all') filtered = filtered.filter(p => p.cat === filter.cat);
+  if (filter.concept) filtered = filtered.filter(p => (p.concepts || []).includes(filter.concept));
+  if (filter.search) {
+    const q = filter.search.toLowerCase();
+    filtered = filtered.filter(p =>
+      (p.title || '').toLowerCase().includes(q) ||
+      (p.desc || '').toLowerCase().includes(q) ||
+      (p.tags || []).some(t => t.toLowerCase().includes(q))
+    );
+  }
+  const usedConcepts = new Set();
+  (state.plays || []).forEach(p => (p.concepts || []).forEach(c => usedConcepts.add(c)));
+  const conceptList = [...usedConcepts].sort();
+
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">${filtered.length} / ${(state.plays || []).length} plays</div>
+        <div class="modal-title">📚 Lier un play au match</div>
+      </div>
+      <button class="modal-close" onclick="closeMatchPlayPicker()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="fld">
+        <input id="mpicker-search" placeholder="Rechercher dans les plays..." value="${esc(filter.search)}" oninput="state._matchPlayPicker.filter.search=this.value;renderMatchPlayPicker()">
+      </div>
+      <div class="segmented" style="margin-bottom:10px;overflow-x:auto;flex-wrap:nowrap">
+        <button class="segmented-btn ${filter.cat==='all'?'active':''}" onclick="state._matchPlayPicker.filter.cat='all';renderMatchPlayPicker()">Tous</button>
+        ${PLAY_CATEGORIES.map(c => `
+          <button class="segmented-btn ${filter.cat===c.id?'active':''}" onclick="state._matchPlayPicker.filter.cat='${c.id}';renderMatchPlayPicker()">${c.label}</button>
+        `).join('')}
+      </div>
+      ${conceptList.length > 0 ? `
+        <div class="eyebrow-muted" style="margin-bottom:6px;font-size:9px">Filtrer par concept</div>
+        <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:14px">
+          ${filter.concept ? `<button class="concept-chip selected" onclick="state._matchPlayPicker.filter.concept='';renderMatchPlayPicker()" style="--color:var(--ink-3)">✕ ${esc(filter.concept)}</button>` : ''}
+          ${conceptList.slice(0, 12).map(c => `<button class="concept-chip ${filter.concept===c?'selected':''}" onclick="state._matchPlayPicker.filter.concept='${esc(c).replace(/'/g, "\\'")}';renderMatchPlayPicker()">${esc(c)}</button>`).join('')}
+        </div>
+      ` : ''}
+      ${filtered.length === 0 ? `
+        <div class="empty" style="padding:30px"><div class="empty-icon">○</div><div class="empty-title">Aucun résultat</div></div>
+      ` : `
+        <div style="display:flex;flex-direction:column;gap:6px">
+          ${filtered.map(p => {
+            const already = linkedIds.has(p.id);
+            return `
+              <div class="picker-row" ${already ? 'style="opacity:0.5;cursor:default"' : `onclick="addPlayToMatchFromPicker('${p.id}')"`}>
+                ${p.images && p.images.length > 0
+                  ? `<img src="${p.images[0]}" style="width:48px;height:48px;border-radius:6px;object-fit:cover;flex-shrink:0">`
+                  : `<div style="width:48px;height:48px;border-radius:6px;background:var(--bg-3);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:14px;color:var(--orange);flex-shrink:0">${getCatShort(p.cat)}</div>`}
+                <div style="flex:1;min-width:0">
+                  <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;line-height:1.2">${esc(p.title || '')}</div>
+                  <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${getCatLabel(p.cat)}${(p.concepts || []).length > 0 ? ' · ' + p.concepts.slice(0,2).join(', ') : ''}</div>
+                </div>
+                <div style="color:${already?'var(--ink-4)':'var(--orange)'};font-size:18px">${already ? '✓' : '+'}</div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `}
+    </div>
+  `);
+  setTimeout(() => document.getElementById('mpicker-search')?.focus(), 80);
+}
+function addPlayToMatchFromPicker(playId) {
+  const ctx = state._matchPlayPicker;
+  if (!ctx) return;
+  addPlayToMatch(ctx.matchId, playId, '');
+  renderMatchPlayPicker(); // garde le modal ouvert pour permettre +sieurs ajouts
+  // Force un re-render derrière pour MAJ la liste visible quand modal fermée
+  setTimeout(() => render(), 0);
+}
+function closeMatchPlayPicker() {
+  state._matchPlayPicker = null;
+  closeModal();
+  render();
+}
+
+// Édition note coach sur un lien play↔match (inline modal).
+function editPlayLinkNote(matchId, playId) {
+  const lk = (state.matchPlayLinks || []).find(x => x.matchId === matchId && x.playId === playId);
+  const p = (state.plays || []).find(x => x.id === playId);
+  if (!lk || !p) return;
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">${esc(getCatLabel(p.cat) || '')}</div>
+        <div class="modal-title">${esc(p.title || '')}</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="fld">
+        <label class="fld-label">Note coach (rappel tactique, focus contre cet adversaire)</label>
+        <textarea id="ln-note" rows="5" placeholder="Ex : à enchaîner après chaque time-out, ou : leur #5 saute systématiquement sur le screen">${esc(lk.coachNote || '')}</textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Annuler</button>
+      <button class="btn btn-primary" onclick="savePlayLinkNote('${matchId}','${playId}')">Enregistrer</button>
+    </div>
+  `);
+  setTimeout(() => document.getElementById('ln-note')?.focus(), 80);
+}
+function savePlayLinkNote(matchId, playId) {
+  updatePlayLinkNote(matchId, playId, (document.getElementById('ln-note').value || '').trim());
+  closeModal(); render();
+}
+
+// ----- Rendu UI -----
+function renderMatchPrep(m) {
+  const isCoach = state.auth.role === 'coach';
+  const links = getMatchPlayLinks(m.id);
+  const playsById = Object.fromEntries((state.plays || []).map(p => [p.id, p]));
+  const prepVideos = Array.isArray(m.prepVideos) ? m.prepVideos : [];
+  const prepComment = m.prepComment || '';
+
+  return `
+    <!-- BRIEF -->
+    <div class="section-header">
+      <div>
+        <div class="eyebrow">📋 Préparation</div>
+        <h2 class="display-md mt-2">Brief</h2>
+      </div>
+      ${isCoach ? `<button class="section-action" onclick="editMatch('${m.id}')">✎ Éditer</button>` : ''}
+    </div>
+    <div class="list-section">
+      <div style="padding:14px 16px;display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        <div>
+          <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em">Adversaire</div>
+          <div style="font-family:'Anton';font-size:16px;margin-top:2px">${esc(m.opponent || '—')}</div>
+        </div>
+        <div>
+          <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em">Date</div>
+          <div style="font-family:'Anton';font-size:16px;margin-top:2px">${formatDate(m.date, 'long')}</div>
+        </div>
+        <div>
+          <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em">Heure</div>
+          <div style="font-family:'Anton';font-size:16px;margin-top:2px;color:var(--orange)">${esc(m.time || '—')}</div>
+        </div>
+        <div>
+          <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em">Lieu</div>
+          <div style="font-family:'Anton';font-size:14px;margin-top:2px;line-height:1.3">${esc(m.place || (m.home ? 'Domicile' : 'Extérieur'))}</div>
+        </div>
+      </div>
+    </div>
+
+    ${isCoach ? `
+    <!-- PLAYS LIÉS -->
+    <div class="section-header">
+      <div>
+        <div class="eyebrow">📚 Tactique</div>
+        <h2 class="display-md mt-2">Plays liés <span style="font-size:14px;color:var(--ink-3)">· ${links.length}</span></h2>
+      </div>
+      <button class="section-action" onclick="openMatchPlayPicker('${m.id}')">+ Lier un play</button>
+    </div>
+    <div class="list-section">
+      ${links.length === 0 ? `
+        <div class="empty" style="padding:24px 16px">
+          <div class="empty-icon">📚</div>
+          <div class="empty-title">Aucun play attaché</div>
+          <div class="empty-desc">Choisis 3-6 plays à exécuter ou répéter pour ce match</div>
+          <button class="btn btn-secondary" style="margin-top:10px" onclick="openMatchPlayPicker('${m.id}')">+ Lier un play</button>
+        </div>
+      ` : links.map((lk, i) => {
+        const p = playsById[lk.playId];
+        if (!p) return '';
+        const isFirst = i === 0;
+        const isLast = i === links.length - 1;
+        return `
+          <div style="padding:12px 14px;border-bottom:1px solid var(--border-soft);display:flex;gap:10px;align-items:flex-start">
+            <div style="display:flex;flex-direction:column;gap:2px;align-items:center;padding-top:4px">
+              <button class="btn btn-icon" style="padding:2px 6px;font-size:12px" ${isFirst ? 'disabled style="opacity:0.3;padding:2px 6px;font-size:12px"' : `onclick="movePlayLink('${m.id}','${p.id}',-1)"`}>▲</button>
+              <div style="font-family:'JetBrains Mono';font-size:10px;color:var(--ink-3)">${i + 1}</div>
+              <button class="btn btn-icon" style="padding:2px 6px;font-size:12px" ${isLast ? 'disabled style="opacity:0.3;padding:2px 6px;font-size:12px"' : `onclick="movePlayLink('${m.id}','${p.id}',1)"`}>▼</button>
+            </div>
+            ${p.images && p.images.length > 0
+              ? `<img src="${p.images[0]}" style="width:48px;height:48px;border-radius:6px;object-fit:cover;flex-shrink:0;cursor:pointer" onclick="state.view={type:'play',id:'${p.id}'};render()">`
+              : `<div style="width:48px;height:48px;border-radius:6px;background:var(--bg-3);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:14px;color:var(--orange);flex-shrink:0;cursor:pointer" onclick="state.view={type:'play',id:'${p.id}'};render()">${getCatShort(p.cat)}</div>`}
+            <div style="flex:1;min-width:0">
+              <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;line-height:1.2;cursor:pointer" onclick="state.view={type:'play',id:'${p.id}'};render()">${esc(p.title || '')}</div>
+              <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${getCatLabel(p.cat)}</div>
+              ${lk.coachNote ? `
+                <div style="margin-top:8px;padding:8px 10px;background:rgba(255,107,0,0.08);border-left:2px solid var(--orange);border-radius:0 6px 6px 0;font-size:12px;color:var(--ink-2);line-height:1.4;white-space:pre-wrap">${esc(lk.coachNote)}</div>
+              ` : ''}
+            </div>
+            <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
+              <button class="btn btn-icon" onclick="editPlayLinkNote('${m.id}','${p.id}')" title="Note coach">${lk.coachNote ? '✎' : '+'}</button>
+              <button class="btn btn-icon" onclick="if(confirm('Retirer ce play du match ?')){removePlayFromMatch('${m.id}','${p.id}');render()}" style="color:var(--red)" title="Retirer">✕</button>
+            </div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+
+    <!-- VIDÉOS PRÉPA -->
+    <div class="section-header">
+      <div>
+        <div class="eyebrow">▶ Vidéo</div>
+        <h2 class="display-md mt-2">Vidéos prépa <span style="font-size:14px;color:var(--ink-3)">· ${prepVideos.length}</span></h2>
+      </div>
+      <button class="section-action" onclick="openAddPrepVideo('${m.id}')">+ Ajouter</button>
+    </div>
+    <div class="list-section">
+      ${prepVideos.length === 0 ? `
+        <div class="empty" style="padding:24px 16px">
+          <div class="empty-icon">▶</div>
+          <div class="empty-title">Aucune vidéo</div>
+          <div class="empty-desc">Extrait de match adverse, démo tactique, scouting…</div>
+        </div>
+      ` : `
+        <div style="padding:12px 16px">
+          <div class="focus-images">
+            ${prepVideos.map((v, idx) => {
+              const parsed = parseVideo(v.url);
+              const thumb = parsed && parsed.thumb ? parsed.thumb : '';
+              const startSec = (v.startSec | 0);
+              const tsBadge = startSec > 0 ? `<span style="position:absolute;bottom:2px;left:2px;background:rgba(0,0,0,0.75);color:#fff;font-size:9px;padding:1px 4px;border-radius:3px;font-family:'JetBrains Mono'">🎬 ${formatSecToTimestamp(startSec)}</span>` : '';
+              const lbl = v.label ? `<div style="font-size:10px;color:var(--ink-2);margin-top:3px;line-height:1.2;text-align:center">${esc(v.label)}</div>` : '';
+              const safeUrl = String(v.url).replace(/'/g, "\\'");
+              return `
+                <div>
+                  <div class="focus-img-thumb" onclick="viewFocusVideo('${safeUrl}',${startSec})" style="position:relative">
+                    ${thumb ? `<img src="${esc(thumb)}" alt="">` : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:var(--ink-3);font-size:28px">▶</div>`}
+                    <span style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:32px;height:32px;border-radius:50%;background:rgba(0,0,0,0.75);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px">▶</span>
+                    ${tsBadge}
+                    <button class="btn btn-icon" onclick="event.stopPropagation();removePrepVideo('${m.id}',${idx})" style="position:absolute;top:2px;right:2px;background:rgba(0,0,0,0.6);color:#fff;padding:2px 6px;font-size:10px">✕</button>
+                  </div>
+                  ${lbl}
+                </div>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      `}
+    </div>
+
+    <!-- NOTES COACH -->
+    <div class="section-header">
+      <div>
+        <div class="eyebrow">📝 Briefing</div>
+        <h2 class="display-md mt-2">Notes coach</h2>
+      </div>
+      <button class="section-action" onclick="editPrepComment('${m.id}')">${prepComment ? '✎ Éditer' : '+ Ajouter'}</button>
+    </div>
+    <div class="list-section">
+      ${prepComment ? `
+        <div style="padding:16px;line-height:1.6;color:var(--ink-2);white-space:pre-wrap;font-size:13px">${esc(prepComment)}</div>
+      ` : `
+        <div class="empty" style="padding:24px 16px">
+          <div class="empty-icon">📝</div>
+          <div class="empty-title">Aucune note</div>
+          <div class="empty-desc">Consignes, focus tactique, points d'attention</div>
+        </div>
+      `}
+    </div>
+    ` : ''}
+  `;
 }
 
 // PLAYER STATS
