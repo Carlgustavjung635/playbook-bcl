@@ -2599,6 +2599,11 @@ window.PbStore = {
     // un PIN il faut passer par l'RPC set_player_pin (L2 coach uniquement).
     const row = { id: p.id, name: p.name, num: p.num|0 };
     if (p.photo !== undefined) row.photo = p.photo || null;
+    // feedback coach (positives/negatives/axes) : toujours envoyé pour
+    // garantir la sync cross-device (saveFeedback delete p.feedback sur
+    // clear → on l'envoie comme {} qui = "pas de feedback"). Cf
+    // migration 20260524_005.
+    row.feedback = p.feedback || {};
     const { error } = await sb.from('players').upsert(row);
     if (error) throw error;
   },
@@ -2622,7 +2627,7 @@ window.PbStore = {
     return (data || []).map(_dbMatchToClient);
   },
   async fetchPlayers() {
-    const { data } = await sb.from('players').select('id,name,num,photo').order('num');
+    const { data } = await sb.from('players').select('id,name,num,photo,feedback').order('num');
     return data || [];
   },
   async fetchLiveMatch() {
@@ -12373,7 +12378,12 @@ const FB_SUGGEST_POS = ['Énergie défensive', 'Lecture du jeu', 'Adresse à 3pt
 const FB_SUGGEST_NEG = ['Choix de tirs', 'Placement défensif', 'Communication', 'Boxing-out', 'Concentration LF', 'Fautes inutiles', 'Pertes de balle', 'Aide défensive', 'Lecture des écrans', 'Préparation physique', 'Gestion émotion', 'Vision périphérique'];
 
 function getFeedback(p) {
-  return p && p.feedback ? p.feedback : { positives: [], negatives: [] };
+  // Défensif : p.feedback peut être undefined (jamais set), {} (reset DB),
+  // ou {positives, negatives, updatedAt}. On garantit toujours la shape
+  // {positives:[], negatives:[]} pour les callers qui font fb.positives.length
+  // direct sans `|| []`.
+  const fb = (p && p.feedback) || {};
+  return { positives: fb.positives || [], negatives: fb.negatives || [] };
 }
 
 function openPlayerFeedback(pid) {
@@ -12504,6 +12514,11 @@ function saveFeedback() {
   }
   state._editingFeedback = null;
   persist();
+  // Sync feedback vers Supabase (players n'est pas dans ENTITIES, on push
+  // explicitement via le canal dédié PbStore.upsertPlayer enrichi).
+  if (window.PbStore) {
+    PbStore.upsertPlayer(p).catch(e => console.warn('[sync] upsertPlayer feedback:', e.message));
+  }
   closeModal();
   setTimeout(() => editPlayer(fb.pid), 50);
 }
@@ -15763,7 +15778,10 @@ function _initPlayersSync() {
       const localById = Object.fromEntries(state.players.map(p => [p.id, p]));
       const merged = remote.map(rp => {
         const lp = localById[rp.id] || {};
-        return { ...lp, id: rp.id, name: rp.name, num: rp.num, photo: rp.photo || lp.photo || null, pin: lp.pin || '0000' };
+        return { ...lp, id: rp.id, name: rp.name, num: rp.num,
+          photo: rp.photo || lp.photo || null,
+          pin: lp.pin || '0000',
+          feedback: rp.feedback || lp.feedback || {} };
       });
       const remoteIds = new Set(remote.map(r => r.id));
       const localOnly = state.players.filter(p => !remoteIds.has(p.id));
@@ -15806,7 +15824,10 @@ function _initPlayersSync() {
     if (event === 'INSERT' || event === 'UPDATE') {
       const i = state.players.findIndex(p => p.id === row.id);
       const lp = i >= 0 ? state.players[i] : {};
-      const patched = { ...lp, id: row.id, name: row.name, num: row.num, photo: row.photo || lp.photo || null, pin: lp.pin || '0000' };
+      const patched = { ...lp, id: row.id, name: row.name, num: row.num,
+        photo: row.photo || lp.photo || null,
+        pin: lp.pin || '0000',
+        feedback: row.feedback || lp.feedback || {} };
       if (i >= 0) state.players[i] = patched;
       else state.players.push(patched);
     } else if (event === 'DELETE' && old) {
