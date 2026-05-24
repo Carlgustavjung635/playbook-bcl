@@ -2820,9 +2820,9 @@ const ENTITIES = [
       const out = {};
       (state.matches || []).forEach(m => {
         (m.positives || []).forEach(f => out[f.id] = { id: f.id, match_id: m.id, kind: 'positive',
-          text: f.text || '', minute: f.minute || null, images: f.images || [] });
+          text: f.text || '', minute: f.minute || null, images: f.images || [], videos: f.videos || [] });
         (m.negatives || []).forEach(f => out[f.id] = { id: f.id, match_id: m.id, kind: 'negative',
-          text: f.text || '', minute: f.minute || null, images: f.images || [] });
+          text: f.text || '', minute: f.minute || null, images: f.images || [], videos: f.videos || [] });
       });
       return out;
     },
@@ -2831,7 +2831,7 @@ const ENTITIES = [
       rows.forEach(r => {
         byMatch[r.match_id] = byMatch[r.match_id] || { positives: [], negatives: [] };
         const arr = r.kind === 'positive' ? byMatch[r.match_id].positives : byMatch[r.match_id].negatives;
-        arr.push({ id: r.id, text: r.text || '', minute: r.minute || '', images: r.images || [] });
+        arr.push({ id: r.id, text: r.text || '', minute: r.minute || '', images: r.images || [], videos: r.videos || [] });
       });
       (state.matches || []).forEach(m => {
         if (byMatch[m.id]) { m.positives = byMatch[m.id].positives; m.negatives = byMatch[m.id].negatives; }
@@ -3871,17 +3871,32 @@ function parseVideo(url) {
   let m = url.match(/(?:youtube(?:-nocookie)?\.com\/(?:watch\?(?:.*?&)?v=|embed\/|shorts\/|v\/|live\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})(?:[?&#\/]|$)/);
   if (m) {
     const id = m[1];
-    const embed = `https://www.youtube.com/embed/${id}?rel=0&modestbranding=1&playsinline=1`;
+    // Préserve un timestamp éventuel (?t=42, &t=1m23s, &start=83, #t=2m).
+    // Accepte les formats numériques, "Xs", "XmYs", "XhYmZs".
+    const tMatch = url.match(/[?&#](?:t|start)=([0-9hms]+)/i);
+    let startSec = 0;
+    if (tMatch) {
+      const raw = tMatch[1];
+      if (/^\d+$/.test(raw)) startSec = parseInt(raw, 10);
+      else {
+        const h = (raw.match(/(\d+)h/i) || [])[1] | 0;
+        const mn = (raw.match(/(\d+)m/i) || [])[1] | 0;
+        const s = (raw.match(/(\d+)s/i) || [])[1] | 0;
+        startSec = h * 3600 + mn * 60 + s;
+      }
+    }
+    const embed = `https://www.youtube.com/embed/${id}?rel=0&modestbranding=1&playsinline=1${startSec > 0 ? '&start=' + startSec : ''}`;
     const watchUrl = isVertical
       ? `https://www.youtube.com/shorts/${id}`
-      : `https://www.youtube.com/watch?v=${id}`;
+      : `https://www.youtube.com/watch?v=${id}${startSec > 0 ? '&t=' + startSec + 's' : ''}`;
     return {
       provider: 'youtube', id,
       embed,
       watchUrl,
       thumb: `https://img.youtube.com/vi/${id}/hqdefault.jpg`,
       thumbHQ: `https://img.youtube.com/vi/${id}/maxresdefault.jpg`,
-      vertical: isVertical
+      vertical: isVertical,
+      startSec
     };
   }
   m = url.match(/vimeo\.com\/(?:video\/)?(\d+)/);
@@ -8061,6 +8076,28 @@ function focusItem(matchId, type, p, color, canEdit) {
             `).join('')}
           </div>
         ` : ''}
+        ${p.videos && p.videos.length ? `
+          <div class="focus-images">
+            ${p.videos.map(v => {
+              const parsed = parseVideo(v.url);
+              const thumb = parsed && parsed.thumb ? parsed.thumb : '';
+              const startSec = (v.startSec | 0);
+              const tsBadge = startSec > 0 ? `<span style="position:absolute;bottom:2px;left:2px;background:rgba(0,0,0,0.75);color:#fff;font-size:9px;padding:1px 4px;border-radius:3px;font-family:'JetBrains Mono'">🎬 ${formatSecToTimestamp(startSec)}</span>` : '';
+              const lbl = v.label ? `<div style="font-size:10px;color:var(--ink-2);margin-top:3px;line-height:1.2;text-align:center">${esc(v.label)}</div>` : '';
+              const safeUrl = String(v.url).replace(/'/g, "\\'");
+              return `
+                <div>
+                  <div class="focus-img-thumb" onclick="viewFocusVideo('${safeUrl}',${startSec})" style="position:relative">
+                    ${thumb ? `<img src="${esc(thumb)}" alt="">` : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:var(--ink-3);font-size:28px">▶</div>`}
+                    <span style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:32px;height:32px;border-radius:50%;background:rgba(0,0,0,0.75);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px">▶</span>
+                    ${tsBadge}
+                  </div>
+                  ${lbl}
+                </div>
+              `;
+            }).join('')}
+          </div>
+        ` : ''}
       </div>
       ${canEdit ? `
         <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
@@ -8801,12 +8838,14 @@ function openFocusModal(matchId, type, focusId) {
   const m = state.matches.find(x => x.id === matchId);
   m[type] = m[type] || [];
   const isNew = !focusId;
-  const f = isNew ? { id: uid(), text: '', minute: '', images: [] } : m[type].find(x => x.id === focusId);
+  const f = isNew ? { id: uid(), text: '', minute: '', images: [], videos: [] } : m[type].find(x => x.id === focusId);
   if (!f) return;
   f.images = f.images || [];
+  f.videos = f.videos || [];
 
-  // Stocker temporairement les images dans state pour les manipuler
+  // Stocker temporairement les images + vidéos dans state pour les manipuler
   state._focusImages = [...f.images];
+  state._focusVideos = f.videos.map(v => ({ ...v }));
 
   renderFocusModal(matchId, type, f.id, isNew);
 }
@@ -8815,6 +8854,8 @@ function renderFocusModal(matchId, type, focusId, isNew) {
   const m = state.matches.find(x => x.id === matchId);
   const f = isNew ? { text: '', minute: '' } : m[type].find(x => x.id === focusId);
   const images = state._focusImages || [];
+  const videos = state._focusVideos || [];
+  const videosMax = videos.length >= 3;
 
   openModal(`
     <div class="modal-header">
@@ -8838,6 +8879,41 @@ function renderFocusModal(matchId, type, focusId, isNew) {
         </div>
         <input id="focus-file-${focusId}" type="file" accept="image/*" multiple style="display:none" onchange="addFocusImages(event, '${matchId}', '${type}', '${focusId}', ${isNew})">
         <div style="margin-top:6px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">Photos d'écran de vidéo, schémas tactiques, captures</div>
+      </div>
+
+      <div class="fld">
+        <label class="fld-label">Vidéos liées (${videos.length}/3)</label>
+        <div class="focus-images">
+          ${videos.map((v, i) => {
+            const parsed = parseVideo(v.url);
+            const thumb = parsed && parsed.thumb ? parsed.thumb : '';
+            const tsBadge = (v.startSec | 0) > 0 ? `<span style="position:absolute;bottom:2px;left:2px;background:rgba(0,0,0,0.75);color:#fff;font-size:9px;padding:1px 4px;border-radius:3px;font-family:'JetBrains Mono'">🎬 ${formatSecToTimestamp(v.startSec)}</span>` : '';
+            const lbl = v.label ? `<div style="font-size:10px;color:var(--ink-2);margin-top:3px;line-height:1.2;text-align:center">${esc(v.label)}</div>` : '';
+            return `
+              <div>
+                <div class="focus-img-thumb" style="position:relative">
+                  ${thumb ? `<img src="${esc(thumb)}" alt="">` : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:var(--ink-3);font-size:28px">▶</div>`}
+                  ${tsBadge}
+                  <button onclick="event.stopPropagation();removeFocusVideo(${i},'${matchId}','${type}','${focusId}',${isNew})"
+                    style="position:absolute;top:2px;right:2px;width:20px;height:20px;border-radius:50%;background:rgba(0,0,0,0.8);color:white;border:none;cursor:pointer;font-size:11px">✕</button>
+                </div>
+                ${lbl}
+              </div>
+            `;
+          }).join('')}
+        </div>
+        ${videosMax ? '' : `
+          <div style="margin-top:10px;display:grid;gap:6px">
+            <input id="fo-vid-url" placeholder="https://www.youtube.com/watch?v=..." style="width:100%">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+              <input id="fo-vid-ts" placeholder="mm:ss (ex 1:23)">
+              <input id="fo-vid-label" placeholder="Étiquette (optionnel)">
+            </div>
+            <button class="btn btn-secondary" type="button" onclick="addFocusVideo('${matchId}','${type}','${focusId}',${isNew})">+ Ajouter une vidéo YouTube</button>
+          </div>
+        `}
+        ${videosMax ? `<div style="margin-top:6px;font-size:10px;color:var(--orange);font-family:'JetBrains Mono'">Maximum 3 vidéos par point</div>` : ''}
+        <div style="margin-top:6px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">Astuce : utilise des vidéos YouTube en "Non répertorié" pour partager uniquement avec l'équipe</div>
       </div>
     </div>
     <div class="modal-footer">
@@ -8864,16 +8940,98 @@ function removeFocusImage(idx) {
   state._focusImages.splice(idx, 1);
 }
 
+// ===== Vidéos liées (focus positives/negatives) =====
+// Parse "mm:ss" ou "h:mm:ss" ou "Xs"/"XmYs" en secondes. Retourne 0 si vide/invalide.
+function parseTimestampToSec(input) {
+  if (!input) return 0;
+  const raw = String(input).trim();
+  if (!raw) return 0;
+  if (/^\d+$/.test(raw)) return parseInt(raw, 10);
+  // Format h:mm:ss ou mm:ss
+  const colon = raw.match(/^(?:(\d+):)?(\d+):(\d+)$/);
+  if (colon) {
+    const h = (colon[1] | 0), mn = (colon[2] | 0), s = (colon[3] | 0);
+    return h * 3600 + mn * 60 + s;
+  }
+  // Format "1h2m3s" / "2m30s" / "90s"
+  const h = (raw.match(/(\d+)h/i) || [])[1] | 0;
+  const mn = (raw.match(/(\d+)m(?!s)/i) || [])[1] | 0;
+  const s = (raw.match(/(\d+)s/i) || [])[1] | 0;
+  const tot = h * 3600 + mn * 60 + s;
+  return tot > 0 ? tot : 0;
+}
+function formatSecToTimestamp(sec) {
+  sec = sec | 0;
+  if (sec <= 0) return '';
+  const h = Math.floor(sec / 3600);
+  const mn = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h > 0) return `${h}:${String(mn).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  return `${mn}:${String(s).padStart(2, '0')}`;
+}
+function addFocusVideo(matchId, type, focusId, isNew) {
+  const urlEl = document.getElementById('fo-vid-url');
+  const tsEl = document.getElementById('fo-vid-ts');
+  const lblEl = document.getElementById('fo-vid-label');
+  const url = (urlEl.value || '').trim();
+  if (!url) return alert('URL YouTube requise');
+  const parsed = parseVideo(url);
+  if (!parsed || parsed.provider !== 'youtube') return alert('URL YouTube invalide');
+  state._focusVideos = state._focusVideos || [];
+  if (state._focusVideos.length >= 3) return alert('Maximum 3 vidéos par point');
+  const startSec = parseTimestampToSec(tsEl.value) || parsed.startSec || 0;
+  const label = (lblEl.value || '').trim();
+  const item = { url };
+  if (label) item.label = label;
+  if (startSec > 0) item.startSec = startSec;
+  state._focusVideos.push(item);
+  renderFocusModal(matchId, type, focusId, isNew);
+}
+function removeFocusVideo(idx, matchId, type, focusId, isNew) {
+  state._focusVideos = state._focusVideos || [];
+  state._focusVideos.splice(idx, 1);
+  renderFocusModal(matchId, type, focusId, isNew);
+}
+// Ouvre une vidéo focus en plein écran (iframe avec start=N appliqué)
+function viewFocusVideo(url, startSec) {
+  const parsed = parseVideo(url);
+  if (!parsed) return;
+  let embed = parsed.embed;
+  if (startSec > 0 && !/[?&]start=/.test(embed)) {
+    embed += (embed.includes('?') ? '&' : '?') + 'start=' + (startSec | 0);
+  }
+  // Autoplay pour ouvrir directement la vidéo (lightbox = user gesture).
+  embed += (embed.includes('?') ? '&' : '?') + 'autoplay=1';
+  let root = document.getElementById('modal-root');
+  if (!root) { root = document.createElement('div'); root.id = 'modal-root'; document.body.appendChild(root); }
+  root.innerHTML = `
+    <div class="img-viewer" onclick="closeModal()">
+      <button class="img-viewer-close" onclick="event.stopPropagation();closeModal()">✕</button>
+      <div onclick="event.stopPropagation()" style="width:min(100%,960px);aspect-ratio:16/9;max-height:90vh">
+        <iframe src="${esc(embed)}" allowfullscreen
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+          style="width:100%;height:100%;border:0;border-radius:8px;background:#000"></iframe>
+      </div>
+    </div>
+  `;
+  document.body.style.overflow = 'hidden';
+}
+
 function saveFocus(matchId, type, focusId, isNew) {
   const m = state.matches.find(x => x.id === matchId);
   const text = document.getElementById('fo-text').value.trim();
   if (!text) return alert('Commentaire requis');
   const minute = document.getElementById('fo-min').value.trim();
   m[type] = m[type] || [];
-  const obj = { id: focusId, text, minute, images: state._focusImages || [] };
+  const obj = {
+    id: focusId, text, minute,
+    images: state._focusImages || [],
+    videos: state._focusVideos || []
+  };
   if (isNew) m[type].push(obj);
   else { const i = m[type].findIndex(x => x.id === focusId); m[type][i] = obj; }
   state._focusImages = null;
+  state._focusVideos = null;
   persist(); closeModal(); render();
 }
 function deleteFocus(matchId, type, focusId) {
