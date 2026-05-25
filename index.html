@@ -3279,6 +3279,60 @@ const ENTITIES = [
         createdAt: r.created_at ? Date.parse(r.created_at) : null
       }));
     }
+  },
+  // ==========================================================================
+  // JOUEUSES GUESTS — Phase 5 (cf. migration 20260524_009_guest_players.sql).
+  // guest_players : humains temporaires (copine, essayeuse) suivis cross-
+  //   instance pour permettre la suggestion "récents 30j" et la promotion.
+  // training_guests : N-N convoc↔guest avec instance_date dans la PK pour
+  //   gérer les trainings récurrents.
+  // ==========================================================================
+  {
+    key: 'guestPlayers', table: 'guest_players', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.guestPlayers || []).map(g => [g.id, {
+      id: g.id,
+      name: g.name || '',
+      note: g.note || null,
+      promoted_to_player_id: g.promotedToPlayerId || null,
+      first_seen_at: g.firstSeenAt ? new Date(g.firstSeenAt).toISOString() : new Date().toISOString(),
+      last_seen_at: g.lastSeenAt ? new Date(g.lastSeenAt).toISOString() : new Date().toISOString()
+    }])),
+    apply: (state, rows) => {
+      state.guestPlayers = rows.map(r => ({
+        id: r.id,
+        name: r.name || '',
+        note: r.note || '',
+        promotedToPlayerId: r.promoted_to_player_id || null,
+        firstSeenAt: r.first_seen_at ? Date.parse(r.first_seen_at) : null,
+        lastSeenAt: r.last_seen_at ? Date.parse(r.last_seen_at) : null,
+        createdAt: r.created_at ? Date.parse(r.created_at) : null
+      }));
+    }
+  },
+  {
+    key: 'trainingGuests', table: 'training_guests',
+    pk: ['convocation_id', 'guest_player_id', 'instance_date'], realtime: true, auth: 'anon',
+    dump: (state) => {
+      const out = {};
+      (state.trainingGuests || []).forEach(tg => {
+        const idate = tg.instanceDate;
+        if (!idate) return; // skip rows sans instance_date (NOT NULL en DB)
+        out[`${tg.convocationId}|${tg.guestPlayerId}|${idate}`] = {
+          convocation_id: tg.convocationId,
+          guest_player_id: tg.guestPlayerId,
+          instance_date: idate
+        };
+      });
+      return out;
+    },
+    apply: (state, rows) => {
+      state.trainingGuests = rows.map(r => ({
+        convocationId: r.convocation_id,
+        guestPlayerId: r.guest_player_id,
+        instanceDate: r.instance_date,
+        createdAt: r.created_at ? Date.parse(r.created_at) : null
+      }));
+    }
   }
 ];
 
@@ -3682,6 +3736,8 @@ const K = {
   seasonPlays: 'pb8_season_plays',
   currentSeasonId: 'pb8_current_season_id',
   matchPlayLinks: 'pb8_match_play_links',
+  guestPlayers: 'pb8_guest_players',
+  trainingGuests: 'pb8_training_guests',
 };
 function load(k, d) { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : d; } catch { return d; } }
 // save() : sync localStorage avec gestion explicite du QuotaExceededError.
@@ -3771,6 +3827,16 @@ let state = {
   // [{ matchId, playId, position, coachNote, createdAt }]
   matchPlayLinks: load(K.matchPlayLinks, []),
 
+  // === JOUEUSES GUESTS (Phase 5 — cf. migration 20260524_009_guest_players) ===
+  // guestPlayers : humains temporaires identifiés par leur nom (copine d'une
+  //   joueuse, essayeuse). [{ id, name, note, promotedToPlayerId, firstSeenAt,
+  //   lastSeenAt }]. Persiste cross-instance pour permettre la suggestion
+  //   "Guests récents 30j" et la promotion en joueuse régulière.
+  // trainingGuests : N-N convocation↔guest avec instance_date (récurrents).
+  //   [{ convocationId, guestPlayerId, instanceDate, createdAt }]
+  guestPlayers: load(K.guestPlayers, []),
+  trainingGuests: load(K.trainingGuests, []),
+
   // UI state
   view: null, // { type: 'play'|'match'|'live', id }
   playsCat: 'off',
@@ -3806,6 +3872,8 @@ function persist() {
   save(K.seasonPlays, state.seasonPlays);
   save(K.currentSeasonId, state.currentSeasonId);
   save(K.matchPlayLinks, state.matchPlayLinks);
+  save(K.guestPlayers, state.guestPlayers);
+  save(K.trainingGuests, state.trainingGuests);
   // Push toutes les entités équipe vers Supabase (debounced 400ms)
   if (window.PbSync) PbSync.schedule(state);
 }
@@ -13061,6 +13129,35 @@ function openEventInstance(parentId, dateStr) {
           ` : ''}
         </div>
       ` : ''}
+
+      ${isCoach && !isCancelled && instance.type === 'training' ? (() => {
+        const guests = getTrainingGuests(parentId, dateStr);
+        return `
+          <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border-soft)">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <div class="eyebrow-muted">Invitées · ${guests.length}</div>
+              <button class="btn btn-ghost" onclick="openAddGuestModal('${parentId}','${dateStr}')" style="font-size:11px">+ Ajouter une joueuse temporaire</button>
+            </div>
+            ${guests.length === 0 ? `
+              <div style="font-size:11px;color:var(--ink-3);font-style:italic;font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.04em">Aucune invitée — copine d'une joueuse, essayeuse…</div>
+            ` : `
+              <div style="display:flex;flex-direction:column;gap:4px">
+                ${guests.map(g => `
+                  <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--bg-2);border:1px solid var(--border-soft);border-left:3px solid var(--orange);border-radius:6px">
+                    <div style="width:32px;height:32px;border-radius:50%;background:var(--bg-3);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:13px;color:var(--orange);flex-shrink:0">${esc(((g.name || '?').trim().charAt(0) || '?').toUpperCase())}</div>
+                    <div style="flex:1;min-width:0">
+                      <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;line-height:1.2">${esc(g.name)}${g.promotedToPlayerId ? ' <span style=\"font-size:9px;color:var(--green);font-family:JetBrains Mono\">PROMUE</span>' : ''}</div>
+                      ${g.note ? `<div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${esc(g.note)}</div>` : ''}
+                    </div>
+                    ${!g.promotedToPlayerId ? `<button class="btn btn-icon" onclick="promoteGuestToPlayer('${g.id}')" title="Promouvoir en joueuse régulière" style="font-size:12px">↗</button>` : ''}
+                    <button class="btn btn-icon" onclick="removeGuestAndRefresh('${parentId}','${dateStr}','${g.id}')" style="color:var(--red)" title="Retirer">✕</button>
+                  </div>
+                `).join('')}
+              </div>
+            `}
+          </div>
+        `;
+      })() : ''}
     </div>
     ${isCoach ? `
       <div style="padding:16px 20px;border-top:1px solid var(--border-soft);background:var(--bg-1)">
@@ -14215,6 +14312,217 @@ function deleteChallenge(id) {
   if (!confirm('Supprimer ?')) return;
   state.challenges = state.challenges.filter(x => x.id !== id);
   persist(); render();
+}
+
+// ============================================================
+// JOUEUSES GUESTS — invitées temporaires sur une instance training
+// (Phase 5 — cf. migrations 20260524_009_guest_players.sql).
+//
+// Une guest = un humain identifié par son nom (texte libre coach), suivi
+// cross-instance pour permettre la suggestion "récents 30j" et la
+// promotion en joueuse régulière.
+// ============================================================
+
+function getTrainingGuests(convocationId, instanceDate) {
+  return (state.trainingGuests || [])
+    .filter(tg => tg.convocationId === convocationId && tg.instanceDate === instanceDate)
+    .map(tg => {
+      const g = (state.guestPlayers || []).find(x => x.id === tg.guestPlayerId);
+      return g ? { ...g, _link: tg } : null;
+    })
+    .filter(Boolean);
+}
+
+// "Guests récents" pour suggestion : seen dans les N derniers jours ET
+// pas encore promus ET pas encore liés à cette instance précise.
+function suggestRecentGuests(convocationId, instanceDate, daysWindow) {
+  daysWindow = daysWindow || 30;
+  const since = Date.now() - daysWindow * 24 * 3600 * 1000;
+  const linkedHere = new Set(
+    (state.trainingGuests || [])
+      .filter(tg => tg.convocationId === convocationId && tg.instanceDate === instanceDate)
+      .map(tg => tg.guestPlayerId)
+  );
+  return (state.guestPlayers || [])
+    .filter(g => !g.promotedToPlayerId)
+    .filter(g => !linkedHere.has(g.id))
+    .filter(g => (g.lastSeenAt || 0) >= since)
+    .sort((a, b) => (b.lastSeenAt || 0) - (a.lastSeenAt || 0));
+}
+
+// Crée un nouveau guest et le lie à l'instance. Si name existe déjà
+// (case-insensitive) parmi les non-promus, on réutilise le guest existant
+// au lieu de créer un doublon — c'est le comportement attendu quand le
+// coach retape "Lina" plusieurs entraînements de suite.
+function addGuestToTraining(convocationId, instanceDate, name, note) {
+  const cleanName = (name || '').trim();
+  if (!cleanName) return null;
+  state.guestPlayers = state.guestPlayers || [];
+  state.trainingGuests = state.trainingGuests || [];
+  let existing = state.guestPlayers.find(g =>
+    !g.promotedToPlayerId &&
+    (g.name || '').trim().toLowerCase() === cleanName.toLowerCase()
+  );
+  const now = Date.now();
+  if (!existing) {
+    existing = {
+      id: uid(),
+      name: cleanName,
+      note: (note || '').trim(),
+      promotedToPlayerId: null,
+      firstSeenAt: now,
+      lastSeenAt: now,
+      createdAt: now
+    };
+    state.guestPlayers.push(existing);
+  } else {
+    existing.lastSeenAt = now;
+    if (note) existing.note = note.trim();
+  }
+  linkExistingGuestToTraining(convocationId, instanceDate, existing.id, { skipPersist: true });
+  persist();
+  return existing;
+}
+
+function linkExistingGuestToTraining(convocationId, instanceDate, guestId, opts) {
+  opts = opts || {};
+  state.trainingGuests = state.trainingGuests || [];
+  const dup = state.trainingGuests.find(tg =>
+    tg.convocationId === convocationId &&
+    tg.guestPlayerId === guestId &&
+    tg.instanceDate === instanceDate
+  );
+  if (!dup) {
+    state.trainingGuests.push({
+      convocationId, guestPlayerId: guestId, instanceDate,
+      createdAt: Date.now()
+    });
+  }
+  // MAJ lastSeenAt même sur ré-link (un guest réutilisé est "vu" à nouveau)
+  const g = (state.guestPlayers || []).find(x => x.id === guestId);
+  if (g) g.lastSeenAt = Date.now();
+  if (!opts.skipPersist) persist();
+}
+
+function removeGuestFromTraining(convocationId, instanceDate, guestId) {
+  state.trainingGuests = (state.trainingGuests || []).filter(tg =>
+    !(tg.convocationId === convocationId && tg.guestPlayerId === guestId && tg.instanceDate === instanceDate)
+  );
+  persist();
+}
+
+// Promote : crée une row players + flag le guest comme promu (pour ne plus
+// le suggérer mais garder l'historique du lien). Demande un numéro de
+// maillot car obligatoire côté players.
+function promoteGuestToPlayer(guestId) {
+  const g = (state.guestPlayers || []).find(x => x.id === guestId);
+  if (!g) return;
+  if (g.promotedToPlayerId) { alert('Cette guest a déjà été promue.'); return; }
+  const num = prompt(`Promouvoir "${g.name}" en joueuse régulière.\n\nNuméro de maillot ?`, '');
+  if (num === null) return;
+  const n = parseInt(num);
+  if (isNaN(n) || n <= 0) { alert('Numéro invalide.'); return; }
+  if ((state.players || []).some(p => p.num === n)) {
+    if (!confirm(`Le numéro ${n} est déjà utilisé. Continuer quand même ?`)) return;
+  }
+  const newPlayer = {
+    id: uid(),
+    name: g.name,
+    num: n,
+    photo: null,
+    feedback: {}
+  };
+  state.players = state.players || [];
+  state.players.unshift(newPlayer);
+  g.promotedToPlayerId = newPlayer.id;
+  // Auto-rattache à la saison courante si une est active
+  if (state.currentSeasonId) {
+    state.seasonPlayers = state.seasonPlayers || [];
+    state.seasonPlayers.push({
+      seasonId: state.currentSeasonId,
+      playerId: newPlayer.id,
+      joinedAt: new Date().toISOString().slice(0, 10),
+      leftAt: '',
+      role: ''
+    });
+  }
+  persist();
+  alert(`✓ ${g.name} ajoutée à l'effectif${state.currentSeasonId ? ' et à la saison courante' : ''}.`);
+  render();
+}
+
+// ----- UI -----
+function openAddGuestModal(convocationId, instanceDate) {
+  const suggestions = suggestRecentGuests(convocationId, instanceDate, 30);
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">${formatDate(instanceDate, 'long')}</div>
+        <div class="modal-title">+ Ajouter une joueuse temporaire</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="fld">
+        <label class="fld-label">Nom (ex : "Lina — copine de Carla")</label>
+        <input id="gp-name" placeholder="Prénom + contexte court">
+      </div>
+      <div class="fld">
+        <label class="fld-label">Note (optionnel)</label>
+        <input id="gp-note" placeholder="Ex : essayeuse, club veut tester">
+      </div>
+      <button class="btn btn-primary btn-block" onclick="submitAddGuest('${convocationId}','${instanceDate}')">+ Ajouter à cet entraînement</button>
+
+      ${suggestions.length > 0 ? `
+        <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border-soft)">
+          <div class="eyebrow-muted mb-2">Guests récentes (30j) · ${suggestions.length}</div>
+          <div style="display:flex;flex-direction:column;gap:4px">
+            ${suggestions.slice(0, 8).map(g => {
+              const days = g.lastSeenAt ? Math.floor((Date.now() - g.lastSeenAt) / (24 * 3600 * 1000)) : '?';
+              return `
+                <button class="picker-row" onclick="linkExistingGuestAndClose('${convocationId}','${instanceDate}','${g.id}')" style="text-align:left">
+                  <div style="width:36px;height:36px;border-radius:50%;background:var(--bg-3);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:14px;color:var(--orange);flex-shrink:0">${esc(((g.name || '?').trim().charAt(0) || '?').toUpperCase())}</div>
+                  <div style="flex:1;min-width:0">
+                    <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;line-height:1.2">${esc(g.name)}</div>
+                    <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">Vue il y a ${days}j${g.note ? ' · ' + esc(g.note) : ''}</div>
+                  </div>
+                  <div style="color:var(--orange);font-size:18px">+</div>
+                </button>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      ` : ''}
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Annuler</button>
+    </div>
+  `);
+  setTimeout(() => document.getElementById('gp-name')?.focus(), 80);
+}
+
+function submitAddGuest(convocationId, instanceDate) {
+  const name = (document.getElementById('gp-name').value || '').trim();
+  if (!name) return alert('Nom requis');
+  const note = (document.getElementById('gp-note').value || '').trim();
+  addGuestToTraining(convocationId, instanceDate, name, note);
+  closeModal();
+  // Réouvre l'instance derrière pour voir la guest apparaître
+  setTimeout(() => openEventInstance(convocationId, instanceDate), 80);
+}
+
+function linkExistingGuestAndClose(convocationId, instanceDate, guestId) {
+  linkExistingGuestToTraining(convocationId, instanceDate, guestId);
+  closeModal();
+  setTimeout(() => openEventInstance(convocationId, instanceDate), 80);
+}
+
+function removeGuestAndRefresh(convocationId, instanceDate, guestId) {
+  const g = (state.guestPlayers || []).find(x => x.id === guestId);
+  if (!confirm(`Retirer "${g ? g.name : 'cette guest'}" de cet entraînement ?`)) return;
+  removeGuestFromTraining(convocationId, instanceDate, guestId);
+  closeModal();
+  setTimeout(() => openEventInstance(convocationId, instanceDate), 80);
 }
 
 // ============================================================
