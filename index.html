@@ -4586,6 +4586,12 @@ function closeModal() {
   const r = document.getElementById('modal-root');
   if (r) r.innerHTML = '';
   document.body.style.overflow = '';
+  // Révoque l'URL blob de l'export victoire challenge si présente (évite
+  // de garder le JPEG en mémoire après fermeture du preview).
+  if (state && state._challengeStoryUrl) {
+    try { URL.revokeObjectURL(state._challengeStoryUrl); } catch {}
+    state._challengeStoryUrl = null;
+  }
 }
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 
@@ -13810,6 +13816,7 @@ function challengeCard(c, isCoach) {
 
           ${isCoach ? `
             <div style="display:flex;gap:4px;margin-top:12px;justify-content:flex-end;flex-wrap:wrap">
+              ${topContributors.length > 0 ? `<button class="btn btn-secondary" onclick="openChallengeStoryModal('${c.id}')" style="font-size:10px;padding:6px 10px">📸 Exporter victoire</button>` : ''}
               ${!c.badgesAwarded ? `<button class="btn btn-secondary" onclick="closeChallengeNow('${c.id}')" style="font-size:10px;padding:6px 10px">🏁 Clôturer & attribuer trophées</button>` : '<span class="chip chip-green">🏆 Trophées attribués</span>'}
               <button class="btn btn-icon" onclick="editChallenge('${c.id}')" title="Modifier">✎</button>
               <button class="btn btn-icon" onclick="resetCollective('${c.id}')" title="Réinitialiser le compteur">↺</button>
@@ -13870,6 +13877,7 @@ function challengeCard(c, isCoach) {
         ${isAuto ? `<div style="margin-top:8px;font-size:11px;color:var(--orange);font-family:'JetBrains Mono'">⚙ Compte automatiquement</div>` : ''}
         ${isCoach ? `
           <div style="display:flex;gap:4px;margin-top:10px;justify-content:flex-end;flex-wrap:wrap">
+            ${entries.some(e => e.score > 0) ? `<button class="btn btn-secondary" onclick="openChallengeStoryModal('${c.id}')" style="font-size:10px;padding:6px 10px">📸 Exporter victoire</button>` : ''}
             ${(c.scope === 'individual' && !c.badgesAwarded) ? `<button class="btn btn-secondary" onclick="closeChallengeNow('${c.id}')" style="font-size:10px;padding:6px 10px">🏁 Clôturer & attribuer trophées</button>` : (c.scope === 'individual' && c.badgesAwarded ? '<span class="chip chip-green">🏆 Trophées attribués</span>' : '')}
             <button class="btn btn-icon" onclick="editChallenge('${c.id}')">✎</button>
             <button class="btn btn-icon" onclick="deleteChallenge('${c.id}')" style="color:var(--red)">🗑</button>
@@ -14207,6 +14215,299 @@ function deleteChallenge(id) {
   if (!confirm('Supprimer ?')) return;
   state.challenges = state.challenges.filter(x => x.id !== id);
   persist(); render();
+}
+
+// ============================================================
+// EXPORT VICTOIRE CHALLENGE — story Instagram 1080x1920 portrait,
+// Canvas 2D vanilla. Pas de dépendance, pas de stockage Supabase :
+// le blob JPEG est généré à la demande et téléchargé via <a download>.
+// Layout B : grosse photo joueuse gagnante (cercle 400px), nom XL, score
+// énorme, titre challenge, date, runner-up compact dessous.
+// ============================================================
+
+function _slugifyForFile(s) {
+  return String(s || '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')  // strip diacritics
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 40) || 'item';
+}
+
+// Promise-wrapped image load. crossOrigin pour permettre toDataURL/toBlob
+// quand le bucket Storage le permet ; fallback silencieux sur erreur (le
+// caller dessine alors un placeholder).
+function loadImage(url) {
+  return new Promise((resolve, reject) => {
+    if (!url) return reject(new Error('no url'));
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('img load failed'));
+    img.src = url;
+  });
+}
+
+// Clip + draw une image dans un cercle (cover, centré). Garde le ratio.
+function drawCircleImage(ctx, img, cx, cy, r) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.closePath();
+  ctx.clip();
+  // Fit cover : ratio préservé, on remplit le cercle puis crop par le clip.
+  const iw = img.width, ih = img.height;
+  const scale = Math.max((2 * r) / iw, (2 * r) / ih);
+  const dw = iw * scale, dh = ih * scale;
+  ctx.drawImage(img, cx - dw / 2, cy - dh / 2, dw, dh);
+  ctx.restore();
+}
+
+// Placeholder cercle avec initiale (utilisé si pas de photo joueuse).
+function drawCirclePlaceholder(ctx, name, cx, cy, r, bgColor, fgColor) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.closePath();
+  ctx.fillStyle = bgColor;
+  ctx.fill();
+  ctx.fillStyle = fgColor;
+  ctx.font = `bold ${r * 0.9}px 'Anton', system-ui, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const initial = ((name || '?').trim().charAt(0) || '?').toUpperCase();
+  ctx.fillText(initial, cx, cy + r * 0.05);
+  ctx.restore();
+}
+
+// Word-wrap simple. Retourne nb de lignes effectivement dessinées (utile
+// pour placer du contenu en dessous).
+function drawWrappedText(ctx, text, x, y, maxWidth, lineHeight, maxLines) {
+  const words = String(text || '').split(/\s+/).filter(Boolean);
+  const lines = [];
+  let cur = '';
+  words.forEach(w => {
+    const test = cur ? cur + ' ' + w : w;
+    if (ctx.measureText(test).width <= maxWidth) {
+      cur = test;
+    } else {
+      if (cur) lines.push(cur);
+      cur = w;
+    }
+  });
+  if (cur) lines.push(cur);
+  const out = (maxLines && lines.length > maxLines)
+    ? lines.slice(0, maxLines - 1).concat([lines[maxLines - 1].replace(/.{0,3}$/, '…')])
+    : lines;
+  out.forEach((ln, i) => ctx.fillText(ln, x, y + i * lineHeight));
+  return out.length;
+}
+
+// Returns { player, score } | null. Gère lowerIsBetter et les modes
+// individual/season/collective. Pour collectif, le "winner" = top
+// contributrice (joueuse avec score max, peu importe l'objectif).
+function getChallengeWinner(c) {
+  const scores = c.scores || {};
+  const _seasonId = c.seasonId || state.currentSeasonId;
+  const pool = _seasonsLoaded() && _seasonId
+    ? getSeasonPlayers(_seasonId)
+    : (state.players || []);
+  const entries = pool
+    .map(p => ({ player: p, score: scores[p.id] || 0 }))
+    .filter(e => e.score > 0);
+  if (!entries.length) return null;
+  if (c.lowerIsBetter) entries.sort((a, b) => a.score - b.score);
+  else entries.sort((a, b) => b.score - a.score);
+  return entries[0];
+}
+
+function getChallengeRunnerUp(c, excludeId, n) {
+  n = n || 2;
+  const scores = c.scores || {};
+  const _seasonId = c.seasonId || state.currentSeasonId;
+  const pool = _seasonsLoaded() && _seasonId
+    ? getSeasonPlayers(_seasonId)
+    : (state.players || []);
+  const entries = pool
+    .map(p => ({ player: p, score: scores[p.id] || 0 }))
+    .filter(e => e.score > 0 && e.player.id !== excludeId);
+  if (!entries.length) return [];
+  if (c.lowerIsBetter) entries.sort((a, b) => a.score - b.score);
+  else entries.sort((a, b) => b.score - a.score);
+  return entries.slice(0, n);
+}
+
+// Construit le canvas 1080x1920 et résout en Blob JPEG q=0.85.
+async function generateChallengeStory(challengeId) {
+  const c = state.challenges.find(x => x.id === challengeId);
+  if (!c) throw new Error('Challenge introuvable');
+  const winner = getChallengeWinner(c);
+  if (!winner) throw new Error('Aucune joueuse avec un score > 0');
+  const runnerUps = getChallengeRunnerUp(c, winner.player.id, 2);
+
+  const W = 1080, H = 1920;
+  const canvas = document.createElement('canvas');
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext('2d');
+
+  // Fond dégradé sombre (cohérent avec --bg-1 / --orange de l'app)
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#1a0e08');
+  bg.addColorStop(0.5, '#0f0805');
+  bg.addColorStop(1, '#000');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  // Halo orange derrière la photo
+  const halo = ctx.createRadialGradient(W / 2, 620, 80, W / 2, 620, 480);
+  halo.addColorStop(0, 'rgba(255,107,0,0.35)');
+  halo.addColorStop(1, 'rgba(255,107,0,0)');
+  ctx.fillStyle = halo;
+  ctx.fillRect(0, 240, W, 760);
+
+  // Eyebrow top : "🏆 CHAMPIONNE" + date
+  ctx.fillStyle = '#ff6b00';
+  ctx.font = `bold 38px 'JetBrains Mono', monospace`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText('🏆  CHAMPIONNE', W / 2, 120);
+
+  const today = new Date();
+  const dateStr = today.toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' });
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.font = `28px 'JetBrains Mono', monospace`;
+  ctx.fillText(dateStr.toUpperCase(), W / 2, 180);
+
+  // === Photo gagnante (cercle 400px) ===
+  const photoCx = W / 2, photoCy = 620, photoR = 200;
+  // Ring orange
+  ctx.beginPath();
+  ctx.arc(photoCx, photoCy, photoR + 12, 0, Math.PI * 2);
+  ctx.strokeStyle = '#ff6b00';
+  ctx.lineWidth = 8;
+  ctx.stroke();
+
+  let photoOk = false;
+  if (winner.player.photo) {
+    try {
+      const img = await loadImage(winner.player.photo);
+      drawCircleImage(ctx, img, photoCx, photoCy, photoR);
+      photoOk = true;
+    } catch (e) {
+      // CORS ou 404 → fallback placeholder. Pas de log car attendu si la
+      // photo vit en data: ou sur un host sans CORS.
+    }
+  }
+  if (!photoOk) {
+    drawCirclePlaceholder(ctx, winner.player.name, photoCx, photoCy, photoR, '#2a1810', '#ff6b00');
+  }
+
+  // === Nom joueuse ===
+  ctx.fillStyle = '#fff';
+  ctx.font = `bold 72px 'Anton', 'Impact', system-ui, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  const nameStr = `#${winner.player.num || '–'}  ${(winner.player.name || '').toUpperCase()}`;
+  ctx.fillText(nameStr, W / 2, 900);
+
+  // === Score énorme ===
+  ctx.fillStyle = '#ff6b00';
+  ctx.font = `bold 220px 'Anton', 'Impact', system-ui, sans-serif`;
+  ctx.fillText(String(winner.score), W / 2, 1010);
+
+  // Métrique sous le score
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  ctx.font = `36px 'JetBrains Mono', monospace`;
+  ctx.fillText((c.metric || '').toUpperCase(), W / 2, 1250);
+
+  // === Titre challenge (wrapped, max 2 lignes) ===
+  ctx.fillStyle = '#fff';
+  ctx.font = `48px 'Anton', 'Impact', system-ui, sans-serif`;
+  ctx.textAlign = 'center';
+  const titleLines = drawWrappedText(ctx, (c.title || '').toUpperCase(), W / 2, 1330, W - 160, 60, 2);
+
+  // === Runner-up compact ===
+  if (runnerUps.length > 0) {
+    const blockY = 1530;
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.font = `26px 'JetBrains Mono', monospace`;
+    ctx.textAlign = 'center';
+    ctx.fillText('PODIUM', W / 2, blockY);
+
+    // 2nd (et 3e si dispo)
+    runnerUps.forEach((r, i) => {
+      const y = blockY + 60 + i * 80;
+      const medal = i === 0 ? '🥈' : '🥉';
+      const txt = `${medal}  #${r.player.num || '–'} ${r.player.name}  ·  ${r.score} ${c.metric || ''}`;
+      ctx.fillStyle = '#fff';
+      ctx.font = `36px 'Anton', 'Impact', system-ui, sans-serif`;
+      ctx.fillText(txt.toUpperCase(), W / 2, y);
+    });
+  }
+
+  // === Footer signature ===
+  ctx.fillStyle = 'rgba(255,107,0,0.7)';
+  ctx.font = `28px 'JetBrains Mono', monospace`;
+  ctx.textAlign = 'center';
+  ctx.fillText('PLAYBOOK · BCL', W / 2, H - 80);
+
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(b => b ? resolve({ blob: b, winner, challenge: c }) : reject(new Error('toBlob failed')), 'image/jpeg', 0.85);
+  });
+}
+
+// ----- UI : preview modal + download -----
+async function openChallengeStoryModal(challengeId) {
+  const c = state.challenges.find(x => x.id === challengeId);
+  if (!c) return;
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">🏆 Export victoire</div>
+        <div class="modal-title">${esc(c.title || '')}</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body" id="cs-body">
+      <div style="text-align:center;padding:40px 16px;color:var(--ink-3);font-family:'JetBrains Mono';font-size:12px">
+        Génération de la story…
+      </div>
+    </div>
+    <div class="modal-footer" id="cs-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">← Retour</button>
+    </div>
+  `);
+  try {
+    const { blob, winner, challenge } = await generateChallengeStory(challengeId);
+    const url = URL.createObjectURL(blob);
+    const fname = `challenge_${_slugifyForFile(challenge.title)}_${_slugifyForFile(winner.player.name)}_${new Date().toISOString().slice(0,10)}.jpg`;
+    // On garde l'URL en mémoire pour la révoquer au close. Pas critique
+    // (le GC le ferait) mais propre.
+    state._challengeStoryUrl = url;
+    const body = document.getElementById('cs-body');
+    const footer = document.getElementById('cs-footer');
+    if (!body || !footer) return; // user a fermé pendant le render
+    body.innerHTML = `
+      <div style="text-align:center;background:var(--bg-3);border-radius:12px;padding:10px">
+        <img src="${url}" alt="Story victoire" style="max-width:100%;max-height:60vh;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,0.5)">
+      </div>
+      <div style="margin-top:10px;font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.04em;text-align:center;line-height:1.5">
+        1080 × 1920 · JPEG · ${(blob.size / 1024).toFixed(0)} Ko<br>
+        Format story Instagram / WhatsApp status
+      </div>
+    `;
+    footer.innerHTML = `
+      <button class="btn btn-secondary" onclick="closeModal()">← Retour</button>
+      <a class="btn btn-primary" href="${url}" download="${esc(fname)}">⬇ Télécharger</a>
+    `;
+  } catch (e) {
+    const body = document.getElementById('cs-body');
+    if (body) body.innerHTML = `
+      <div style="text-align:center;padding:30px 16px;color:var(--red);font-family:'JetBrains Mono';font-size:13px">
+        ⚠ ${esc(e.message)}
+      </div>
+    `;
+  }
 }
 
 // PLAYERS MANAGEMENT
