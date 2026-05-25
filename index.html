@@ -5908,20 +5908,29 @@ function eventInstanceRow(ev, isCoach) {
   const isToday = isoDate(new Date()) === ev.date;
   const isMatch = ev.type === 'match';
   const instanceKey = ev._instanceKey || ev.id;
+  const parentId = ev._parentId || ev.id;
+  const instanceDate = ev._instanceDate || ev.date;
+  // Invitées : chip + raccourci "+ ajouter" sur training, coach uniquement, non annulé
+  const parentConvoc = state.convocations.find(x => x.id === parentId);
+  const isCancelled = parentConvoc && (parentConvoc.cancelledInstances || []).includes(instanceDate);
+  const showGuestUI = isCoach && !isMatch && !isCancelled;
+  const guestCount = showGuestUI ? getTrainingGuests(parentId, instanceDate).length : 0;
   return `
-    <div class="list-row" onclick="openEventInstance('${ev._parentId || ev.id}','${ev._instanceDate || ev.date}')">
+    <div class="list-row" onclick="openEventInstance('${parentId}','${instanceDate}')">
       <div class="event-date-badge">
         <div class="event-date-day">${day}</div>
         <div class="event-date-month">${month}</div>
       </div>
       <div class="list-row-content">
-        <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px;flex-wrap:wrap">
           <div class="list-row-title">${esc(ev.title)}</div>
           ${isMatch ? '<span class="chip chip-orange" style="font-size:9px;padding:2px 6px">MATCH</span>' : ''}
           ${isToday ? '<span class="chip chip-red" style="font-size:9px;padding:2px 6px">AUJOURD\'HUI</span>' : ''}
+          ${guestCount > 0 ? `<span class="chip" style="font-size:9px;padding:2px 6px;background:rgba(255,107,0,0.15);border-color:var(--orange);color:var(--orange)" title="${guestCount} invitée${guestCount>1?'s':''}">+${guestCount} 👤</span>` : ''}
         </div>
         <div class="list-row-subtitle">${dayName}${ev.time ? ' · ' + ev.time : ''}${ev.location ? ' · ' + esc(ev.location) : ''}</div>
       </div>
+      ${showGuestUI ? `<button class="btn btn-icon" onclick="event.stopPropagation();openAddGuestModal('${parentId}','${instanceDate}')" title="Ajouter une joueuse temporaire" style="color:var(--orange);font-size:16px;margin-right:2px">+👤</button>` : ''}
       <span class="list-row-trail">›</span>
     </div>
   `;
@@ -12215,12 +12224,19 @@ function renderExerciseDetail() {
   if (!ex) return;
   const linkedPlay = ex.source === 'play' && ex.playId ? state.plays.find(p => p.id === ex.playId) : null;
 
-  // Auto-nettoyage : retirer les IDs orphelins des groupes (joueuses qui n'existent plus)
+  // Auto-nettoyage : retirer les IDs orphelins des groupes (joueuses qui n'existent plus).
+  // Les guests sont stockées préfixées `guest:<id>` — on les préserve si la guest existe encore.
   const validIds = new Set(state.players.map(p => p.id));
+  const validGuestIds = new Set((state.guestPlayers || []).map(g => g.id));
   let cleaned = false;
   (ex.groups || []).forEach(g => {
     const before = (g.players || []).length;
-    g.players = (g.players || []).filter(pid => validIds.has(pid));
+    g.players = (g.players || []).filter(pid => {
+      if (typeof pid === 'string' && pid.startsWith('guest:')) {
+        return validGuestIds.has(pid.slice(6));
+      }
+      return validIds.has(pid);
+    });
     if (g.players.length !== before) cleaned = true;
   });
   if (cleaned) persist();
@@ -12230,7 +12246,8 @@ function renderExerciseDetail() {
   // Joueuses présentes ce jour-là (basé sur les responses de la convoc)
   // SAISON : on scope l'effectif sur la saison de la convoc
   const { dateStr } = state._editingTraining;
-  const instance = makeConvocInstance(c, dateStr || c.date);
+  const _instDate = dateStr || c.date;
+  const instance = makeConvocInstance(c, _instDate);
   const responses = instance.responses || {};
   const _seasonId = c.seasonId || state.currentSeasonId;
   const _seasonPool = _seasonsLoaded() && _seasonId
@@ -12241,10 +12258,19 @@ function renderExerciseDetail() {
     return !r || r.status !== 'absent';
   });
 
-  // Joueuses non encore assignées à un groupe dans cet exo (parmi les présentes uniquement)
-  const assignedIds = new Set();
-  groups.forEach(g => (g.players || []).forEach(pid => assignedIds.add(pid)));
-  const unassigned = presentPlayers.filter(p => !assignedIds.has(p.id));
+  // INVITÉES de l'instance — ajoutées au pool sélectionnable comme les régulières.
+  // Clé interne préfixée pour distinguer dans `g.players` (rétrocompat : les IDs
+  // existants restent en uuid brut, seules les nouvelles entrées guest sont préfixées).
+  const instanceGuests = (c.type === 'training') ? getTrainingGuests(c.id, _instDate) : [];
+  const presentEntities = [
+    ...presentPlayers.map(p => ({ kind: 'player', key: p.id, full: p })),
+    ...instanceGuests.map(g => ({ kind: 'guest', key: 'guest:' + g.id, full: g })),
+  ];
+
+  // Entités non encore assignées à un groupe dans cet exo (parmi les présentes + invitées)
+  const assignedKeys = new Set();
+  groups.forEach(g => (g.players || []).forEach(k => assignedKeys.add(k)));
+  const unassigned = presentEntities.filter(e => !assignedKeys.has(e.key));
 
   openModal(`
     <div class="modal-header">
@@ -12400,10 +12426,15 @@ function renderExerciseDetail() {
                 ${groups.length > 1 ? `<button class="btn btn-icon" onclick="removeExerciseGroup(${gIdx})" style="color:var(--red);width:24px;height:24px">✕</button>` : ''}
               </div>
               <div style="display:flex;flex-wrap:wrap;gap:4px;min-height:32px">
-                ${(g.players || []).map(pid => {
-                  const pl = state.players.find(x => x.id === pid);
+                ${(g.players || []).map(k => {
+                  if (typeof k === 'string' && k.startsWith('guest:')) {
+                    const gp = (state.guestPlayers || []).find(x => x.id === k.slice(6));
+                    if (!gp) return '';
+                    return `<button class="player-chip-assigned" onclick="removePlayerFromGroup(${gIdx},'${k}')" title="Invitée · ${esc(gp.name)}" style="border-style:dashed">👤 ${esc((gp.name || '').split(' ')[0] || gp.name)} ✕</button>`;
+                  }
+                  const pl = state.players.find(x => x.id === k);
                   if (!pl) return '';
-                  return `<button class="player-chip-assigned" onclick="removePlayerFromGroup(${gIdx},'${pid}')">#${pl.num} ${esc(pl.name.split(' ')[0])} ✕</button>`;
+                  return `<button class="player-chip-assigned" onclick="removePlayerFromGroup(${gIdx},'${k}')">#${pl.num} ${esc(pl.name.split(' ')[0])} ✕</button>`;
                 }).join('')}
                 ${(g.players || []).length === 0 ? '<span style="font-size:11px;color:var(--ink-4);font-style:italic;font-family:\'JetBrains Mono\'">Aucune joueuse · pioche depuis ci-dessous</span>' : ''}
               </div>
@@ -12415,13 +12446,16 @@ function renderExerciseDetail() {
         ${unassigned.length > 0 ? `
           <div style="margin-top:12px;padding:10px 12px;background:var(--bg-2);border:1px dashed var(--border);border-radius:8px">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:6px;flex-wrap:wrap">
-              <div class="eyebrow-muted" style="font-size:9px">Non assignées · ${unassigned.length}</div>
+              <div class="eyebrow-muted" style="font-size:9px">Non assignées · ${unassigned.length}${instanceGuests.length > 0 ? ` · ${instanceGuests.length} 👤 invitée${instanceGuests.length>1?'s':''}` : ''}</div>
               <button class="btn btn-secondary" onclick="groupAllRemaining()" style="font-size:10px;padding:4px 10px">📦 Tout dans un groupe</button>
             </div>
             <div style="display:flex;flex-wrap:wrap;gap:4px">
-              ${unassigned.map(p => `
-                <button class="player-chip" onclick="openAssignPlayerToGroup('${p.id}')">#${p.num} ${esc(p.name.split(' ')[0])}</button>
-              `).join('')}
+              ${unassigned.map(e => {
+                if (e.kind === 'guest') {
+                  return `<button class="player-chip" onclick="openAssignPlayerToGroup('${e.key}')" title="Invitée · ${esc(e.full.name)}" style="border-style:dashed;color:var(--orange)">👤 ${esc((e.full.name || '').split(' ')[0] || e.full.name)}</button>`;
+                }
+                return `<button class="player-chip" onclick="openAssignPlayerToGroup('${e.key}')">#${e.full.num} ${esc(e.full.name.split(' ')[0])}</button>`;
+              }).join('')}
             </div>
           </div>
         ` : '<div style="margin-top:10px;text-align:center;font-size:10px;color:var(--green);font-family:\'JetBrains Mono\';text-transform:uppercase">✓ Toutes les présentes sont placées</div>'}
@@ -12480,10 +12514,18 @@ function openAssignPlayerToGroup(pid) {
   const c = state.convocations.find(x => x.id === state._editingTraining.convocId);
   const ex = c.trainingPlan.exercises[state._editingExerciseIdx];
   const groups = ex.groups || [];
-  const p = state.players.find(x => x.id === pid);
+  // pid peut être un uuid de joueuse régulière OU `guest:<id>` pour une invitée
+  let displayLabel;
+  if (typeof pid === 'string' && pid.startsWith('guest:')) {
+    const gp = (state.guestPlayers || []).find(x => x.id === pid.slice(6));
+    displayLabel = gp ? '👤 ' + gp.name : 'Invitée';
+  } else {
+    const p = state.players.find(x => x.id === pid);
+    displayLabel = p ? p.name : 'Joueuse';
+  }
   openModal(`
     <div class="modal-header">
-      <div class="modal-title">Placer ${esc(p.name)}</div>
+      <div class="modal-title">Placer ${esc(displayLabel)}</div>
       <button class="modal-close" onclick="closeModal();setTimeout(()=>renderExerciseDetail(),50)">✕</button>
     </div>
     <div class="modal-body">
@@ -12515,20 +12557,25 @@ function groupAllRemaining() {
   const c = state.convocations.find(x => x.id === convocId);
   const ex = c.trainingPlan.exercises[state._editingExerciseIdx];
 
-  // Recalculer les non assignées (parmi présentes uniquement)
+  // Recalculer les non assignées (parmi présentes + invitées)
   // SAISON : effectif scopé à la saison de la convoc
-  const instance = makeConvocInstance(c, dateStr || c.date);
+  const _instDate = dateStr || c.date;
+  const instance = makeConvocInstance(c, _instDate);
   const responses = instance.responses || {};
   const _seasonId = c.seasonId || state.currentSeasonId;
   const _seasonPool = _seasonsLoaded() && _seasonId
     ? getSeasonPlayers(_seasonId)
     : (state.players || []);
-  const presentIds = _seasonPool
+  const presentKeys = _seasonPool
     .filter(p => { const r = responses[p.id]; return !r || r.status !== 'absent'; })
     .map(p => p.id);
+  const guestKeys = (c.type === 'training')
+    ? getTrainingGuests(c.id, _instDate).map(g => 'guest:' + g.id)
+    : [];
+  const allKeys = [...presentKeys, ...guestKeys];
   const assignedIds = new Set();
-  (ex.groups || []).forEach(g => (g.players || []).forEach(pid => assignedIds.add(pid)));
-  const remainingIds = presentIds.filter(pid => !assignedIds.has(pid));
+  (ex.groups || []).forEach(g => (g.players || []).forEach(k => assignedIds.add(k)));
+  const remainingIds = allKeys.filter(k => !assignedIds.has(k));
 
   if (remainingIds.length === 0) {
     alert('Toutes les présentes sont déjà placées.');
