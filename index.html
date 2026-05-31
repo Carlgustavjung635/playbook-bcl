@@ -3333,6 +3333,52 @@ const ENTITIES = [
         createdAt: r.created_at ? Date.parse(r.created_at) : null
       }));
     }
+  },
+  // ==========================================================================
+  // TRAINING PLANS — Phase 2 (cf. migration 20260529_001_training_plans.sql).
+  // Plan d'entraînement (exercices + notes + validation) attaché à une instance
+  // de convocation training SPÉCIFIQUE (couple convocation_id + instance_date,
+  // pour les trainings récurrents). Persisté en Supabase pour la sync cross-
+  // device. PK applicative `id` = `${convocationId}::${instanceDate}`
+  // (déterministe → upsert idempotent). Contenu dans `plan` (jsonb libre :
+  // { exercises, validated, validatedAt, completedExercises }).
+  // ==========================================================================
+  {
+    key: 'trainingPlans', table: 'training_plans', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => {
+      const out = {};
+      (state.trainingPlans || []).forEach(tp => {
+        const idate = tp.instanceDate;
+        if (!tp.convocationId || !idate) return; // colonnes NOT NULL en DB
+        const id = `${tp.convocationId}::${idate}`;
+        out[id] = {
+          id,
+          convocation_id: tp.convocationId,
+          instance_date: idate,
+          season_id: tp.seasonId || null,
+          plan: tp.plan || {},
+          // updated_at stable par contenu : pas de new Date() ici (sinon le hash
+          // change à chaque flush → ré-upsert en boucle infinie).
+          updated_at: tp.updatedAt ? new Date(tp.updatedAt).toISOString() : null,
+        };
+      });
+      return out;
+    },
+    apply: (state, rows) => {
+      // Merge anti-race : conserve les entrées locales pas encore en remote
+      // (fenêtre de debounce 400ms d'un push concurrent), comme l'entité plays.
+      const local = state.trainingPlans || [];
+      const remoteIds = new Set(rows.map(r => r.id));
+      const fromRemote = rows.map(r => ({
+        convocationId: r.convocation_id,
+        instanceDate: r.instance_date,
+        seasonId: r.season_id || null,
+        plan: r.plan || { exercises: [], validated: false, completedExercises: {} },
+        updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
+      }));
+      const pendingLocal = local.filter(tp => !remoteIds.has(`${tp.convocationId}::${tp.instanceDate}`));
+      state.trainingPlans = [...pendingLocal, ...fromRemote];
+    }
   }
 ];
 
@@ -3738,6 +3784,7 @@ const K = {
   matchPlayLinks: 'pb8_match_play_links',
   guestPlayers: 'pb8_guest_players',
   trainingGuests: 'pb8_training_guests',
+  trainingPlans: 'pb8_training_plans',
 };
 function load(k, d) { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : d; } catch { return d; } }
 // save() : sync localStorage avec gestion explicite du QuotaExceededError.
@@ -3837,6 +3884,14 @@ let state = {
   guestPlayers: load(K.guestPlayers, []),
   trainingGuests: load(K.trainingGuests, []),
 
+  // === TRAINING PLANS (Phase 2 — cf. migration 20260529_001_training_plans) ===
+  // Plans d'entraînement persistés PAR INSTANCE de convoc (sync cross-device).
+  //   [{ convocationId, instanceDate, seasonId, plan:{ exercises, validated,
+  //      validatedAt, completedExercises }, updatedAt }]
+  // Avant Phase 2 le plan vivait sur c.trainingPlan (localStorage only, jamais
+  // synchronisé). Migration legacy → per-instance via _migrateLegacyTrainingPlans().
+  trainingPlans: load(K.trainingPlans, []),
+
   // UI state
   view: null, // { type: 'play'|'match'|'live', id }
   playsCat: 'off',
@@ -3874,6 +3929,7 @@ function persist() {
   save(K.matchPlayLinks, state.matchPlayLinks);
   save(K.guestPlayers, state.guestPlayers);
   save(K.trainingGuests, state.trainingGuests);
+  save(K.trainingPlans, state.trainingPlans);
   // Push toutes les entités équipe vers Supabase (debounced 400ms)
   if (window.PbSync) PbSync.schedule(state);
 }
@@ -11637,6 +11693,92 @@ function closeConvocation(cid, instanceDate) {
 //   completedExercises: { exerciseId: true } // côté joueuse
 // }
 
+// ============================================================
+// PHASE 2 — Plans d'entraînement persistés PAR INSTANCE (sync cross-device)
+// ------------------------------------------------------------
+// Le plan vivait sur c.trainingPlan (localStorage only). On le déporte dans
+// l'entité synchronisée state.trainingPlans, indexée par (convocationId,
+// instanceDate). Pour ne pas réécrire les ~48 sites qui lisent/mutent
+// c.trainingPlan, on utilise un LIVE-BINDING : resolveTrainingPlan() fait
+// pointer c.trainingPlan vers l'objet `plan` de l'entrée per-instance. Toutes
+// les mutations existantes + persist() (qui dump l'entité) restent valides.
+// ============================================================
+function _emptyPlan() { return { exercises: [], validated: false, completedExercises: {} }; }
+
+function _normalizePlan(plan) {
+  if (!plan) return _emptyPlan();
+  if (!plan.exercises) plan.exercises = [];
+  if (!plan.completedExercises) plan.completedExercises = {};
+  if (typeof plan.validated !== 'boolean') plan.validated = false;
+  return plan;
+}
+
+// Lecture seule : retourne le plan per-instance s'il existe, sinon le plan
+// legacy (c.trainingPlan) pour la date de base, sinon un plan vide. NE CRÉE
+// PAS d'entrée (évite de polluer la BD quand le coach ne fait que consulter).
+function getTrainingPlan(convocId, instanceDate) {
+  const c = state.convocations.find(x => x.id === convocId);
+  if (!c) return null;
+  const idate = instanceDate || c.date;
+  const entry = (state.trainingPlans || []).find(tp => tp.convocationId === convocId && tp.instanceDate === idate);
+  if (entry) return _normalizePlan(entry.plan);
+  // Fallback legacy (plan convoc-level non encore migré), uniquement date de base
+  if (idate === c.date && c.trainingPlan && (c.trainingPlan.exercises || []).length) {
+    return _normalizePlan(c.trainingPlan);
+  }
+  return _emptyPlan();
+}
+
+// Résout (et crée si besoin) l'entrée per-instance, puis bind c.trainingPlan
+// dessus. À appeler à chaque ENTRÉE d'édition/lecture mutante d'un plan.
+function resolveTrainingPlan(c, instanceDate) {
+  if (!c) return _emptyPlan();
+  const idate = instanceDate || c.date;
+  state.trainingPlans = state.trainingPlans || [];
+  let entry = state.trainingPlans.find(tp => tp.convocationId === c.id && tp.instanceDate === idate);
+  if (!entry) {
+    entry = {
+      convocationId: c.id,
+      instanceDate: idate,
+      seasonId: c.seasonId || state.currentSeasonId || null,
+      plan: _emptyPlan(),
+      updatedAt: Date.now(),
+    };
+    state.trainingPlans.push(entry);
+  }
+  _normalizePlan(entry.plan);
+  // LIVE-BINDING : les 48 sites existants mutent c.trainingPlan → on le fait
+  // pointer sur l'objet synchronisé. persist() dump state.trainingPlans qui
+  // contient CE MÊME objet → la mutation est capturée sans réécriture.
+  c.trainingPlan = entry.plan;
+  return entry.plan;
+}
+
+// Migration one-shot, idempotente : pour chaque convoc portant un ancien plan
+// convoc-level (c.trainingPlan avec exercices) sans entrée per-instance pour sa
+// date de base, on crée l'entrée per-instance (date de base). Sûr à rejouer.
+function _migrateLegacyTrainingPlans() {
+  if (!Array.isArray(state.convocations)) return;
+  state.trainingPlans = state.trainingPlans || [];
+  let migrated = 0;
+  state.convocations.forEach(c => {
+    const legacy = c.trainingPlan;
+    if (!legacy || !(legacy.exercises || []).length) return;
+    const idate = c.date;
+    const exists = state.trainingPlans.find(tp => tp.convocationId === c.id && tp.instanceDate === idate);
+    if (exists) return;
+    state.trainingPlans.push({
+      convocationId: c.id,
+      instanceDate: idate,
+      seasonId: c.seasonId || state.currentSeasonId || null,
+      plan: _normalizePlan(legacy),
+      updatedAt: Date.now(),
+    });
+    migrated++;
+  });
+  if (migrated) { console.log('[migration] training plans legacy → per-instance:', migrated); persist(); }
+}
+
 function ensureTrainingPlan(c) {
   if (!c.trainingPlan) c.trainingPlan = { exercises: [], validated: false, completedExercises: {} };
   if (!c.trainingPlan.exercises) c.trainingPlan.exercises = [];
@@ -11650,8 +11792,12 @@ function openTrainingPlanEditor(convocId, dateStr) {
     alert('Convocation introuvable.');
     return;
   }
-  ensureTrainingPlan(c);
-  state._editingTraining = { convocId, dateStr: dateStr || c.date };
+  const _idate = dateStr || c.date;
+  // PHASE 2 : bind c.trainingPlan sur le plan per-instance synchronisé (le crée
+  // si besoin). Toutes les mutations en aval (add/move/remove/validate) opèrent
+  // donc sur l'objet synchronisé, capturé par persist() → dump.
+  resolveTrainingPlan(c, _idate);
+  state._editingTraining = { convocId, dateStr: _idate };
   renderTrainingPlanEditor();
 }
 
@@ -11663,8 +11809,9 @@ function renderTrainingPlanEditor() {
   const { convocId, dateStr } = state._editingTraining;
   const c = state.convocations.find(x => x.id === convocId);
   if (!c) return;
-  ensureTrainingPlan(c);
-  const plan = c.trainingPlan;
+  // PHASE 2 : re-bind à chaque render (un apply() realtime a pu reconstruire
+  // les objets de state.trainingPlans → la ref c.trainingPlan serait orpheline).
+  const plan = resolveTrainingPlan(c, dateStr || c.date);
   const totalDuration = plan.exercises.reduce((acc, ex) => acc + (ex.duration || 0), 0);
 
   openModal(`
@@ -12876,8 +13023,11 @@ function goToPlayFromTraining(playId) {
 // === CÔTÉ JOUEUSE : voir le plan validé + cocher ===
 function openMyTrainingPlan(convocId, dateStr) {
   const c = state.convocations.find(x => x.id === convocId);
-  if (!c || !c.trainingPlan || !c.trainingPlan.validated) return;
-  const plan = c.trainingPlan;
+  if (!c) return;
+  // PHASE 2 : plan per-instance (lecture seule, pas de création d'entrée vide).
+  const _idate = dateStr || c.date;
+  const plan = getTrainingPlan(convocId, _idate);
+  if (!plan || !plan.validated) return;
   const myPid = state.auth.playerId;
   const completed = plan.completedExercises || {};
 
@@ -13028,14 +13178,17 @@ function navPExoImg(convocId, exId, delta) {
   document.getElementById('pexo-counter').textContent = (window._pExoIdx + 1) + ' / ' + images.length;
 }
 
-function togglePlayerExerciseDone(convocId, exerciseId) {
+function togglePlayerExerciseDone(convocId, exerciseId, dateStr) {
   const c = state.convocations.find(x => x.id === convocId);
-  if (!c || !c.trainingPlan) return;
-  c.trainingPlan.completedExercises = c.trainingPlan.completedExercises || {};
-  c.trainingPlan.completedExercises[exerciseId] = !c.trainingPlan.completedExercises[exerciseId];
+  if (!c) return;
+  // PHASE 2 : bind sur le plan per-instance synchronisé puis toggle.
+  const _idate = dateStr || c.date;
+  const plan = resolveTrainingPlan(c, _idate);
+  if (!plan) return;
+  plan.completedExercises = plan.completedExercises || {};
+  plan.completedExercises[exerciseId] = !plan.completedExercises[exerciseId];
   persist();
-  // Re-render avec le bon dateStr (on cherche dans le state)
-  openMyTrainingPlan(convocId, c.date);
+  openMyTrainingPlan(convocId, _idate);
 }
 
 function openEventInstance(parentId, dateStr) {
@@ -13090,7 +13243,8 @@ function openEventInstance(parentId, dateStr) {
 
       <!-- V8 : Plan d'entraînement (training uniquement) -->
       ${instance.type === 'training' && !isCancelled ? (() => {
-        const plan = c.trainingPlan || { exercises: [], validated: false };
+        // PHASE 2 : plan per-instance (lecture seule pour l'aperçu).
+        const plan = getTrainingPlan(parentId, dateStr) || { exercises: [], validated: false };
         const totalMin = plan.exercises.reduce((acc, ex) => acc + (ex.duration || 0), 0);
         if (isCoach) {
           return `
@@ -18320,6 +18474,10 @@ function _initPlayersSync() {
         // - coach garde son choix s'il est valide, sinon fallback active
         // - joueuse toujours forcée sur la saison active
         try { ensureCurrentSeasonId(); } catch(e) {}
+        // PHASE 2 : migration one-shot des plans d'entraînement legacy
+        // (c.trainingPlan convoc-level, localStorage only) → entité per-instance
+        // synchronisée. Idempotente (ne recrée pas une entrée existante).
+        try { _migrateLegacyTrainingPlans(); } catch(e) { console.warn('[migration] training plans:', e.message); }
         persist();
         render();
         // Subscribe Realtime sur toutes les entités configurées. On utilise
