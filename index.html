@@ -4649,6 +4649,7 @@ function openModal(html) {
     </div>
   `;
   document.body.style.overflow = 'hidden';
+  _pbModalPush();
 }
 function closeModal() {
   const r = document.getElementById('modal-root');
@@ -4659,6 +4660,13 @@ function closeModal() {
   if (state && state._challengeStoryUrl) {
     try { URL.revokeObjectURL(state._challengeStoryUrl); } catch {}
     state._challengeStoryUrl = null;
+  }
+  // BACK BUTTON : retire proprement l'entrée d'historique de la modal
+  // (history.back) en ignorant le popstate qui en résulte.
+  if (_pbModalDepth > 0 && !_pbInPop) {
+    _pbModalDepth = 0;
+    _pbSuppressPop = true;
+    try { history.back(); } catch (e) { _pbSuppressPop = false; }
   }
 }
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
@@ -4675,6 +4683,7 @@ function viewImage(src) {
       <img src="${esc(src)}" alt="" onclick="event.stopPropagation()">
     </div>
   `;
+  _pbModalPush();
 }
 
 // ============================================================
@@ -4762,6 +4771,7 @@ function viewPdf(id, data, name) {
     </div>
   `;
   document.body.style.overflow = 'hidden';
+  _pbModalPush();
 }
 
 // ============================================================
@@ -5690,9 +5700,14 @@ function renderNav() {
 }
 
 function goSection(id) {
+  // BACK BUTTON : hash routing des onglets. On pose _pbViewActive=false
+  // pour que le hook de render() ne déclenche pas un history.back parasite.
+  const _pbChanged = state.section !== id;
   state.section = id;
   state.view = null;
+  _pbViewActive = false;
   persist();
+  _pbGoSectionHistory(id, _pbChanged);
   render();
   _scrollTopApp();
 }
@@ -18408,7 +18423,24 @@ function _doRender() {
   }
 }
 
-function render() { _doRender(); }
+function render() {
+  // BACK BUTTON : render() est le point de passage unique des vues détail
+  // (state.view). On synchronise ici l'historique : push à l'ouverture d'une
+  // vue, history.back à sa fermeture programmatique (bouton « ← Retour »).
+  // Les var _pb* sont hoistées (déclarées en bas du script) : undefined/falsy
+  // tant que non initialisées, donc sans effet pendant le boot.
+  if (!_pbInPop) {
+    if (state.view && !_pbViewActive) {
+      _pbViewActive = true;
+      try { history.pushState({ pbView: true }, ''); } catch (e) {}
+    } else if (!state.view && _pbViewActive) {
+      _pbViewActive = false;
+      _pbSuppressPop = true;
+      try { history.back(); } catch (e) { _pbSuppressPop = false; }
+    }
+  }
+  _doRender();
+}
 
 // Scroll to top : depuis le fix scroll-past-footer, le scroll est interne au
 // .app. window.scrollTo ne fait plus rien. Helper centralisé pour cibler le
@@ -18525,7 +18557,85 @@ function _renderBody() {
   `;
 }
 
-render();
+// ============================================================
+// BACK BUTTON / NAVIGATION HISTORY (Phase 1 — bouton retour)
+// Objectif : le bouton retour navigateur (et le back physique Android/PWA)
+// ferme d'abord les modals, puis les vues détail (state.view), puis change
+// d'onglet via le hash routing (#/section), au lieu de sortir de l'app.
+// Chokepoints instrumentés : openModal/closeModal (toutes les popups coach +
+// joueuses), viewImage, viewPdf, render() (vues détail), goSection() (onglets).
+// ============================================================
+var _pbViewActive = false;   // une vue détail (state.view) a une entrée d'historique
+var _pbModalDepth = 0;       // 1 si une modal a une entrée d'historique, 0 sinon
+var _pbSuppressPop = false;  // ignore le prochain popstate (close programmatique)
+var _pbInPop = false;        // true pendant le traitement d'un popstate (anti-boucle)
+
+var _PB_SECTIONS = ['home','plays','matches','team','inspire','ffbb','live','challenges','match','calendrier','programme'];
+function _pbIsValidSection(id) { return _PB_SECTIONS.indexOf(id) !== -1; }
+function _pbHashSection() { var h = (location.hash || '').replace(/^#\/?/, '').trim(); return h || null; }
+function _pbModalOpen() { var r = document.getElementById('modal-root'); return !!(r && r.innerHTML.trim() !== ''); }
+
+// Empile une entrée d'historique pour une modal (idempotent : une seule par
+// modal visible, car modal-root ne contient qu'une modal à la fois).
+function _pbModalPush() {
+  if (_pbInPop) return;
+  if (_pbModalDepth === 0) {
+    _pbModalDepth = 1;
+    try { history.pushState({ pbModal: true }, ''); } catch (e) {}
+  }
+}
+
+// Historique du changement d'onglet (hash routing #/section).
+function _pbGoSectionHistory(id, changed) {
+  try {
+    if (changed) history.pushState({ pbTab: id }, '', '#/' + id);
+    else history.replaceState({ pbTab: id }, '', '#/' + id);
+  } catch (e) {}
+}
+
+window.addEventListener('popstate', function (e) {
+  if (_pbSuppressPop) { _pbSuppressPop = false; return; }
+  _pbInPop = true;
+  try {
+    // 1) Modal ouverte → la fermer (prioritaire).
+    if (_pbModalOpen()) {
+      _pbModalDepth = 0;
+      closeModal();
+      return;
+    }
+    // 2) Vue détail ouverte → revenir à la liste.
+    if (typeof state !== 'undefined' && state && state.view) {
+      _pbViewActive = false;
+      state.view = null;
+      _doRender();
+      return;
+    }
+    // 3) Niveau onglet → restaurer la section (état d'historique ou hash).
+    var sec = (e.state && e.state.pbTab) || _pbHashSection();
+    if (sec && _pbIsValidSection(sec) && typeof state !== 'undefined' && state) {
+      state.section = sec;
+      state.view = null;
+    }
+    _pbViewActive = false;
+    _doRender();
+  } finally {
+    _pbInPop = false;
+  }
+});
+
+// Boot : applique le hash de l'URL (deep-link / reload), pose l'entrée de base.
+function _pbBoot() {
+  try {
+    var sec = _pbHashSection();
+    if (sec && _pbIsValidSection(sec) && typeof state !== 'undefined' && state) state.section = sec;
+    _pbViewActive = !!(typeof state !== 'undefined' && state && state.view);
+    var s = (typeof state !== 'undefined' && state && state.section) ? state.section : '';
+    history.replaceState({ pbTab: s }, '', s ? ('#/' + s) : location.pathname);
+  } catch (e) {}
+  render();
+}
+
+_pbBoot();
 </script>
 </body>
 </html>
