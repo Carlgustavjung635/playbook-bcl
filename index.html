@@ -3391,19 +3391,46 @@ const ENTITIES = [
       return out;
     },
     apply: (state, rows) => {
-      // Merge anti-race : conserve les entrées locales pas encore en remote
-      // (fenêtre de debounce 400ms d'un push concurrent), comme l'entité plays.
+      // FIX binding orphelin (Option B) : on PRÉSERVE la référence de l'objet
+      // `plan` des entrées déjà locales. resolveTrainingPlan a fait pointer
+      // c.trainingPlan dessus (live-binding) ; si on recréait un nouvel objet ici,
+      // c.trainingPlan deviendrait orphelin et les éditions en cours (groupes…)
+      // partiraient à la poubelle. On remplace donc le CONTENU du plan EN PLACE.
+      // Garde anti-écho : on n'écrase le contenu QUE si le remote est strictement
+      // plus récent (updatedAt) que l'édition locale → un écho realtime de notre
+      // propre push n'efface pas une édition locale encore en vol. (cf persist()
+      // qui bumpe updatedAt pendant l'édition.)
       const local = state.trainingPlans || [];
-      const remoteIds = new Set(rows.map(r => r.id));
-      const fromRemote = rows.map(r => ({
-        convocationId: r.convocation_id,
-        instanceDate: r.instance_date,
-        seasonId: r.season_id || null,
-        plan: r.plan || { exercises: [], validated: false, completedExercises: {} },
-        updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
-      }));
-      const pendingLocal = local.filter(tp => !remoteIds.has(`${tp.convocationId}::${tp.instanceDate}`));
-      state.trainingPlans = [...pendingLocal, ...fromRemote];
+      const byId = new Map(local.map(tp => [`${tp.convocationId}::${tp.instanceDate}`, tp]));
+      rows.forEach(r => {
+        const id = r.id;
+        const remoteUpdated = r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : 0);
+        const remotePlan = r.plan || { exercises: [], validated: false, completedExercises: {} };
+        const existing = byId.get(id);
+        if (existing) {
+          if (remoteUpdated > (existing.updatedAt || 0)) {
+            if (existing.plan && typeof existing.plan === 'object') {
+              Object.keys(existing.plan).forEach(k => delete existing.plan[k]); // vide en place
+              Object.assign(existing.plan, remotePlan);                          // réf préservée
+            } else {
+              existing.plan = remotePlan;
+            }
+            existing.updatedAt = remoteUpdated;
+          }
+          existing.seasonId = r.season_id || existing.seasonId || null;
+        } else {
+          byId.set(id, {
+            convocationId: r.convocation_id,
+            instanceDate: r.instance_date,
+            seasonId: r.season_id || null,
+            plan: remotePlan,
+            updatedAt: remoteUpdated || null,
+          });
+        }
+      });
+      // Map = ordre d'insertion : entrées locales (réfs conservées, y compris les
+      // pending pas encore en remote) puis nouvelles entrées venues du remote.
+      state.trainingPlans = Array.from(byId.values());
     }
   }
 ];
@@ -3955,6 +3982,17 @@ function persist() {
   save(K.matchPlayLinks, state.matchPlayLinks);
   save(K.guestPlayers, state.guestPlayers);
   save(K.trainingGuests, state.trainingGuests);
+  // FIX Option B : pendant l'édition d'un plan, bumper updatedAt de l'entrée
+  // courante AVANT le save → la garde anti-écho de l'apply() trainingPlans peut
+  // distinguer une édition locale fraîche d'un écho realtime obsolète (qui
+  // sinon écraserait des groupes tout juste ajoutés).
+  if (state._editingTraining) {
+    const _et = state._editingTraining;
+    const _c = state.convocations.find(x => x.id === _et.convocId);
+    const _idate = _et.dateStr || (_c && _c.date);
+    const _e = (state.trainingPlans || []).find(tp => tp.convocationId === _et.convocId && tp.instanceDate === _idate);
+    if (_e) _e.updatedAt = Date.now();
+  }
   save(K.trainingPlans, state.trainingPlans);
   // Push toutes les entités équipe vers Supabase (debounced 400ms)
   if (window.PbSync) PbSync.schedule(state);
@@ -12141,6 +12179,7 @@ function renderTrainingPlanEditor() {
       </div>
     </div>
     <div class="modal-footer" style="flex-direction:column;gap:6px">
+      ${plan.exercises.length > 0 ? `<button class="btn btn-secondary btn-block" onclick="_saveTrainingPlanNow()">💾 Sauvegarder le plan</button>` : ''}
       ${plan.exercises.length > 0 ? `
         ${!plan.validated ? `
           <button class="btn btn-primary btn-block" onclick="validateTrainingPlan()">✓ Valider et envoyer aux joueuses</button>
@@ -12160,217 +12199,78 @@ function renderTrainingPlanEditor() {
 }
 
 // ============================================================
-// PHASE 3 — ATELIERS + ROTATIONS (workshop rotations) — PER-EXERCICE
+// OPTION B (2026-06) — ATELIERS + ROTATIONS RETIRÉS
 // ------------------------------------------------------------
-// Les ateliers et rotations sont liés à UN EXERCICE (pas au plan global).
-// Chaque exercice porte ses propres stations + rotations, stockés directement
-// sur l'objet exercice (jsonb training_plans.plan.exercises[]) :
-//   ex.workshops = [{ id, name }]
-//   ex.rotations = [{ id, assignments: [{ workshop, group }] }]
-// Les groupes sont les noms distincts trouvés dans CET exercice (ex.groups[].name,
-// créés via la feature "compo groupes exo"). Pas de timer, pas de notif (V1).
-// Le coach voit, sous chaque exercice, un tableau Rotations × Groupes ; chaque
-// cellule = dropdown des ateliers de l'exo. Auto-save : chaque mutation appelle
-// persist() (debounce sync 400ms via PbSync) — pas de debounce UI séparé.
-// Migration legacy (ancien plan.workshop_rotations global → 1er exo) :
-//   _migrateLegacyWorkshopRotations(), one-shot idempotente au boot.
+// La matrice ateliers × rotations était sur-conçue et peu utilisée (un coach
+// annonce ses rotations sur le terrain). On ne garde QUE les groupes de joueuses
+// par exercice (cf. section 👥 dans renderExerciseDetail). Les données existantes
+// (ex.workshops / ex.rotations, et l'ancien plan.workshop_rotations global) sont
+// ARCHIVÉES dans ex._archive_workshop_rotations (au cas où on réactiverait), puis
+// retirées de la structure vivante. Fonction conservée sous son ancien nom pour
+// ne pas toucher l'appel au boot ; idempotente (rejouée = no-op une fois archivé).
 // ============================================================
-function _wsData(ex) {
-  if (!Array.isArray(ex.workshops)) ex.workshops = [];
-  if (!Array.isArray(ex.rotations)) ex.rotations = [];
-  return ex;
-}
-
-// Liste des noms de groupes distincts d'UN exercice (source : ex.groups[].name).
-function _exGroupNames(ex) {
-  const seen = [];
-  (ex.groups || []).forEach(g => {
-    const n = (g && g.name || '').trim();
-    if (n && !seen.includes(n)) seen.push(n);
-  });
-  return seen;
-}
-
-// Récupère l'exercice en cours d'édition (contexte state._editingTraining +
-// state._editingExerciseIdx). c.trainingPlan est live-bindé per-instance (Phase 2).
-function _currentEditingExercise() {
-  if (!state._editingTraining) return null;
-  const c = state.convocations.find(x => x.id === state._editingTraining.convocId);
-  if (!c || !c.trainingPlan) return null;
-  const ex = c.trainingPlan.exercises[state._editingExerciseIdx];
-  return ex || null;
-}
-
-// Rendu du bloc Ateliers + rotations POUR UN EXERCICE donné. Affiché en
-// sous-section collapsable dans le détail de l'exercice (renderExerciseDetail).
-function renderWorkshopRotations(ex) {
-  const wr = _wsData(ex);
-  const groups = _exGroupNames(ex);
-  const workshops = wr.workshops;
-  const rotations = wr.rotations;
-  const count = workshops.length + rotations.length;
-
-  const workshopChips = workshops.length === 0
-    ? `<div style="color:var(--ink-4);font-size:11px;font-family:'JetBrains Mono'">Aucun atelier. Ajoute des stations ci-dessous.</div>`
-    : workshops.map(w => `
-        <span class="chip" style="display:inline-flex;align-items:center;gap:6px">
-          ${esc(w.name)}
-          <button onclick="removeWorkshop('${esc(w.id)}')" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:13px;padding:0;line-height:1">✕</button>
-        </span>`).join('');
-
-  let table = '';
-  if (groups.length === 0) {
-    table = `<div style="padding:14px;text-align:center;color:var(--ink-4);font-size:11px;font-family:'JetBrains Mono';line-height:1.5">
-      Crée d'abord des groupes dans cet exercice (section 👥 ci-dessus) pour configurer les rotations.
-    </div>`;
-  } else if (workshops.length === 0) {
-    table = `<div style="padding:14px;text-align:center;color:var(--ink-4);font-size:11px;font-family:'JetBrains Mono'">
-      Ajoute au moins un atelier pour configurer les rotations.
-    </div>`;
-  } else {
-    const head = `<th style="text-align:left;padding:6px 8px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">Groupe</th>` +
-      rotations.map((r, ri) => `<th style="padding:6px 8px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';white-space:nowrap">
-        R${ri + 1}
-        <button onclick="removeRotation(${r.id})" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:11px;padding:0 0 0 4px">✕</button>
-      </th>`).join('');
-    const rows = groups.map(gName => {
-      const cells = rotations.map(r => {
-        const a = (r.assignments || []).find(x => x.group === gName);
-        const cur = a ? a.workshop : '';
-        const opts = `<option value="">—</option>` + workshops.map(w =>
-          `<option value="${esc(w.id)}" ${cur === w.id ? 'selected' : ''}>${esc(w.name)}</option>`).join('');
-        return `<td style="padding:4px 6px">
-          <select onchange="setRotationAssignment(${r.id}, '${esc(gName)}', this.value)" style="width:100%;padding:6px;background:var(--bg-3);border:1px solid var(--border);border-radius:6px;color:var(--ink);font-size:12px">${opts}</select>
-        </td>`;
-      }).join('');
-      return `<tr><td style="padding:6px 8px;font-family:'Anton';font-size:12px;white-space:nowrap">${esc(gName)}</td>${cells}</tr>`;
-    }).join('');
-    table = `<div style="overflow-x:auto;margin-bottom:10px">
-      <table style="width:100%;border-collapse:collapse;min-width:${120 + rotations.length * 90}px">
-        <thead><tr>${head}</tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </div>
-    <button class="btn btn-secondary btn-block" onclick="addRotation()" style="font-size:12px">+ Ajouter une rotation</button>`;
-  }
-
-  return `
-    <details class="ws-block" ${count > 0 ? 'open' : ''} style="padding-top:14px;border-top:1px solid var(--border-soft);margin-top:14px">
-      <summary style="cursor:pointer;list-style:none;display:flex;align-items:center;justify-content:space-between;gap:6px">
-        <span class="eyebrow-muted">🔄 Ateliers + rotations${count > 0 ? ` · ${workshops.length} atelier${workshops.length>1?'s':''} · ${rotations.length} rotation${rotations.length>1?'s':''}` : ''}</span>
-        <span style="font-size:10px;color:var(--ink-4);font-family:'JetBrains Mono'">▾</span>
-      </summary>
-      <div style="margin-top:10px">
-        <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px">
-          ${workshopChips}
-        </div>
-        <div style="display:flex;gap:6px;margin-bottom:14px">
-          <input id="ws-new-name" type="text" placeholder="Nom de l'atelier (ex: Shooting)" style="flex:1;padding:8px 10px;background:var(--bg-3);border:1px solid var(--border);border-radius:6px;color:var(--ink);font-size:12px" onkeydown="if(event.key==='Enter'){event.preventDefault();addWorkshop();}">
-          <button class="btn btn-secondary" onclick="addWorkshop()" style="font-size:12px;white-space:nowrap">+ Atelier</button>
-        </div>
-        ${table}
-      </div>
-    </details>
-  `;
-}
-
-function addWorkshop() {
-  const ex = _currentEditingExercise();
-  if (!ex) return;
-  const input = document.getElementById('ws-new-name');
-  const name = (input && input.value || '').trim();
-  if (!name) return;
-  const wr = _wsData(ex);
-  // id court stable : A, B, C… (réutilise un id libéré), puis W4, W5… si > 26.
-  const used = new Set(wr.workshops.map(w => w.id));
-  let id = '';
-  for (let i = 0; i < 26 && !id; i++) { const c = String.fromCharCode(65 + i); if (!used.has(c)) id = c; }
-  if (!id) id = 'W' + (wr.workshops.length + 1);
-  wr.workshops.push({ id, name });
-  persist();
-  renderExerciseDetail();
-}
-
-function removeWorkshop(workshopId) {
-  const ex = _currentEditingExercise();
-  if (!ex) return;
-  const wr = _wsData(ex);
-  wr.workshops = wr.workshops.filter(w => w.id !== workshopId);
-  // Purge les assignations qui pointaient sur cet atelier.
-  wr.rotations.forEach(r => { r.assignments = (r.assignments || []).filter(a => a.workshop !== workshopId); });
-  persist();
-  renderExerciseDetail();
-}
-
-function addRotation() {
-  const ex = _currentEditingExercise();
-  if (!ex) return;
-  const wr = _wsData(ex);
-  const nextId = wr.rotations.reduce((mx, r) => Math.max(mx, r.id || 0), 0) + 1;
-  wr.rotations.push({ id: nextId, assignments: [] });
-  persist();
-  renderExerciseDetail();
-}
-
-function removeRotation(rotationId) {
-  const ex = _currentEditingExercise();
-  if (!ex) return;
-  const wr = _wsData(ex);
-  wr.rotations = wr.rotations.filter(r => r.id !== rotationId);
-  persist();
-  renderExerciseDetail();
-}
-
-// Définit (ou efface si workshopId vide) l'atelier d'un groupe à une rotation.
-function setRotationAssignment(rotationId, groupName, workshopId) {
-  const ex = _currentEditingExercise();
-  if (!ex) return;
-  const wr = _wsData(ex);
-  const r = wr.rotations.find(x => x.id === rotationId);
-  if (!r) return;
-  r.assignments = r.assignments || [];
-  const existing = r.assignments.find(a => a.group === groupName);
-  if (!workshopId) {
-    r.assignments = r.assignments.filter(a => a.group !== groupName);
-  } else if (existing) {
-    existing.workshop = workshopId;
-  } else {
-    r.assignments.push({ workshop: workshopId, group: groupName });
-  }
-  persist();
-  // Pas de re-render complet (le <select> reflète déjà la valeur) → évite de
-  // perdre le focus/scroll. L'état est persisté + synchronisé.
-}
-
-// Migration one-shot, idempotente : l'ancien format (PR #36) stockait les
-// ateliers/rotations au niveau du plan global (plan.workshop_rotations). On les
-// rattache au 1er exercice du plan (sans écraser d'éventuelles données déjà
-// per-exercice), puis on supprime le champ legacy. Un plan sans exercice voit
-// ses données legacy ignorées (rien où les rattacher). Sûr à rejouer.
 function _migrateLegacyWorkshopRotations() {
-  let migrated = 0, dropped = 0;
-  const migratePlan = (plan) => {
-    if (!plan || !plan.workshop_rotations) return;
-    const wr = plan.workshop_rotations;
-    const hasData = (Array.isArray(wr.workshops) && wr.workshops.length) ||
-                    (Array.isArray(wr.rotations) && wr.rotations.length);
-    if (hasData && Array.isArray(plan.exercises) && plan.exercises.length) {
-      const ex0 = plan.exercises[0];
-      if (!Array.isArray(ex0.workshops) || ex0.workshops.length === 0) ex0.workshops = wr.workshops || [];
-      if (!Array.isArray(ex0.rotations) || ex0.rotations.length === 0) ex0.rotations = wr.rotations || [];
-      migrated++;
-    } else if (hasData) {
-      dropped++; // aucun exercice → impossible de rattacher
+  let archived = 0;
+  const archivePlan = (plan) => {
+    if (!plan) return;
+    // 1) ancien format global (PR #36) → on le rabat sur le 1er exercice avant archive
+    if (plan.workshop_rotations) {
+      const wr = plan.workshop_rotations;
+      if (Array.isArray(plan.exercises) && plan.exercises.length) {
+        const ex0 = plan.exercises[0];
+        if (!Array.isArray(ex0.workshops) || ex0.workshops.length === 0) ex0.workshops = wr.workshops || [];
+        if (!Array.isArray(ex0.rotations) || ex0.rotations.length === 0) ex0.rotations = wr.rotations || [];
+      }
+      delete plan.workshop_rotations;
     }
-    delete plan.workshop_rotations;
+    // 2) per-exercice (PR #38) → archive + strip
+    (plan.exercises || []).forEach(ex => {
+      const hasW = Array.isArray(ex.workshops) && ex.workshops.length;
+      const hasR = Array.isArray(ex.rotations) && ex.rotations.length;
+      if (hasW || hasR) {
+        ex._archive_workshop_rotations = {
+          workshops: ex.workshops || [],
+          rotations: ex.rotations || [],
+        };
+        archived++;
+      }
+      delete ex.workshops;
+      delete ex.rotations;
+    });
   };
-  (state.trainingPlans || []).forEach(tp => { try { migratePlan(tp.plan); } catch (e) {} });
-  (state.convocations || []).forEach(c => { try { migratePlan(c.trainingPlan); } catch (e) {} });
-  if (migrated || dropped) {
-    console.warn('[migration] workshop rotations global → per-exercice : ' + migrated + ' migré(s)' +
-      (dropped ? ', ' + dropped + ' ignoré(s) (plan sans exercice)' : ''));
+  (state.trainingPlans || []).forEach(tp => { try { archivePlan(tp.plan); } catch (e) {} });
+  (state.convocations || []).forEach(c => { try { archivePlan(c.trainingPlan); } catch (e) {} });
+  if (archived) {
+    console.warn('[archive] ateliers/rotations retirés (Option B), archivés sur ' + archived + ' exercice(s)');
     persist();
   }
+}
+
+// Indicateur transitoire "✓ Sauvegardé" (rassure le coach que l'édition du plan
+// est bien persistée). Badge flottant créé à la volée, masqué après 1.4s.
+function _flashSaved(msg) {
+  try {
+    let el = document.getElementById('pb-saved-flash');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'pb-saved-flash';
+      el.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:99999;background:var(--green,#22c55e);color:#fff;font-family:\'JetBrains Mono\',monospace;font-size:12px;font-weight:700;padding:8px 16px;border-radius:20px;box-shadow:0 4px 16px rgba(0,0,0,0.3);opacity:0;transition:opacity .2s;pointer-events:none';
+      document.body.appendChild(el);
+    }
+    el.textContent = msg || '✓ Sauvegardé';
+    el.style.opacity = '1';
+    clearTimeout(window._pbSavedFlashT);
+    window._pbSavedFlashT = setTimeout(() => { el.style.opacity = '0'; }, 1400);
+  } catch (e) {}
+}
+
+// Sauvegarde explicite du plan en cours (bouton "Enregistrer") : persist immédiat
+// + flush Supabase + feedback visuel. Le binding live (apply réf-préservée) + le
+// bump updatedAt garantissent que l'édition n'est pas perdue.
+function _saveTrainingPlanNow() {
+  persist();
+  if (window.PbSync && PbSync.flushNow) { try { PbSync.flushNow(state); } catch (e) {} }
+  _flashSaved('✓ Plan sauvegardé');
 }
 
 function trainingExerciseRow(ex, idx, totalCount, startTime, endTime) {
@@ -13109,11 +13009,10 @@ function renderExerciseDetail() {
         ` : '<div style="margin-top:10px;text-align:center;font-size:10px;color:var(--green);font-family:\'JetBrains Mono\';text-transform:uppercase">✓ Toutes les présentes sont placées</div>'}
       </div>
 
-      <!-- PHASE 3 : Ateliers + rotations de groupes — propres à CET exercice -->
-      ${renderWorkshopRotations(ex)}
     </div>
-    <div class="modal-footer">
-      <button class="btn btn-primary btn-block" onclick="closeModal();state._editingExerciseIdx=null;setTimeout(()=>renderTrainingPlanEditor(),80)">Terminé</button>
+    <div class="modal-footer" style="flex-direction:column;gap:6px">
+      <button class="btn btn-secondary btn-block" onclick="_saveTrainingPlanNow()">💾 Enregistrer</button>
+      <button class="btn btn-primary btn-block" onclick="_saveTrainingPlanNow();closeModal();state._editingExerciseIdx=null;setTimeout(()=>renderTrainingPlanEditor(),80)">Terminé</button>
     </div>
   `);
 }
@@ -13131,6 +13030,7 @@ function addExerciseGroup() {
   const next = ex.groups.length + 1;
   ex.groups.push({ name: 'Groupe ' + String.fromCharCode(64 + next), players: [] });
   persist();
+  _flashSaved();
   renderExerciseDetail();
 }
 
@@ -13143,6 +13043,7 @@ function removeExerciseGroup(gIdx) {
   ex.groups.splice(gIdx, 1);
   if (ex.groups.length === 0) ex.groups.push({ name: 'Toute l\'équipe', players: [] });
   persist();
+  _flashSaved();
   renderExerciseDetail();
 }
 
@@ -13151,6 +13052,7 @@ function updateGroupField(gIdx, field, value) {
   const ex = c.trainingPlan.exercises[state._editingExerciseIdx];
   ex.groups[gIdx][field] = value;
   persist();
+  _flashSaved();
 }
 
 function removePlayerFromGroup(gIdx, pid) {
@@ -13158,6 +13060,7 @@ function removePlayerFromGroup(gIdx, pid) {
   const ex = c.trainingPlan.exercises[state._editingExerciseIdx];
   ex.groups[gIdx].players = (ex.groups[gIdx].players || []).filter(x => x !== pid);
   persist();
+  _flashSaved();
   renderExerciseDetail();
 }
 
@@ -13198,6 +13101,7 @@ function assignPlayerToGroup(pid, gIdx) {
   ex.groups[gIdx].players = ex.groups[gIdx].players || [];
   if (!ex.groups[gIdx].players.includes(pid)) ex.groups[gIdx].players.push(pid);
   persist();
+  _flashSaved();
   closeModal();
   setTimeout(() => renderExerciseDetail(), 50);
 }
@@ -13247,6 +13151,7 @@ function groupAllRemaining() {
   ex.groups = ex.groups || [];
   ex.groups.push({ name, players: remainingIds });
   persist();
+  _flashSaved();
   renderExerciseDetail();
 }
 
