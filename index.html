@@ -8202,15 +8202,31 @@ function renderMatchDetail() {
       <button class="detail-back" onclick="state.view=null;render()">← ${state.auth.role === 'player' ? 'Agenda' : 'Tous les matchs'}</button>
 
       <div class="px" style="padding-top:6px">
-        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
-          ${played ? `<span class="chip ${win ? 'chip-green' : 'chip-red'}">${win ? 'Victoire' : 'Défaite'}</span>` : `<span class="chip" style="background:rgba(255,107,0,0.10);border-color:var(--orange);color:var(--orange)">${upcoming ? '⏳ À jouer' : '○ À jouer'}</span>`}
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;align-items:center">
+          ${played
+            ? `<span class="chip ${win ? 'chip-green' : 'chip-red'}" style="font-weight:700;letter-spacing:0.04em">🏀 JOUÉ · ${win ? 'Victoire' : 'Défaite'}</span>`
+            : `<span class="chip" style="background:rgba(255,107,0,0.14);border-color:var(--orange);color:var(--orange);font-weight:700;letter-spacing:0.04em">${upcoming ? '⏳ À VENIR' : '○ À JOUER'}</span>`}
           <span class="chip">${m.home ? 'Domicile' : 'Extérieur'}</span>
           <span class="chip">${formatDate(m.date, 'long')}</span>
         </div>
         <div class="display-lg" style="margin-bottom:4px">vs ${esc(m.opponent)}</div>
-        <div style="font-family:'Anton';font-size:64px;line-height:0.9;margin:10px 0;letter-spacing:0.02em;color:${played ? (win?'var(--green)':'var(--red)') : 'var(--ink-3)'}">
-          ${m.scoreUs}<span style="color:var(--ink-4);margin:0 10px">·</span>${m.scoreOpp}
-        </div>
+        ${played ? `
+          <div style="font-family:'Anton';font-size:64px;line-height:0.9;margin:10px 0;letter-spacing:0.02em;color:${win?'var(--green)':'var(--red)'}">
+            ${m.scoreUs}<span style="color:var(--ink-4);margin:0 10px">·</span>${m.scoreOpp}
+          </div>
+        ` : `
+          <!-- Phase E : status to_play → pas de score (0·0), on met en avant le coup d'envoi -->
+          <div style="display:flex;gap:22px;margin:12px 0 4px;flex-wrap:wrap">
+            <div>
+              <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em">Coup d'envoi</div>
+              <div style="font-family:'Anton';font-size:30px;color:var(--orange);line-height:1">${esc(m.time || '—')}</div>
+            </div>
+            <div style="min-width:0">
+              <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em">Lieu</div>
+              <div style="font-family:'Anton';font-size:22px;line-height:1.1">${esc(m.place || (m.home ? 'Domicile' : 'Extérieur'))}</div>
+            </div>
+          </div>
+        `}
         ${(isCoach || isStat) ? `
           <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
             ${isStat ? `<button class="btn btn-primary" onclick="startLive('${m.id}')">● Saisir Live</button>` : ''}
