@@ -2447,6 +2447,11 @@ async function refreshSession() {
     Pb.profile = null;
   }
   emit('auth', { user: Pb.user, profile: Pb.profile });
+  // Email binding strict : à chaque (re)résolution de session cloud, on vérifie
+  // la cohérence avec l'identité applicative liée. _enforceEmailBinding est
+  // défini dans le script principal (classic, global) → accès via window depuis
+  // ce module. Au boot il peut ne pas encore exister : guard + try/catch.
+  try { if (typeof window._enforceEmailBinding === 'function') window._enforceEmailBinding(); } catch (e) {}
 }
 
 sb.auth.onAuthStateChange((_evt, _session) => { refreshSession(); });
@@ -4644,6 +4649,9 @@ async function tryPin() {
     // Reset compteur en cas de succès
     delete state.pinAttempts[key];
     state.auth = { role, playerId: role === 'player' ? playerId : null };
+    // Email binding strict : si un compte cloud est déjà connecté, on lie cette
+    // identité (player/coach) à ce compte. Stat = rôle partagé → pas de binding.
+    try { _enforceEmailBinding(); } catch (e) {}
     state.authFlow = { stage: 'role', role: null, playerId: null, pinInput: '' };
     if (role === 'stat') state.section = 'live';
     else state.section = 'home';
@@ -5479,6 +5487,9 @@ function openSettings() {
         <div class="eyebrow-muted" style="margin-bottom:6px">Compte personnel (cloud)</div>
         ${window.SbAuth && window.SbAuth.isAuthed() ? `
           <div style="font-size:12px;color:var(--ink-2);margin-bottom:8px">${esc(window.SbAuth.current().user.email)}</div>
+          ${state.auth && state.auth.role !== 'stat' && state.auth.boundUserId ? `
+            <div style="font-size:10px;color:var(--green);font-family:'JetBrains Mono';margin-bottom:8px;line-height:1.4">🔒 Identité verrouillée sur ce compte — changer d'email déconnecte automatiquement.</div>
+          ` : ''}
           <button class="btn btn-secondary btn-block" onclick="closeModal();setTimeout(()=>sbAccountSignOut(),50)">Se déconnecter du compte cloud</button>
         ` : `
           <div style="font-size:11px;color:var(--ink-3);margin-bottom:8px;line-height:1.4">Optionnel — requis uniquement pour synchroniser tes données perso entre appareils.</div>
@@ -5594,6 +5605,10 @@ async function sbAccountSignOut() {
 }
 
 function doLogout() {
+  // Email binding strict : si l'identité sortante était liée à un compte cloud,
+  // on déconnecte aussi ce compte pour que la personne suivante reparte d'une
+  // identité vierge (pas de fuite des données perso cloud entre utilisateurs).
+  const wasBound = !!(state.auth && state.auth.role !== 'stat' && state.auth.boundUserId);
   state.auth = null;
   state.authFlow = { stage: 'role', role: null, playerId: null, pinInput: '' };
   state.view = null;
@@ -5601,6 +5616,57 @@ function doLogout() {
   persist();
   closeModal();
   render();
+  if (wasBound && window.SbAuth && SbAuth.isAuthed()) {
+    SbAuth.signOut().catch(() => {});
+  }
+}
+
+// ============================================================
+// EMAIL BINDING STRICT
+// ------------------------------------------------------------
+// Player/coach = associé à un compte cloud UNIQUE (1 email = 1 personne).
+// Stat'man = rôle partagé/anonyme → jamais de compte associé, jamais d'auto-logout.
+// Règle : si l'identité applicative (state.auth) est liée à un compte cloud
+// (boundUserId) et que le compte cloud ACTIF devient un AUTRE compte (email
+// différent), la personne au clavier n'est plus la titulaire → déconnexion
+// stricte de l'identité applicative.
+// Volontairement LENIENT sur la déconnexion cloud (curUserId null) : au boot la
+// session cloud se restaure de façon asynchrone, et un coach peut vouloir se
+// déconnecter du cloud tout en gardant l'accès PIN. On ne déconnecte donc QUE
+// sur bascule vers un compte différent et non-null (vrai changement d'email).
+// ============================================================
+function _enforceEmailBinding() {
+  if (!state || !state.auth) return;
+  if (state.auth.role === 'stat') return; // rôle partagé : aucun binding
+  const curUserId = (window.Pb && Pb.user && Pb.user.id) || null;
+  const curEmail = (window.Pb && Pb.user && Pb.user.email) || null;
+  const bound = state.auth.boundUserId || null;
+
+  if (!bound) {
+    // Pas encore lié : si un compte cloud est présent, on lie cette identité à lui.
+    if (curUserId) {
+      state.auth.boundUserId = curUserId;
+      state.auth.boundEmail = curEmail;
+      persist();
+    }
+    return;
+  }
+  // Déjà lié : bascule vers un AUTRE compte cloud non-null → binding rompu.
+  if (curUserId && curUserId !== bound) {
+    console.warn('[auth] email binding rompu (' + (state.auth.boundEmail || bound) + ' → ' + (curEmail || curUserId) + ') → déconnexion auto');
+    _autoLogoutBindingBroken();
+  }
+}
+
+function _autoLogoutBindingBroken() {
+  state.auth = null;
+  state.authFlow = { stage: 'role', role: null, playerId: null, pinInput: '' };
+  state.view = null;
+  state.live = null;
+  persist();
+  try { closeModal(); } catch (e) {}
+  render();
+  setTimeout(() => { try { alert('Compte cloud changé — déconnexion automatique par sécurité. Reconnecte-toi avec ton identité.'); } catch (e) {} }, 60);
 }
 
 function openChangeMyPin() {
