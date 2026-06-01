@@ -1,0 +1,66 @@
+{
+  "name": "Playbook-BCL — Événement → Notification in-app",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "playbook-inapp-notif",
+        "options": {}
+      },
+      "id": "b1111111-1111-4111-8111-111111111111",
+      "name": "Webhook (Supabase)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "webhookId": "playbook-inapp-notif"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.headers['x-pb-secret'] }}",
+              "value2": "CHANGE_ME_SHARED_SECRET"
+            }
+          ]
+        }
+      },
+      "id": "b2222222-2222-4222-8222-222222222222",
+      "name": "Vérif secret",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Mappe l'événement Supabase vers une ligne `notifications`.\nconst b = $json.body || $json;\nconst table = b.table || 'inconnu';\nconst rec = b.record || {};\nlet out = null;\nswitch (table) {\n  case 'team_reviews':\n    out = { audience: 'coach', player_id: null, kind: 'wellness', title: 'Nouveau ressenti équipe', body: rec.comment || '', link: '#team-reviews' };\n    break;\n  case 'convocation_responses':\n    if ((rec.status || '').toLowerCase() !== 'absent') return [];\n    out = { audience: 'coach', player_id: null, kind: 'absence', title: 'Absence signalée', body: `Joueuse ${rec.player_id}`, link: '#convoc/' + rec.convocation_id };\n    break;\n  case 'convocations':\n    out = { audience: 'all', player_id: null, kind: 'convocation', title: 'Nouvelle convocation', body: rec.title || '', link: '#convoc/' + rec.id };\n    break;\n  case 'matches':\n    out = { audience: 'all', player_id: null, kind: 'match', title: 'Nouveau match', body: rec.opponent || rec.title || '', link: '#match/' + rec.id };\n    break;\n  case 'training_plans':\n    if (!(rec.plan && rec.plan.validated)) return [];\n    out = { audience: 'all', player_id: null, kind: 'plan', title: \"Plan d'entraînement validé\", body: '', link: '#training/' + rec.id };\n    break;\n  default:\n    return [];\n}\nreturn [{ json: out }];"
+      },
+      "id": "b3333333-3333-4333-8333-333333333333",
+      "name": "Mapper notification",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [680, 220]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "tableId": "notifications",
+        "dataToSend": "autoMapInputData"
+      },
+      "id": "b4444444-4444-4444-8444-444444444444",
+      "name": "Insert notifications",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [900, 220],
+      "notes": "Credentials Supabase requis (service_role). Table public.notifications."
+    }
+  ],
+  "connections": {
+    "Webhook (Supabase)": { "main": [[{ "node": "Vérif secret", "type": "main", "index": 0 }]] },
+    "Vérif secret": { "main": [[{ "node": "Mapper notification", "type": "main", "index": 0 }], []] },
+    "Mapper notification": { "main": [[{ "node": "Insert notifications", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": {},
+  "pinData": {}
+}
