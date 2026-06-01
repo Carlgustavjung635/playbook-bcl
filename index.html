@@ -16468,45 +16468,48 @@ async function exportStory(matchId, style, customMessage) {
 
   // === ZONE STYLE 'SELFIE' : photo en grand au centre ===
   if (style === 'selfie' && m.winSelfie) {
-    // Charger la photo
-    await new Promise((resolve) => {
-      const img = new Image();
-      img.onload = () => {
-        // Calc dimensions pour fit dans 880x880 centré
-        const targetSize = 880;
-        const x = (1080 - targetSize) / 2;
-        const y = 240;
-        // Cadre orange
-        ctx.fillStyle = '#ff6b00';
-        roundedRect(ctx, x - 6, y - 6, targetSize + 12, targetSize + 12, 20);
-        ctx.fill();
-        // Photo (cover crop)
-        ctx.save();
-        roundedRect(ctx, x, y, targetSize, targetSize, 16);
-        ctx.clip();
-        const ratio = img.width / img.height;
-        let dw = targetSize, dh = targetSize;
-        if (ratio > 1) { dw = targetSize * ratio; }
-        else { dh = targetSize / ratio; }
-        const dx = x - (dw - targetSize) / 2;
-        const dy = y - (dh - targetSize) / 2;
-        ctx.drawImage(img, dx, dy, dw, dh);
-        ctx.restore();
-        // Bandeau noir bas
-        ctx.fillStyle = 'rgba(0,0,0,0.85)';
-        ctx.fillRect(x, y + targetSize - 130, targetSize, 130);
-        // Score sur le bandeau
-        ctx.fillStyle = win ? '#22c55e' : '#ef4444';
-        ctx.font = 'bold 18px monospace';
-        ctx.fillText(win ? 'VICTOIRE' : 'DÉFAITE', 540, y + targetSize - 88);
-        ctx.fillStyle = '#fff';
-        ctx.font = 'bold 70px sans-serif';
-        ctx.fillText((m.scoreUs||0) + '–' + (m.scoreOpp||0), 540, y + targetSize - 30);
-        resolve();
-      };
-      img.onerror = () => resolve();
-      img.src = m.winSelfie;
-    });
+    // Charger la photo via loadImage() (crossOrigin='anonymous') pour NE PAS
+    // tainter le canvas. Le selfie victoire vit dans Supabase Storage (URL
+    // cross-origin) depuis la migration Storage : un `new Image()` brut sans
+    // crossOrigin teintait le canvas → canvas.toDataURL() levait "Tainted
+    // canvas may not be exported" et la story ne se générait plus. Si le chargement
+    // échoue (CORS/Storage indispo), on dégrade : story sans photo plutôt que crash.
+    let selfieImg = null;
+    try { selfieImg = await loadImage(m.winSelfie); }
+    catch (e) { console.warn('[exportStory] selfie load échoué (CORS/Storage ?):', e && e.message); }
+    if (selfieImg) {
+      const img = selfieImg;
+      // Calc dimensions pour fit dans 880x880 centré
+      const targetSize = 880;
+      const x = (1080 - targetSize) / 2;
+      const y = 240;
+      // Cadre orange
+      ctx.fillStyle = '#ff6b00';
+      roundedRect(ctx, x - 6, y - 6, targetSize + 12, targetSize + 12, 20);
+      ctx.fill();
+      // Photo (cover crop)
+      ctx.save();
+      roundedRect(ctx, x, y, targetSize, targetSize, 16);
+      ctx.clip();
+      const ratio = img.width / img.height;
+      let dw = targetSize, dh = targetSize;
+      if (ratio > 1) { dw = targetSize * ratio; }
+      else { dh = targetSize / ratio; }
+      const dx = x - (dw - targetSize) / 2;
+      const dy = y - (dh - targetSize) / 2;
+      ctx.drawImage(img, dx, dy, dw, dh);
+      ctx.restore();
+      // Bandeau noir bas
+      ctx.fillStyle = 'rgba(0,0,0,0.85)';
+      ctx.fillRect(x, y + targetSize - 130, targetSize, 130);
+      // Score sur le bandeau
+      ctx.fillStyle = win ? '#22c55e' : '#ef4444';
+      ctx.font = 'bold 18px monospace';
+      ctx.fillText(win ? 'VICTOIRE' : 'DÉFAITE', 540, y + targetSize - 88);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 70px sans-serif';
+      ctx.fillText((m.scoreUs||0) + '–' + (m.scoreOpp||0), 540, y + targetSize - 30);
+    }
     // Sous photo : adversaire
     ctx.fillStyle = '#aaa';
     ctx.font = '32px monospace';
@@ -16661,7 +16664,15 @@ async function exportStory(matchId, style, customMessage) {
   ctx.fillText('PLAYBOOK BCL · ' + new Date().toLocaleDateString('fr-FR'), 540, 1870);
 
   // === EXPORT ===
-  const dataUrl = canvas.toDataURL('image/png');
+  let dataUrl;
+  try {
+    dataUrl = canvas.toDataURL('image/png');
+  } catch (e) {
+    // Canvas teinté (image cross-origin sans CORS) → toDataURL lève SecurityError.
+    console.error('[exportStory] toDataURL échoué (canvas teinté ?):', e && e.message);
+    alert("Impossible de générer l'image (photo non accessible). Réessaie, ou retire/réajoute le selfie du match.");
+    return;
+  }
   const shareSupported = navigator.share && navigator.canShare;
 
   openModal(`
