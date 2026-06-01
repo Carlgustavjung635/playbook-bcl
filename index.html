@@ -12021,9 +12021,6 @@ function renderTrainingPlanEditor() {
         <button class="btn btn-secondary btn-block" onclick="closeModal();setTimeout(()=>openPlayPicker(),80)">📚 Piocher dans la bibliothèque (${state.plays.length})</button>
         <button class="btn btn-secondary btn-block" onclick="addCustomExercise()">+ Créer un exo à la volée</button>
       </div>
-
-      <!-- PHASE 3 : Ateliers + rotations de groupes -->
-      ${renderWorkshopRotations(plan)}
     </div>
     <div class="modal-footer" style="flex-direction:column;gap:6px">
       ${plan.exercises.length > 0 ? `
@@ -12045,50 +12042,55 @@ function renderTrainingPlanEditor() {
 }
 
 // ============================================================
-// PHASE 3 — ATELIERS + ROTATIONS (workshop rotations)
+// PHASE 3 — ATELIERS + ROTATIONS (workshop rotations) — PER-EXERCICE
 // ------------------------------------------------------------
-// Stocké dans plan.workshop_rotations (jsonb training_plans.plan, déjà prévu
-// en Phase 2, aucune nouvelle migration) :
-//   { workshops: [{ id, name }], rotations: [{ id, assignments: [{ workshop, group }] }] }
-// Les groupes sont les noms distincts trouvés dans plan.exercises[].groups[].name
-// (créés via la feature "compo groupes exo"). Pas de timer, pas de notif (V1).
-// Le coach voit un tableau Rotations × Groupes ; chaque cellule = dropdown des
-// ateliers. Auto-save : chaque mutation appelle persist() (debounce sync 400ms
-// via PbSync) — pas de debounce UI séparé (les writes sont rares et discrets).
+// Les ateliers et rotations sont liés à UN EXERCICE (pas au plan global).
+// Chaque exercice porte ses propres stations + rotations, stockés directement
+// sur l'objet exercice (jsonb training_plans.plan.exercises[]) :
+//   ex.workshops = [{ id, name }]
+//   ex.rotations = [{ id, assignments: [{ workshop, group }] }]
+// Les groupes sont les noms distincts trouvés dans CET exercice (ex.groups[].name,
+// créés via la feature "compo groupes exo"). Pas de timer, pas de notif (V1).
+// Le coach voit, sous chaque exercice, un tableau Rotations × Groupes ; chaque
+// cellule = dropdown des ateliers de l'exo. Auto-save : chaque mutation appelle
+// persist() (debounce sync 400ms via PbSync) — pas de debounce UI séparé.
+// Migration legacy (ancien plan.workshop_rotations global → 1er exo) :
+//   _migrateLegacyWorkshopRotations(), one-shot idempotente au boot.
 // ============================================================
-function _wsData(plan) {
-  if (!plan.workshop_rotations) plan.workshop_rotations = { workshops: [], rotations: [] };
-  const wr = plan.workshop_rotations;
-  if (!Array.isArray(wr.workshops)) wr.workshops = [];
-  if (!Array.isArray(wr.rotations)) wr.rotations = [];
-  return wr;
+function _wsData(ex) {
+  if (!Array.isArray(ex.workshops)) ex.workshops = [];
+  if (!Array.isArray(ex.rotations)) ex.rotations = [];
+  return ex;
 }
 
-// Liste des noms de groupes distincts du plan (source : ex.groups[].name).
-function _planGroupNames(plan) {
+// Liste des noms de groupes distincts d'UN exercice (source : ex.groups[].name).
+function _exGroupNames(ex) {
   const seen = [];
-  (plan.exercises || []).forEach(ex => {
-    (ex.groups || []).forEach(g => {
-      const n = (g && g.name || '').trim();
-      if (n && !seen.includes(n)) seen.push(n);
-    });
+  (ex.groups || []).forEach(g => {
+    const n = (g && g.name || '').trim();
+    if (n && !seen.includes(n)) seen.push(n);
   });
   return seen;
 }
 
-// Récupère le plan en cours d'édition (contexte state._editingTraining), bindé
-// per-instance via resolveTrainingPlan (Phase 2).
-function _currentEditingPlan() {
+// Récupère l'exercice en cours d'édition (contexte state._editingTraining +
+// state._editingExerciseIdx). c.trainingPlan est live-bindé per-instance (Phase 2).
+function _currentEditingExercise() {
   if (!state._editingTraining) return null;
   const c = state.convocations.find(x => x.id === state._editingTraining.convocId);
-  if (!c) return null;
-  return resolveTrainingPlan(c, state._editingTraining.dateStr || c.date);
+  if (!c || !c.trainingPlan) return null;
+  const ex = c.trainingPlan.exercises[state._editingExerciseIdx];
+  return ex || null;
 }
 
-function renderWorkshopRotations(plan) {
-  const wr = _wsData(plan);
-  const groups = _planGroupNames(plan);
+// Rendu du bloc Ateliers + rotations POUR UN EXERCICE donné. Affiché en
+// sous-section collapsable dans le détail de l'exercice (renderExerciseDetail).
+function renderWorkshopRotations(ex) {
+  const wr = _wsData(ex);
+  const groups = _exGroupNames(ex);
   const workshops = wr.workshops;
+  const rotations = wr.rotations;
+  const count = workshops.length + rotations.length;
 
   const workshopChips = workshops.length === 0
     ? `<div style="color:var(--ink-4);font-size:11px;font-family:'JetBrains Mono'">Aucun atelier. Ajoute des stations ci-dessous.</div>`
@@ -12101,14 +12103,13 @@ function renderWorkshopRotations(plan) {
   let table = '';
   if (groups.length === 0) {
     table = `<div style="padding:14px;text-align:center;color:var(--ink-4);font-size:11px;font-family:'JetBrains Mono';line-height:1.5">
-      Crée d'abord des groupes dans les exercices (👥 dans le détail d'un exercice) pour configurer les rotations.
+      Crée d'abord des groupes dans cet exercice (section 👥 ci-dessus) pour configurer les rotations.
     </div>`;
   } else if (workshops.length === 0) {
     table = `<div style="padding:14px;text-align:center;color:var(--ink-4);font-size:11px;font-family:'JetBrains Mono'">
       Ajoute au moins un atelier pour configurer les rotations.
     </div>`;
   } else {
-    const rotations = wr.rotations;
     const head = `<th style="text-align:left;padding:6px 8px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">Groupe</th>` +
       rotations.map((r, ri) => `<th style="padding:6px 8px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';white-space:nowrap">
         R${ri + 1}
@@ -12136,27 +12137,32 @@ function renderWorkshopRotations(plan) {
   }
 
   return `
-    <div style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:14px">
-      <div class="eyebrow-muted mb-2">Ateliers + rotations</div>
-      <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px">
-        ${workshopChips}
+    <details class="ws-block" ${count > 0 ? 'open' : ''} style="padding-top:14px;border-top:1px solid var(--border-soft);margin-top:14px">
+      <summary style="cursor:pointer;list-style:none;display:flex;align-items:center;justify-content:space-between;gap:6px">
+        <span class="eyebrow-muted">🔄 Ateliers + rotations${count > 0 ? ` · ${workshops.length} atelier${workshops.length>1?'s':''} · ${rotations.length} rotation${rotations.length>1?'s':''}` : ''}</span>
+        <span style="font-size:10px;color:var(--ink-4);font-family:'JetBrains Mono'">▾</span>
+      </summary>
+      <div style="margin-top:10px">
+        <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px">
+          ${workshopChips}
+        </div>
+        <div style="display:flex;gap:6px;margin-bottom:14px">
+          <input id="ws-new-name" type="text" placeholder="Nom de l'atelier (ex: Shooting)" style="flex:1;padding:8px 10px;background:var(--bg-3);border:1px solid var(--border);border-radius:6px;color:var(--ink);font-size:12px" onkeydown="if(event.key==='Enter'){event.preventDefault();addWorkshop();}">
+          <button class="btn btn-secondary" onclick="addWorkshop()" style="font-size:12px;white-space:nowrap">+ Atelier</button>
+        </div>
+        ${table}
       </div>
-      <div style="display:flex;gap:6px;margin-bottom:14px">
-        <input id="ws-new-name" type="text" placeholder="Nom de l'atelier (ex: Shooting)" style="flex:1;padding:8px 10px;background:var(--bg-3);border:1px solid var(--border);border-radius:6px;color:var(--ink);font-size:12px" onkeydown="if(event.key==='Enter'){event.preventDefault();addWorkshop();}">
-        <button class="btn btn-secondary" onclick="addWorkshop()" style="font-size:12px;white-space:nowrap">+ Atelier</button>
-      </div>
-      ${table}
-    </div>
+    </details>
   `;
 }
 
 function addWorkshop() {
-  const plan = _currentEditingPlan();
-  if (!plan) return;
+  const ex = _currentEditingExercise();
+  if (!ex) return;
   const input = document.getElementById('ws-new-name');
   const name = (input && input.value || '').trim();
   if (!name) return;
-  const wr = _wsData(plan);
+  const wr = _wsData(ex);
   // id court stable : A, B, C… (réutilise un id libéré), puis W4, W5… si > 26.
   const used = new Set(wr.workshops.map(w => w.id));
   let id = '';
@@ -12164,44 +12170,44 @@ function addWorkshop() {
   if (!id) id = 'W' + (wr.workshops.length + 1);
   wr.workshops.push({ id, name });
   persist();
-  renderTrainingPlanEditor();
+  renderExerciseDetail();
 }
 
 function removeWorkshop(workshopId) {
-  const plan = _currentEditingPlan();
-  if (!plan) return;
-  const wr = _wsData(plan);
+  const ex = _currentEditingExercise();
+  if (!ex) return;
+  const wr = _wsData(ex);
   wr.workshops = wr.workshops.filter(w => w.id !== workshopId);
   // Purge les assignations qui pointaient sur cet atelier.
   wr.rotations.forEach(r => { r.assignments = (r.assignments || []).filter(a => a.workshop !== workshopId); });
   persist();
-  renderTrainingPlanEditor();
+  renderExerciseDetail();
 }
 
 function addRotation() {
-  const plan = _currentEditingPlan();
-  if (!plan) return;
-  const wr = _wsData(plan);
+  const ex = _currentEditingExercise();
+  if (!ex) return;
+  const wr = _wsData(ex);
   const nextId = wr.rotations.reduce((mx, r) => Math.max(mx, r.id || 0), 0) + 1;
   wr.rotations.push({ id: nextId, assignments: [] });
   persist();
-  renderTrainingPlanEditor();
+  renderExerciseDetail();
 }
 
 function removeRotation(rotationId) {
-  const plan = _currentEditingPlan();
-  if (!plan) return;
-  const wr = _wsData(plan);
+  const ex = _currentEditingExercise();
+  if (!ex) return;
+  const wr = _wsData(ex);
   wr.rotations = wr.rotations.filter(r => r.id !== rotationId);
   persist();
-  renderTrainingPlanEditor();
+  renderExerciseDetail();
 }
 
 // Définit (ou efface si workshopId vide) l'atelier d'un groupe à une rotation.
 function setRotationAssignment(rotationId, groupName, workshopId) {
-  const plan = _currentEditingPlan();
-  if (!plan) return;
-  const wr = _wsData(plan);
+  const ex = _currentEditingExercise();
+  if (!ex) return;
+  const wr = _wsData(ex);
   const r = wr.rotations.find(x => x.id === rotationId);
   if (!r) return;
   r.assignments = r.assignments || [];
@@ -12216,6 +12222,37 @@ function setRotationAssignment(rotationId, groupName, workshopId) {
   persist();
   // Pas de re-render complet (le <select> reflète déjà la valeur) → évite de
   // perdre le focus/scroll. L'état est persisté + synchronisé.
+}
+
+// Migration one-shot, idempotente : l'ancien format (PR #36) stockait les
+// ateliers/rotations au niveau du plan global (plan.workshop_rotations). On les
+// rattache au 1er exercice du plan (sans écraser d'éventuelles données déjà
+// per-exercice), puis on supprime le champ legacy. Un plan sans exercice voit
+// ses données legacy ignorées (rien où les rattacher). Sûr à rejouer.
+function _migrateLegacyWorkshopRotations() {
+  let migrated = 0, dropped = 0;
+  const migratePlan = (plan) => {
+    if (!plan || !plan.workshop_rotations) return;
+    const wr = plan.workshop_rotations;
+    const hasData = (Array.isArray(wr.workshops) && wr.workshops.length) ||
+                    (Array.isArray(wr.rotations) && wr.rotations.length);
+    if (hasData && Array.isArray(plan.exercises) && plan.exercises.length) {
+      const ex0 = plan.exercises[0];
+      if (!Array.isArray(ex0.workshops) || ex0.workshops.length === 0) ex0.workshops = wr.workshops || [];
+      if (!Array.isArray(ex0.rotations) || ex0.rotations.length === 0) ex0.rotations = wr.rotations || [];
+      migrated++;
+    } else if (hasData) {
+      dropped++; // aucun exercice → impossible de rattacher
+    }
+    delete plan.workshop_rotations;
+  };
+  (state.trainingPlans || []).forEach(tp => { try { migratePlan(tp.plan); } catch (e) {} });
+  (state.convocations || []).forEach(c => { try { migratePlan(c.trainingPlan); } catch (e) {} });
+  if (migrated || dropped) {
+    console.warn('[migration] workshop rotations global → per-exercice : ' + migrated + ' migré(s)' +
+      (dropped ? ', ' + dropped + ' ignoré(s) (plan sans exercice)' : ''));
+    persist();
+  }
 }
 
 function trainingExerciseRow(ex, idx, totalCount, startTime, endTime) {
@@ -12953,6 +12990,9 @@ function renderExerciseDetail() {
           </div>
         ` : '<div style="margin-top:10px;text-align:center;font-size:10px;color:var(--green);font-family:\'JetBrains Mono\';text-transform:uppercase">✓ Toutes les présentes sont placées</div>'}
       </div>
+
+      <!-- PHASE 3 : Ateliers + rotations de groupes — propres à CET exercice -->
+      ${renderWorkshopRotations(ex)}
     </div>
     <div class="modal-footer">
       <button class="btn btn-primary btn-block" onclick="closeModal();state._editingExerciseIdx=null;setTimeout(()=>renderTrainingPlanEditor(),80)">Terminé</button>
@@ -19175,6 +19215,9 @@ function _initPlayersSync() {
         // (c.trainingPlan convoc-level, localStorage only) → entité per-instance
         // synchronisée. Idempotente (ne recrée pas une entrée existante).
         try { _migrateLegacyTrainingPlans(); } catch(e) { console.warn('[migration] training plans:', e.message); }
+        // PHASE 3 : migration one-shot des ateliers/rotations legacy (ancien
+        // format global plan.workshop_rotations, PR #36) → rattachés au 1er exo.
+        try { _migrateLegacyWorkshopRotations(); } catch(e) { console.warn('[migration] workshop rotations:', e.message); }
         persist();
         render();
         // Subscribe Realtime sur toutes les entités configurées. On utilise
