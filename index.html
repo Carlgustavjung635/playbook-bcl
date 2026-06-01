@@ -6696,6 +6696,14 @@ function renderPlayerProgrammeDaily(p, o, teamReview) {
   const allDates = Object.keys(sched).sort();
   const upcoming = allDates.filter(d => d > todayStr).slice(0, 7);
   const past = allDates.filter(d => d < todayStr).reverse().slice(0, 5);
+  // Prochain jour FUTUR portant au moins 1 exercice (forward-looking) : permet
+  // d'indiquer à la joueuse quand tombe sa prochaine séance même si rien
+  // aujourd'hui (ex : ouvre l'app un dimanche, prochain exo mardi).
+  const nextTrainingDate = allDates.find(d => d > todayStr && (sched[d] || []).length > 0);
+  const nextTrainingCount = nextTrainingDate ? sched[nextTrainingDate].length : 0;
+  const nextTrainingDelta = nextTrainingDate ? daysUntil(nextTrainingDate) : null;
+  const nextTrainingWhen = nextTrainingDelta === 1 ? 'demain'
+    : (nextTrainingDelta != null ? 'dans ' + nextTrainingDelta + ' jours' : '');
   state.offseasonLogs = state.offseasonLogs || {};
   state.offseasonLogs[pid] = state.offseasonLogs[pid] || {};
   const todayItems = sched[todayStr] || [];
@@ -6744,7 +6752,19 @@ function renderPlayerProgrammeDaily(p, o, teamReview) {
           ${todayItems.map(it => exoRow(todayStr, it, true)).join('')}
         </div>
       ` : `
-        <div style="padding:14px;background:var(--bg-3);border-left:3px solid var(--ink-3);border-radius:6px;margin:0 18px 18px;font-size:12px;color:var(--ink-2);line-height:1.5">Rien de prévu aujourd'hui. Repos ou séance libre 💪</div>
+        <div style="padding:14px;background:var(--bg-3);border-left:3px solid var(--ink-3);border-radius:6px;margin:0 18px ${nextTrainingDate ? '10px' : '18px'};font-size:12px;color:var(--ink-2);line-height:1.5">Rien de prévu aujourd'hui. Repos ou séance libre 💪</div>
+        ${nextTrainingDate ? `
+          <div style="padding:0 18px;margin-bottom:18px">
+            <div style="padding:14px;background:var(--bg-2);border-radius:10px;border:1px solid var(--orange);display:flex;align-items:center;gap:12px">
+              <div style="font-size:26px;line-height:1">📅</div>
+              <div style="flex:1;min-width:0">
+                <div class="eyebrow" style="color:var(--orange);margin-bottom:3px">Prochain entraînement · ${nextTrainingWhen}</div>
+                <div style="font-family:'Anton';font-size:16px;text-transform:uppercase;line-height:1.2">${formatDate(nextTrainingDate, 'long')}</div>
+                <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">${nextTrainingCount} exercice${nextTrainingCount > 1 ? 's' : ''} prévu${nextTrainingCount > 1 ? 's' : ''}</div>
+              </div>
+            </div>
+          </div>
+        ` : ''}
       `}
       ${upcoming.length ? `
         <div class="section-header"><div><div class="eyebrow-muted">À venir</div></div></div>
