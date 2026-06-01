@@ -3026,12 +3026,19 @@ const ENTITIES = [
       if (!state.offseason) return {};
       const o = state.offseason;
       return { 1: { id: 1, start_date: o.startDate || null, end_date: o.endDate || null,
-        title: o.title || null, exercises: o.exercises || [] } };
+        title: o.title || null, exercises: o.exercises || [],
+        // PHASE 4 : mode hebdo (défaut) | journalier. daily_schedule = jsonb
+        // { 'YYYY-MM-DD': [{ exercise_id, label, sets, reps, duration_min, notes }] }.
+        mode: o.mode === 'daily' ? 'daily' : 'weekly',
+        daily_schedule: o.dailySchedule || {} } };
     },
     apply: (state, rows) => {
       const r = rows.find(x => x.id === 1);
       if (r) state.offseason = { startDate: r.start_date || '', endDate: r.end_date || '',
-        title: r.title || '', exercises: r.exercises || [] };
+        title: r.title || '', exercises: r.exercises || [],
+        // Rétrocompat : colonnes absentes (migration non appliquée) → weekly / {}.
+        mode: r.mode === 'daily' ? 'daily' : 'weekly',
+        dailySchedule: r.daily_schedule || {} };
     }
   },
   {
@@ -5922,6 +5929,45 @@ function renderHomeCoach() {
             </div>
           `;
         }
+        // PHASE 4 : mode journalier → carte dédiée (engagement du jour), car
+        // o.exercises est vide en daily et le calcul hebdo donnerait 0%.
+        if (o.mode === 'daily') {
+          const today = new Date().toISOString().slice(0, 10);
+          const sched = o.dailySchedule || {};
+          const todayItems = sched[today] || [];
+          const _pool = currentSeasonPlayers();
+          const logs2 = state.offseasonLogs || {};
+          const todayExpected = _pool.length * todayItems.length;
+          const todayDone = _pool.reduce((acc, p) => {
+            const pLog = (logs2[p.id] || {})[today] || {};
+            return acc + todayItems.filter(it => pLog[it.id] && pLog[it.id].done).length;
+          }, 0);
+          const dPct = todayExpected > 0 ? Math.round((todayDone / todayExpected) * 100) : 0;
+          const dColor = dPct >= 70 ? 'var(--green)' : dPct >= 40 ? 'var(--orange)' : 'var(--red)';
+          const plannedDates = Object.keys(sched).length;
+          return `
+            <div class="section-header">
+              <div>
+                <div class="eyebrow" style="color:${active?'var(--orange)':'var(--ink-3)'}">${active ? '🗓 Journalier · actif' : '○ Journalier · inactif'}</div>
+                <h2 class="display-md mt-2">${esc(o.title)}</h2>
+              </div>
+              <button class="section-action" onclick="openOffseasonDashboard()">Suivi →</button>
+            </div>
+            <div style="padding:0 18px;margin-bottom:18px">
+              <div onclick="openOffseasonDashboard()" style="padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+                  <div style="font-family:'JetBrains Mono';font-size:10px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em">${todayItems.length ? "Engagement équipe · aujourd'hui" : "Aucun exo prévu aujourd'hui"}</div>
+                  ${todayItems.length ? `<div style="font-family:'Anton';font-size:28px;color:${dColor};line-height:1">${dPct}%</div>` : ''}
+                </div>
+                ${todayItems.length ? `<div style="height:6px;background:var(--bg-1);border-radius:3px;overflow:hidden;margin-bottom:8px"><div style="height:100%;width:${dPct}%;background:${dColor}"></div></div>` : ''}
+                <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">
+                  <span>${plannedDates} date${plannedDates>1?'s':''} planifiée${plannedDates>1?'s':''}</span>
+                  <span>${todayItems.length} exo${todayItems.length>1?'s':''} aujourd'hui</span>
+                </div>
+              </div>
+            </div>
+          `;
+        }
         // Calcul engagement équipe semaine en cours
         // SAISON : la prépa estivale concerne l'effectif de la saison courante,
         // pas tout l'historique du roster.
@@ -6551,6 +6597,9 @@ function renderPlayerProgramme() {
     `;
   }
 
+  // PHASE 4 : onglet Forme en mode journalier.
+  if (o.mode === 'daily') return renderPlayerProgrammeDaily(p, o, teamReview);
+
   const beforeStart = o.startDate && todayStr < o.startDate;
   const afterEnd = o.endDate && todayStr > o.endDate;
   const active = !beforeStart && !afterEnd;
@@ -6637,6 +6686,111 @@ function renderPlayerProgramme() {
       ` : ''}
     </div>
   `;
+}
+
+// PHASE 4 : onglet Forme en mode journalier (programme du jour + à venir).
+function renderPlayerProgrammeDaily(p, o, teamReview) {
+  const pid = p.id;
+  const sched = o.dailySchedule || {};
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const allDates = Object.keys(sched).sort();
+  const upcoming = allDates.filter(d => d > todayStr).slice(0, 7);
+  const past = allDates.filter(d => d < todayStr).reverse().slice(0, 5);
+  state.offseasonLogs = state.offseasonLogs || {};
+  state.offseasonLogs[pid] = state.offseasonLogs[pid] || {};
+  const todayItems = sched[todayStr] || [];
+
+  const exoRow = (date, it, clickable) => {
+    const dLog = state.offseasonLogs[pid][date] || {};
+    const isDone = !!(dLog[it.id] && dLog[it.id].done);
+    const meta = [it.sets?it.sets+' séries':'', it.reps?it.reps+' reps':'', it.durationMin?it.durationMin+' min':''].filter(Boolean).join(' · ');
+    const clickAttr = clickable ? `onclick="togglePlayerProgrammeDailyExercise('${date}','${it.id}')"` : '';
+    return `
+      <div class="warmup-step-do ${isDone ? 'done' : ''}" ${clickAttr} style="${clickable ? '' : 'cursor:default;opacity:0.85'}">
+        <div style="font-family:'Anton';font-size:18px;color:${isDone?'var(--green)':'var(--orange)'};min-width:32px;text-align:center">${isDone ? '✓' : '○'}</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;${isDone?'text-decoration:line-through;color:var(--ink-3)':''}">${esc(it.label)}</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:3px">
+            ${meta ? `<span style="font-size:10px;color:var(--orange);font-family:'JetBrains Mono';text-transform:uppercase">🎯 ${esc(meta)}</span>` : ''}
+            ${it.notes ? `<span style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';font-style:italic">${esc(it.notes)}</span>` : ''}
+          </div>
+        </div>
+      </div>`;
+  };
+
+  const doneToday = todayItems.filter(it => { const dl = state.offseasonLogs[pid][todayStr] || {}; return dl[it.id] && dl[it.id].done; }).length;
+  const pctToday = todayItems.length ? Math.round((doneToday / todayItems.length) * 100) : 0;
+
+  return `
+    <div class="fade-up">
+      <div class="section-header">
+        <div>
+          <div class="eyebrow" style="color:var(--orange)">Programme journalier</div>
+          <h2 class="display-lg mt-2">☀ ${esc(o.title)}</h2>
+        </div>
+      </div>
+      ${teamReview}
+      ${todayItems.length ? `
+        <div style="padding:0 18px;margin-bottom:14px">
+          <div style="text-align:center;padding:14px;background:var(--bg-2);border-radius:10px;border:1px solid ${pctToday===100?'var(--green)':'var(--border)'}">
+            <div class="eyebrow" style="color:var(--orange);margin-bottom:4px">Aujourd'hui · ${formatDate(todayStr, 'long')}</div>
+            <div style="font-family:'Anton';font-size:36px;color:${pctToday===100?'var(--green)':'var(--orange)'};line-height:1">${doneToday}<span style="font-size:18px;color:var(--ink-4)">/${todayItems.length}</span></div>
+            <div style="height:6px;background:var(--bg-1);border-radius:3px;overflow:hidden;margin-top:10px">
+              <div style="height:100%;width:${pctToday}%;background:linear-gradient(90deg,var(--orange),${pctToday===100?'var(--green)':'#cc5400'})"></div>
+            </div>
+          </div>
+        </div>
+        <div style="padding:0 18px;display:flex;flex-direction:column;gap:8px;margin-bottom:18px">
+          ${todayItems.map(it => exoRow(todayStr, it, true)).join('')}
+        </div>
+      ` : `
+        <div style="padding:14px;background:var(--bg-3);border-left:3px solid var(--ink-3);border-radius:6px;margin:0 18px 18px;font-size:12px;color:var(--ink-2);line-height:1.5">Rien de prévu aujourd'hui. Repos ou séance libre 💪</div>
+      `}
+      ${upcoming.length ? `
+        <div class="section-header"><div><div class="eyebrow-muted">À venir</div></div></div>
+        <div style="padding:0 18px;display:flex;flex-direction:column;gap:10px;margin-bottom:18px">
+          ${upcoming.map(date => `
+            <div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">
+              <div style="padding:8px 10px;background:var(--bg-3);font-family:'Anton';font-size:12px;text-transform:uppercase">${formatDate(date, 'long')} · ${(sched[date]||[]).length} exo${(sched[date]||[]).length>1?'s':''}</div>
+              <div style="padding:8px 10px;display:flex;flex-direction:column;gap:6px">${(sched[date]||[]).map(it => exoRow(date, it, false)).join('')}</div>
+            </div>
+          `).join('')}
+        </div>
+      ` : ''}
+      ${past.length ? `
+        <div class="section-header"><div><div class="eyebrow-muted">Jours passés</div></div></div>
+        <div style="padding:0 18px;display:flex;flex-direction:column;gap:4px;margin-bottom:18px">
+          ${past.map(date => {
+            const items = sched[date] || [];
+            const dLog = state.offseasonLogs[pid][date] || {};
+            const wDone = items.filter(it => dLog[it.id] && dLog[it.id].done).length;
+            const wPct = items.length ? Math.round((wDone / items.length) * 100) : 0;
+            const c = wPct >= 80 ? 'var(--green)' : wPct >= 50 ? 'var(--orange)' : 'var(--red)';
+            return `
+              <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--bg-2);border-radius:6px">
+                <div style="font-family:'JetBrains Mono';font-size:10px;color:var(--ink-3);text-transform:uppercase;min-width:90px">${formatDate(date, 'short')}</div>
+                <div style="flex:1;height:5px;background:var(--bg-1);border-radius:3px;overflow:hidden"><div style="height:100%;width:${wPct}%;background:${c}"></div></div>
+                <div style="font-family:'Anton';font-size:13px;color:${c};min-width:50px;text-align:right">${wDone}/${items.length}</div>
+              </div>`;
+          }).join('')}
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
+function togglePlayerProgrammeDailyExercise(date, exId) {
+  if (state.auth.role !== 'player') return;
+  const pid = state.auth.playerId;
+  state.offseasonLogs = state.offseasonLogs || {};
+  state.offseasonLogs[pid] = state.offseasonLogs[pid] || {};
+  state.offseasonLogs[pid][date] = state.offseasonLogs[pid][date] || {};
+  const log = state.offseasonLogs[pid][date];
+  log[exId] = log[exId] || {};
+  log[exId].done = !log[exId].done;
+  if (log[exId].done) log[exId].at = Date.now();
+  persist();
+  render();
 }
 
 // Toggle exo programme intégré dans la page (pas modal) — render() suffit
@@ -16827,9 +16981,35 @@ function isOffseasonActive() {
 // === COACH : configuration du programme ===
 
 function openOffseasonConfig() {
-  const o = state.offseason || { startDate: '', endDate: '', title: 'Prépa estivale', exercises: [] };
+  const o = state.offseason || { startDate: '', endDate: '', title: 'Prépa estivale', exercises: [], mode: 'weekly', dailySchedule: {} };
   state._editingOffseason = JSON.parse(JSON.stringify(o));
   if (!state._editingOffseason.exercises) state._editingOffseason.exercises = [];
+  // PHASE 4 : rétrocompat — un programme legacy sans mode est hebdo.
+  if (state._editingOffseason.mode !== 'daily') state._editingOffseason.mode = 'weekly';
+  if (!state._editingOffseason.dailySchedule) state._editingOffseason.dailySchedule = {};
+  renderOffseasonEditor();
+}
+
+// PHASE 4 : bascule hebdo ↔ journalier. Les deux modes sont mutuellement
+// exclusifs. On NE détruit PAS les données de l'autre mode (exercises[] et
+// dailySchedule{} coexistent dans le state d'édition) : on confirme juste le
+// changement de mode actif, et l'autre jeu reste en backup tant que non
+// enregistré / écrasé. À l'enregistrement, on persiste les deux structures.
+function setOffseasonMode(mode) {
+  const e = state._editingOffseason;
+  if (!e || e.mode === mode) return;
+  const fromWeekly = e.mode === 'weekly';
+  const hasWeekly = (e.exercises || []).some(ex => (ex.label || '').trim());
+  const hasDaily = Object.values(e.dailySchedule || {}).some(arr => (arr || []).length);
+  // Avertir uniquement si on quitte un mode qui contient des données.
+  const leavingData = fromWeekly ? hasWeekly : hasDaily;
+  if (leavingData) {
+    const msg = fromWeekly
+      ? 'Passer en mode journalier ? Tes exercices hebdomadaires restent sauvegardés mais ne seront plus utilisés tant que tu es en mode journalier.'
+      : 'Repasser en mode hebdomadaire ? Ton planning journalier reste sauvegardé mais ne sera plus utilisé tant que tu es en mode hebdo.';
+    if (!confirm(msg)) return;
+  }
+  e.mode = mode;
   renderOffseasonEditor();
 }
 
@@ -16844,8 +17024,16 @@ function renderOffseasonEditor() {
       <button class="modal-close" onclick="closeModal();state._editingOffseason=null">✕</button>
     </div>
     <div class="modal-body">
+      <!-- PHASE 4 : toggle mode hebdo / journalier -->
+      <div class="segmented" style="margin-bottom:14px">
+        <button class="segmented-btn ${e.mode !== 'daily' ? 'active' : ''}" onclick="setOffseasonMode('weekly')">📅 Hebdomadaire</button>
+        <button class="segmented-btn ${e.mode === 'daily' ? 'active' : ''}" onclick="setOffseasonMode('daily')">🗓 Journalier</button>
+      </div>
+
       <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:14px;font-size:11px;color:var(--ink-2);line-height:1.5">
-        Définis un programme hebdomadaire. Les joueuses cocheront chaque exercice fait dans la semaine. Le suivi reset chaque lundi automatiquement.
+        ${e.mode === 'daily'
+          ? 'Mode journalier : tu planifies des exercices date par date. Chaque joueuse voit son programme du jour.'
+          : 'Mode hebdomadaire : les mêmes exercices chaque semaine. Les joueuses cochent ce qui est fait, reset auto chaque lundi.'}
       </div>
 
       <div class="fld">
@@ -16863,6 +17051,7 @@ function renderOffseasonEditor() {
         </div>
       </div>
 
+      ${e.mode === 'daily' ? renderDailySchedule(e) : `
       <div class="eyebrow-muted" style="margin-top:14px;margin-bottom:8px">Exercices hebdomadaires (${e.exercises.length})</div>
       <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px">
         ${e.exercises.length === 0 ? `<div style="padding:14px;text-align:center;color:var(--ink-3);font-size:12px;font-style:italic;border:1px dashed var(--border);border-radius:8px">Aucun exercice · ajoute via les templates ou en perso</div>` : e.exercises.map((ex, i) => `
@@ -16893,6 +17082,7 @@ function renderOffseasonEditor() {
           <button class="feedback-suggest-chip suggest-pos" onclick="addOffseasonTemplate(${i})">+ ${esc(t.label)}</button>
         `).join('')}
       </div>
+      `}
     </div>
     <div class="modal-footer" style="flex-direction:column;gap:6px">
       <div style="display:flex;gap:6px;width:100%">
@@ -16928,17 +17118,125 @@ function moveOffseasonStep(idx, delta) {
   renderOffseasonEditor();
 }
 
+// ============================================================
+// PHASE 4 — MODE JOURNALIER (daily schedule)
+// ------------------------------------------------------------
+// state._editingOffseason.dailySchedule : { 'YYYY-MM-DD': [{ id, label, sets,
+// reps, durationMin, notes }] }. UI : liste des dates planifiées (triées) +
+// ajout d'une date dans la fenêtre [startDate, endDate]. Chaque date = liste
+// d'exos avec sets/reps/durée. Auto-save : voir saveOffseason (bouton commun).
+// ============================================================
+function renderDailySchedule(e) {
+  const sched = e.dailySchedule || {};
+  const dates = Object.keys(sched).sort();
+  const dateInputMin = e.startDate || '';
+  const dateInputMax = e.endDate || '';
+
+  const dateBlocks = dates.length === 0
+    ? `<div style="padding:14px;text-align:center;color:var(--ink-3);font-size:12px;font-style:italic;border:1px dashed var(--border);border-radius:8px">Aucune date planifiée · ajoute une date ci-dessous</div>`
+    : dates.map(date => {
+        const items = sched[date] || [];
+        return `
+        <div style="border:1px solid var(--border);border-radius:8px;margin-bottom:10px;overflow:hidden">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--bg-3)">
+            <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;letter-spacing:0.03em">${formatDate(date, 'long')}</div>
+            <button class="btn btn-icon" onclick="removeOffseasonDay('${date}')" style="color:var(--red);width:24px;height:24px" title="Retirer cette date">✕</button>
+          </div>
+          <div style="padding:8px 10px;display:flex;flex-direction:column;gap:6px">
+            ${items.length === 0 ? `<div style="color:var(--ink-4);font-size:11px;font-family:'JetBrains Mono'">Aucun exo</div>` : items.map((it, i) => `
+              <div class="warmup-step">
+                <div style="font-family:'Anton';font-size:13px;color:var(--orange);min-width:20px">${i+1}</div>
+                <div style="flex:1;min-width:0">
+                  <input type="text" value="${esc(it.label || '')}" placeholder="Exercice" onchange="setOffseasonDayField('${date}',${i},'label',this.value)" style="width:100%;background:transparent;border:0;color:var(--ink);font-family:'Inter';font-size:13px;padding:2px 0;outline:none">
+                  <div style="display:flex;gap:6px;margin-top:4px;flex-wrap:wrap">
+                    <input type="number" value="${it.sets || ''}" min="0" placeholder="séries" onchange="setOffseasonDayField('${date}',${i},'sets',parseInt(this.value)||0)" style="width:62px;background:var(--bg-1);border:1px solid var(--border);border-radius:4px;color:var(--ink);font-family:'JetBrains Mono';font-size:10px;padding:3px 6px;text-align:center">
+                    <input type="number" value="${it.reps || ''}" min="0" placeholder="reps" onchange="setOffseasonDayField('${date}',${i},'reps',parseInt(this.value)||0)" style="width:62px;background:var(--bg-1);border:1px solid var(--border);border-radius:4px;color:var(--ink);font-family:'JetBrains Mono';font-size:10px;padding:3px 6px;text-align:center">
+                    <input type="number" value="${it.durationMin || ''}" min="0" placeholder="min" onchange="setOffseasonDayField('${date}',${i},'durationMin',parseInt(this.value)||0)" style="width:54px;background:var(--bg-1);border:1px solid var(--border);border-radius:4px;color:var(--ink);font-family:'JetBrains Mono';font-size:10px;padding:3px 6px;text-align:center">
+                  </div>
+                  <input type="text" value="${esc(it.notes || '')}" placeholder="Notes (optionnel)" onchange="setOffseasonDayField('${date}',${i},'notes',this.value)" style="width:100%;background:var(--bg-1);border:1px solid var(--border);border-radius:4px;color:var(--ink-2);font-family:'Inter';font-size:11px;padding:4px 6px;margin-top:4px;outline:none">
+                </div>
+                <button class="btn btn-icon" onclick="removeOffseasonDayExercise('${date}',${i})" style="color:var(--red);flex-shrink:0">✕</button>
+              </div>
+            `).join('')}
+            <button class="btn btn-secondary btn-block" onclick="addOffseasonDayExercise('${date}')" style="font-size:11px">+ Ajouter un exo à cette date</button>
+          </div>
+        </div>`;
+      }).join('');
+
+  return `
+    <div class="eyebrow-muted" style="margin-top:14px;margin-bottom:8px">Planning journalier (${dates.length} date${dates.length>1?'s':''})</div>
+    ${dateBlocks}
+    <div style="display:flex;gap:6px;margin-top:10px;margin-bottom:8px">
+      <input id="os-new-date" type="date" ${dateInputMin?`min="${dateInputMin}"`:''} ${dateInputMax?`max="${dateInputMax}"`:''} style="flex:1;padding:8px 10px;background:var(--bg-3);border:1px solid var(--border);border-radius:6px;color:var(--ink);font-size:12px">
+      <button class="btn btn-secondary" onclick="addOffseasonDay()" style="font-size:12px;white-space:nowrap">+ Date</button>
+    </div>
+  `;
+}
+
+function addOffseasonDay() {
+  const e = state._editingOffseason;
+  const input = document.getElementById('os-new-date');
+  const date = input && input.value;
+  if (!date) return;
+  if (e.startDate && date < e.startDate) { alert('Date avant le début du programme.'); return; }
+  if (e.endDate && date > e.endDate) { alert('Date après la fin du programme.'); return; }
+  e.dailySchedule = e.dailySchedule || {};
+  if (!e.dailySchedule[date]) e.dailySchedule[date] = [];
+  renderOffseasonEditor();
+}
+
+function removeOffseasonDay(date) {
+  const e = state._editingOffseason;
+  if (!e.dailySchedule) return;
+  const items = e.dailySchedule[date] || [];
+  if (items.length && !confirm('Retirer cette date et ses ' + items.length + ' exo(s) ?')) return;
+  delete e.dailySchedule[date];
+  renderOffseasonEditor();
+}
+
+function addOffseasonDayExercise(date) {
+  const e = state._editingOffseason;
+  e.dailySchedule = e.dailySchedule || {};
+  e.dailySchedule[date] = e.dailySchedule[date] || [];
+  e.dailySchedule[date].push({ id: uid(), label: '', sets: 0, reps: 0, durationMin: 0, notes: '' });
+  renderOffseasonEditor();
+}
+
+function removeOffseasonDayExercise(date, idx) {
+  const e = state._editingOffseason;
+  if (!e.dailySchedule || !e.dailySchedule[date]) return;
+  e.dailySchedule[date].splice(idx, 1);
+  renderOffseasonEditor();
+}
+
+// MAJ d'un champ sans re-render (préserve le focus dans l'input en cours).
+function setOffseasonDayField(date, idx, field, value) {
+  const e = state._editingOffseason;
+  if (!e.dailySchedule || !e.dailySchedule[date] || !e.dailySchedule[date][idx]) return;
+  e.dailySchedule[date][idx][field] = value;
+}
+
 function saveOffseason() {
   const e = state._editingOffseason;
   const title = document.getElementById('os-title').value.trim() || 'Prépa estivale';
   const startDate = document.getElementById('os-start').value;
   const endDate = document.getElementById('os-end').value;
   if (!startDate || !endDate) { alert('Date de début et de fin requises'); return; }
+  const mode = e.mode === 'daily' ? 'daily' : 'weekly';
   const exercises = e.exercises.filter(ex => (ex.label || '').trim());
-  if (exercises.length === 0) { alert('Au moins un exercice est requis'); return; }
-  // Réassigner des id pour s'assurer qu'ils sont uniques
+  // PHASE 4 : nettoie le planning journalier (purge dates vides) + assure les id.
+  const dailySchedule = {};
+  Object.entries(e.dailySchedule || {}).forEach(([date, arr]) => {
+    const items = (arr || []).filter(it => (it.label || '').trim());
+    items.forEach(it => { if (!it.id) it.id = uid(); });
+    if (items.length) dailySchedule[date] = items;
+  });
+  // Validation selon le mode actif (l'autre mode est conservé en backup).
+  if (mode === 'weekly' && exercises.length === 0) { alert('Au moins un exercice hebdomadaire est requis'); return; }
+  if (mode === 'daily' && Object.keys(dailySchedule).length === 0) { alert('Ajoute au moins un exercice à une date'); return; }
+  // Réassigner des id pour s'assurer qu'ils sont uniques (hebdo).
   exercises.forEach(ex => { if (!ex.id) ex.id = uid(); });
-  state.offseason = { title, startDate, endDate, exercises };
+  state.offseason = { title, startDate, endDate, mode, exercises, dailySchedule };
   state._editingOffseason = null;
   persist();
   closeModal();
@@ -16962,6 +17260,8 @@ function openMyOffseason() {
   const o = state.offseason;
   const pid = state.auth.playerId;
   if (!o || !pid) return;
+  // PHASE 4 : mode journalier → vue "programme du jour" dédiée.
+  if (o.mode === 'daily') return openMyOffseasonDaily();
   const todayStr = new Date().toISOString().slice(0,10);
   const beforeStart = o.startDate && todayStr < o.startDate;
   const afterEnd = o.endDate && todayStr > o.endDate;
@@ -17083,11 +17383,172 @@ function toggleOffseasonExercise(exId) {
   if (newMb) newMb.scrollTop = prevScroll;
 }
 
+// === JOUEUSE : vue mode journalier (programme du jour + à venir) ===
+// Les logs de complétion sont stockés dans state.offseasonLogs[pid][dateKey]
+// (dateKey = 'YYYY-MM-DD' au lieu de 'YYYY-Www'). La colonne iso_week étant un
+// text, ça transite par la même entité offseasonLogs sans changement de schéma.
+function openMyOffseasonDaily() {
+  const o = state.offseason;
+  const pid = state.auth.playerId;
+  const sched = o.dailySchedule || {};
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const allDates = Object.keys(sched).sort();
+  // Dates à afficher : aujourd'hui + à venir (dans la fenêtre du programme).
+  const upcoming = allDates.filter(d => d >= todayStr);
+  const past = allDates.filter(d => d < todayStr).reverse().slice(0, 5);
+
+  state.offseasonLogs = state.offseasonLogs || {};
+  state.offseasonLogs[pid] = state.offseasonLogs[pid] || {};
+
+  const dayBlock = (date, isToday) => {
+    const items = sched[date] || [];
+    const dlog = state.offseasonLogs[pid][date] || {};
+    const doneCount = items.filter(it => dlog[it.id] && dlog[it.id].done).length;
+    const pct = items.length ? Math.round((doneCount / items.length) * 100) : 0;
+    return `
+      <div style="border:1px solid ${isToday ? 'var(--orange)' : 'var(--border)'};border-radius:10px;margin-bottom:10px;overflow:hidden">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:${isToday ? 'rgba(255,107,0,0.08)' : 'var(--bg-3)'}">
+          <div>
+            <div class="eyebrow" style="color:${isToday ? 'var(--orange)' : 'var(--ink-3)'}">${isToday ? "Aujourd'hui" : formatDate(date, 'short')}</div>
+            <div style="font-family:'Anton';font-size:14px;text-transform:uppercase">${formatDate(date, 'long')}</div>
+          </div>
+          <div style="font-family:'Anton';font-size:20px;color:${pct===100?'var(--green)':'var(--orange)'}">${doneCount}<span style="font-size:12px;color:var(--ink-4)">/${items.length}</span></div>
+        </div>
+        <div style="padding:8px 12px;display:flex;flex-direction:column;gap:6px">
+          ${items.map(it => {
+            const entry = dlog[it.id] || {};
+            const isDone = !!entry.done;
+            const meta = [
+              it.sets ? it.sets + ' séries' : '',
+              it.reps ? it.reps + ' reps' : '',
+              it.durationMin ? it.durationMin + ' min' : '',
+            ].filter(Boolean).join(' · ');
+            return `
+              <div class="warmup-step-do ${isDone ? 'done' : ''}" onclick="toggleOffseasonDailyExercise('${date}','${it.id}')">
+                <div style="font-family:'Anton';font-size:18px;color:${isDone?'var(--green)':'var(--orange)'};min-width:32px;text-align:center">${isDone ? '✓' : '○'}</div>
+                <div style="flex:1;min-width:0">
+                  <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;${isDone?'text-decoration:line-through;color:var(--ink-3)':''}">${esc(it.label)}</div>
+                  <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:3px">
+                    ${meta ? `<span style="font-size:10px;color:var(--orange);font-family:'JetBrains Mono';text-transform:uppercase">🎯 ${esc(meta)}</span>` : ''}
+                    ${it.notes ? `<span style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';font-style:italic">${esc(it.notes)}</span>` : ''}
+                  </div>
+                </div>
+              </div>`;
+          }).join('')}
+        </div>
+      </div>`;
+  };
+
+  const todayHasPlan = !!sched[todayStr];
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">Programme journalier</div>
+        <div class="modal-title">☀ ${esc(o.title)}</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      ${todayHasPlan ? dayBlock(todayStr, true) : `<div style="padding:14px;background:var(--bg-3);border-left:3px solid var(--ink-3);border-radius:6px;margin-bottom:14px;font-size:12px;color:var(--ink-2);line-height:1.5">Rien de prévu aujourd'hui. Repos ou séance libre 💪</div>`}
+      ${upcoming.filter(d => d !== todayStr).length ? `<div class="eyebrow-muted mb-2" style="margin-top:14px">À venir</div>${upcoming.filter(d => d !== todayStr).map(d => dayBlock(d, false)).join('')}` : ''}
+      ${past.length ? `<div class="eyebrow-muted mb-2" style="margin-top:14px">Jours passés</div>${past.map(d => dayBlock(d, false)).join('')}` : ''}
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary btn-block" onclick="closeModal()">Fermer</button>
+    </div>
+  `);
+}
+
+function toggleOffseasonDailyExercise(date, exId) {
+  if (state.auth.role !== 'player') return;
+  const pid = state.auth.playerId;
+  state.offseasonLogs = state.offseasonLogs || {};
+  state.offseasonLogs[pid] = state.offseasonLogs[pid] || {};
+  state.offseasonLogs[pid][date] = state.offseasonLogs[pid][date] || {};
+  const log = state.offseasonLogs[pid][date];
+  log[exId] = log[exId] || {};
+  log[exId].done = !log[exId].done;
+  if (log[exId].done) log[exId].at = Date.now();
+  persist();
+  render();
+  const mb = document.querySelector('#modal-root .modal-body');
+  const prevScroll = mb ? mb.scrollTop : 0;
+  openMyOffseasonDaily();
+  const newMb = document.querySelector('#modal-root .modal-body');
+  if (newMb) newMb.scrollTop = prevScroll;
+}
+
 // === COACH : dashboard de suivi ===
+
+// PHASE 4 : dashboard coach en mode journalier (suivi du jour).
+function openOffseasonDashboardDaily() {
+  const o = state.offseason;
+  const sched = o.dailySchedule || {};
+  const today = new Date().toISOString().slice(0, 10);
+  const items = sched[today] || [];
+  const logs = state.offseasonLogs || {};
+  const _seasonPool = currentSeasonPlayers();
+
+  const playersStats = _seasonPool.map(p => {
+    const pLog = (logs[p.id] || {})[today] || {};
+    const doneCount = items.filter(it => pLog[it.id] && pLog[it.id].done).length;
+    const pct = items.length > 0 ? Math.round((doneCount / items.length) * 100) : 0;
+    return { player: p, doneCount, pct };
+  }).sort((a, b) => b.pct - a.pct);
+
+  const totalDone = playersStats.reduce((acc, x) => acc + x.doneCount, 0);
+  const totalExpected = _seasonPool.length * items.length;
+  const teamPct = totalExpected > 0 ? Math.round((totalDone / totalExpected) * 100) : 0;
+  const teamColor = teamPct >= 70 ? 'var(--green)' : teamPct >= 40 ? 'var(--orange)' : 'var(--red)';
+  const plannedDates = Object.keys(sched).length;
+
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">🗓 Journalier · ${formatDate(today, 'long')}</div>
+        <div class="modal-title">Suivi · ${esc(o.title)}</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      ${items.length === 0 ? `
+        <div style="padding:14px;background:var(--bg-3);border-left:3px solid var(--ink-3);border-radius:6px;margin-bottom:14px;font-size:12px;color:var(--ink-2);line-height:1.5">
+          Aucun exercice prévu aujourd'hui (${plannedDates} date${plannedDates>1?'s':''} planifiée${plannedDates>1?'s':''} au total).
+        </div>
+      ` : `
+        <div style="text-align:center;padding:14px;background:var(--bg-2);border-radius:10px;margin-bottom:14px;border:1px solid ${teamPct===100?'var(--green)':'var(--border)'}">
+          <div style="font-family:'Anton';font-size:36px;color:${teamColor};line-height:1">${teamPct}%</div>
+          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em;margin-top:6px">Engagement équipe · aujourd'hui · ${items.length} exo${items.length>1?'s':''}</div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px">
+          ${playersStats.map(x => {
+            const color = x.pct >= 80 ? 'var(--green)' : x.pct >= 40 ? 'var(--orange)' : 'var(--red)';
+            return `
+              <div class="offseason-row" onclick="openOffseasonPlayerDetail('${x.player.id}')">
+                <div style="flex:1;min-width:0">
+                  <div style="font-family:'Anton';font-size:13px;text-transform:uppercase">${esc(x.player.name)}</div>
+                  <div style="height:5px;background:var(--bg-1);border-radius:3px;overflow:hidden;margin-top:5px">
+                    <div style="height:100%;width:${x.pct}%;background:${color}"></div>
+                  </div>
+                </div>
+                <div style="font-family:'Anton';font-size:15px;color:${color};min-width:54px;text-align:right">${x.doneCount}/${items.length}</div>
+              </div>`;
+          }).join('')}
+        </div>
+      `}
+    </div>
+    <div class="modal-footer" style="flex-direction:column;gap:6px">
+      <button class="btn btn-secondary btn-block" onclick="closeModal();setTimeout(()=>openOffseasonConfig(),50)">✎ Modifier le programme</button>
+      <button class="btn btn-primary btn-block" onclick="closeModal()">Fermer</button>
+    </div>
+  `);
+}
 
 function openOffseasonDashboard() {
   const o = state.offseason;
   if (!o) return;
+  // PHASE 4 : en mode journalier, le suivi est par date (aujourd'hui).
+  if (o.mode === 'daily') return openOffseasonDashboardDaily();
   const weekKey = getWeekKey();
   const logs = state.offseasonLogs || {};
 
@@ -17176,10 +17637,69 @@ function openOffseasonDashboard() {
   `);
 }
 
+// PHASE 4 : détail joueuse par date (mode journalier). Croise dailySchedule
+// (planning coach par date) avec les logs de complétion de la joueuse.
+function openOffseasonPlayerDetailDaily(pid) {
+  const o = state.offseason;
+  const p = state.players.find(x => x.id === pid);
+  if (!o || !p) return;
+  const sched = o.dailySchedule || {};
+  const logs = (state.offseasonLogs || {})[pid] || {};
+  // Dates planifiées par le coach, plus récentes d'abord (8 max).
+  const dates = Object.keys(sched).sort().reverse().slice(0, 8);
+
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">${dates.length} jour${dates.length>1?'s':''} planifié${dates.length>1?'s':''}</div>
+        <div class="modal-title">${esc(p.name)} · Prépa</div>
+      </div>
+      <button class="modal-close" onclick="closeModal();setTimeout(()=>openOffseasonDashboard(),50)">✕</button>
+    </div>
+    <div class="modal-body">
+      ${dates.length === 0 ? `<div class="empty" style="padding:30px"><div class="empty-icon">○</div><div class="empty-title">Aucune date planifiée</div></div>` : `
+        <div style="display:flex;flex-direction:column;gap:10px">
+          ${dates.map(date => {
+            const items = sched[date] || [];
+            const dLog = logs[date] || {};
+            const dDone = items.filter(it => dLog[it.id] && dLog[it.id].done);
+            const dPct = items.length > 0 ? Math.round((dDone.length / items.length) * 100) : 0;
+            const color = dPct >= 70 ? 'var(--green)' : dPct >= 40 ? 'var(--orange)' : 'var(--red)';
+            return `
+              <div class="review-card" style="border-left-color:${color}">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+                  <div style="font-family:'JetBrains Mono';font-size:11px;text-transform:uppercase;letter-spacing:0.06em">${formatDate(date, 'long')}</div>
+                  <div style="font-family:'Anton';font-size:18px;color:${color}">${dDone.length}<span style="font-size:11px;color:var(--ink-4)">/${items.length}</span> · ${dPct}%</div>
+                </div>
+                <div style="display:flex;flex-direction:column;gap:3px">
+                  ${items.map(it => {
+                    const done = dLog[it.id] && dLog[it.id].done;
+                    const meta = [it.sets?it.sets+' séries':'', it.reps?it.reps+' reps':'', it.durationMin?it.durationMin+' min':''].filter(Boolean).join(' · ');
+                    return `
+                      <div style="display:flex;align-items:center;gap:8px;font-size:11px;padding:4px 8px;background:${done?'rgba(34,197,94,0.06)':'rgba(239,68,68,0.04)'};border-radius:4px;border-left:2px solid ${done?'var(--green)':'var(--ink-4)'}">
+                        <span style="color:${done?'var(--green)':'var(--ink-4)'};font-family:'Anton'">${done?'✓':'○'}</span>
+                        <span style="${done?'':'color:var(--ink-3)'};flex:1">${esc(it.label)}</span>
+                        ${meta ? `<span style="color:var(--ink-3);font-family:'JetBrains Mono';font-size:9px;text-transform:uppercase">${esc(meta)}</span>` : ''}
+                      </div>`;
+                  }).join('')}
+                </div>
+              </div>`;
+          }).join('')}
+        </div>
+      `}
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary btn-block" onclick="closeModal();setTimeout(()=>openOffseasonDashboard(),50)">← Retour</button>
+    </div>
+  `);
+}
+
 function openOffseasonPlayerDetail(pid) {
   const o = state.offseason;
   const p = state.players.find(x => x.id === pid);
   if (!o || !p) return;
+  // PHASE 4 : détail par date en mode journalier.
+  if (o.mode === 'daily') return openOffseasonPlayerDetailDaily(pid);
   const logs = (state.offseasonLogs || {})[pid] || {};
   const weeks = Object.keys(logs).sort().reverse().slice(0, 8); // 8 semaines max
 
