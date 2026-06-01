@@ -11867,6 +11867,9 @@ function renderTrainingPlanEditor() {
         <button class="btn btn-secondary btn-block" onclick="closeModal();setTimeout(()=>openPlayPicker(),80)">📚 Piocher dans la bibliothèque (${state.plays.length})</button>
         <button class="btn btn-secondary btn-block" onclick="addCustomExercise()">+ Créer un exo à la volée</button>
       </div>
+
+      <!-- PHASE 3 : Ateliers + rotations de groupes -->
+      ${renderWorkshopRotations(plan)}
     </div>
     <div class="modal-footer" style="flex-direction:column;gap:6px">
       ${plan.exercises.length > 0 ? `
@@ -11885,6 +11888,180 @@ function renderTrainingPlanEditor() {
   if (plan.exercises.length > 1) {
     setTimeout(() => initTrainingDragDrop(), 100);
   }
+}
+
+// ============================================================
+// PHASE 3 — ATELIERS + ROTATIONS (workshop rotations)
+// ------------------------------------------------------------
+// Stocké dans plan.workshop_rotations (jsonb training_plans.plan, déjà prévu
+// en Phase 2, aucune nouvelle migration) :
+//   { workshops: [{ id, name }], rotations: [{ id, assignments: [{ workshop, group }] }] }
+// Les groupes sont les noms distincts trouvés dans plan.exercises[].groups[].name
+// (créés via la feature "compo groupes exo"). Pas de timer, pas de notif (V1).
+// Le coach voit un tableau Rotations × Groupes ; chaque cellule = dropdown des
+// ateliers. Auto-save : chaque mutation appelle persist() (debounce sync 400ms
+// via PbSync) — pas de debounce UI séparé (les writes sont rares et discrets).
+// ============================================================
+function _wsData(plan) {
+  if (!plan.workshop_rotations) plan.workshop_rotations = { workshops: [], rotations: [] };
+  const wr = plan.workshop_rotations;
+  if (!Array.isArray(wr.workshops)) wr.workshops = [];
+  if (!Array.isArray(wr.rotations)) wr.rotations = [];
+  return wr;
+}
+
+// Liste des noms de groupes distincts du plan (source : ex.groups[].name).
+function _planGroupNames(plan) {
+  const seen = [];
+  (plan.exercises || []).forEach(ex => {
+    (ex.groups || []).forEach(g => {
+      const n = (g && g.name || '').trim();
+      if (n && !seen.includes(n)) seen.push(n);
+    });
+  });
+  return seen;
+}
+
+// Récupère le plan en cours d'édition (contexte state._editingTraining), bindé
+// per-instance via resolveTrainingPlan (Phase 2).
+function _currentEditingPlan() {
+  if (!state._editingTraining) return null;
+  const c = state.convocations.find(x => x.id === state._editingTraining.convocId);
+  if (!c) return null;
+  return resolveTrainingPlan(c, state._editingTraining.dateStr || c.date);
+}
+
+function renderWorkshopRotations(plan) {
+  const wr = _wsData(plan);
+  const groups = _planGroupNames(plan);
+  const workshops = wr.workshops;
+
+  const workshopChips = workshops.length === 0
+    ? `<div style="color:var(--ink-4);font-size:11px;font-family:'JetBrains Mono'">Aucun atelier. Ajoute des stations ci-dessous.</div>`
+    : workshops.map(w => `
+        <span class="chip" style="display:inline-flex;align-items:center;gap:6px">
+          ${esc(w.name)}
+          <button onclick="removeWorkshop('${esc(w.id)}')" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:13px;padding:0;line-height:1">✕</button>
+        </span>`).join('');
+
+  let table = '';
+  if (groups.length === 0) {
+    table = `<div style="padding:14px;text-align:center;color:var(--ink-4);font-size:11px;font-family:'JetBrains Mono';line-height:1.5">
+      Crée d'abord des groupes dans les exercices (👥 dans le détail d'un exercice) pour configurer les rotations.
+    </div>`;
+  } else if (workshops.length === 0) {
+    table = `<div style="padding:14px;text-align:center;color:var(--ink-4);font-size:11px;font-family:'JetBrains Mono'">
+      Ajoute au moins un atelier pour configurer les rotations.
+    </div>`;
+  } else {
+    const rotations = wr.rotations;
+    const head = `<th style="text-align:left;padding:6px 8px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">Groupe</th>` +
+      rotations.map((r, ri) => `<th style="padding:6px 8px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';white-space:nowrap">
+        R${ri + 1}
+        <button onclick="removeRotation(${r.id})" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:11px;padding:0 0 0 4px">✕</button>
+      </th>`).join('');
+    const rows = groups.map(gName => {
+      const cells = rotations.map(r => {
+        const a = (r.assignments || []).find(x => x.group === gName);
+        const cur = a ? a.workshop : '';
+        const opts = `<option value="">—</option>` + workshops.map(w =>
+          `<option value="${esc(w.id)}" ${cur === w.id ? 'selected' : ''}>${esc(w.name)}</option>`).join('');
+        return `<td style="padding:4px 6px">
+          <select onchange="setRotationAssignment(${r.id}, '${esc(gName)}', this.value)" style="width:100%;padding:6px;background:var(--bg-3);border:1px solid var(--border);border-radius:6px;color:var(--ink);font-size:12px">${opts}</select>
+        </td>`;
+      }).join('');
+      return `<tr><td style="padding:6px 8px;font-family:'Anton';font-size:12px;white-space:nowrap">${esc(gName)}</td>${cells}</tr>`;
+    }).join('');
+    table = `<div style="overflow-x:auto;margin-bottom:10px">
+      <table style="width:100%;border-collapse:collapse;min-width:${120 + rotations.length * 90}px">
+        <thead><tr>${head}</tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <button class="btn btn-secondary btn-block" onclick="addRotation()" style="font-size:12px">+ Ajouter une rotation</button>`;
+  }
+
+  return `
+    <div style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:14px">
+      <div class="eyebrow-muted mb-2">Ateliers + rotations</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px">
+        ${workshopChips}
+      </div>
+      <div style="display:flex;gap:6px;margin-bottom:14px">
+        <input id="ws-new-name" type="text" placeholder="Nom de l'atelier (ex: Shooting)" style="flex:1;padding:8px 10px;background:var(--bg-3);border:1px solid var(--border);border-radius:6px;color:var(--ink);font-size:12px" onkeydown="if(event.key==='Enter'){event.preventDefault();addWorkshop();}">
+        <button class="btn btn-secondary" onclick="addWorkshop()" style="font-size:12px;white-space:nowrap">+ Atelier</button>
+      </div>
+      ${table}
+    </div>
+  `;
+}
+
+function addWorkshop() {
+  const plan = _currentEditingPlan();
+  if (!plan) return;
+  const input = document.getElementById('ws-new-name');
+  const name = (input && input.value || '').trim();
+  if (!name) return;
+  const wr = _wsData(plan);
+  // id court stable : A, B, C… (réutilise un id libéré), puis W4, W5… si > 26.
+  const used = new Set(wr.workshops.map(w => w.id));
+  let id = '';
+  for (let i = 0; i < 26 && !id; i++) { const c = String.fromCharCode(65 + i); if (!used.has(c)) id = c; }
+  if (!id) id = 'W' + (wr.workshops.length + 1);
+  wr.workshops.push({ id, name });
+  persist();
+  renderTrainingPlanEditor();
+}
+
+function removeWorkshop(workshopId) {
+  const plan = _currentEditingPlan();
+  if (!plan) return;
+  const wr = _wsData(plan);
+  wr.workshops = wr.workshops.filter(w => w.id !== workshopId);
+  // Purge les assignations qui pointaient sur cet atelier.
+  wr.rotations.forEach(r => { r.assignments = (r.assignments || []).filter(a => a.workshop !== workshopId); });
+  persist();
+  renderTrainingPlanEditor();
+}
+
+function addRotation() {
+  const plan = _currentEditingPlan();
+  if (!plan) return;
+  const wr = _wsData(plan);
+  const nextId = wr.rotations.reduce((mx, r) => Math.max(mx, r.id || 0), 0) + 1;
+  wr.rotations.push({ id: nextId, assignments: [] });
+  persist();
+  renderTrainingPlanEditor();
+}
+
+function removeRotation(rotationId) {
+  const plan = _currentEditingPlan();
+  if (!plan) return;
+  const wr = _wsData(plan);
+  wr.rotations = wr.rotations.filter(r => r.id !== rotationId);
+  persist();
+  renderTrainingPlanEditor();
+}
+
+// Définit (ou efface si workshopId vide) l'atelier d'un groupe à une rotation.
+function setRotationAssignment(rotationId, groupName, workshopId) {
+  const plan = _currentEditingPlan();
+  if (!plan) return;
+  const wr = _wsData(plan);
+  const r = wr.rotations.find(x => x.id === rotationId);
+  if (!r) return;
+  r.assignments = r.assignments || [];
+  const existing = r.assignments.find(a => a.group === groupName);
+  if (!workshopId) {
+    r.assignments = r.assignments.filter(a => a.group !== groupName);
+  } else if (existing) {
+    existing.workshop = workshopId;
+  } else {
+    r.assignments.push({ workshop: workshopId, group: groupName });
+  }
+  persist();
+  // Pas de re-render complet (le <select> reflète déjà la valeur) → évite de
+  // perdre le focus/scroll. L'état est persisté + synchronisé.
 }
 
 function trainingExerciseRow(ex, idx, totalCount, startTime, endTime) {
