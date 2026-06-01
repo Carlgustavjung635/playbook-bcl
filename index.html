@@ -2625,6 +2625,15 @@ window.PbStore = {
     const { error } = await sb.from('players').delete().eq('id', pid);
     if (error) throw error;
   },
+  // Dernière connexion : UPDATE ciblé d'une seule colonne (ne touche pas au
+  // reste de la ligne, contrairement à upsertPlayer). Tolère l'absence de la
+  // colonne last_seen_at (migration 20260601_001 pas encore appliquée) : le
+  // caller catch en silence.
+  async touchLastSeen(playerId) {
+    if (!playerId) return;
+    const { error } = await sb.from('players').update({ last_seen_at: new Date().toISOString() }).eq('id', playerId);
+    if (error) throw error;
+  },
   subscribePlayers(onChange) {
     if (Pb.playersChannel) { sb.removeChannel(Pb.playersChannel); Pb.playersChannel = null; }
     const ch = sb.channel('players-sync')
@@ -2641,8 +2650,13 @@ window.PbStore = {
     return (data || []).map(_dbMatchToClient);
   },
   async fetchPlayers() {
-    const { data } = await sb.from('players').select('id,name,num,photo,feedback').order('num');
-    return data || [];
+    // last_seen_at peut ne pas encore exister en base (migration 20260601_001) :
+    // on tente le select enrichi, fallback legacy si la colonne manque.
+    let res = await sb.from('players').select('id,name,num,photo,feedback,last_seen_at').order('num');
+    if (res.error) {
+      res = await sb.from('players').select('id,name,num,photo,feedback').order('num');
+    }
+    return res.data || [];
   },
   async fetchLiveMatch() {
     const { data } = await sb.from('matches').select('*').eq('public_live', true).maybeSingle();
@@ -4656,6 +4670,8 @@ async function tryPin() {
     if (role === 'stat') state.section = 'live';
     else state.section = 'home';
     persist();
+    // Dernière connexion : login frais d'une joueuse → tampon immédiat.
+    try { _touchCurrentPlayerLastSeen(); } catch (e) {}
     render();
     return;
   }
@@ -18155,14 +18171,19 @@ function managePlayers() {
       </div>
       <button class="btn btn-primary btn-block" onclick="addNewPlayer()">+ Ajouter</button>
       <div style="margin-top:18px;display:flex;flex-direction:column;gap:6px">
-        ${state.players.map(p => `
+        ${state.players.map(p => {
+          const ls = _lastSeenBadge(p.lastSeenAt);
+          return `
           <div style="display:flex;align-items:center;gap:8px;padding:10px;background:var(--bg-1);border-radius:8px;border:1px solid var(--border);cursor:pointer" onclick="editPlayer('${p.id}')">
             ${p.photo ? `<img src="${p.photo}" style="width:36px;height:36px;border-radius:50%;object-fit:cover;border:2px solid var(--orange)">` : `<div style="width:36px;height:36px;border-radius:50%;background:var(--bg-3);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:14px;color:var(--orange);border:2px solid var(--border)">${esc(p.name.charAt(0).toUpperCase())}</div>`}
             <div style="font-family:'Anton';font-size:18px;color:var(--orange);min-width:32px">#${p.num}</div>
-            <div style="flex:1;font-family:'Anton';text-transform:uppercase;font-size:13px">${esc(p.name)}</div>
+            <div style="flex:1;min-width:0">
+              <div style="font-family:'Anton';text-transform:uppercase;font-size:13px">${esc(p.name)}</div>
+              <div style="font-size:9px;color:${ls.color};font-family:'JetBrains Mono';margin-top:2px"><span style="font-size:7px;vertical-align:middle">${ls.dot}</span> ${ls.label}</div>
+            </div>
             <div style="font-size:9px;color:${p.pin === '0000' ? 'var(--red)' : 'var(--ink-3)'};font-family:'JetBrains Mono';text-transform:uppercase">${p.pin === '0000' ? '⚠ pin 0000' : '✎ ouvrir'}</div>
           </div>
-        `).join('')}
+        `;}).join('')}
       </div>
     </div>
     <div class="modal-footer">
@@ -19268,6 +19289,33 @@ window.addEventListener('hashchange', () => render());
 // ---- Sync globale toutes entités équipe ----
 // 1) players reste géré séparément (RPC verify_pin + protect pin_hash)
 // 2) tout le reste est piloté par window.PbSync (sync engine générique)
+// Tamponne la dernière connexion de la joueuse courante (rôle 'player').
+// Optimiste local + UPDATE ciblé Supabase (silencieux si colonne absente).
+function _touchCurrentPlayerLastSeen() {
+  if (!state.auth || state.auth.role !== 'player' || !state.auth.playerId) return;
+  const pid = state.auth.playerId;
+  const p = state.players.find(x => x.id === pid);
+  if (p) p.lastSeenAt = Date.now();
+  try { save(K.players, state.players); } catch (e) {}
+  if (window.PbStore) PbStore.touchLastSeen(pid).catch(() => {});
+}
+
+// Badge "dernière connexion" pour l'effectif coach.
+// Vert < 24h · orange < 7j · rouge >= 7j ou jamais (spec).
+function _lastSeenBadge(ms) {
+  if (!ms) return { label: 'jamais vue', color: 'var(--red)', dot: '●' };
+  const hours = (Date.now() - ms) / 3600000;
+  const days = Math.floor(hours / 24);
+  const color = hours < 24 ? 'var(--green)' : (hours < 24 * 7 ? 'var(--orange)' : 'var(--red)');
+  let label;
+  if (days <= 0) label = "vue aujourd'hui";
+  else if (days === 1) label = 'vue hier';
+  else if (days < 7) label = 'vue il y a ' + days + 'j';
+  else if (days < 30) label = 'vue il y a ' + Math.floor(days / 7) + ' sem';
+  else label = 'vue il y a ' + Math.floor(days / 30) + ' mois';
+  return { label, color, dot: '●' };
+}
+
 function _initPlayersSync() {
   if (window._syncInitDone || !window.PbStore || !window.PbSync) return;
   window._syncInitDone = true;
@@ -19281,13 +19329,17 @@ function _initPlayersSync() {
         return { ...lp, id: rp.id, name: rp.name, num: rp.num,
           photo: rp.photo || lp.photo || null,
           pin: lp.pin || '0000',
-          feedback: rp.feedback || lp.feedback || {} };
+          feedback: rp.feedback || lp.feedback || {},
+          lastSeenAt: rp.last_seen_at ? Date.parse(rp.last_seen_at) : (lp.lastSeenAt || null) };
       });
       const remoteIds = new Set(remote.map(r => r.id));
       const localOnly = state.players.filter(p => !remoteIds.has(p.id));
       state.players = [...merged, ...localOnly];
       localOnly.forEach(p => PbStore.upsertPlayer(p).catch(()=>{}));
     }
+    // Dernière connexion : si une joueuse charge l'app, on tamponne son
+    // last_seen_at (après la fusion → la joueuse existe dans state.players).
+    try { _touchCurrentPlayerLastSeen(); } catch (e) {}
   }).catch(e => console.warn('[sync] fetchPlayers:', e.message))
     .finally(() => {
       // --- B) Toutes les autres entités via PbSync ---
@@ -19347,7 +19399,8 @@ function _initPlayersSync() {
       const patched = { ...lp, id: row.id, name: row.name, num: row.num,
         photo: row.photo || lp.photo || null,
         pin: lp.pin || '0000',
-        feedback: row.feedback || lp.feedback || {} };
+        feedback: row.feedback || lp.feedback || {},
+        lastSeenAt: row.last_seen_at ? Date.parse(row.last_seen_at) : (lp.lastSeenAt || null) };
       if (i >= 0) state.players[i] = patched;
       else state.players.push(patched);
     } else if (event === 'DELETE' && old) {
