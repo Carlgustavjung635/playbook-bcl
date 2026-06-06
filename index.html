@@ -3029,12 +3029,14 @@ const ENTITIES = [
       if (!state.ffbb) return {};
       const f = state.ffbb;
       return { 1: { id: 1, club_url: f.clubUrl || null, team_name: f.teamName || null,
+        nickname: f.nickname || null,
         matches: f.matches || [], standings: f.standings || [],
         last_sync: f.lastSync ? new Date(f.lastSync).toISOString() : null } };
     },
     apply: (state, rows) => {
       const r = rows.find(x => x.id === 1);
       if (r) state.ffbb = { clubUrl: r.club_url || '', teamName: r.team_name || '',
+        nickname: r.nickname || '',
         matches: r.matches || [], standings: r.standings || [],
         lastSync: r.last_sync ? Date.parse(r.last_sync) : null };
     }
@@ -3900,7 +3902,7 @@ let state = {
   players: load(K.players, DEFAULT_PLAYERS),
   convocations: load(K.convocations, DEFAULT_CONVOCATIONS),
   pins: load(K.pins, { coach: '1234', stat: '1234' }),
-  ffbb: load(K.ffbb, { clubUrl: 'https://competitions.ffbb.com/ligues/occ/comites/0065/clubs/occ0032016', teamName: 'IE - BASKET CLUB L\'ISLOIS - 2', matches: [], standings: [], lastSync: null }),
+  ffbb: load(K.ffbb, { clubUrl: 'https://competitions.ffbb.com/ligues/occ/comites/0065/clubs/occ0032016', teamName: 'IE - BASKET CLUB L\'ISLOIS - 2', nickname: '', matches: [], standings: [], lastSync: null }),
   lineups: load(K.lineups, []),
   pinAttempts: load(K.pinAttempts, {}), // { 'coach': {count, lockedUntil}, 'stat': {...}, 'pl1': {...} }
   teamReviews: load(K.teamReviews, []), // [{ id, pid, date, ambiance, roleClarity, playtime, physique, comment, updatedAt }]
@@ -4928,7 +4930,7 @@ function renderTopbar() {
         <div class="topbar-orb">🏀</div>
         <div>
           <div class="topbar-title">Playbook</div>
-          <div class="topbar-sub">BCL · L'Islois</div>
+          <div class="topbar-sub">${state.ffbb && state.ffbb.nickname ? esc(state.ffbb.nickname) : "BCL · L'Islois"}</div>
         </div>
       </div>
       <div style="display:flex;gap:6px;align-items:center">
@@ -19077,6 +19079,11 @@ function editFFBBConfig() {
         <input id="ffbb-team" value="${esc(f.teamName || '')}" placeholder="IE - BASKET CLUB L'ISLOIS - 2">
         <div style="margin-top:6px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">Permet de détecter automatiquement V/D et de surligner ta ligne dans le classement</div>
       </div>
+      <div class="fld">
+        <label class="fld-label">Surnom de l'équipe (affiché dans l'app)</label>
+        <input id="ffbb-nickname" value="${esc(f.nickname || '')}" placeholder="Les Isloises, La Team, ...">
+        <div style="margin-top:6px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">Optionnel · remplace « BCL · L'Islois » dans l'en-tête</div>
+      </div>
       ${f.rawDataSnippet ? `
         <div style="margin-top:14px;padding:10px;background:var(--bg-1);border:1px solid var(--border);border-radius:6px">
           <div class="eyebrow-muted" style="margin-bottom:4px">Debug · 200 premiers car. du dernier scrape</div>
@@ -19095,6 +19102,8 @@ function editFFBBConfig() {
 function saveFFBBConfig() {
   state.ffbb.clubUrl = document.getElementById('ffbb-url').value.trim();
   state.ffbb.teamName = document.getElementById('ffbb-team').value.trim();
+  const nickEl = document.getElementById('ffbb-nickname');
+  if (nickEl) state.ffbb.nickname = nickEl.value.trim();
   persist();
   closeModal();
   syncFFBB();
