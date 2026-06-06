@@ -4947,7 +4947,9 @@ function renderTopbar() {
         <div class="topbar-orb">🏀</div>
         <div>
           <div class="topbar-title">Playbook</div>
-          <div class="topbar-sub">${state.team && state.team.displayNickname ? esc(state.team.displayNickname) : "BCL · L'Islois"}</div>
+          ${isCoach
+            ? `<div class="topbar-sub" style="cursor:pointer" onclick="editTeamIdentity()" title="Modifier le surnom de l'équipe">${state.team && state.team.displayNickname ? esc(state.team.displayNickname) : "BCL · L'Islois"} <span style="opacity:.55;font-size:.85em">✏️</span></div>`
+            : `<div class="topbar-sub">${state.team && state.team.displayNickname ? esc(state.team.displayNickname) : "BCL · L'Islois"}</div>`}
         </div>
       </div>
       <div style="display:flex;gap:6px;align-items:center">
