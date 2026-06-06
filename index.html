@@ -4796,6 +4796,21 @@ function closeModal() {
 }
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 
+// --- Préservation du scroll des modales à re-render plein (full-repaint) ---
+// openModal() reconstruit toute la .modal-body via innerHTML : tout re-render du
+// même modal (ajout d'un groupe, retour depuis un sous-modal, etc.) repart en
+// haut de liste. _modalScrollAttr(key) pose un onscroll qui mémorise en continu
+// la position dans state._modalScroll[key] (champ transient, non persisté) ;
+// _restoreModalScroll(key) la réapplique juste après openModal. La clé survit
+// aux allers-retours modal → sous-modal → retour. (bugs #9b, #3)
+function _modalScrollAttr(key) {
+  return `onscroll="state._modalScroll=state._modalScroll||{};state._modalScroll['${key}']=this.scrollTop"`;
+}
+function _restoreModalScroll(key) {
+  const mb = document.querySelector('#modal-root .modal-body');
+  if (mb && state._modalScroll && state._modalScroll[key] != null) mb.scrollTop = state._modalScroll[key];
+}
+
 // ============================================================
 // IMAGE VIEWER
 // ============================================================
@@ -12842,7 +12857,7 @@ function renderExerciseDetail() {
       </div>
       <button class="modal-close" onclick="closeModal();state._editingExerciseIdx=null;setTimeout(()=>renderTrainingPlanEditor(),80)">✕</button>
     </div>
-    <div class="modal-body">
+    <div class="modal-body" ${_modalScrollAttr('exo')}>
 
       <div class="fld">
         <label class="fld-label">Titre</label>
@@ -13029,6 +13044,7 @@ function renderExerciseDetail() {
       <button class="btn btn-primary btn-block" onclick="_saveTrainingPlanNow();closeModal();state._editingExerciseIdx=null;setTimeout(()=>renderTrainingPlanEditor(),80)">Terminé</button>
     </div>
   `);
+  _restoreModalScroll('exo');
 }
 
 function updateExerciseField(field, value) {
@@ -18109,7 +18125,7 @@ function managePlayers() {
       <div class="modal-title">Joueuses (${state.players.length})</div>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
-    <div class="modal-body">
+    <div class="modal-body" ${_modalScrollAttr('players')}>
       <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em;margin-bottom:14px">Chaque joueuse a un PIN à 4 chiffres pour se connecter</div>
       <div class="fld-row" style="margin-bottom:14px">
         <input id="pl-new-name" placeholder="Prénom" onkeydown="if(event.key==='Enter')addNewPlayer()">
@@ -18136,6 +18152,7 @@ function managePlayers() {
       <button class="btn btn-primary" onclick="closeModal();render()">Terminé</button>
     </div>
   `);
+  _restoreModalScroll('players');
   setTimeout(() => document.getElementById('pl-new-name')?.focus(), 100);
 }
 function addNewPlayer() {
