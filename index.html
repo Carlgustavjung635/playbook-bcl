@@ -3874,6 +3874,7 @@ const K = {
   guestPlayers: 'pb8_guest_players',
   trainingGuests: 'pb8_training_guests',
   trainingPlans: 'pb8_training_plans',
+  teamFilter: 'pb8_team_filter',
 };
 function load(k, d) { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : d; } catch { return d; } }
 // save() : sync localStorage avec gestion explicite du QuotaExceededError.
@@ -3960,6 +3961,13 @@ let state = {
   seasonPlays: load(K.seasonPlays, []),
   currentSeasonId: load(K.currentSeasonId, null),
 
+  // === MULTI-EFFECTIF (E1/E2) — chantier #2 ===
+  // Filtre équipe ACTIF côté coach/stat (pillule topbar). 'all' | 'e1' | 'e2'.
+  // Défaut 'all' = toutes les équipes (= comportement mono-équipe historique
+  // quand multi_squad off, puisque tout est en 'e1'). Ignoré côté joueuse :
+  // elle est auto-scopée à son propre team_tag (cf. currentSeasonPlayers).
+  teamFilter: load(K.teamFilter, 'all'),
+
   // === PRÉPA MATCH (Phase 4 — cf. migration 20260524_008_match_play_links) ===
   // Liens N-N plays↔match avec note coach + position (ordre coach-curated).
   // [{ matchId, playId, position, coachNote, createdAt }]
@@ -4018,6 +4026,7 @@ function persist() {
   save(K.seasonPlayers, state.seasonPlayers);
   save(K.seasonPlays, state.seasonPlays);
   save(K.currentSeasonId, state.currentSeasonId);
+  save(K.teamFilter, state.teamFilter);
   save(K.matchPlayLinks, state.matchPlayLinks);
   save(K.guestPlayers, state.guestPlayers);
   save(K.trainingGuests, state.trainingGuests);
@@ -4079,14 +4088,26 @@ function setCurrentSeasonId(id) {
   if (typeof render === 'function') render();
 }
 
+// Multi-effectif : une joueuse appartient à une équipe SI son tag matche le
+// filtre demandé, OU si elle est 'both' (présente dans les 2), OU si on demande
+// 'all' (vue coach « Toutes »). Mono-équipe (tout en 'e1', filtre 'all') → tout
+// passe, comportement historique inchangé.
+function teamTagMatches(tag, want) {
+  if (!want || want === 'all') return true;
+  const t = tag || 'e1';
+  return t === want || t === 'both';
+}
+
 // Joueuses d'une saison. includeLeft=true affiche aussi les parties (badge).
-function getSeasonPlayers(seasonId, { includeLeft = false } = {}) {
+// team : 'all' (défaut) | 'e1' | 'e2' → scope sur season_players.team_tag.
+function getSeasonPlayers(seasonId, { includeLeft = false, team = 'all' } = {}) {
   if (!seasonId) return state.players || [];
   const links = (state.seasonPlayers || []).filter(sp => sp.seasonId === seasonId);
   return links.map(link => {
     const p = (state.players || []).find(p => p.id === link.playerId);
     if (!p) return null;
     if (!includeLeft && link.leftAt) return null;
+    if (!teamTagMatches(link.teamTag, team)) return null;
     return { ...p, _seasonLink: link };
   }).filter(Boolean);
 }
@@ -4146,8 +4167,57 @@ function currentSeasonPlays(opts)    { return getSeasonPlays(state.currentSeason
 // leaderboard saison, etc.
 function currentSeasonPlayers(opts) {
   if (!_seasonsLoaded() || !state.currentSeasonId) return state.players || [];
-  return getSeasonPlayers(state.currentSeasonId, opts || {});
+  const o = opts || {};
+  // team explicite (appelant qui sait ce qu'il veut) sinon filtre effectif.
+  const team = o.team || effectiveTeamFilter();
+  return getSeasonPlayers(state.currentSeasonId, { ...o, team });
 }
+
+// ============================================================
+// MULTI-EFFECTIF (E1/E2) — filtre effectif + helpers
+// ============================================================
+// Tag équipe de la joueuse connectée (sur la saison courante). Défaut 'e1'.
+function currentPlayerTeamTag() {
+  const a = state.auth;
+  if (!a || a.role !== 'player') return null;
+  const link = (state.seasonPlayers || []).find(
+    sp => sp.seasonId === state.currentSeasonId && sp.playerId === a.playerId
+  );
+  return (link && link.teamTag) || 'e1';
+}
+
+// Filtre équipe EFFECTIF appliqué aux vues saison-scopées :
+//   - multi off          → 'all' (mono-équipe, tout en e1 : aucun changement)
+//   - joueuse e1/e2      → son propre tag (scope auto, pas de pillule)
+//   - joueuse both       → 'all' (voit les deux équipes)
+//   - coach / stat       → la pillule topbar (state.teamFilter)
+function effectiveTeamFilter() {
+  if (!(state.team && state.team.multiSquad)) return 'all';
+  if (state.auth && state.auth.role === 'player') {
+    const tag = currentPlayerTeamTag();
+    return tag === 'both' ? 'all' : tag;
+  }
+  return state.teamFilter || 'all';
+}
+
+// Pillule coach/stat : bascule le filtre actif et re-render.
+function setTeamFilter(tag) {
+  state.teamFilter = (tag === 'e1' || tag === 'e2') ? tag : 'all';
+  save(K.teamFilter, state.teamFilter);
+  if (typeof render === 'function') render();
+}
+
+// Pool roster scopé sur le tag d'un ÉVÉNEMENT (match/convoc/défi). Un événement
+// 'both' (entraînement commun, défi partagé) tire tout l'effectif (e1+e2+both).
+// Un match est toujours e1|e2. Fallback : tag de l'événement absent → 'e1'.
+function eventTeamPool(ev) {
+  const seasonId = (ev && ev.seasonId) || state.currentSeasonId;
+  const tag = (ev && ev.teamTag) || 'e1';
+  const team = tag === 'both' ? 'all' : tag;
+  return getSeasonPlayers(seasonId, { team });
+}
+// Alias explicite côté match (jamais 'both').
+function matchTeamPool(m) { return eventTeamPool(m); }
 
 // Lecture seule si la saison courante est archivée
 function isCurrentSeasonReadOnly() {
