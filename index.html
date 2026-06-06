@@ -4219,6 +4219,17 @@ function eventTeamPool(ev) {
 // Alias explicite côté match (jamais 'both').
 function matchTeamPool(m) { return eventTeamPool(m); }
 
+// Libellé d'affichage d'un tag équipe. short=true → version compacte (pillule,
+// badges). Les libellés perso (e1Label/e2Label) viennent de team_settings.
+function teamLabel(tag, short) {
+  const t = state.team || {};
+  if (tag === 'e1') return t.e1Label || (short ? 'E1' : 'Équipe 1');
+  if (tag === 'e2') return t.e2Label || (short ? 'E2' : 'Équipe 2');
+  if (tag === 'both') return short ? 'E1+E2' : 'Les deux';
+  return short ? 'Toutes' : 'Toutes les équipes';
+}
+function isMultiSquad() { return !!(state.team && state.team.multiSquad); }
+
 // Lecture seule si la saison courante est archivée
 function isCurrentSeasonReadOnly() {
   const s = getCurrentSeason();
@@ -5052,6 +5063,7 @@ function renderTopbar() {
       </div>
       <div style="display:flex;gap:6px;align-items:center">
         ${isCoach && activeLive ? `<button class="role-badge" style="background:#ff2222;color:white;border-color:#ff2222;cursor:pointer;animation:pulseGlow 2s infinite" onclick="openMatch('${activeLive.id}')">● LIVE</button>` : ''}
+        ${renderTeamPill()}
         ${isCoach ? renderSeasonSwitcher() : ''}
         ${isCoach ? `<button class="role-badge" style="cursor:pointer" onclick="openPublicShare()">🔗 Portail</button>` : ''}
         <button class="role-badge" style="cursor:pointer;padding-left:10px;padding-right:10px" onclick="openSettings()" title="Menu">${player ? '#' + player.num + ' ' + esc(player.name) : esc(role ? role.label : '')} ⚙</button>
@@ -5065,6 +5077,25 @@ function renderTopbar() {
 // ============================================================
 // Sélecteur dans la topbar (coach only). Affiche la saison courante avec
 // code couleur status. Au click → openSeasonsModal pour switcher / gérer.
+// Pillule multi-effectif [E1 · E2 · Toutes] — visible UNIQUEMENT si le multi
+// est activé ET rôle coach/stat. Côté joueuse : rien (scope auto sur son tag).
+// Mono-équipe (multi off) : rien → topbar strictement identique à aujourd'hui.
+function renderTeamPill() {
+  if (!isMultiSquad()) return '';
+  const role = state.auth && state.auth.role;
+  if (role !== 'coach' && role !== 'stat') return '';
+  const cur = state.teamFilter || 'all';
+  const seg = (tag, label) => {
+    const on = cur === tag;
+    return `<button onclick="setTeamFilter('${tag}')" style="border:none;background:${on ? 'var(--orange)' : 'transparent'};color:${on ? '#000' : 'var(--ink-2)'};font-family:'JetBrains Mono';font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;padding:5px 9px;cursor:pointer;border-radius:5px;transition:background .12s">${esc(label)}</button>`;
+  };
+  return `<div class="team-pill" style="display:inline-flex;gap:2px;padding:2px;background:var(--bg-3);border:1px solid var(--border);border-radius:7px" title="Filtrer par équipe">
+    ${seg('e1', teamLabel('e1', true))}
+    ${seg('e2', teamLabel('e2', true))}
+    ${seg('all', 'Toutes')}
+  </div>`;
+}
+
 function renderSeasonSwitcher() {
   const seasons = state.seasons || [];
   if (seasons.length === 0) return '';
@@ -19245,6 +19276,29 @@ function editTeamIdentity() {
         <input id="team-nickname" value="${esc(t.displayNickname || '')}" placeholder="Les Isloises, La Team, ...">
         <div style="margin-top:6px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">Optionnel · remplace « BCL · L'Islois » dans la topbar. Vide = valeur par défaut.</div>
       </div>
+
+      <div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+        <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+          <input type="checkbox" id="team-multi-squad" ${t.multiSquad ? 'checked' : ''} onchange="document.getElementById('team-squad-labels').style.display=this.checked?'block':'none'" style="width:18px;height:18px;flex:none">
+          <span style="font-family:'Anton';text-transform:uppercase;font-size:13px">Gérer 2 équipes (E1 / E2)</span>
+        </label>
+        <div style="margin-top:6px;font-size:11px;color:var(--ink-3);line-height:1.5">
+          Active une pillule <strong>[E1 · E2 · Toutes]</strong> dans l'en-tête pour filtrer l'effectif, les matchs, convocs et défis par équipe. Chaque joueuse ne voit que son équipe. Désactivé = app mono-équipe classique.
+        </div>
+        <div id="team-squad-labels" style="display:${t.multiSquad ? 'block' : 'none'};margin-top:12px">
+          <div class="fld-row">
+            <div class="fld">
+              <label class="fld-label">Libellé Équipe 1</label>
+              <input id="team-e1-label" value="${esc(t.e1Label || '')}" placeholder="Séniors 1, Équipe 1, ...">
+            </div>
+            <div class="fld">
+              <label class="fld-label">Libellé Équipe 2</label>
+              <input id="team-e2-label" value="${esc(t.e2Label || '')}" placeholder="U18, Équipe 2, ...">
+            </div>
+          </div>
+          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">Optionnel · vide = « Équipe 1 » / « Équipe 2 ».</div>
+        </div>
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="closeModal()">Annuler</button>
@@ -19258,7 +19312,17 @@ function saveTeamIdentity() {
   if (!state.team) state.team = { displayNickname: '' };
   const el = document.getElementById('team-nickname');
   if (el) state.team.displayNickname = el.value.trim();
-  persist();
+  // Multi-effectif
+  const ms = document.getElementById('team-multi-squad');
+  if (ms) state.team.multiSquad = ms.checked;
+  const e1 = document.getElementById('team-e1-label');
+  const e2 = document.getElementById('team-e2-label');
+  if (e1) state.team.e1Label = e1.value.trim();
+  if (e2) state.team.e2Label = e2.value.trim();
+  // Si on désactive le multi : on remet le filtre sur 'all' pour ne pas rester
+  // bloqué sur une vue E2 invisible une fois la pillule masquée.
+  if (!state.team.multiSquad) { state.teamFilter = 'all'; save(K.teamFilter, 'all'); }
+  persist(); // → PbSync.schedule pousse l'entité 'team' (multi_squad/labels) en DB
   closeModal();
   render();
 }
