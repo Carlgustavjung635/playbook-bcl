@@ -4818,16 +4818,24 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal()
 // --- Préservation du scroll des modales à re-render plein (full-repaint) ---
 // openModal() reconstruit toute la .modal-body via innerHTML : tout re-render du
 // même modal (ajout d'un groupe, retour depuis un sous-modal, etc.) repart en
-// haut de liste. _modalScrollAttr(key) pose un onscroll qui mémorise en continu
-// la position dans state._modalScroll[key] (champ transient, non persisté) ;
-// _restoreModalScroll(key) la réapplique juste après openModal. La clé survit
-// aux allers-retours modal → sous-modal → retour. (bugs #9b, #3)
+// haut de liste. Le vrai conteneur scrollable est .modal (CSS : max-height:92vh;
+// overflow-y:auto), PAS .modal-body (overflow:visible) → on écoute/restaure sur
+// .modal. _modalScrollAttr(key) pose juste un marqueur data- sur .modal-body ;
+// _restoreModalScroll(key) attache l'écouteur scroll sur .modal et y réapplique
+// la position mémorisée dans state._modalScroll[key] (transient, non persisté),
+// juste après openModal. La clé survit aux allers-retours modal → sous-modal →
+// retour. (bugs #9b, #3)
 function _modalScrollAttr(key) {
-  return `onscroll="state._modalScroll=state._modalScroll||{};state._modalScroll['${key}']=this.scrollTop"`;
+  return `data-scroll-key="${key}"`;
 }
 function _restoreModalScroll(key) {
-  const mb = document.querySelector('#modal-root .modal-body');
-  if (mb && state._modalScroll && state._modalScroll[key] != null) mb.scrollTop = state._modalScroll[key];
+  const m = document.querySelector('#modal-root .modal');
+  if (!m) return;
+  m.addEventListener('scroll', () => {
+    state._modalScroll = state._modalScroll || {};
+    state._modalScroll[key] = m.scrollTop;
+  });
+  if (state._modalScroll && state._modalScroll[key] != null) m.scrollTop = state._modalScroll[key];
 }
 
 // ============================================================
