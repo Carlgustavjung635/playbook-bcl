@@ -7511,6 +7511,17 @@ function _syncPlayEditorVideoInputs() {
     if (labelEl) v.label = labelEl.value.trim();
     if (orientEl) v.orientation = orientEl.value === 'vertical' ? 'vertical' : 'horizontal';
   });
+  // Sync aussi titre/catégorie/description/tags depuis le DOM : sinon un
+  // ajout/retrait de vidéo (qui re-render l'éditeur depuis state._editingPlay)
+  // efface ces champs saisis et resette la catégorie. (bug #9a)
+  const titleEl = document.getElementById('p-title');
+  const catEl = document.getElementById('p-cat');
+  const descEl = document.getElementById('p-desc');
+  const tagsEl = document.getElementById('p-tags');
+  if (titleEl) state._editingPlay.title = titleEl.value;
+  if (catEl) state._editingPlay.cat = catEl.value;
+  if (descEl) state._editingPlay.desc = descEl.value;
+  if (tagsEl) state._editingPlay.tags = tagsEl.value.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
 }
 
 function renderPlayEditor(isNew) {
