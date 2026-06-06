@@ -2817,7 +2817,8 @@ const ENTITIES = [
         prep_videos: Array.isArray(m.prepVideos) ? m.prepVideos : [],
         prep_comment: m.prepComment || null,
         location: m.place || null,
-        time: m.time || null
+        time: m.time || null,
+        team_tag: (m.teamTag === 'e2') ? 'e2' : 'e1'  // multi-effectif : e1 | e2 (jamais both pour un match)
       }];
     })),
     apply: (state, rows) => {
@@ -2861,7 +2862,8 @@ const ENTITIES = [
           time: r.time || local.time || '',
           positives: local.positives || [], negatives: local.negatives || [],
           playerStats: local.playerStats || {},
-          seasonId: r.season_id || local.seasonId || null
+          seasonId: r.season_id || local.seasonId || null,
+          teamTag: (r.team_tag === 'e2') ? 'e2' : 'e1'  // rétrocompat : colonne absente → 'e1'
         };
       });
       // Préserve les matches locaux non encore push (id format uid() = 'x...')
@@ -2922,7 +2924,8 @@ const ENTITIES = [
       type: c.type || 'skill', metric: c.metric || null,
       end_date: c.endDate || null, scope: c.scope || 'individual',
       auto_count: !!c.autoCount, lower_is_better: !!c.lowerIsBetter,
-      season_id: c.seasonId || null
+      season_id: c.seasonId || null,
+      team_tag: c.teamTag || 'e1'  // multi-effectif : e1 | e2 | both
     }])),
     apply: (state, rows) => {
       const byId = Object.fromEntries((state.challenges || []).map(c => [c.id, c]));
@@ -2932,7 +2935,8 @@ const ENTITIES = [
         metric: r.metric || '', endDate: r.end_date || '',
         scope: r.scope, autoCount: r.auto_count, lowerIsBetter: r.lower_is_better,
         scores: (byId[r.id] || {}).scores || {},
-        seasonId: r.season_id || (byId[r.id] || {}).seasonId || null
+        seasonId: r.season_id || (byId[r.id] || {}).seasonId || null,
+        teamTag: r.team_tag || 'e1'  // rétrocompat : colonne absente → 'e1'
       }));
     }
   },
@@ -2965,7 +2969,8 @@ const ENTITIES = [
       cancelled_instances: c.cancelledInstances || [],
       instance_overrides: c.instanceOverrides || {},
       attachments: c.attachments || [],
-      season_id: c.seasonId || null
+      season_id: c.seasonId || null,
+      team_tag: c.teamTag || 'e1'  // multi-effectif : e1 | e2 | both (both = entraînement commun)
     }])),
     apply: (state, rows) => {
       const byId = Object.fromEntries((state.convocations || []).map(c => [c.id, c]));
@@ -2978,7 +2983,8 @@ const ENTITIES = [
         instanceOverrides: r.instance_overrides || {},
         attachments: r.attachments || [],
         responses: (byId[r.id] || {}).responses || {},
-        seasonId: r.season_id || (byId[r.id] || {}).seasonId || null
+        seasonId: r.season_id || (byId[r.id] || {}).seasonId || null,
+        teamTag: r.team_tag || 'e1'  // rétrocompat : colonne absente → 'e1'
       }));
     }
   },
@@ -3047,11 +3053,23 @@ const ENTITIES = [
     key: 'team', table: 'team_settings', pk: 'id', realtime: false, auth: 'anon',
     dump: (state) => {
       if (!state.team) return {};
-      return { 1: { id: 1, display_nickname: state.team.displayNickname || null } };
+      return { 1: { id: 1,
+        display_nickname: state.team.displayNickname || null,
+        // Multi-effectif : flag d'activation + libellés perso des 2 équipes.
+        multi_squad: !!state.team.multiSquad,
+        e1_label: state.team.e1Label || null,
+        e2_label: state.team.e2Label || null
+      } };
     },
     apply: (state, rows) => {
       const r = rows.find(x => x.id === 1);
-      if (r) state.team = { displayNickname: r.display_nickname || '' };
+      if (r) state.team = {
+        displayNickname: r.display_nickname || '',
+        // Rétrocompat : colonnes absentes (migration non appliquée) → off / ''.
+        multiSquad: !!r.multi_squad,
+        e1Label: r.e1_label || '',
+        e2Label: r.e2_label || ''
+      };
     }
   },
   {
@@ -3262,7 +3280,8 @@ const ENTITIES = [
           season_id: sp.seasonId, player_id: sp.playerId,
           joined_at: sp.joinedAt || null,
           left_at: sp.leftAt || null,
-          role: sp.role || null
+          role: sp.role || null,
+          team_tag: sp.teamTag || 'e1'  // multi-effectif : e1 | e2 | both
         };
       });
       return out;
@@ -3271,7 +3290,8 @@ const ENTITIES = [
       state.seasonPlayers = rows.map(r => ({
         seasonId: r.season_id, playerId: r.player_id,
         joinedAt: r.joined_at || '', leftAt: r.left_at || '',
-        role: r.role || ''
+        role: r.role || '',
+        teamTag: r.team_tag || 'e1'  // rétrocompat : colonne absente → 'e1'
       }));
     }
   },
@@ -3918,7 +3938,7 @@ let state = {
   pins: load(K.pins, { coach: '1234', stat: '1234' }),
   ffbb: load(K.ffbb, { clubUrl: 'https://competitions.ffbb.com/ligues/occ/comites/0065/clubs/occ0032016', teamName: 'IE - BASKET CLUB L\'ISLOIS - 2', matches: [], standings: [], lastSync: null }),
   // Identité/branding équipe — surnom de display (topbar), séparé du nom FFBB.
-  team: load(K.team, { displayNickname: '' }),
+  team: load(K.team, { displayNickname: '', multiSquad: false, e1Label: '', e2Label: '' }),
   lineups: load(K.lineups, []),
   pinAttempts: load(K.pinAttempts, {}), // { 'coach': {count, lockedUntil}, 'stat': {...}, 'pl1': {...} }
   teamReviews: load(K.teamReviews, []), // [{ id, pid, date, ambiance, roleClarity, playtime, physique, comment, updatedAt }]
