@@ -3029,16 +3029,29 @@ const ENTITIES = [
       if (!state.ffbb) return {};
       const f = state.ffbb;
       return { 1: { id: 1, club_url: f.clubUrl || null, team_name: f.teamName || null,
-        nickname: f.nickname || null,
         matches: f.matches || [], standings: f.standings || [],
         last_sync: f.lastSync ? new Date(f.lastSync).toISOString() : null } };
     },
     apply: (state, rows) => {
       const r = rows.find(x => x.id === 1);
       if (r) state.ffbb = { clubUrl: r.club_url || '', teamName: r.team_name || '',
-        nickname: r.nickname || '',
         matches: r.matches || [], standings: r.standings || [],
         lastSync: r.last_sync ? Date.parse(r.last_sync) : null };
+    }
+  },
+  {
+    // Identité / branding de l'équipe — VOLONTAIREMENT séparé de 'ffbb'.
+    // displayNickname = surnom de display (topbar). Le nom FFBB (state.ffbb.teamName)
+    // sert lui à la détection V/D et au classement scrapé : on ne les confond pas.
+    // Singleton (id=1), non realtime (config rarement modifiée, comme ffbb).
+    key: 'team', table: 'team_settings', pk: 'id', realtime: false, auth: 'anon',
+    dump: (state) => {
+      if (!state.team) return {};
+      return { 1: { id: 1, display_nickname: state.team.displayNickname || null } };
+    },
+    apply: (state, rows) => {
+      const r = rows.find(x => x.id === 1);
+      if (r) state.team = { displayNickname: r.display_nickname || '' };
     }
   },
   {
@@ -3826,6 +3839,7 @@ const K = {
   liveSession: 'pb8_live',
   pins: 'pb8_pins',
   ffbb: 'pb8_ffbb',
+  team: 'pb8_team',
   lineups: 'pb8_lineups',
   pinAttempts: 'pb8_pin_attempts',
   teamReviews: 'pb8_team_reviews',
@@ -3902,7 +3916,9 @@ let state = {
   players: load(K.players, DEFAULT_PLAYERS),
   convocations: load(K.convocations, DEFAULT_CONVOCATIONS),
   pins: load(K.pins, { coach: '1234', stat: '1234' }),
-  ffbb: load(K.ffbb, { clubUrl: 'https://competitions.ffbb.com/ligues/occ/comites/0065/clubs/occ0032016', teamName: 'IE - BASKET CLUB L\'ISLOIS - 2', nickname: '', matches: [], standings: [], lastSync: null }),
+  ffbb: load(K.ffbb, { clubUrl: 'https://competitions.ffbb.com/ligues/occ/comites/0065/clubs/occ0032016', teamName: 'IE - BASKET CLUB L\'ISLOIS - 2', matches: [], standings: [], lastSync: null }),
+  // Identité/branding équipe — surnom de display (topbar), séparé du nom FFBB.
+  team: load(K.team, { displayNickname: '' }),
   lineups: load(K.lineups, []),
   pinAttempts: load(K.pinAttempts, {}), // { 'coach': {count, lockedUntil}, 'stat': {...}, 'pl1': {...} }
   teamReviews: load(K.teamReviews, []), // [{ id, pid, date, ambiance, roleClarity, playtime, physique, comment, updatedAt }]
@@ -3971,6 +3987,7 @@ function persist() {
   save(K.convocations, state.convocations);
   save(K.pins, state.pins);
   save(K.ffbb, state.ffbb);
+  save(K.team, state.team);
   save(K.lineups, state.lineups);
   save(K.pinAttempts, state.pinAttempts);
   save(K.teamReviews, state.teamReviews);
@@ -4930,7 +4947,7 @@ function renderTopbar() {
         <div class="topbar-orb">🏀</div>
         <div>
           <div class="topbar-title">Playbook</div>
-          <div class="topbar-sub">${state.ffbb && state.ffbb.nickname ? esc(state.ffbb.nickname) : "BCL · L'Islois"}</div>
+          <div class="topbar-sub">${state.team && state.team.displayNickname ? esc(state.team.displayNickname) : "BCL · L'Islois"}</div>
         </div>
       </div>
       <div style="display:flex;gap:6px;align-items:center">
@@ -5554,6 +5571,9 @@ function openSettings() {
         </button>
         <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openSeasonsModal(),50)">
           📅 Gérer les saisons
+        </button>
+        <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>editTeamIdentity(),50)">
+          🏷 Identité de l'équipe (surnom)
         </button>
       ` : ''}
 
@@ -19079,11 +19099,6 @@ function editFFBBConfig() {
         <input id="ffbb-team" value="${esc(f.teamName || '')}" placeholder="IE - BASKET CLUB L'ISLOIS - 2">
         <div style="margin-top:6px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">Permet de détecter automatiquement V/D et de surligner ta ligne dans le classement</div>
       </div>
-      <div class="fld">
-        <label class="fld-label">Surnom de l'équipe (affiché dans l'app)</label>
-        <input id="ffbb-nickname" value="${esc(f.nickname || '')}" placeholder="Les Isloises, La Team, ...">
-        <div style="margin-top:6px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">Optionnel · remplace « BCL · L'Islois » dans l'en-tête</div>
-      </div>
       ${f.rawDataSnippet ? `
         <div style="margin-top:14px;padding:10px;background:var(--bg-1);border:1px solid var(--border);border-radius:6px">
           <div class="eyebrow-muted" style="margin-bottom:4px">Debug · 200 premiers car. du dernier scrape</div>
@@ -19102,11 +19117,50 @@ function editFFBBConfig() {
 function saveFFBBConfig() {
   state.ffbb.clubUrl = document.getElementById('ffbb-url').value.trim();
   state.ffbb.teamName = document.getElementById('ffbb-team').value.trim();
-  const nickEl = document.getElementById('ffbb-nickname');
-  if (nickEl) state.ffbb.nickname = nickEl.value.trim();
   persist();
   closeModal();
   syncFFBB();
+}
+
+// ============================================================
+// IDENTITÉ DE L'ÉQUIPE (branding) — surnom de display, séparé du FFBB.
+// Le surnom n'a AUCUN rôle dans le scraping FFBB (calendrier/classement) :
+// il remplace seulement « BCL · L'Islois » dans la topbar.
+// Synchronisé via l'entité 'team' (table team_settings), pas via ffbb_config.
+// ============================================================
+function editTeamIdentity() {
+  if (!state.team) state.team = { displayNickname: '' };
+  const t = state.team;
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">Identité de l'équipe</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:14px;font-size:12px;color:var(--ink-2);line-height:1.5">
+        Le surnom est purement décoratif (en-tête de l'app). Il n'a aucun effet sur la connexion FFBB ni sur le calendrier/classement — ceux-ci se règlent dans la section FFBB.
+      </div>
+      <div class="fld">
+        <label class="fld-label">Surnom de l'équipe (affiché dans l'en-tête)</label>
+        <input id="team-nickname" value="${esc(t.displayNickname || '')}" placeholder="Les Isloises, La Team, ...">
+        <div style="margin-top:6px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">Optionnel · remplace « BCL · L'Islois » dans la topbar. Vide = valeur par défaut.</div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Annuler</button>
+      <button class="btn btn-primary" onclick="saveTeamIdentity()">Enregistrer</button>
+    </div>
+  `);
+  setTimeout(() => document.getElementById('team-nickname')?.focus(), 100);
+}
+
+function saveTeamIdentity() {
+  if (!state.team) state.team = { displayNickname: '' };
+  const el = document.getElementById('team-nickname');
+  if (el) state.team.displayNickname = el.value.trim();
+  persist();
+  closeModal();
+  render();
 }
 
 // ============================================================
