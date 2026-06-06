@@ -5273,7 +5273,10 @@ function openSeasonRosterEditor() {
             <div style="display:flex;align-items:center;gap:8px;padding:10px;background:var(--bg-1);border-radius:8px;border:1px solid var(--border)">
               ${p.photo ? `<img src="${p.photo}" style="width:36px;height:36px;border-radius:50%;object-fit:cover;border:2px solid var(--orange)">` : `<div style="width:36px;height:36px;border-radius:50%;background:var(--bg-3);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:14px;color:var(--orange);border:2px solid var(--border)">${esc((p.name||'?').charAt(0).toUpperCase())}</div>`}
               <div style="font-family:'Anton';font-size:16px;color:var(--orange);min-width:36px">#${p.num}</div>
-              <div style="flex:1;font-family:'Anton';text-transform:uppercase;font-size:13px;min-width:0">${esc(p.name)}</div>
+              <div style="flex:1;min-width:0">
+                <div style="font-family:'Anton';text-transform:uppercase;font-size:13px">${esc(p.name)}</div>
+                ${(() => { const ls = _lastSeenBadge(p.lastSeenAt); return `<div style="font-size:9px;color:${ls.color};font-family:'JetBrains Mono';margin-top:2px"><span style="font-size:7px;vertical-align:middle">${ls.dot}</span> ${ls.label}</div>`; })()}
+              </div>
               ${readOnly ? '' : `<button class="btn btn-ghost" style="font-size:10px;color:var(--red);padding:6px 8px" onclick="removePlayerFromSeason('${esc(p.id)}')" title="Retirer de la saison">↗ Partir</button>`}
             </div>
           `).join('')}
