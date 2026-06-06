@@ -4155,9 +4155,18 @@ function _challengesSeasonId(seasonId) {
     return seasonId === activeId;
   });
 }
-function currentSeasonMatches()      { return _matchesSeasonId(state.currentSeasonId); }
-function currentSeasonConvocations() { return _convocsSeasonId(state.currentSeasonId); }
-function currentSeasonChallenges()   { return _challengesSeasonId(state.currentSeasonId); }
+// Multi-effectif : filtre une liste d'événements (matchs/convocs/défis) sur le
+// tag équipe EFFECTIF (pillule coach/stat, ou tag perso côté joueuse). Un
+// événement 'both' (convoc/défi commun) passe quel que soit le filtre. Filtre
+// 'all' (multi off, ou coach « Toutes ») → liste inchangée (golden path).
+function _filterEventsByTeam(list) {
+  const want = effectiveTeamFilter();
+  if (!want || want === 'all') return list;
+  return list.filter(x => teamTagMatches(x.teamTag, want));
+}
+function currentSeasonMatches()      { return _filterEventsByTeam(_matchesSeasonId(state.currentSeasonId)); }
+function currentSeasonConvocations() { return _filterEventsByTeam(_convocsSeasonId(state.currentSeasonId)); }
+function currentSeasonChallenges()   { return _filterEventsByTeam(_challengesSeasonId(state.currentSeasonId)); }
 function currentSeasonPlays(opts)    { return getSeasonPlays(state.currentSeasonId, opts); }
 
 // Helper court : joueuses de la saison courante. Fallback rétrocompat sur
@@ -4229,6 +4238,34 @@ function teamLabel(tag, short) {
   return short ? 'Toutes' : 'Toutes les équipes';
 }
 function isMultiSquad() { return !!(state.team && state.team.multiSquad); }
+
+// Champ <select> de tag équipe pour un formulaire d'événement. Renvoie '' si
+// le multi est désactivé (le formulaire reste identique à aujourd'hui).
+// includeBoth=true pour convocs/défis (entraînement commun / défi partagé).
+function renderTeamTagField(selectId, currentTag, includeBoth) {
+  if (!isMultiSquad()) return '';
+  const t = currentTag || 'e1';
+  const opt = (v, label) => `<option value="${v}" ${t === v ? 'selected' : ''}>${esc(label)}</option>`;
+  return `<div class="fld"><label class="fld-label">Équipe</label>
+    <select id="${selectId}">
+      ${opt('e1', teamLabel('e1'))}
+      ${opt('e2', teamLabel('e2'))}
+      ${includeBoth ? opt('both', 'Commun (E1+E2)') : ''}
+    </select></div>`;
+}
+
+// Tag par défaut pour un NOUVEL événement : la pillule courante (e1/e2), sinon
+// 'e1'. ('all' ne peut pas tagger un événement concret → fallback e1.)
+function defaultEventTag() { return state.teamFilter === 'e2' ? 'e2' : 'e1'; }
+
+// Badge couleur compact pour afficher le tag d'un événement/joueuse (multi on).
+function teamTagBadge(tag) {
+  if (!isMultiSquad()) return '';
+  const t = tag || 'e1';
+  const bg = t === 'e2' ? 'rgba(56,139,253,0.15)' : t === 'both' ? 'rgba(168,85,247,0.15)' : 'rgba(255,107,0,0.15)';
+  const fg = t === 'e2' ? '#388bfd' : t === 'both' ? '#a855f7' : 'var(--orange)';
+  return `<span style="font-size:9px;font-family:'JetBrains Mono';color:${fg};background:${bg};padding:2px 6px;border-radius:4px;text-transform:uppercase;letter-spacing:0.04em">${esc(teamLabel(t, true))}</span>`;
+}
 
 // Lecture seule si la saison courante est archivée
 function isCurrentSeasonReadOnly() {
@@ -5259,7 +5296,8 @@ function createSeasonFromModal() {
       if (state.seasonPlayers.find(sp => sp.seasonId === id && sp.playerId === link.playerId)) return;
       state.seasonPlayers.push({
         seasonId: id, playerId: link.playerId,
-        joinedAt: startDate, leftAt: '', role: ''
+        joinedAt: startDate, leftAt: '', role: '',
+        teamTag: link.teamTag || 'e1'  // multi-effectif : conserve l'équipe
       });
     });
   }
@@ -5439,8 +5477,9 @@ function openSeasonRosterEditor() {
               ${p.photo ? `<img src="${p.photo}" style="width:36px;height:36px;border-radius:50%;object-fit:cover;border:2px solid var(--orange)">` : `<div style="width:36px;height:36px;border-radius:50%;background:var(--bg-3);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:14px;color:var(--orange);border:2px solid var(--border)">${esc((p.name||'?').charAt(0).toUpperCase())}</div>`}
               <div style="font-family:'Anton';font-size:16px;color:var(--orange);min-width:36px">#${p.num}</div>
               <div style="flex:1;min-width:0">
-                <div style="font-family:'Anton';text-transform:uppercase;font-size:13px">${esc(p.name)}</div>
+                <div style="display:flex;align-items:center;gap:6px"><div style="font-family:'Anton';text-transform:uppercase;font-size:13px">${esc(p.name)}</div>${teamTagBadge(link.teamTag)}</div>
                 ${(() => { const ls = _lastSeenBadge(p.lastSeenAt); return `<div style="font-size:9px;color:${ls.color};font-family:'JetBrains Mono';margin-top:2px"><span style="font-size:7px;vertical-align:middle">${ls.dot}</span> ${ls.label}</div>`; })()}
+                ${readOnly ? '' : renderPlayerTeamTagToggle(p.id, link.teamTag)}
               </div>
               ${readOnly ? '' : `<button class="btn btn-ghost" style="font-size:10px;color:var(--red);padding:6px 8px" onclick="removePlayerFromSeason('${esc(p.id)}')" title="Retirer de la saison">↗ Partir</button>`}
             </div>
@@ -5474,6 +5513,29 @@ function openSeasonRosterEditor() {
 
 function toggleSeasonRosterHistory() {
   state._seasonRosterShowHistory = !state._seasonRosterShowHistory;
+  openSeasonRosterEditor();
+}
+
+// Multi-effectif : toggle 3 boutons E1 / E2 / Les deux sous chaque joueuse de
+// l'effectif (vide si multi off). Modifie season_players.team_tag du lien.
+function renderPlayerTeamTagToggle(pid, tag) {
+  if (!isMultiSquad()) return '';
+  const t = tag || 'e1';
+  const btn = (v, label) => {
+    const on = t === v;
+    return `<button onclick="setPlayerTeamTag('${esc(pid)}','${v}')" style="border:1px solid ${on ? 'var(--orange)' : 'var(--border)'};background:${on ? 'var(--orange)' : 'transparent'};color:${on ? '#000' : 'var(--ink-3)'};font-family:'JetBrains Mono';font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;padding:3px 7px;border-radius:5px;cursor:pointer">${esc(label)}</button>`;
+  };
+  return `<div style="display:flex;gap:4px;margin-top:5px">${btn('e1', teamLabel('e1', true))}${btn('e2', teamLabel('e2', true))}${btn('both', 'Les 2')}</div>`;
+}
+
+function setPlayerTeamTag(playerId, tag) {
+  const seasonId = state.currentSeasonId;
+  if (!seasonId) return;
+  if (isCurrentSeasonReadOnly()) return;
+  const link = (state.seasonPlayers || []).find(sp => sp.seasonId === seasonId && sp.playerId === playerId);
+  if (!link) return;
+  link.teamTag = ['e1', 'e2', 'both'].includes(tag) ? tag : 'e1';
+  persist();
   openSeasonRosterEditor();
 }
 
@@ -5564,7 +5626,7 @@ function confirmAddSelectedPlayersToSeason() {
       existing.leftAt = '';
       if (!existing.joinedAt) existing.joinedAt = today;
     } else {
-      state.seasonPlayers.push({ seasonId, playerId: pid, joinedAt: today, leftAt: '', role: '' });
+      state.seasonPlayers.push({ seasonId, playerId: pid, joinedAt: today, leftAt: '', role: '', teamTag: 'e1' });
     }
   });
   persist();
@@ -5628,7 +5690,7 @@ function createNewPlayerForSeason() {
   state.seasonPlayers = state.seasonPlayers || [];
   state.seasonPlayers.push({
     seasonId, playerId: newP.id,
-    joinedAt: isoDate(new Date()), leftAt: '', role: ''
+    joinedAt: isoDate(new Date()), leftAt: '', role: '', teamTag: 'e1'
   });
   persist();
   closeModal();
@@ -9000,6 +9062,7 @@ function editMatch(id) {
         </div>
       </div>
       <div class="fld"><label class="fld-label">Adversaire</label><input id="m-opp" value="${esc(m.opponent)}" placeholder="Ex : CA PONTACQ"></div>
+      ${renderTeamTagField('m-team', isNew ? defaultEventTag() : (m.teamTag === 'e2' ? 'e2' : 'e1'), false)}
       <div class="fld-row">
         <div class="fld"><label class="fld-label">Heure du match</label><input id="m-time" type="time" value="${m.time || ''}"></div>
         <div class="fld"><label class="fld-label">Lieu du match</label><input id="m-place" value="${esc(m.place || '')}" placeholder="Gymnase de..."></div>
@@ -9088,6 +9151,13 @@ function saveMatch(id, isNew) {
     status: nextStatus,
     prepVideos: existing ? (existing.prepVideos || []) : [],
     prepComment: existing ? (existing.prepComment || '') : '',
+    // Multi-effectif : un match appartient à E1 ou E2. Sélecteur absent (multi
+    // off) → préserve l'existant / 'e1' par défaut.
+    teamTag: (() => {
+      const sel = document.getElementById('m-team');
+      if (sel) return sel.value === 'e2' ? 'e2' : 'e1';
+      return existing ? (existing.teamTag === 'e2' ? 'e2' : 'e1') : 'e1';
+    })(),
   };
   if (isNew) { state.matches.unshift(obj); state.view = { type: 'match', id: obj.id }; }
   else { const i = state.matches.findIndex(x => x.id === id); state.matches[i] = obj; }
@@ -9119,6 +9189,8 @@ function syncConvocFromMatch(m) {
       // Saison : hérite du match (la convoc match doit toujours être dans la
       // même saison que son match parent — sinon filtrage incohérent).
       seasonId: m.seasonId || state.currentSeasonId || null,
+      // Multi-effectif : la convoc match hérite du tag équipe du match.
+      teamTag: m.teamTag === 'e2' ? 'e2' : 'e1',
     };
     state.convocations.unshift(convoc);
     m.convocId = convoc.id;
@@ -9133,6 +9205,8 @@ function syncConvocFromMatch(m) {
     // Si le match a un seasonId (et que la convoc n'en a pas encore — legacy),
     // on synchronise. Sinon on préserve l'existant pour ne pas réécrire.
     if (m.seasonId && !convoc.seasonId) convoc.seasonId = m.seasonId;
+    // Multi-effectif : la convoc match suit toujours le tag du match.
+    convoc.teamTag = m.teamTag === 'e2' ? 'e2' : 'e1';
   }
 }
 
@@ -9182,6 +9256,7 @@ function cleanupOrphanMatchConvocs() {
         notes: m.notes || '',
         responses: {},
         seasonId: m.seasonId || state.currentSeasonId || null,
+        teamTag: m.teamTag === 'e2' ? 'e2' : 'e1',
       };
       state.convocations.unshift(convoc);
       m.convocId = convoc.id;
@@ -10465,8 +10540,10 @@ function getMatchRoster(m) {
     return (state.players || []).filter(p => m.roster.included.includes(p.id));
   }
   const _matchSeasonId = m.seasonId || state.currentSeasonId;
+  // Multi-effectif : l'effectif proposé est scopé sur l'équipe du match (e1/e2).
+  const _matchTeam = m.teamTag === 'e2' ? 'e2' : 'e1';
   const _seasonPool = _seasonsLoaded() && _matchSeasonId
-    ? getSeasonPlayers(_matchSeasonId)
+    ? getSeasonPlayers(_matchSeasonId, { team: _matchTeam })
     : (state.players || []);
   // Chercher la convoc match du même jour
   const sameDayConvoc = (state.convocations || []).find(c =>
@@ -10502,8 +10579,10 @@ function openRosterManager(matchId) {
   //   l'effectif de la saison du match (pas de joueuses parties proposées).
   const included = (state.players || []).filter(p => m.roster.included.includes(p.id));
   const _matchSeasonId = m.seasonId || state.currentSeasonId;
+  // Multi-effectif : joueuses ajoutables = effectif de l'équipe du match (e1/e2).
+  const _matchTeam = m.teamTag === 'e2' ? 'e2' : 'e1';
   const _seasonPool = _seasonsLoaded() && _matchSeasonId
-    ? getSeasonPlayers(_matchSeasonId)
+    ? getSeasonPlayers(_matchSeasonId, { team: _matchTeam })
     : (state.players || []);
   const excluded = _seasonPool.filter(p => !m.roster.included.includes(p.id));
 
@@ -11961,6 +12040,7 @@ function renderEditConvocModal(id, isNew, c) {
         <div class="fld"><label class="fld-label">Heure</label><input id="cv-time" type="time" value="${c.time || ''}" ${c.matchId ? 'readonly style="opacity:0.6"' : ''}></div>
       </div>
       <div class="fld"><label class="fld-label">Lieu</label><input id="cv-loc" value="${esc(c.location || c.place || '')}" ${c.matchId ? 'readonly style="opacity:0.6"' : ''}></div>
+      ${c.matchId ? '' : renderTeamTagField('cv-team', isNew ? defaultEventTag() : (c.teamTag || 'e1'), true)}
       <div class="fld"><label class="fld-label">Message à l'équipe</label><textarea id="cv-note">${esc(c.note || '')}</textarea></div>
 
       <div class="fld" style="padding-top:14px;border-top:1px solid var(--border-soft);margin-top:14px">
@@ -12111,6 +12191,13 @@ function saveConvoc(id, isNew) {
     place: existing ? existing.place : undefined,
     callSheet: existing ? existing.callSheet : undefined,
     seasonId: existing ? (existing.seasonId || state.currentSeasonId || null) : (state.currentSeasonId || null),
+    // Multi-effectif : tag équipe. Convoc match → suit le match (syncConvocFromMatch
+    // écrase). Convoc training → sélecteur (e1/e2/both). Absent → préserve/'e1'.
+    teamTag: (() => {
+      const sel = document.getElementById('cv-team');
+      if (sel) return ['e1', 'e2', 'both'].includes(sel.value) ? sel.value : 'e1';
+      return existing ? (existing.teamTag || 'e1') : 'e1';
+    })(),
   };
   if (isNew) state.convocations.unshift(obj);
   else { const i = state.convocations.findIndex(x => x.id === id); state.convocations[i] = obj; }
@@ -12137,10 +12224,12 @@ function deleteConvoc(id) {
 function closeConvocation(cid, instanceDate) {
   const c = state.convocations.find(x => x.id === cid);
   if (!c) return;
-  // SAISON : comptabilise uniquement les joueuses de la saison de la convoc
+  // SAISON : comptabilise uniquement les joueuses de la saison de la convoc.
+  // MULTI-EFFECTIF : scopé sur l'équipe de la convoc ('both' → tout l'effectif).
   const _seasonId = c.seasonId || state.currentSeasonId;
+  const _convTeam = c.teamTag === 'both' ? 'all' : (c.teamTag === 'e2' ? 'e2' : 'e1');
   const _seasonPool = _seasonsLoaded() && _seasonId
-    ? getSeasonPlayers(_seasonId)
+    ? getSeasonPlayers(_seasonId, { team: _convTeam })
     : (state.players || []);
   // Pour récurrence : clôturer l'instance spécifique
   if (c.recurrence && instanceDate) {
@@ -14620,6 +14709,7 @@ function createChallengeFromIdea(idea) {
     endDate: '',
     scores: {},
     seasonId: state.currentSeasonId || null,
+    teamTag: defaultEventTag(),  // multi-effectif : suit la pillule courante
   };
   if (idea.scope === 'collective') {
     challenge.target = idea.target;
@@ -14741,10 +14831,12 @@ function challengeCard(c, isCoach) {
   }
 
   // === MODE INDIVIDUEL / SAISON : classement entre joueuses ===
-  // SAISON : leaderboard restreint à l'effectif de la saison du challenge
+  // SAISON : leaderboard restreint à l'effectif de la saison du challenge.
+  // MULTI-EFFECTIF : scopé sur l'équipe du défi ('both' → tout l'effectif).
   const _seasonId2 = c.seasonId || state.currentSeasonId;
+  const _chTeam = c.teamTag === 'both' ? 'all' : (c.teamTag === 'e2' ? 'e2' : 'e1');
   const _seasonPool2 = _seasonsLoaded() && _seasonId2
-    ? getSeasonPlayers(_seasonId2)
+    ? getSeasonPlayers(_seasonId2, { team: _chTeam })
     : (state.players || []);
   const entries = _seasonPool2.map(p => ({ id: p.id, name: p.name, num: p.num, score: scores[p.id] || 0 }));
   if (c.lowerIsBetter) {
@@ -15060,6 +15152,8 @@ function editChallenge(id) {
         <div class="fld"><label class="fld-label">Date de fin</label><input id="c-end" type="date" value="${c.endDate || ''}"></div>
       </div>
 
+      ${renderTeamTagField('c-team', isNew ? defaultEventTag() : (c.teamTag || 'e1'), true)}
+
       <div id="collective-fields" style="display:${c.scope==='collective'?'block':'none'};padding-top:8px;border-top:1px solid var(--border-soft);margin-top:8px">
         <div class="fld">
           <label class="fld-label">🎯 Objectif équipe à atteindre</label>
@@ -15092,6 +15186,12 @@ function saveChallenge(id, isNew) {
     desc: document.getElementById('c-desc').value.trim(),
     scores: existing ? existing.scores : {},
     seasonId: existing ? (existing.seasonId || state.currentSeasonId || null) : (state.currentSeasonId || null),
+    // Multi-effectif : tag équipe (e1/e2/both). Absent → préserve / 'e1'.
+    teamTag: (() => {
+      const sel = document.getElementById('c-team');
+      if (sel) return ['e1', 'e2', 'both'].includes(sel.value) ? sel.value : 'e1';
+      return existing ? (existing.teamTag || 'e1') : 'e1';
+    })(),
   };
   if (scope === 'collective') {
     obj.target = parseInt(document.getElementById('c-target').value) || 0;
