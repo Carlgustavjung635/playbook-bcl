@@ -3101,24 +3101,47 @@ const ENTITIES = [
     }
   },
   {
-    key: 'offseason', table: 'offseason_program', pk: 'id', realtime: true, auth: 'anon',
-    dump: (state) => {
-      if (!state.offseason) return {};
-      const o = state.offseason;
-      return { 1: { id: 1, start_date: o.startDate || null, end_date: o.endDate || null,
-        title: o.title || null, exercises: o.exercises || [],
-        // PHASE 4 : mode hebdo (défaut) | journalier. daily_schedule = jsonb
-        // { 'YYYY-MM-DD': [{ exercise_id, label, sets, reps, duration_min, notes }] }.
-        mode: o.mode === 'daily' ? 'daily' : 'weekly',
-        daily_schedule: o.dailySchedule || {} } };
-    },
+    // CHANTIER C — programmes sportifs MULTIPLES. Avant : singleton hardcodé
+    // `offseason_program` id=1 (state.offseason = objet unique). Après : table
+    // `programs` (1-N, id text), state.programs = array, state.currentProgramId
+    // = programme visible. `state.offseason` reste un ALIAS calculé (getter)
+    // vers le programme courant pour rétrocompat des ~30 sites de lecture.
+    // NB : dump/apply vivent dans le bloc <script type="module"> → AUCUN appel
+    // aux helpers du bloc classique (state passé en paramètre, logique inline).
+    key: 'programs', table: 'programs', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.programs || []).map(pr => [pr.id, {
+      id: String(pr.id),
+      name: pr.title || pr.name || 'Programme',
+      start_date: pr.startDate || null,
+      end_date: pr.endDate || null,
+      mode: pr.mode === 'daily' ? 'daily' : 'weekly',
+      exercises: pr.exercises || [],
+      daily_schedule: pr.dailySchedule || {},
+      season_id: pr.seasonId || null
+    }])),
     apply: (state, rows) => {
-      const r = rows.find(x => x.id === 1);
-      if (r) state.offseason = { startDate: r.start_date || '', endDate: r.end_date || '',
-        title: r.title || '', exercises: r.exercises || [],
-        // Rétrocompat : colonnes absentes (migration non appliquée) → weekly / {}.
+      state.programs = rows.map(r => ({
+        id: String(r.id),
+        title: r.name || '',
+        startDate: r.start_date || '',
+        endDate: r.end_date || '',
         mode: r.mode === 'daily' ? 'daily' : 'weekly',
-        dailySchedule: r.daily_schedule || {} };
+        exercises: r.exercises || [],
+        dailySchedule: r.daily_schedule || {},
+        seasonId: r.season_id || null
+      }));
+      // Garder currentProgramId valide : si l'id courant a disparu (suppression
+      // distante) ou n'est pas encore défini, retomber sur un défaut (programme
+      // actif aujourd'hui > le plus récent par date de début > le premier).
+      const progs = state.programs;
+      if (progs.length && !progs.some(p => p.id === state.currentProgramId)) {
+        const today = new Date().toISOString().slice(0, 10);
+        const active = progs.find(p => p.startDate && p.endDate && today >= p.startDate && today <= p.endDate);
+        const byDate = progs.slice().sort((a, b) => (b.startDate || '').localeCompare(a.startDate || ''));
+        state.currentProgramId = (active || byDate[0] || progs[0]).id;
+      } else if (!progs.length) {
+        state.currentProgramId = null;
+      }
     }
   },
   {
@@ -3127,17 +3150,36 @@ const ENTITIES = [
     // toggle ses exercices. Avant 2026-05-24, vivait uniquement en
     // localStorage (pb8_offseason_logs) → perdu à chaque purge Safari iOS
     // et invisible cross-device. Cf migration 20260524_003.
+    // CHANTIER C : dimension program_id (PK étendue à 4 colonnes). Côté front
+    // la structure reste state.offseasonLogs[pid][weekKey][exId] : les exId sont
+    // uniques par exercice (uid()), donc naturellement rattachés à un programme.
+    // On reconstruit program_id au dump via une map exId→programId bâtie depuis
+    // state.programs (exercices hebdo + planning journalier). Fallback : le
+    // programme courant / le premier (toujours présent dès qu'un log existe) →
+    // jamais d'orphelin qui violerait la FK programs(id).
     key: 'offseasonLogs', table: 'offseason_logs',
-    pk: ['player_id', 'iso_week', 'exercise_id'], realtime: true, auth: 'anon',
+    pk: ['player_id', 'program_id', 'iso_week', 'exercise_id'], realtime: true, auth: 'anon',
     dump: (state) => {
       const out = {};
       const logs = state.offseasonLogs || {};
+      const progs = state.programs || [];
+      // map exId → programId (hebdo + journalier)
+      const exMap = {};
+      progs.forEach(pr => {
+        (pr.exercises || []).forEach(ex => { if (ex && ex.id != null) exMap[ex.id] = pr.id; });
+        Object.values(pr.dailySchedule || {}).forEach(arr => {
+          (arr || []).forEach(it => { if (it && it.id != null) exMap[it.id] = pr.id; });
+        });
+      });
+      const fallbackPid = state.currentProgramId
+        || (progs[0] && progs[0].id) || '1';
       Object.entries(logs).forEach(([pid, byWeek]) => {
         Object.entries(byWeek || {}).forEach(([weekKey, byEx]) => {
           Object.entries(byEx || {}).forEach(([exId, entry]) => {
             if (entry == null) return;
-            out[`${pid}|${weekKey}|${exId}`] = {
-              player_id: pid, iso_week: weekKey, exercise_id: exId,
+            const programId = exMap[exId] || fallbackPid;
+            out[`${pid}|${programId}|${weekKey}|${exId}`] = {
+              player_id: pid, program_id: programId, iso_week: weekKey, exercise_id: exId,
               done: !!entry.done,
               value: typeof entry.value === 'number' ? entry.value : null,
               logged_at: entry.at ? new Date(entry.at).toISOString() : null
@@ -3891,7 +3933,9 @@ const K = {
   lineups: 'pb8_lineups',
   pinAttempts: 'pb8_pin_attempts',
   teamReviews: 'pb8_team_reviews',
-  offseason: 'pb8_offseason',
+  offseason: 'pb8_offseason', // legacy (singleton) — conservé pour backfill
+  programs: 'pb8_programs',
+  currentProgramId: 'pb8_current_program_id',
   offseasonLogs: 'pb8_offseason_logs',
   wellnessLogs: 'pb8_wellness_logs',
   seasons: 'pb8_seasons',
@@ -3971,7 +4015,16 @@ let state = {
   lineups: load(K.lineups, []),
   pinAttempts: load(K.pinAttempts, {}), // { 'coach': {count, lockedUntil}, 'stat': {...}, 'pl1': {...} }
   teamReviews: load(K.teamReviews, []), // [{ id, pid, date, ambiance, roleClarity, playtime, physique, comment, updatedAt }]
-  offseason: load(K.offseason, null), // { startDate, endDate, title, exercises: [{ id, label, target, unit, notes }] }
+  // CHANTIER C — programmes sportifs MULTIPLES.
+  // state.programs : array 1-N [{ id, title, startDate, endDate, mode,
+  //   exercises, dailySchedule, seasonId }]. state.currentProgramId : id du
+  //   programme visible (coach peut switcher). state.offseason n'est PLUS une
+  //   propriété de données : c'est un ALIAS calculé (getter défini après ce
+  //   littéral) qui renvoie le programme courant → rétrocompat des ~30 sites
+  //   de lecture `const o = state.offseason`. Backfill legacy : voir
+  //   _backfillProgramsFromLegacy() juste après.
+  programs: load(K.programs, []),
+  currentProgramId: load(K.currentProgramId, null),
   offseasonLogs: load(K.offseasonLogs, {}), // { pid: { 'YYYY-Www': { exerciseId: { done: bool, value, at } } } }
   wellnessLogs: load(K.wellnessLogs, {}), // { pid: { 'YYYY-MM-DD': { physical, mental, note, updatedAt } } }
 
@@ -4032,6 +4085,43 @@ let state = {
   live: null, // { matchId, mode: 'tap'|'counter'|'numpad', selectedPlayer, log: [] }
 };
 
+// === CHANTIER C — alias rétrocompat state.offseason ===
+// state.offseason n'est plus une donnée mais une VUE calculée sur le programme
+// courant (getCurrentProgram, défini plus bas — function declaration hoistée).
+// Les ~30 sites `const o = state.offseason` continuent de marcher sans réécriture.
+// Le setter route une éventuelle écriture legacy vers state.programs (défensif :
+// après refonte plus aucun site n'assigne state.offseason).
+Object.defineProperty(state, 'offseason', {
+  configurable: true,
+  get() { return getCurrentProgram(); },
+  set(v) { _setOffseasonCompat(v); }
+});
+
+// Backfill défensif (one-shot, local) : si aucun programme mais un ancien
+// singleton `pb8_offseason` en localStorage → créer un programme id '1' pour ne
+// rien casser hors-ligne. Le fetch distant (programs id='1' backfillé en BD)
+// écrasera ensuite avec la même donnée (id stable) → pas de doublon.
+(function _backfillProgramsFromLegacy() {
+  if ((state.programs || []).length) return;
+  const legacy = load(K.offseason, null);
+  if (!legacy) return;
+  const hasData = (legacy.title || '').trim()
+    || (legacy.exercises || []).length
+    || Object.keys(legacy.dailySchedule || {}).length;
+  if (!hasData) return;
+  state.programs = [{
+    id: '1',
+    title: legacy.title || 'Programme estival',
+    startDate: legacy.startDate || '',
+    endDate: legacy.endDate || '',
+    mode: legacy.mode === 'daily' ? 'daily' : 'weekly',
+    exercises: legacy.exercises || [],
+    dailySchedule: legacy.dailySchedule || {},
+    seasonId: null
+  }];
+  state.currentProgramId = '1';
+})();
+
 function persist() {
   save(K.auth, state.auth);
   save(K.section, state.section);
@@ -4047,7 +4137,8 @@ function persist() {
   save(K.lineups, state.lineups);
   save(K.pinAttempts, state.pinAttempts);
   save(K.teamReviews, state.teamReviews);
-  save(K.offseason, state.offseason);
+  save(K.programs, state.programs);
+  save(K.currentProgramId, state.currentProgramId);
   save(K.offseasonLogs, state.offseasonLogs);
   save(K.wellnessLogs, state.wellnessLogs);
   save(K.seasons, state.seasons);
@@ -6321,6 +6412,7 @@ function renderHomeCoach() {
         }
       })()}
 
+      ${renderProgramSelector()}
       ${(() => {
         const o = state.offseason;
         const active = isOffseasonActive();
@@ -6360,7 +6452,10 @@ function renderHomeCoach() {
                 <div class="eyebrow" style="color:${active?'var(--orange)':'var(--ink-3)'}">${active ? '🗓 Journalier · actif' : '○ Journalier · inactif'}</div>
                 <h2 class="display-md mt-2">${esc(o.title)}</h2>
               </div>
-              <button class="section-action" onclick="openOffseasonDashboard()">Suivi →</button>
+              <div style="display:flex;gap:10px;align-items:center">
+                <button class="section-action" onclick="openOffseasonConfig()">⚙ Gérer</button>
+                <button class="section-action" onclick="openOffseasonDashboard()">Suivi →</button>
+              </div>
             </div>
             <div style="padding:0 18px;margin-bottom:18px">
               <div onclick="openOffseasonDashboard()" style="padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer">
@@ -6401,7 +6496,10 @@ function renderHomeCoach() {
               <div class="eyebrow" style="color:${active?'var(--orange)':'var(--ink-3)'}">${active ? '☀ Actif · ' + formatWeekRange() : '○ Inactif · ' + formatDate(o.startDate, 'short') + ' → ' + formatDate(o.endDate, 'short')}</div>
               <h2 class="display-md mt-2">${esc(o.title)}</h2>
             </div>
-            <button class="section-action" onclick="openOffseasonDashboard()">Suivi →</button>
+            <div style="display:flex;gap:10px;align-items:center">
+              <button class="section-action" onclick="openOffseasonConfig()">⚙ Gérer</button>
+              <button class="section-action" onclick="openOffseasonDashboard()">Suivi →</button>
+            </div>
           </div>
           <div style="padding:0 18px;margin-bottom:18px">
             <div onclick="openOffseasonDashboard()" style="padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer">
@@ -7044,6 +7142,8 @@ function renderPlayerProgramme() {
         </div>
       </div>
 
+      ${renderProgramSelector()}
+
       ${teamReview}
 
       ${banner}
@@ -7153,6 +7253,7 @@ function renderPlayerProgrammeDaily(p, o, teamReview) {
           <h2 class="display-lg mt-2">☀ ${esc(o.title)}</h2>
         </div>
       </div>
+      ${renderProgramSelector()}
       ${teamReview}
       ${todayItems.length ? `
         <div style="padding:0 18px;margin-bottom:14px">
@@ -17874,6 +17975,125 @@ function formatWeekRange(date) {
   return monday.getDate() + ' ' + monday.toLocaleDateString('fr-FR', {month:'short'}) + ' → ' + sunday.getDate() + ' ' + sunday.toLocaleDateString('fr-FR', {month:'short'});
 }
 
+// ============================================================
+// CHANTIER C — PROGRAMMES SPORTIFS MULTIPLES (helpers)
+// ------------------------------------------------------------
+// Source de vérité : state.programs (array) + state.currentProgramId.
+// state.offseason = getter calculé → le programme courant (rétrocompat).
+// ============================================================
+
+// Programme actif aujourd'hui ? (dates renseignées + today dans [start,end])
+function _isProgramActive(p) {
+  if (!p || !p.startDate || !p.endDate) return false;
+  const today = new Date().toISOString().slice(0, 10);
+  return today >= p.startDate && today <= p.endDate;
+}
+
+// Choisit le programme par défaut : actif aujourd'hui > le plus récent (date de
+// début) > le premier.
+function _pickDefaultProgramId(progs) {
+  if (!progs || !progs.length) return null;
+  const active = progs.find(_isProgramActive);
+  if (active) return active.id;
+  const byDate = progs.slice().sort((a, b) => (b.startDate || '').localeCompare(a.startDate || ''));
+  return (byDate[0] || progs[0]).id;
+}
+
+// Programme courant (objet) ou null. Auto-corrige currentProgramId si invalide.
+function getCurrentProgram() {
+  const progs = state.programs || [];
+  if (!progs.length) return null;
+  let p = progs.find(x => x.id === state.currentProgramId);
+  if (!p) {
+    state.currentProgramId = _pickDefaultProgramId(progs);
+    p = progs.find(x => x.id === state.currentProgramId);
+  }
+  return p || null;
+}
+
+// Programmes actifs aujourd'hui (pour un éventuel affichage multi-cartes).
+function getActivePrograms() {
+  return (state.programs || []).filter(_isProgramActive);
+}
+
+// Switch le programme visible.
+function setCurrentProgram(id) {
+  if (!(state.programs || []).some(p => p.id === id)) return;
+  state.currentProgramId = id;
+  persist();
+  render();
+  closeModal();
+}
+
+// Setter rétrocompat (state.offseason = ...). Défensif : route vers programs.
+function _setOffseasonCompat(v) {
+  if (!v) return; // la suppression passe par deleteProgram()
+  const id = v.id || state.currentProgramId || '1';
+  const obj = {
+    id, title: v.title || '', startDate: v.startDate || '', endDate: v.endDate || '',
+    mode: v.mode === 'daily' ? 'daily' : 'weekly',
+    exercises: v.exercises || [], dailySchedule: v.dailySchedule || {}, seasonId: v.seasonId || null
+  };
+  state.programs = state.programs || [];
+  const idx = state.programs.findIndex(p => p.id === id);
+  if (idx >= 0) state.programs[idx] = obj; else state.programs.push(obj);
+  state.currentProgramId = id;
+}
+
+// Tous les exId (hebdo + journalier) d'un programme — pour purge ciblée des logs.
+function _programExerciseIds(p) {
+  const ids = new Set();
+  (p.exercises || []).forEach(ex => { if (ex && ex.id != null) ids.add(String(ex.id)); });
+  Object.values(p.dailySchedule || {}).forEach(arr => (arr || []).forEach(it => { if (it && it.id != null) ids.add(String(it.id)); }));
+  return ids;
+}
+
+// Purge locale des logs rattachés aux exercices d'un programme (à la suppression).
+function _purgeProgramLogs(p) {
+  const ids = _programExerciseIds(p);
+  if (!ids.size) return;
+  const logs = state.offseasonLogs || {};
+  Object.keys(logs).forEach(pid => {
+    Object.keys(logs[pid] || {}).forEach(weekKey => {
+      const byEx = logs[pid][weekKey] || {};
+      Object.keys(byEx).forEach(exId => { if (ids.has(String(exId))) delete byEx[exId]; });
+      if (!Object.keys(byEx).length) delete logs[pid][weekKey];
+    });
+    if (logs[pid] && !Object.keys(logs[pid]).length) delete logs[pid];
+  });
+}
+
+// Compte de complétions (toggles "done") rattachées à un programme — affiché
+// dans la liste pour informer avant suppression.
+function _programLogCount(p) {
+  const ids = _programExerciseIds(p);
+  if (!ids.size) return 0;
+  let n = 0;
+  const logs = state.offseasonLogs || {};
+  Object.values(logs).forEach(byWeek => Object.values(byWeek || {}).forEach(byEx => {
+    Object.entries(byEx || {}).forEach(([exId, e]) => { if (e && e.done && ids.has(String(exId))) n++; });
+  }));
+  return n;
+}
+
+// Sélecteur de programme (chips) — affiché seulement si > 1 programme. Permet
+// au coach/à la joueuse de basculer la vue. Backward-compat : invisible en
+// mono-programme → rendu identique à avant.
+function renderProgramSelector() {
+  const progs = state.programs || [];
+  if (progs.length <= 1) return '';
+  const curId = (getCurrentProgram() || {}).id;
+  return `
+    <div style="padding:0 18px;margin-bottom:10px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      <span style="font-size:9px;color:var(--ink-4);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em">Programme</span>
+      ${progs.map(p => {
+        const on = p.id === curId;
+        const act = _isProgramActive(p);
+        return `<button onclick="setCurrentProgram('${p.id}')" style="padding:5px 10px;border-radius:999px;border:1px solid ${on?'var(--orange)':'var(--border)'};background:${on?'rgba(255,107,0,0.12)':'var(--bg-2)'};color:${on?'var(--orange)':'var(--ink-2)'};font-size:11px;font-family:'Inter';cursor:pointer;white-space:nowrap">${act?'● ':''}${esc(p.title || 'Programme')}</button>`;
+      }).join('')}
+    </div>`;
+}
+
 // Vérifie si la prépa est active aujourd'hui
 function isOffseasonActive() {
   const o = state.offseason;
@@ -17882,16 +18102,128 @@ function isOffseasonActive() {
   return today >= o.startDate && today <= o.endDate;
 }
 
-// === COACH : configuration du programme ===
+// === COACH : configuration des programmes ===
 
+// CHANTIER C : écran LISTE des programmes (cartes) + création. Remplace l'accès
+// direct à l'éditeur singleton. Chaque carte : nom, dates, mode, # exos, # logs,
+// éditer / dupliquer / supprimer.
 function openOffseasonConfig() {
-  const o = state.offseason || { startDate: '', endDate: '', title: 'Prépa estivale', exercises: [], mode: 'weekly', dailySchedule: {} };
-  state._editingOffseason = JSON.parse(JSON.stringify(o));
-  if (!state._editingOffseason.exercises) state._editingOffseason.exercises = [];
-  // PHASE 4 : rétrocompat — un programme legacy sans mode est hebdo.
-  if (state._editingOffseason.mode !== 'daily') state._editingOffseason.mode = 'weekly';
-  if (!state._editingOffseason.dailySchedule) state._editingOffseason.dailySchedule = {};
+  const progs = state.programs || [];
+  const card = (p) => {
+    const active = _isProgramActive(p);
+    const exCount = p.mode === 'daily'
+      ? Object.values(p.dailySchedule || {}).reduce((a, arr) => a + (arr || []).length, 0)
+      : (p.exercises || []).length;
+    const datesTxt = (p.startDate && p.endDate)
+      ? `${formatDate(p.startDate, 'short')} → ${formatDate(p.endDate, 'short')}`
+      : 'Dates non définies';
+    const logN = _programLogCount(p);
+    return `
+      <div style="border:1px solid ${active?'var(--orange)':'var(--border)'};border-radius:10px;padding:12px;margin-bottom:10px;background:var(--bg-2)">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px">
+          <div style="flex:1;min-width:0;cursor:pointer" onclick="openProgramEditor('${p.id}')">
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+              <span style="font-family:'Anton';font-size:15px;text-transform:uppercase;letter-spacing:0.02em">${esc(p.title || 'Programme')}</span>
+              <span style="font-size:9px;font-family:'JetBrains Mono';text-transform:uppercase;padding:2px 6px;border-radius:4px;background:${active?'rgba(255,107,0,0.15)':'var(--bg-3)'};color:${active?'var(--orange)':'var(--ink-3)'}">${active?'● Actif':'○ Inactif'}</span>
+            </div>
+            <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px">${datesTxt}</div>
+            <div style="display:flex;gap:10px;margin-top:6px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">
+              <span>${p.mode === 'daily' ? '🗓 Journalier' : '📅 Hebdo'}</span>
+              <span>${exCount} exo${exCount>1?'s':''}</span>
+              <span>${logN} complétion${logN>1?'s':''}</span>
+            </div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
+            <button class="btn btn-icon" title="Éditer" onclick="openProgramEditor('${p.id}')" style="width:28px;height:28px">✎</button>
+            <button class="btn btn-icon" title="Dupliquer" onclick="cloneProgram('${p.id}')" style="width:28px;height:28px">⧉</button>
+            <button class="btn btn-icon" title="Supprimer" onclick="confirmDeleteProgram('${p.id}')" style="width:28px;height:28px;color:var(--red)">🗑</button>
+          </div>
+        </div>
+      </div>`;
+  };
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">Prépa individuelle</div>
+        <div class="modal-title">🏋 Programmes sportifs</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:14px;font-size:11px;color:var(--ink-2);line-height:1.5">
+        Gère plusieurs programmes (prépa estivale, reprise, individualisé…). Chaque joueuse suit le programme <strong>actif</strong>. Les complétions sont rattachées au bon programme.
+      </div>
+      ${progs.length === 0
+        ? `<div style="padding:18px;text-align:center;color:var(--ink-3);font-size:12px;font-style:italic;border:1px dashed var(--border);border-radius:8px;margin-bottom:12px">Aucun programme · crée ton premier programme ci-dessous</div>`
+        : progs.map(card).join('')}
+      <button class="btn btn-primary btn-block" onclick="openProgramEditor('new')" style="margin-top:4px">+ Nouveau programme</button>
+    </div>
+  `);
+}
+
+// Ouvre l'éditeur de formulaire pour un programme existant ('id') ou un nouveau
+// ('new'). Le formulaire (renderOffseasonEditor) travaille sur _editingOffseason
+// qui porte désormais un `id`.
+function openProgramEditor(id) {
+  let base;
+  if (id === 'new') {
+    base = { id: uid(), title: '', startDate: '', endDate: '', mode: 'weekly', exercises: [], dailySchedule: {}, _isNew: true };
+  } else {
+    const p = (state.programs || []).find(x => x.id === id);
+    base = p
+      ? JSON.parse(JSON.stringify(p))
+      : { id: uid(), title: '', startDate: '', endDate: '', mode: 'weekly', exercises: [], dailySchedule: {}, _isNew: true };
+  }
+  if (!base.exercises) base.exercises = [];
+  if (base.mode !== 'daily') base.mode = 'weekly';
+  if (!base.dailySchedule) base.dailySchedule = {};
+  state._editingOffseason = base;
   renderOffseasonEditor();
+}
+
+// Duplique un programme : nouvel id + RÉGÉNÉRATION de tous les exId (hebdo +
+// journalier) — CRUCIAL : les logs sont disambiguïsés par exId, des ids partagés
+// feraient apparaître les mêmes complétions dans les deux programmes.
+function cloneProgram(id) {
+  const src = (state.programs || []).find(x => x.id === id);
+  if (!src) return;
+  const copy = JSON.parse(JSON.stringify(src));
+  copy.id = uid();
+  copy.title = (src.title || 'Programme') + ' (copie)';
+  copy._isNew = true;
+  (copy.exercises || []).forEach(ex => { ex.id = uid(); });
+  Object.values(copy.dailySchedule || {}).forEach(arr => (arr || []).forEach(it => { it.id = uid(); }));
+  if (!copy.exercises) copy.exercises = [];
+  if (copy.mode !== 'daily') copy.mode = 'weekly';
+  if (!copy.dailySchedule) copy.dailySchedule = {};
+  state._editingOffseason = copy;
+  renderOffseasonEditor();
+}
+
+function confirmDeleteProgram(id) {
+  const p = (state.programs || []).find(x => x.id === id);
+  if (!p) return;
+  const logN = _programLogCount(p);
+  const msg = logN > 0
+    ? `Supprimer « ${p.title || 'Programme'} » et ses ${logN} complétion(s) ? Action définitive.`
+    : `Supprimer « ${p.title || 'Programme'} » ?`;
+  if (!confirm(msg)) return;
+  deleteProgram(id);
+}
+
+function deleteProgram(id) {
+  const idx = (state.programs || []).findIndex(x => x.id === id);
+  if (idx < 0) return;
+  const p = state.programs[idx];
+  _purgeProgramLogs(p); // purge locale → le sync supprime les rows distantes (+ FK cascade)
+  state.programs.splice(idx, 1);
+  if (state.currentProgramId === id) state.currentProgramId = _pickDefaultProgramId(state.programs);
+  state._editingOffseason = null;
+  persist();
+  closeModal();
+  render();
+  // Rouvre la liste pour enchaîner.
+  openOffseasonConfig();
 }
 
 // PHASE 4 : bascule hebdo ↔ journalier. Les deux modes sont mutuellement
@@ -17922,8 +18254,8 @@ function renderOffseasonEditor() {
   openModal(`
     <div class="modal-header">
       <div>
-        <div class="eyebrow">Prépa individuelle</div>
-        <div class="modal-title">☀ Programme estival</div>
+        <div class="eyebrow" style="cursor:pointer" onclick="state._editingOffseason=null;openOffseasonConfig()">← Programmes</div>
+        <div class="modal-title">${e._isNew ? '➕ Nouveau programme' : '✎ ' + esc(e.title || 'Programme')}</div>
       </div>
       <button class="modal-close" onclick="closeModal();state._editingOffseason=null">✕</button>
     </div>
@@ -17990,10 +18322,10 @@ function renderOffseasonEditor() {
     </div>
     <div class="modal-footer" style="flex-direction:column;gap:6px">
       <div style="display:flex;gap:6px;width:100%">
-        <button class="btn btn-secondary btn-block" onclick="closeModal();state._editingOffseason=null">Annuler</button>
+        <button class="btn btn-secondary btn-block" onclick="state._editingOffseason=null;openOffseasonConfig()">Annuler</button>
         <button class="btn btn-primary btn-block" onclick="saveOffseason()">Enregistrer</button>
       </div>
-      ${state.offseason ? `<button class="btn btn-ghost btn-block" style="color:var(--red);font-size:11px" onclick="deleteOffseason()">🗑 Supprimer le programme</button>` : ''}
+      ${!e._isNew && (state.programs || []).some(p => p.id === e.id) ? `<button class="btn btn-ghost btn-block" style="color:var(--red);font-size:11px" onclick="confirmDeleteProgram('${e.id}')">🗑 Supprimer le programme</button>` : ''}
     </div>
   `);
 }
@@ -18140,17 +18472,13 @@ function saveOffseason() {
   if (mode === 'daily' && Object.keys(dailySchedule).length === 0) { alert('Ajoute au moins un exercice à une date'); return; }
   // Réassigner des id pour s'assurer qu'ils sont uniques (hebdo).
   exercises.forEach(ex => { if (!ex.id) ex.id = uid(); });
-  state.offseason = { title, startDate, endDate, mode, exercises, dailySchedule };
-  state._editingOffseason = null;
-  persist();
-  closeModal();
-  render();
-}
-
-function deleteOffseason() {
-  if (!confirm('Supprimer le programme et tous les suivis associés ?')) return;
-  state.offseason = null;
-  state.offseasonLogs = {};
+  // CHANTIER C : upsert dans state.programs par id (au lieu d'écraser le singleton).
+  const id = e.id || uid();
+  const prog = { id, title, startDate, endDate, mode, exercises, dailySchedule, seasonId: e.seasonId || null };
+  state.programs = state.programs || [];
+  const idx = state.programs.findIndex(p => p.id === id);
+  if (idx >= 0) state.programs[idx] = prog; else state.programs.push(prog);
+  state.currentProgramId = id; // le programme édité devient le programme visible
   state._editingOffseason = null;
   persist();
   closeModal();
@@ -18442,7 +18770,7 @@ function openOffseasonDashboardDaily() {
       `}
     </div>
     <div class="modal-footer" style="flex-direction:column;gap:6px">
-      <button class="btn btn-secondary btn-block" onclick="closeModal();setTimeout(()=>openOffseasonConfig(),50)">✎ Modifier le programme</button>
+      <button class="btn btn-secondary btn-block" onclick="closeModal();setTimeout(()=>openProgramEditor('${o.id}'),50)">✎ Modifier le programme</button>
       <button class="btn btn-primary btn-block" onclick="closeModal()">Fermer</button>
     </div>
   `);
@@ -18535,7 +18863,7 @@ function openOffseasonDashboard() {
       </div>
     </div>
     <div class="modal-footer">
-      <button class="btn btn-secondary btn-block" onclick="closeModal();setTimeout(()=>openOffseasonConfig(),50)">✎ Modifier le programme</button>
+      <button class="btn btn-secondary btn-block" onclick="closeModal();setTimeout(()=>openProgramEditor('${o.id}'),50)">✎ Modifier le programme</button>
       <button class="btn btn-primary btn-block" onclick="closeModal()">Fermer</button>
     </div>
   `);
