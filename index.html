@@ -3537,6 +3537,93 @@ const ENTITIES = [
       // pending pas encore en remote) puis nouvelles entrées venues du remote.
       state.trainingPlans = Array.from(byId.values());
     }
+  },
+  // ==========================================================================
+  // DIFFUSIONS COACH — chantier D (cf. migration 20260607_004_broadcasts.sql).
+  // broadcasts : message + média (image/vidéo) + ciblage, créé par le coach.
+  // broadcastReceipts : statut par couple (broadcast × joueuse) pending → seen
+  //   / skipped / acknowledged. La joueuse voit une popup au boot ; le coach
+  //   suit qui a vu / compris / skippé. Realtime des deux côtés (suivi live
+  //   coach + popup instantanée joueuse). NB : dump/apply dans le bloc module →
+  //   logique inline, pas d'appel aux helpers du bloc classique.
+  // ==========================================================================
+  {
+    key: 'broadcasts', table: 'broadcasts', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.broadcasts || []).map(b => [b.id, {
+      id: b.id, coach_id: b.coachId || null, message: b.message || '',
+      media_url: b.mediaUrl || null,
+      media_type: (b.mediaType === 'image' || b.mediaType === 'video') ? b.mediaType : null,
+      target_type: ['team', 'players', 'e1', 'e2'].includes(b.targetType) ? b.targetType : 'team',
+      target_player_ids: Array.isArray(b.targetPlayerIds) ? b.targetPlayerIds : [],
+      season_id: b.seasonId || null,
+      // created_at / expires_at : fixés une fois à la création → hash stable.
+      created_at: b.createdAt ? new Date(b.createdAt).toISOString() : null,
+      expires_at: b.expiresAt ? new Date(b.expiresAt).toISOString() : null,
+      archived: !!b.archived
+    }])),
+    apply: (state, rows) => {
+      const localList = state.broadcasts || [];
+      const remoteIds = new Set(rows.map(r => r.id));
+      const fromRemote = rows.map(r => ({
+        id: r.id, coachId: r.coach_id || '', message: r.message || '',
+        mediaUrl: r.media_url || '', mediaType: r.media_type || null,
+        targetType: r.target_type || 'team',
+        targetPlayerIds: Array.isArray(r.target_player_ids) ? r.target_player_ids : [],
+        seasonId: r.season_id || null,
+        createdAt: r.created_at ? Date.parse(r.created_at) : null,
+        expiresAt: r.expires_at ? Date.parse(r.expires_at) : null,
+        archived: !!r.archived
+      }));
+      // Anti-wipe : un broadcast local fraîchement créé (id uid() = 'x…') pas
+      // encore présent en remote (fenêtre de debounce 400ms) est préservé.
+      const pendingLocal = localList.filter(b => !remoteIds.has(b.id) && typeof b.id === 'string' && b.id.startsWith('x'));
+      state.broadcasts = [...pendingLocal, ...fromRemote];
+    }
+  },
+  {
+    key: 'broadcastReceipts', table: 'broadcast_receipts', pk: ['broadcast_id', 'player_id'], realtime: true, auth: 'anon',
+    dump: (state) => {
+      const out = {};
+      (state.broadcastReceipts || []).forEach(r => {
+        if (!r.broadcastId || !r.playerId) return;
+        out[`${r.broadcastId}|${r.playerId}`] = {
+          broadcast_id: r.broadcastId, player_id: r.playerId,
+          status: ['pending', 'seen', 'skipped', 'acknowledged'].includes(r.status) ? r.status : 'pending',
+          seen_at: r.seenAt ? new Date(r.seenAt).toISOString() : null,
+          acted_at: r.actedAt ? new Date(r.actedAt).toISOString() : null
+        };
+      });
+      return out;
+    },
+    apply: (state, rows) => {
+      // Préserve un statut local PLUS avancé que le remote (anti-régression :
+      // une joueuse vient de cliquer "Compris" mais le remote n'a pas encore
+      // notre push → ne pas le ramener à 'pending'). rank : pending<seen<
+      // skipped/acknowledged (états terminaux). On garde le local si son rang
+      // est strictement supérieur au remote pour la même clé.
+      const RANK = { pending: 0, seen: 1, skipped: 2, acknowledged: 2 };
+      const byKey = {};
+      (state.broadcastReceipts || []).forEach(r => { byKey[`${r.broadcastId}|${r.playerId}`] = r; });
+      const remoteKeys = new Set();
+      const next = rows.map(r => {
+        const key = `${r.broadcast_id}|${r.player_id}`;
+        remoteKeys.add(key);
+        const local = byKey[key];
+        const remoteStatus = ['pending', 'seen', 'skipped', 'acknowledged'].includes(r.status) ? r.status : 'pending';
+        if (local && (RANK[local.status] || 0) > (RANK[remoteStatus] || 0)) {
+          return local; // local plus avancé → on garde (push à venir)
+        }
+        return {
+          broadcastId: r.broadcast_id, playerId: r.player_id,
+          status: remoteStatus,
+          seenAt: r.seen_at ? Date.parse(r.seen_at) : null,
+          actedAt: r.acted_at ? Date.parse(r.acted_at) : null
+        };
+      });
+      // Préserve les receipts locaux pas encore en remote (créés à l'instant).
+      const pendingLocal = (state.broadcastReceipts || []).filter(r => !remoteKeys.has(`${r.broadcastId}|${r.playerId}`));
+      state.broadcastReceipts = [...pendingLocal, ...next];
+    }
   }
 ];
 
@@ -3947,6 +4034,8 @@ const K = {
   trainingGuests: 'pb8_training_guests',
   trainingPlans: 'pb8_training_plans',
   teamFilter: 'pb8_team_filter',
+  broadcasts: 'pb8_broadcasts',
+  broadcastReceipts: 'pb8_broadcast_receipts',
 };
 function load(k, d) { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : d; } catch { return d; } }
 // save() : sync localStorage avec gestion explicite du QuotaExceededError.
@@ -4054,6 +4143,15 @@ let state = {
   // [{ matchId, playId, position, coachNote, createdAt }]
   matchPlayLinks: load(K.matchPlayLinks, []),
 
+  // === DIFFUSIONS COACH (chantier D — cf. migration 20260607_004_broadcasts) ===
+  // broadcasts : [{ id, coachId, message, mediaUrl, mediaType:'image'|'video'|null,
+  //   targetType:'team'|'players'|'e1'|'e2', targetPlayerIds:[], seasonId,
+  //   createdAt(ms), expiresAt(ms)|null, archived }]
+  // broadcastReceipts : [{ broadcastId, playerId, status:'pending'|'seen'|
+  //   'skipped'|'acknowledged', seenAt(ms)|null, actedAt(ms)|null }]
+  broadcasts: load(K.broadcasts, []),
+  broadcastReceipts: load(K.broadcastReceipts, []),
+
   // === JOUEUSES GUESTS (Phase 5 — cf. migration 20260524_009_guest_players) ===
   // guestPlayers : humains temporaires identifiés par leur nom (copine d'une
   //   joueuse, essayeuse). [{ id, name, note, promotedToPlayerId, firstSeenAt,
@@ -4149,6 +4247,8 @@ function persist() {
   save(K.matchPlayLinks, state.matchPlayLinks);
   save(K.guestPlayers, state.guestPlayers);
   save(K.trainingGuests, state.trainingGuests);
+  save(K.broadcasts, state.broadcasts);
+  save(K.broadcastReceipts, state.broadcastReceipts);
   // FIX Option B : pendant l'édition d'un plan, bumper updatedAt de l'entrée
   // courante AVANT le save → la garde anti-écho de l'apply() trainingPlans peut
   // distinguer une édition locale fraîche d'un écho realtime obsolète (qui
@@ -6292,6 +6392,7 @@ function renderHomeCoach() {
   return `
     <div class="fade-up">
       ${renderOverdueTrainingsBanner()}
+      ${renderBroadcastCoachCard()}
       ${nextEvent ? heroCard(nextEvent) : ''}
 
       <div class="section-header">
@@ -12887,6 +12988,512 @@ function showToast(msg, opts) {
   requestAnimationFrame(() => el.classList.add('toast-show'));
   timer = setTimeout(dismiss, opts.duration || (opts.actionLabel ? 9000 : 4000));
   return dismiss;
+}
+
+// ============================================================
+// CHANTIER D — DIFFUSIONS COACH (broadcasts + accusés de réception)
+// ============================================================
+// Le coach diffuse un message (+ image/vidéo optionnelle) ciblé (équipe / E1 /
+// E2 / sélection). Chaque joueuse ciblée voit une POPUP au boot avec 2 actions :
+//   • Skip       → status 'skipped'      (vu, mais pas confirmé)
+//   • Compris 🫡 → status 'acknowledged' (réception confirmée)
+// Le coach suit le statut de chaque envoi (compteurs + détail par joueuse).
+// Données : state.broadcasts + state.broadcastReceipts (entités sync anon
+// realtime, cf. ENTITIES + migration 20260607_004_broadcasts.sql).
+
+// --- Résolution des joueuses ciblées par un broadcast (liste d'ids) ---
+function broadcastTargetPlayerIds(b) {
+  const seasonId = b.seasonId || getActiveSeasonId();
+  if (b.targetType === 'players') {
+    const valid = new Set(getSeasonPlayers(seasonId, { team: 'all' }).map(p => p.id));
+    return (b.targetPlayerIds || []).filter(id => valid.has(id));
+  }
+  const team = (b.targetType === 'e1' || b.targetType === 'e2') ? b.targetType : 'all';
+  return getSeasonPlayers(seasonId, { team }).map(p => p.id);
+}
+
+function getBroadcastReceipt(broadcastId, playerId) {
+  return (state.broadcastReceipts || []).find(r => r.broadcastId === broadcastId && r.playerId === playerId) || null;
+}
+
+// --- Création d'un broadcast + N receipts (pending) pour chaque cible ---
+function createBroadcast(payload) {
+  const id = payload.id || uid();
+  const now = Date.now();
+  const b = {
+    id,
+    coachId: 'coach',
+    message: (payload.message || '').trim(),
+    mediaUrl: payload.mediaUrl || '',
+    mediaType: (payload.mediaType === 'image' || payload.mediaType === 'video') ? payload.mediaType : null,
+    targetType: ['team', 'players', 'e1', 'e2'].includes(payload.targetType) ? payload.targetType : 'team',
+    targetPlayerIds: Array.isArray(payload.targetPlayerIds) ? payload.targetPlayerIds.slice() : [],
+    seasonId: payload.seasonId || getActiveSeasonId() || null,
+    createdAt: now,
+    expiresAt: payload.expiresAt || null,
+    archived: false
+  };
+  state.broadcasts = [b, ...(state.broadcasts || [])];
+  if (!state.broadcastReceipts) state.broadcastReceipts = [];
+  broadcastTargetPlayerIds(b).forEach(pid => {
+    if (!getBroadcastReceipt(b.id, pid)) {
+      state.broadcastReceipts.push({ broadcastId: b.id, playerId: pid, status: 'pending', seenAt: null, actedAt: null });
+    }
+  });
+  persist();
+  // Push immédiat : réduit à ~0 la fenêtre de course realtime (sinon debounce 400ms).
+  if (window.PbSync) PbSync.flushNow(state).catch(() => {});
+  return b;
+}
+
+// --- MAJ statut d'un receipt (côté joueuse) ---
+function markReceiptStatus(broadcastId, playerId, status) {
+  if (!['pending', 'seen', 'skipped', 'acknowledged'].includes(status)) return;
+  if (!state.broadcastReceipts) state.broadcastReceipts = [];
+  let r = getBroadcastReceipt(broadcastId, playerId);
+  if (!r) {
+    r = { broadcastId, playerId, status: 'pending', seenAt: null, actedAt: null };
+    state.broadcastReceipts.push(r);
+  }
+  const now = Date.now();
+  if (!r.seenAt) r.seenAt = now;
+  r.status = status;
+  if (status === 'skipped' || status === 'acknowledged') r.actedAt = now;
+  persist();
+  if (window.PbSync) PbSync.flushNow(state).catch(() => {});
+}
+
+// --- Compteurs de suivi pour un broadcast (côté coach) ---
+function broadcastStats(b) {
+  const ids = new Set(broadcastTargetPlayerIds(b));
+  // inclure d'éventuels receipts hors cible courante (effectif changé depuis l'envoi)
+  (state.broadcastReceipts || []).forEach(r => { if (r.broadcastId === b.id) ids.add(r.playerId); });
+  let acknowledged = 0, skipped = 0, seen = 0, pending = 0;
+  ids.forEach(pid => {
+    const r = getBroadcastReceipt(b.id, pid);
+    const s = r ? r.status : 'pending';
+    if (s === 'acknowledged') acknowledged++;
+    else if (s === 'skipped') skipped++;
+    else if (s === 'seen') seen++;
+    else pending++;
+  });
+  return { total: ids.size, acknowledged, skipped, seen, pending };
+}
+
+// --- Broadcasts en attente pour la joueuse courante (popup au boot) ---
+function getPendingBroadcastsForPlayer(pid) {
+  if (!pid) return [];
+  const now = Date.now();
+  const out = [];
+  (state.broadcastReceipts || []).forEach(r => {
+    if (r.playerId !== pid || r.status !== 'pending') return;
+    const b = (state.broadcasts || []).find(x => x.id === r.broadcastId);
+    if (!b || b.archived) return;
+    if (b.expiresAt && now > b.expiresAt) {
+      // Expiré : marqué 'seen' (sans popup) — la joueuse n'a plus à agir.
+      markReceiptStatus(b.id, pid, 'seen');
+      return;
+    }
+    out.push(b);
+  });
+  out.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)); // plus ancien d'abord
+  return out;
+}
+
+// Nb de joueuses pas encore "vu" sur les diffusions actives (badge coach).
+function broadcastsPendingCount() {
+  const activeIds = new Set((state.broadcasts || []).filter(b => !b.archived).map(b => b.id));
+  return (state.broadcastReceipts || []).filter(r => activeIds.has(r.broadcastId) && r.status === 'pending').length;
+}
+
+// ------------------------------------------------------------
+// MÉDIA — upload image/vidéo dans le bucket Storage 'broadcast-media'
+// ------------------------------------------------------------
+function _broadcastMediaKey(url) {
+  if (typeof url !== 'string' || !url.includes('/broadcast-media/')) return null;
+  const m = url.match(/\/broadcast-media\/(.+?)(?:\?|$)/);
+  return (m && m[1]) ? decodeURIComponent(m[1]) : null;
+}
+function _removeBroadcastMediaFile(url) {
+  const key = _broadcastMediaKey(url);
+  if (key && window.sb) sb.storage.from('broadcast-media').remove([key]).catch(() => {});
+}
+
+async function uploadBroadcastMedia(event) {
+  const file = (event.target.files || [])[0];
+  event.target.value = '';
+  if (!file) return;
+  const d = state._composeBroadcast;
+  if (!d) return;
+  if (!window.sb || !window.Pb || !window.Pb.online) {
+    alert('⚠ Hors ligne. Reconnecte-toi pour ajouter un média.');
+    return;
+  }
+  const isVideo = /^video\//i.test(file.type);
+  const isImage = /^image\//i.test(file.type);
+  if (!isVideo && !isImage) { alert('⚠ Format non supporté (image ou vidéo uniquement).'); return; }
+  const MAX = 50 * 1024 * 1024; // 50 Mo (bucket = 52 Mo)
+  if (isVideo && file.size > MAX) {
+    alert('⚠ Vidéo trop lourde (' + Math.round(file.size / 1048576) + ' Mo). Maximum 50 Mo — choisis une vidéo plus courte.');
+    return;
+  }
+  d._uploading = true;
+  renderBroadcastComposer();
+  try {
+    let blob = file, ext, contentType;
+    if (isImage) {
+      blob = await compressImageBlob(file, 1280, 0.82);
+      ext = 'jpg'; contentType = 'image/jpeg';
+    } else {
+      ext = (file.name.split('.').pop() || 'mp4').toLowerCase().replace(/[^a-z0-9]/g, '') || 'mp4';
+      contentType = file.type || 'video/mp4';
+    }
+    const fname = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    const path = `${d.id}/${fname}`;
+    const { error: upErr } = await sb.storage.from('broadcast-media').upload(path, blob, {
+      contentType, cacheControl: '31536000', upsert: false
+    });
+    if (upErr) throw upErr;
+    const { data: pub } = sb.storage.from('broadcast-media').getPublicUrl(path);
+    if (!pub || !pub.publicUrl) throw new Error('publicUrl manquante');
+    _removeBroadcastMediaFile(d.mediaUrl); // best-effort : purge l'ancien
+    d.mediaUrl = pub.publicUrl;
+    d.mediaType = isVideo ? 'video' : 'image';
+  } catch (e) {
+    console.error('[broadcast media]', e && e.message ? e.message : e);
+    alert('⚠ Échec de l\'upload du média. Vérifie ta connexion puis recommence.');
+  } finally {
+    d._uploading = false;
+    renderBroadcastComposer();
+  }
+}
+
+function clearBroadcastMedia() {
+  const d = state._composeBroadcast;
+  if (!d) return;
+  _removeBroadcastMediaFile(d.mediaUrl);
+  d.mediaUrl = ''; d.mediaType = null;
+  renderBroadcastComposer();
+}
+
+// ------------------------------------------------------------
+// UI COACH — composer (création)
+// ------------------------------------------------------------
+function openBroadcastComposer() {
+  state._composeBroadcast = {
+    id: uid(),
+    message: '',
+    mediaUrl: '', mediaType: null,
+    targetType: 'team',
+    targetPlayerIds: [],
+    expiresInDays: 7,
+    _uploading: false
+  };
+  renderBroadcastComposer();
+}
+
+function setBroadcastTarget(t) {
+  const d = state._composeBroadcast;
+  if (!d) return;
+  d.targetType = t;
+  renderBroadcastComposer();
+}
+function toggleBroadcastPlayer(pid) {
+  const d = state._composeBroadcast;
+  if (!d) return;
+  const i = d.targetPlayerIds.indexOf(pid);
+  if (i >= 0) d.targetPlayerIds.splice(i, 1);
+  else d.targetPlayerIds.push(pid);
+  renderBroadcastComposer();
+}
+function setBroadcastExpiry(days) {
+  const d = state._composeBroadcast;
+  if (!d) return;
+  d.expiresInDays = days === '' ? 0 : Number(days);
+}
+
+function renderBroadcastComposer() {
+  const d = state._composeBroadcast;
+  if (!d) return;
+  const seasonId = getActiveSeasonId();
+  const multi = !!(state.team && state.team.multiSquad);
+  const e1Label = (state.team && state.team.e1Label) || 'E1';
+  const e2Label = (state.team && state.team.e2Label) || 'E2';
+  const allPlayers = getSeasonPlayers(seasonId, { team: 'all' });
+  const targetIds = broadcastTargetPlayerIds({ targetType: d.targetType, targetPlayerIds: d.targetPlayerIds, seasonId });
+  const targets = [
+    { id: 'team', label: "👥 Toute l'équipe" },
+    ...(multi ? [{ id: 'e1', label: '🅰 ' + esc(e1Label) }, { id: 'e2', label: '🅱 ' + esc(e2Label) }] : []),
+    { id: 'players', label: '🎯 Sélection' }
+  ];
+  const mediaPreview = !d.mediaUrl ? '' : (d.mediaType === 'video'
+    ? `<video src="${esc(d.mediaUrl)}" controls playsinline style="width:100%;max-height:200px;border-radius:8px;background:#000"></video>`
+    : `<img src="${esc(d.mediaUrl)}" alt="" style="width:100%;max-height:200px;object-fit:contain;border-radius:8px;background:#000">`);
+
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">📢 Nouvelle diffusion</div>
+      <button class="modal-close" onclick="state._composeBroadcast=null;closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <label class="eyebrow-muted" style="display:block;margin-bottom:6px">Message</label>
+      <textarea id="bc-message" maxlength="500" placeholder="Ton message aux joueuses…" rows="4"
+        oninput="state._composeBroadcast.message=this.value;var c=document.getElementById('bc-count');if(c)c.textContent=this.value.length+'/500'"
+        style="width:100%;background:var(--bg-3);border:1px solid var(--border);border-radius:8px;color:var(--ink);padding:12px;font-size:15px;font-family:inherit;resize:vertical;line-height:1.4;box-sizing:border-box">${esc(d.message)}</textarea>
+      <div id="bc-count" style="text-align:right;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">${(d.message || '').length}/500</div>
+
+      <label class="eyebrow-muted" style="display:block;margin:14px 0 6px">Média (optionnel)</label>
+      ${d._uploading ? `
+        <div style="padding:18px;text-align:center;background:var(--bg-3);border-radius:8px;color:var(--ink-3);font-size:13px">⏳ Envoi du média…</div>
+      ` : d.mediaUrl ? `
+        <div style="position:relative">
+          ${mediaPreview}
+          <button onclick="clearBroadcastMedia()" style="position:absolute;top:8px;right:8px;width:32px;height:32px;border-radius:50%;border:none;background:rgba(0,0,0,0.7);color:#fff;font-size:16px;cursor:pointer">✕</button>
+        </div>
+      ` : `
+        <label for="bc-media-input" class="btn btn-secondary btn-block" style="cursor:pointer">📎 Ajouter photo ou vidéo</label>
+        <input id="bc-media-input" type="file" accept="image/*,video/*" style="display:none" onchange="uploadBroadcastMedia(event)">
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px;text-align:center">Vidéo : 50 Mo max</div>
+      `}
+
+      <label class="eyebrow-muted" style="display:block;margin:16px 0 6px">Destinataires</label>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">
+        ${targets.map(t => `
+          <button onclick="setBroadcastTarget('${t.id}')"
+            style="padding:9px 13px;border-radius:20px;font-size:13px;cursor:pointer;border:1px solid ${d.targetType === t.id ? 'var(--orange)' : 'var(--border)'};background:${d.targetType === t.id ? 'var(--orange-soft)' : 'var(--bg-3)'};color:${d.targetType === t.id ? 'var(--orange)' : 'var(--ink-2)'}">${t.label}</button>
+        `).join('')}
+      </div>
+      ${d.targetType === 'players' ? `
+        <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:6px;margin-bottom:6px">
+          ${allPlayers.length === 0 ? `<div style="color:var(--ink-3);font-size:12px;grid-column:1/-1">Aucune joueuse dans la saison active.</div>` :
+            allPlayers.map(p => {
+              const sel = d.targetPlayerIds.includes(p.id);
+              return `<button onclick="toggleBroadcastPlayer('${esc(p.id)}')" style="text-align:left;padding:9px 11px;border-radius:8px;font-size:13px;cursor:pointer;border:1px solid ${sel ? 'var(--orange)' : 'var(--border)'};background:${sel ? 'var(--orange-soft)' : 'var(--bg-3)'};color:${sel ? 'var(--orange)' : 'var(--ink-2)'};display:flex;align-items:center;gap:6px"><span>${sel ? '✓' : '+'}</span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.name)}</span></button>`;
+            }).join('')}
+        </div>
+      ` : ''}
+      <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-bottom:14px">${targetIds.length} joueuse${targetIds.length > 1 ? 's' : ''} ciblée${targetIds.length > 1 ? 's' : ''}</div>
+
+      <label class="eyebrow-muted" style="display:block;margin-bottom:6px">Expiration</label>
+      <select onchange="setBroadcastExpiry(this.value)" style="width:100%;background:var(--bg-3);border:1px solid var(--border);border-radius:8px;color:var(--ink);padding:11px;font-size:14px;font-family:inherit;margin-bottom:18px;box-sizing:border-box">
+        <option value="3" ${d.expiresInDays === 3 ? 'selected' : ''}>Dans 3 jours</option>
+        <option value="7" ${d.expiresInDays === 7 ? 'selected' : ''}>Dans 7 jours (défaut)</option>
+        <option value="14" ${d.expiresInDays === 14 ? 'selected' : ''}>Dans 14 jours</option>
+        <option value="30" ${d.expiresInDays === 30 ? 'selected' : ''}>Dans 30 jours</option>
+        <option value="" ${!d.expiresInDays ? 'selected' : ''}>Pas d'expiration</option>
+      </select>
+
+      <button class="btn btn-primary btn-block" ${d._uploading ? 'disabled' : ''} onclick="submitBroadcast()">📢 Envoyer la diffusion</button>
+    </div>
+  `);
+}
+
+function submitBroadcast() {
+  const d = state._composeBroadcast;
+  if (!d) return;
+  const msg = (d.message || '').trim();
+  if (!msg && !d.mediaUrl) { alert('Ajoute un message ou un média avant d\'envoyer.'); return; }
+  if (d.targetType === 'players' && (!d.targetPlayerIds || d.targetPlayerIds.length === 0)) {
+    alert('Sélectionne au moins une joueuse.'); return;
+  }
+  const targets = broadcastTargetPlayerIds({ targetType: d.targetType, targetPlayerIds: d.targetPlayerIds, seasonId: getActiveSeasonId() });
+  if (targets.length === 0) { alert('Aucune joueuse ciblée (effectif vide sur la saison active ?).'); return; }
+  const expiresAt = d.expiresInDays ? Date.now() + d.expiresInDays * 86400000 : null;
+  createBroadcast({
+    id: d.id, message: msg, mediaUrl: d.mediaUrl, mediaType: d.mediaType,
+    targetType: d.targetType, targetPlayerIds: d.targetPlayerIds, expiresAt
+  });
+  state._composeBroadcast = null;
+  closeModal();
+  showToast('📢 Diffusion envoyée à ' + targets.length + ' joueuse' + (targets.length > 1 ? 's' : ''));
+  setTimeout(() => { try { openBroadcastManager(); } catch (e) {} }, 200);
+}
+
+// Carte d'accès sur la home coach (entrée + badge "N pas vu").
+function renderBroadcastCoachCard() {
+  const active = (state.broadcasts || []).filter(b => !b.archived);
+  const pending = broadcastsPendingCount();
+  return `
+    <div style="padding:0 18px;margin-bottom:18px">
+      <div onclick="openBroadcastManager()" style="padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer;display:flex;align-items:center;gap:12px">
+        <span style="font-size:30px">📢</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-family:'Anton';font-size:15px;text-transform:uppercase;letter-spacing:0.04em;color:var(--ink)">Diffuser un message</div>
+          <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase;letter-spacing:0.04em">
+            ${active.length === 0 ? 'Message + photo/vidéo · accusés de réception' : `${active.length} diffusion${active.length > 1 ? 's' : ''} active${active.length > 1 ? 's' : ''}`}
+          </div>
+        </div>
+        ${pending > 0 ? `<span style="background:var(--orange);color:#1a0d00;font-family:'JetBrains Mono';font-size:11px;font-weight:700;padding:3px 9px;border-radius:20px">${pending} en attente</span>` : `<span style="color:var(--ink-3);font-size:18px">›</span>`}
+      </div>
+    </div>
+  `;
+}
+
+// ------------------------------------------------------------
+// UI COACH — gestionnaire / suivi
+// ------------------------------------------------------------
+function openBroadcastManager() { renderBroadcastManager(); }
+
+function renderBroadcastManager() {
+  const all = (state.broadcasts || []).slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const active = all.filter(b => !b.archived);
+  const archived = all.filter(b => b.archived);
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">📢 Diffusions</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <button class="btn btn-primary btn-block mb-3" onclick="openBroadcastComposer()">+ Nouvelle diffusion</button>
+      ${active.length === 0 ? `
+        <div class="empty" style="padding:24px"><div class="empty-icon">📭</div><div class="empty-title">Aucune diffusion active</div></div>
+      ` : active.map(b => broadcastManagerRow(b)).join('')}
+      ${archived.length ? `
+        <div class="eyebrow-muted" style="margin:16px 0 8px">Archivées (${archived.length})</div>
+        ${archived.map(b => broadcastManagerRow(b)).join('')}
+      ` : ''}
+    </div>
+  `);
+}
+
+function broadcastManagerRow(b) {
+  const s = broadcastStats(b);
+  const preview = esc((b.message || '').trim().slice(0, 90)) || '<span style="color:var(--ink-3)">(média seul)</span>';
+  const icon = b.mediaType === 'video' ? '🎬 ' : (b.mediaType === 'image' ? '🖼 ' : '');
+  const expired = b.expiresAt && Date.now() > b.expiresAt;
+  return `
+    <div style="padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:10px;${b.archived ? 'opacity:0.6' : ''}">
+      <div style="font-size:14px;color:var(--ink);line-height:1.4;margin-bottom:8px">${icon}${preview}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
+        <span style="font-size:11px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--green-soft);color:var(--green)">✓ ${s.acknowledged}/${s.total} compris</span>
+        ${s.skipped ? `<span style="font-size:11px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--bg-3);color:var(--ink-3)">⏭ ${s.skipped} skip</span>` : ''}
+        ${s.pending ? `<span style="font-size:11px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--orange-soft);color:var(--orange)">● ${s.pending} pas vu</span>` : ''}
+        ${expired ? `<span style="font-size:10px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--red-soft);color:var(--red)">expiré</span>` : ''}
+      </div>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-secondary" style="font-size:12px;padding:7px 12px;flex:1" onclick="openBroadcastDetail('${esc(b.id)}')">Voir détails</button>
+        <button class="btn btn-ghost" style="font-size:12px;padding:7px 12px;color:${b.archived ? 'var(--green)' : 'var(--ink-3)'}" onclick="${b.archived ? 'unarchiveBroadcast' : 'archiveBroadcast'}('${esc(b.id)}')">${b.archived ? '↺ Rétablir' : '🗄 Archiver'}</button>
+      </div>
+    </div>
+  `;
+}
+
+function openBroadcastDetail(id) {
+  const b = (state.broadcasts || []).find(x => x.id === id);
+  if (!b) return;
+  const ids = new Set(broadcastTargetPlayerIds(b));
+  (state.broadcastReceipts || []).forEach(r => { if (r.broadcastId === b.id) ids.add(r.playerId); });
+  const STATUS = {
+    acknowledged: { label: 'Compris 🫡', color: 'var(--green)', dot: '●' },
+    skipped: { label: 'Skip', color: 'var(--ink-3)', dot: '⏭' },
+    seen: { label: 'Vu', color: 'var(--blue)', dot: '◐' },
+    pending: { label: 'Pas vu', color: 'var(--orange)', dot: '○' }
+  };
+  const RANK = { pending: 0, seen: 1, skipped: 2, acknowledged: 3 };
+  const rows = Array.from(ids).map(pid => {
+    const p = (state.players || []).find(x => x.id === pid);
+    const status = (getBroadcastReceipt(b.id, pid) || {}).status || 'pending';
+    return { name: p ? p.name : pid, st: STATUS[status] || STATUS.pending, rank: RANK[status] || 0 };
+  }).sort((a, b2) => a.rank - b2.rank || a.name.localeCompare(b2.name));
+  const s = broadcastStats(b);
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">Détail diffusion</div>
+      <button class="modal-close" onclick="closeModal();setTimeout(()=>openBroadcastManager(),50)">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="padding:12px;background:var(--bg-3);border-radius:8px;font-size:14px;color:var(--ink);line-height:1.4;margin-bottom:6px;white-space:pre-wrap">${esc(b.message || '(média seul)')}</div>
+      <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-bottom:14px">Envoyé ${b.createdAt ? formatDate(isoDate(new Date(b.createdAt))) : ''} · ${s.acknowledged}/${s.total} compris</div>
+      <div class="list-section">
+        ${rows.map(row => `
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:11px 12px;border-bottom:1px solid var(--border-soft)">
+            <span style="font-size:14px;color:var(--ink)">${esc(row.name)}</span>
+            <span style="font-size:12px;font-family:'JetBrains Mono';color:${row.st.color}">${row.st.dot} ${row.st.label}</span>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `);
+}
+
+function archiveBroadcast(id) {
+  const b = (state.broadcasts || []).find(x => x.id === id);
+  if (!b) return;
+  b.archived = true;
+  persist();
+  if (window.PbSync) PbSync.flushNow(state).catch(() => {});
+  renderBroadcastManager();
+}
+function unarchiveBroadcast(id) {
+  const b = (state.broadcasts || []).find(x => x.id === id);
+  if (!b) return;
+  b.archived = false;
+  persist();
+  if (window.PbSync) PbSync.flushNow(state).catch(() => {});
+  renderBroadcastManager();
+}
+
+// ------------------------------------------------------------
+// UI JOUEUSE — popup au boot (overlay plein écran, choix forcé)
+// ------------------------------------------------------------
+function maybeShowBroadcastPopup() {
+  if (!state.auth || state.auth.role !== 'player' || !state.auth.playerId) return;
+  if (window._broadcastPopupOpen) return;
+  if (typeof _pbModalOpen === 'function' && _pbModalOpen()) return; // ne pas écraser une modal ouverte
+  const pending = getPendingBroadcastsForPlayer(state.auth.playerId);
+  if (pending.length) showBroadcastPopup(pending[0]);
+}
+
+function showBroadcastPopup(b) {
+  window._broadcastPopupOpen = true;
+  let host = document.getElementById('broadcast-overlay');
+  if (!host) { host = document.createElement('div'); host.id = 'broadcast-overlay'; document.body.appendChild(host); }
+  host.innerHTML = renderBroadcastPopup(b);
+  document.body.style.overflow = 'hidden';
+}
+function closeBroadcastPopup() {
+  const host = document.getElementById('broadcast-overlay');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+  window._broadcastPopupOpen = false;
+}
+function ackBroadcast(id) { _resolveBroadcast(id, 'acknowledged'); }
+function skipBroadcast(id) { _resolveBroadcast(id, 'skipped'); }
+function _resolveBroadcast(id, status) {
+  const pid = state.auth && state.auth.playerId;
+  markReceiptStatus(id, pid, status);
+  closeBroadcastPopup();
+  if (status === 'acknowledged') showToast('Message confirmé ✓');
+  const next = getPendingBroadcastsForPlayer(pid);
+  if (next.length) setTimeout(() => showBroadcastPopup(next[0]), 250);
+}
+
+function renderBroadcastPopup(b) {
+  const teamName = (state.team && state.team.displayNickname) || '';
+  const hasMedia = b.mediaUrl && b.mediaType;
+  const mediaHtml = !hasMedia ? '' : (b.mediaType === 'video'
+    ? `<video src="${esc(b.mediaUrl)}" controls playsinline style="width:100%;max-height:42vh;border-radius:12px;background:#000;margin:16px 0"></video>`
+    : `<img src="${esc(b.mediaUrl)}" alt="" style="width:100%;max-height:42vh;object-fit:contain;border-radius:12px;background:#000;margin:16px 0">`);
+  return `
+    <div style="position:fixed;inset:0;z-index:9999;background:rgba(8,10,14,0.94);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);display:flex;flex-direction:column">
+      <div style="flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:calc(28px + env(safe-area-inset-top)) 20px 12px;display:flex;flex-direction:column">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">
+          <div style="width:48px;height:48px;border-radius:50%;background:linear-gradient(135deg,var(--orange),var(--orange-2));display:flex;align-items:center;justify-content:center;font-size:24px;flex-shrink:0">🏀</div>
+          <div style="min-width:0">
+            <div style="font-family:'Anton';font-size:17px;letter-spacing:0.02em;text-transform:uppercase;color:var(--ink)">Message du coach</div>
+            ${teamName ? `<div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em;margin-top:1px">${esc(teamName)}</div>` : ''}
+          </div>
+        </div>
+        ${mediaHtml}
+        ${b.message ? `<div style="font-size:16px;line-height:1.55;color:var(--ink);white-space:pre-wrap;margin-top:10px">${esc(b.message)}</div>` : ''}
+        <div style="flex:1;min-height:20px"></div>
+      </div>
+      <div style="display:flex;gap:10px;padding:12px 20px calc(14px + env(safe-area-inset-bottom));border-top:1px solid var(--border);background:var(--bg-1)">
+        <button onclick="skipBroadcast('${esc(b.id)}')" style="flex:0 0 auto;min-height:52px;padding:0 22px;border-radius:12px;border:1px solid var(--border);background:var(--bg-3);color:var(--ink-3);font-family:'JetBrains Mono';font-size:13px;text-transform:uppercase;letter-spacing:0.05em;cursor:pointer">Skip</button>
+        <button onclick="ackBroadcast('${esc(b.id)}')" style="flex:1;min-height:52px;border-radius:12px;border:none;background:var(--green);color:#06240f;font-family:'Anton';font-size:19px;text-transform:uppercase;letter-spacing:0.03em;cursor:pointer">Compris 🫡</button>
+      </div>
+    </div>
+  `;
 }
 
 // Ouvre la modale détail d'une instance (récurrente ou non)
@@ -21601,6 +22208,15 @@ function _initPlayersSync() {
             }
           }
         } catch (e) { console.warn('[autoclose] notice:', e.message); }
+        // CHANTIER D : popup diffusion(s) coach pour la joueuse. Après la 1re
+        // sync complète, si des broadcasts pending la ciblent → popup séquentielle
+        // (Skip / Compris). One-shot par session (flag interne dans la fn).
+        try {
+          if (state.auth && state.auth.role === 'player' && !window._broadcastBootChecked) {
+            window._broadcastBootChecked = true;
+            setTimeout(() => { try { maybeShowBroadcastPopup(); } catch (e) {} }, 600);
+          }
+        } catch (e) { console.warn('[broadcast] boot popup:', e.message); }
         // Subscribe Realtime sur toutes les entités configurées. On utilise
         // scheduleRender (debouncé 100ms) au lieu de render() direct pour
         // collapser plusieurs events Realtime en un seul re-render.
@@ -21612,6 +22228,11 @@ function _initPlayersSync() {
             try { ensureCurrentSeasonId(); } catch(e) {}
           }
           scheduleRender();
+          // CHANTIER D : une diffusion arrive en live (coach push) → popup joueuse.
+          if ((entityKey === 'broadcasts' || entityKey === 'broadcastReceipts')
+              && state.auth && state.auth.role === 'player') {
+            setTimeout(() => { try { maybeShowBroadcastPopup(); } catch(e) {} }, 200);
+          }
         });
         // Filet de sécurité : si l'utilisateur ferme l'onglet avant la fin
         // du debounce 400ms du PbSync, on flush immédiatement pour ne pas
@@ -21835,6 +22456,14 @@ function _renderBody() {
     </div>
     ${renderNav()}
   `;
+
+  // CHANTIER D : filet pour la joueuse qui se connecte EN COURS de session
+  // (après le boot, donc le check post-fetchAll a déjà passé). maybeShow…
+  // est idempotent (guard window._broadcastPopupOpen + ne montre que du
+  // pending) → pas de spam. Différé pour ne pas réentrer dans le render.
+  if (role === 'player' && !window._broadcastPopupOpen) {
+    setTimeout(() => { try { maybeShowBroadcastPopup(); } catch (e) {} }, 300);
+  }
 }
 
 // ============================================================
