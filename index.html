@@ -4451,6 +4451,89 @@ function currentSeasonConvocations() { return _filterEventsByTeam(_convocsSeason
 function currentSeasonChallenges()   { return _filterEventsByTeam(_challengesSeasonId(state.currentSeasonId)); }
 function currentSeasonPlays(opts)    { return getSeasonPlays(state.currentSeasonId, opts); }
 
+// ============================================================
+// DÉFIS AUTO PAR SAISON — anti-cumul cross-saison
+// ------------------------------------------------------------
+// Les 3 défis auto (présence entraînement / présence match / ponctualité) ont
+// un compteur `scores` par joueuse. S'ils étaient des singletons globaux, leurs
+// compteurs s'accumuleraient saison après saison. La règle : UN jeu de défis
+// auto PAR saison (chacun avec son `seasonId` et ses `scores` propres).
+//
+// La colonne challenges.season_id existe en BD (migration 20260524_002) et le
+// dump/apply de l'entité `challenges` la transporte déjà (cf. ENTITIES). Tout
+// le travail restant est côté client : créer/cibler le bon défi par saison.
+//
+// id déterministe `${type}-${seasonId}` : anti-doublon multi-device (deux coachs
+// qui créent la même saison ne génèrent pas deux défis du même type).
+
+// Retourne le défi AUTO d'un `type` pour une saison donnée (défaut : saison
+// active), en le créant à la volée s'il manque. Garantit qu'un incrément de
+// présence/ponctualité atterrit TOUJOURS dans le défi de la BONNE saison.
+function getAutoChallenge(type, seasonId) {
+  seasonId = seasonId || getActiveSeasonId();
+  state.challenges = state.challenges || [];
+  if (!seasonId) {
+    // Saisons pas encore chargées : fallback comportement legacy (1er défi du type).
+    return state.challenges.find(c => c.autoCount && c.type === type) || null;
+  }
+  let ch = state.challenges.find(c => c.autoCount && c.type === type && c.seasonId === seasonId);
+  if (ch) return ch;
+  // Migre un défi legacy (autoCount, sans seasonId) vers cette saison (préserve compteurs).
+  const legacy = state.challenges.find(c => c.autoCount && c.type === type && !c.seasonId);
+  if (legacy) { legacy.seasonId = seasonId; return legacy; }
+  // Sinon crée à la volée depuis le template par défaut, compteurs vides.
+  const tpl = DEFAULT_CHALLENGES.find(c => c.autoCount && c.type === type);
+  if (!tpl) return null;
+  ch = { ...tpl, id: `${type}-${seasonId}`, seasonId, scores: {} };
+  state.challenges.push(ch);
+  return ch;
+}
+
+// Clone les défis AUTO d'une saison source vers une nouvelle saison, compteurs
+// remis à zéro. Appelé à la CRÉATION d'une saison. Fallback : si la source n'a
+// pas de défis auto (ou pas de source), on part de DEFAULT_CHALLENGES.
+function _cloneAutoChallengesForSeason(newSeasonId, sourceSeasonId) {
+  if (!newSeasonId) return;
+  state.challenges = state.challenges || [];
+  let templates = sourceSeasonId
+    ? state.challenges.filter(c => c.autoCount && c.seasonId === sourceSeasonId)
+    : [];
+  if (templates.length === 0) templates = DEFAULT_CHALLENGES.filter(c => c.autoCount);
+  templates.forEach(tpl => {
+    // Idempotent : ne recrée pas un défi du même type déjà présent sur la cible.
+    if (state.challenges.find(c => c.autoCount && c.type === tpl.type && c.seasonId === newSeasonId)) return;
+    state.challenges.push({ ...tpl, id: `${tpl.type}-${newSeasonId}`, seasonId: newSeasonId, scores: {} });
+  });
+}
+
+// Boot coach : intégrité des défis auto.
+//  1) BACKFILL legacy : tout défi auto sans seasonId → rattaché à la saison active
+//     (préserve les compteurs en cours). Défensif : la prod est déjà backfillée
+//     côté BD (migration 20260524_002) ; couvre un device avec state local offline.
+//  2) INIT : si la saison active n'a aucun défi auto d'un type, le créer (vide).
+//     Couvre une saison créée avant ce fix.
+// Idempotent. Retourne true si le state a changé.
+function _ensureAutoChallenges() {
+  const seasonId = getActiveSeasonId();
+  if (!seasonId) return false;
+  state.challenges = state.challenges || [];
+  let changed = false;
+  // 1) Backfill legacy (ordre important : avant l'init, pour que les défis
+  //    rattachés soient reconnus et qu'on n'en crée pas de doublons).
+  state.challenges.forEach(c => {
+    if (c.autoCount && !c.seasonId) { c.seasonId = seasonId; changed = true; }
+  });
+  // 2) Init défis auto manquants sur la saison active.
+  DEFAULT_CHALLENGES.filter(c => c.autoCount).forEach(tpl => {
+    const exists = state.challenges.find(c => c.autoCount && c.type === tpl.type && c.seasonId === seasonId);
+    if (!exists) {
+      state.challenges.push({ ...tpl, id: `${tpl.type}-${seasonId}`, seasonId, scores: {} });
+      changed = true;
+    }
+  });
+  return changed;
+}
+
 // Ressentis équipe de la saison courante. teamReviews n'a PAS de season_id en
 // base → on filtre par plage de dates [season.startDate, season.endDate] (option
 // retenue : zéro migration). r.date est une chaîne ISO YYYY-MM-DD (cf.
@@ -5612,6 +5695,10 @@ function createSeasonFromModal() {
       state.seasonPlays.push({ seasonId: id, playId: link.playId, active: true });
     });
   }
+
+  // 4. Clone les défis AUTO (présence/ponctualité) avec compteurs vides → chaque
+  //    saison a ses propres défis, aucun cumul cross-saison.
+  _cloneAutoChallengesForSeason(id, sourceSeasonId);
 
   persist();
   closeModal();
@@ -13117,7 +13204,9 @@ function _applyConvocClosure(c, instanceDate) {
     ? getSeasonPlayers(_seasonId, { team: _convTeam })
     : (state.players || []);
   const targetType = c.type === 'match' ? 'attendance_match' : 'attendance_training';
-  const ch = state.challenges.find(x => x.type === targetType && x.autoCount);
+  // Défi auto de la SAISON de la convoc (pas un singleton global) → fini le cumul
+  // cross-saison. Créé à la volée si la saison n'a pas encore son défi.
+  const ch = getAutoChallenge(targetType, _seasonId);
   const credit = (responses) => {
     if (!ch) return;
     const presentPlayers = _seasonPool.filter(p => !responses[p.id] || responses[p.id].status === 'present');
@@ -16215,8 +16304,8 @@ function validateArrival(parentId, dateStr, pid) {
 
   sheet.arrivals[pid] = { at: now, lateMin };
 
-  // Mettre à jour le challenge ponctualité (delta)
-  const ch = state.challenges.find(x => x.type === 'punctuality' && x.autoCount);
+  // Mettre à jour le challenge ponctualité (delta) — défi de la SAISON de la convoc.
+  const ch = getAutoChallenge('punctuality', c.seasonId || state.currentSeasonId);
   if (ch) {
     ch.scores = ch.scores || {};
     ch.scores[pid] = Math.max(0, (ch.scores[pid] || 0) - oldLate + lateMin);
@@ -16235,8 +16324,8 @@ function undoArrival(parentId, dateStr, pid) {
   const entry = sheet.arrivals && sheet.arrivals[pid];
   if (!entry) return;
 
-  // Retirer du challenge
-  const ch = state.challenges.find(x => x.type === 'punctuality' && x.autoCount);
+  // Retirer du challenge — défi de la SAISON de la convoc.
+  const ch = getAutoChallenge('punctuality', c.seasonId || state.currentSeasonId);
   if (ch && ch.scores) {
     ch.scores[pid] = Math.max(0, (ch.scores[pid] || 0) - entry.lateMin);
   }
@@ -22924,6 +23013,12 @@ function _initPlayersSync() {
         // - coach garde son choix s'il est valide, sinon fallback active
         // - joueuse toujours forcée sur la saison active
         try { ensureCurrentSeasonId(); } catch(e) {}
+        // DÉFIS AUTO PAR SAISON : backfill legacy + init des défis manquants sur
+        // la saison active. COACH UNIQUEMENT (jamais d'écriture défis depuis un
+        // device joueuse — la joueuse lit ce que le coach a synchronisé).
+        try {
+          if (state.auth && state.auth.role === 'coach') _ensureAutoChallenges();
+        } catch(e) { console.warn('[migration] auto challenges:', e.message); }
         // PHASE 2 : migration one-shot des plans d'entraînement legacy
         // (c.trainingPlan convoc-level, localStorage only) → entité per-instance
         // synchronisée. Idempotente (ne recrée pas une entrée existante).
