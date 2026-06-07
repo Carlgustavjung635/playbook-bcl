@@ -3552,7 +3552,7 @@ const ENTITIES = [
     dump: (state) => Object.fromEntries((state.broadcasts || []).map(b => [b.id, {
       id: b.id, coach_id: b.coachId || null, message: b.message || '',
       media_url: b.mediaUrl || null,
-      media_type: (b.mediaType === 'image' || b.mediaType === 'video') ? b.mediaType : null,
+      media_type: ['image', 'video', 'embed'].includes(b.mediaType) ? b.mediaType : null,
       target_type: ['team', 'players', 'e1', 'e2'].includes(b.targetType) ? b.targetType : 'team',
       target_player_ids: Array.isArray(b.targetPlayerIds) ? b.targetPlayerIds : [],
       season_id: b.seasonId || null,
@@ -13025,7 +13025,7 @@ function createBroadcast(payload) {
     coachId: 'coach',
     message: (payload.message || '').trim(),
     mediaUrl: payload.mediaUrl || '',
-    mediaType: (payload.mediaType === 'image' || payload.mediaType === 'video') ? payload.mediaType : null,
+    mediaType: ['image', 'video', 'embed'].includes(payload.mediaType) ? payload.mediaType : null,
     targetType: ['team', 'players', 'e1', 'e2'].includes(payload.targetType) ? payload.targetType : 'team',
     targetPlayerIds: Array.isArray(payload.targetPlayerIds) ? payload.targetPlayerIds.slice() : [],
     seasonId: payload.seasonId || getActiveSeasonId() || null,
@@ -13177,6 +13177,88 @@ function clearBroadcastMedia() {
 }
 
 // ------------------------------------------------------------
+// VIDÉO HÉBERGÉE PAR URL (embed) — YouTube / Vimeo / Instagram / lien direct
+// ------------------------------------------------------------
+// parseEmbedUrl(url) → { provider, id, embedUrl, watchUrl } ou null.
+//   provider : 'youtube' | 'vimeo' | 'instagram' | 'link' (fallback).
+//   embedUrl : URL d'iframe (null pour 'link' → on affiche un lien cliquable).
+function parseEmbedUrl(url) {
+  if (typeof url !== 'string') return null;
+  const u = url.trim();
+  if (!/^https?:\/\//i.test(u)) return null;
+  let m;
+  // YouTube : watch?v=, youtu.be/, /shorts/, /embed/
+  m = u.match(/(?:youtube\.com\/(?:watch\?(?:[^#]*&)?v=|shorts\/|embed\/|live\/)|youtu\.be\/)([A-Za-z0-9_-]{6,})/i);
+  if (m) return { provider: 'youtube', id: m[1], embedUrl: `https://www.youtube.com/embed/${m[1]}`, watchUrl: u };
+  // Vimeo : vimeo.com/123 ou vimeo.com/video/123
+  m = u.match(/vimeo\.com\/(?:video\/)?(\d+)/i);
+  if (m) return { provider: 'vimeo', id: m[1], embedUrl: `https://player.vimeo.com/video/${m[1]}`, watchUrl: u };
+  // Instagram : /p/, /reel/, /tv/
+  m = u.match(/instagram\.com\/(p|reel|tv)\/([A-Za-z0-9_-]+)/i);
+  if (m) return { provider: 'instagram', id: m[2], embedUrl: `https://www.instagram.com/${m[1].toLowerCase()}/${m[2]}/embed/`, watchUrl: u };
+  // Fallback : lien direct / autre plateforme → pas d'iframe, lien cliquable.
+  return { provider: 'link', id: null, embedUrl: null, watchUrl: u };
+}
+
+const _EMBED_LABELS = { youtube: '▶ YouTube', vimeo: '▶ Vimeo', instagram: '▶ Instagram', link: '🔗 Lien vidéo' };
+
+// Rendu de l'embed (popup joueuse + aperçu). opts.compact → tailles réduites.
+function renderBroadcastEmbed(b, opts) {
+  opts = opts || {};
+  const parsed = parseEmbedUrl(b.mediaUrl);
+  if (!parsed) return '';
+  if (parsed.embedUrl) {
+    if (parsed.provider === 'instagram') {
+      // Instagram embed est plus haut que large (format portrait).
+      return `<iframe src="${esc(parsed.embedUrl)}" loading="lazy" frameborder="0" scrolling="no" allowtransparency="true" style="width:100%;height:${opts.compact ? '300px' : 'min(62vh,560px)'};border:none;border-radius:12px;background:#000;margin:16px 0"></iframe>`;
+    }
+    // YouTube / Vimeo : ratio 16:9 responsive.
+    return `<div style="position:relative;width:100%;padding-top:56.25%;margin:16px 0;border-radius:12px;overflow:hidden;background:#000">
+      <iframe src="${esc(parsed.embedUrl)}" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen loading="lazy" frameborder="0" style="position:absolute;inset:0;width:100%;height:100%;border:none"></iframe>
+    </div>`;
+  }
+  // Fallback lien direct (autre plateforme).
+  return `<a href="${esc(parsed.watchUrl)}" target="_blank" rel="noopener noreferrer" style="display:flex;align-items:center;gap:10px;padding:15px;margin:16px 0;background:var(--bg-3);border:1px solid var(--border);border-radius:12px;color:var(--orange);text-decoration:none;font-size:15px;font-weight:600">▶ Ouvrir la vidéo</a>`;
+}
+
+// HTML d'aperçu pour le composer (sous le champ URL). Retourne '' si vide.
+function embedPreviewHtml(val) {
+  if (!val || !val.trim()) return '';
+  const parsed = parseEmbedUrl(val);
+  if (!parsed) {
+    return `<div style="margin-top:8px;padding:10px;border-radius:8px;background:var(--red-soft);color:var(--red);font-size:12px">⚠ URL invalide — doit commencer par http:// ou https://</div>`;
+  }
+  const label = _EMBED_LABELS[parsed.provider] || '🔗 Lien';
+  return `<div style="margin-top:8px">
+    <div style="font-size:11px;color:var(--green);font-family:'JetBrains Mono';margin-bottom:6px">✓ ${label} détecté</div>
+    ${renderBroadcastEmbed({ mediaUrl: parsed.watchUrl, mediaType: 'embed' }, { compact: true })}
+  </div>`;
+}
+
+function setBroadcastMediaMode(mode) {
+  const d = state._composeBroadcast;
+  if (!d || d.mediaMode === mode) return;
+  // Bascule de mode : on purge le média courant (fichier uploadé si présent).
+  _removeBroadcastMediaFile(d.mediaUrl);
+  d.mediaUrl = ''; d.mediaType = null;
+  if (mode !== 'url') d.urlDraft = '';
+  d.mediaMode = mode;
+  renderBroadcastComposer();
+}
+
+// Live preview de l'URL sans re-render complet (préserve le focus du champ).
+function previewBroadcastUrl(val) {
+  const d = state._composeBroadcast;
+  if (!d) return;
+  d.urlDraft = val;
+  const parsed = (val && val.trim()) ? parseEmbedUrl(val) : null;
+  if (parsed) { d.mediaUrl = parsed.watchUrl; d.mediaType = 'embed'; }
+  else { d.mediaUrl = ''; d.mediaType = null; }
+  const host = document.getElementById('bc-url-preview');
+  if (host) host.innerHTML = embedPreviewHtml(val);
+}
+
+// ------------------------------------------------------------
 // UI COACH — composer (création)
 // ------------------------------------------------------------
 function openBroadcastComposer() {
@@ -13184,6 +13266,8 @@ function openBroadcastComposer() {
     id: uid(),
     message: '',
     mediaUrl: '', mediaType: null,
+    mediaMode: 'file',   // 'file' (upload) | 'url' (vidéo hébergée)
+    urlDraft: '',
     targetType: 'team',
     targetPlayerIds: [],
     expiresInDays: 7,
@@ -13229,6 +13313,8 @@ function renderBroadcastComposer() {
   const mediaPreview = !d.mediaUrl ? '' : (d.mediaType === 'video'
     ? `<video src="${esc(d.mediaUrl)}" controls playsinline style="width:100%;max-height:200px;border-radius:8px;background:#000"></video>`
     : `<img src="${esc(d.mediaUrl)}" alt="" style="width:100%;max-height:200px;object-fit:contain;border-radius:8px;background:#000">`);
+  const mode = d.mediaMode || 'file';
+  const modeBtn = (id, label) => `<button onclick="setBroadcastMediaMode('${id}')" style="flex:1;padding:8px;border-radius:8px;font-size:12px;cursor:pointer;border:1px solid ${mode === id ? 'var(--orange)' : 'var(--border)'};background:${mode === id ? 'var(--orange-soft)' : 'var(--bg-3)'};color:${mode === id ? 'var(--orange)' : 'var(--ink-2)'};font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.04em">${label}</button>`;
 
   openModal(`
     <div class="modal-header">
@@ -13243,17 +13329,29 @@ function renderBroadcastComposer() {
       <div id="bc-count" style="text-align:right;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">${(d.message || '').length}/500</div>
 
       <label class="eyebrow-muted" style="display:block;margin:14px 0 6px">Média (optionnel)</label>
-      ${d._uploading ? `
-        <div style="padding:18px;text-align:center;background:var(--bg-3);border-radius:8px;color:var(--ink-3);font-size:13px">⏳ Envoi du média…</div>
-      ` : d.mediaUrl ? `
-        <div style="position:relative">
-          ${mediaPreview}
-          <button onclick="clearBroadcastMedia()" style="position:absolute;top:8px;right:8px;width:32px;height:32px;border-radius:50%;border:none;background:rgba(0,0,0,0.7);color:#fff;font-size:16px;cursor:pointer">✕</button>
-        </div>
+      <div style="display:flex;gap:6px;margin-bottom:10px">
+        ${modeBtn('file', '📎 Fichier')}
+        ${modeBtn('url', '🔗 Lien vidéo')}
+      </div>
+      ${mode === 'file' ? `
+        ${d._uploading ? `
+          <div style="padding:18px;text-align:center;background:var(--bg-3);border-radius:8px;color:var(--ink-3);font-size:13px">⏳ Envoi du média…</div>
+        ` : d.mediaUrl ? `
+          <div style="position:relative">
+            ${mediaPreview}
+            <button onclick="clearBroadcastMedia()" style="position:absolute;top:8px;right:8px;width:32px;height:32px;border-radius:50%;border:none;background:rgba(0,0,0,0.7);color:#fff;font-size:16px;cursor:pointer">✕</button>
+          </div>
+        ` : `
+          <label for="bc-media-input" class="btn btn-secondary btn-block" style="cursor:pointer">📎 Ajouter photo ou vidéo</label>
+          <input id="bc-media-input" type="file" accept="image/*,video/*" style="display:none" onchange="uploadBroadcastMedia(event)">
+          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px;text-align:center">Vidéo : 50 Mo max</div>
+        `}
       ` : `
-        <label for="bc-media-input" class="btn btn-secondary btn-block" style="cursor:pointer">📎 Ajouter photo ou vidéo</label>
-        <input id="bc-media-input" type="file" accept="image/*,video/*" style="display:none" onchange="uploadBroadcastMedia(event)">
-        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px;text-align:center">Vidéo : 50 Mo max</div>
+        <input id="bc-url-input" type="url" inputmode="url" placeholder="Colle un lien YouTube, Vimeo, Instagram…" value="${esc(d.urlDraft || '')}"
+          oninput="previewBroadcastUrl(this.value)"
+          style="width:100%;background:var(--bg-3);border:1px solid var(--border);border-radius:8px;color:var(--ink);padding:11px;font-size:14px;font-family:inherit;box-sizing:border-box">
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px">YouTube · Vimeo · Instagram · lien direct</div>
+        <div id="bc-url-preview">${embedPreviewHtml(d.urlDraft)}</div>
       `}
 
       <label class="eyebrow-muted" style="display:block;margin:16px 0 6px">Destinataires</label>
@@ -13292,6 +13390,10 @@ function submitBroadcast() {
   const d = state._composeBroadcast;
   if (!d) return;
   const msg = (d.message || '').trim();
+  // Mode URL : si un lien est saisi mais invalide → on bloque (sinon perte silencieuse).
+  if (d.mediaMode === 'url' && (d.urlDraft || '').trim() && !d.mediaUrl) {
+    alert('Le lien vidéo est invalide. Corrige-le ou bascule sur « Fichier ».'); return;
+  }
   if (!msg && !d.mediaUrl) { alert('Ajoute un message ou un média avant d\'envoyer.'); return; }
   if (d.targetType === 'players' && (!d.targetPlayerIds || d.targetPlayerIds.length === 0)) {
     alert('Sélectionne au moins une joueuse.'); return;
@@ -13359,7 +13461,7 @@ function renderBroadcastManager() {
 function broadcastManagerRow(b) {
   const s = broadcastStats(b);
   const preview = esc((b.message || '').trim().slice(0, 90)) || '<span style="color:var(--ink-3)">(média seul)</span>';
-  const icon = b.mediaType === 'video' ? '🎬 ' : (b.mediaType === 'image' ? '🖼 ' : '');
+  const icon = b.mediaType === 'video' ? '🎬 ' : (b.mediaType === 'image' ? '🖼 ' : (b.mediaType === 'embed' ? '🔗 ' : ''));
   const expired = b.expiresAt && Date.now() > b.expiresAt;
   return `
     <div style="padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:10px;${b.archived ? 'opacity:0.6' : ''}">
@@ -13471,9 +13573,10 @@ function _resolveBroadcast(id, status) {
 function renderBroadcastPopup(b) {
   const teamName = (state.team && state.team.displayNickname) || '';
   const hasMedia = b.mediaUrl && b.mediaType;
-  const mediaHtml = !hasMedia ? '' : (b.mediaType === 'video'
-    ? `<video src="${esc(b.mediaUrl)}" controls playsinline style="width:100%;max-height:42vh;border-radius:12px;background:#000;margin:16px 0"></video>`
-    : `<img src="${esc(b.mediaUrl)}" alt="" style="width:100%;max-height:42vh;object-fit:contain;border-radius:12px;background:#000;margin:16px 0">`);
+  const mediaHtml = !hasMedia ? ''
+    : b.mediaType === 'embed' ? renderBroadcastEmbed(b, { compact: false })
+    : b.mediaType === 'video' ? `<video src="${esc(b.mediaUrl)}" controls playsinline style="width:100%;max-height:42vh;border-radius:12px;background:#000;margin:16px 0"></video>`
+    : `<img src="${esc(b.mediaUrl)}" alt="" style="width:100%;max-height:42vh;object-fit:contain;border-radius:12px;background:#000;margin:16px 0">`;
   return `
     <div style="position:fixed;inset:0;z-index:9999;background:rgba(8,10,14,0.94);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);display:flex;flex-direction:column">
       <div style="flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:calc(28px + env(safe-area-inset-top)) 20px 12px;display:flex;flex-direction:column">
