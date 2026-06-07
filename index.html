@@ -4598,9 +4598,14 @@ function makeConvocInstance(convoc, dateStr) {
 // Pas d'argument de saison explicite : on s'appuie sur le state global,
 // car les vues coach et joueuse partagent la même source. La joueuse a
 // currentSeasonId forcé sur active au boot, donc le résultat est correct.
-function getAllEventsBetween(fromISO, toISO) {
+function getAllEventsBetween(fromISO, toISO, opts) {
   const all = [];
-  const convocs = currentSeasonConvocations();
+  // opts.allSeasons : vue coach « Toutes » — on sort du scope saison courante
+  // pour voir aussi les convocs des saisons futures (préparées à l'avance).
+  // On garde le filtre effectif (E1/E2) pour rester cohérent multi-effectif.
+  const convocs = (opts && opts.allSeasons)
+    ? _filterEventsByTeam(state.convocations || [])
+    : currentSeasonConvocations();
   convocs.forEach(c => {
     getConvocInstances(c, fromISO, toISO).forEach(i => all.push(i));
   });
@@ -11819,7 +11824,71 @@ function renderConvocs() {
   const todayStr = isoDate(today);
   const isCoach = state.auth.role === 'coach';
 
-  // 3 prochaines semaines d'instances
+  // Fix #2 : le coach doit pouvoir voir/éditer les convocs préparées à l'avance
+  // (parfois la saison prochaine), masquées par le filtre « 3 semaines » par
+  // défaut. Toggle opt-in : weeks (défaut visuel) / season / all. La joueuse
+  // reste sur la vue 3 semaines (pas besoin de voir 6 mois en avance).
+  const range = isCoach ? (state.convocRange || 'weeks') : 'weeks';
+
+  const toggleHtml = isCoach ? `
+    <div class="segmented" style="margin:0 18px 12px;overflow-x:auto;flex-wrap:nowrap">
+      <button class="segmented-btn ${range==='weeks'?'active':''}" onclick="setConvocRange('weeks')">Prochaines semaines</button>
+      <button class="segmented-btn ${range==='season'?'active':''}" onclick="setConvocRange('season')">Cette saison</button>
+      <button class="segmented-btn ${range==='all'?'active':''}" onclick="setConvocRange('all')">Toutes</button>
+    </div>
+  ` : '';
+
+  const headerHtml = (countLabel) => `
+    <div style="padding:0 18px 12px;display:flex;justify-content:space-between;align-items:center">
+      <div style="font-size:12px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em">${countLabel}</div>
+      ${isCoach ? `<button class="btn btn-primary" onclick="editConvoc()">+ Nouveau</button>` : ''}
+    </div>`;
+
+  // ---- Vue étendue coach (season / all) : liste chrono groupée par mois ----
+  if (range !== 'weeks') {
+    const season = getCurrentSeason();
+    let toISO, pastFromISO, allSeasons = false;
+    if (range === 'season') {
+      toISO = (season && season.endDate) || isoDate(new Date(today.getTime() + 365 * 86400000));
+      pastFromISO = (season && season.startDate) || isoDate(new Date(today.getTime() - 365 * 86400000));
+    } else { // 'all' : couvre aussi la saison prochaine (~18 mois autour d'aujourd'hui)
+      toISO = isoDate(new Date(today.getTime() + 550 * 86400000));
+      pastFromISO = isoDate(new Date(today.getTime() - 550 * 86400000));
+      allSeasons = true;
+    }
+    const upcoming = getAllEventsBetween(todayStr, toISO, { allSeasons });
+    const past = getAllEventsBetween(pastFromISO, isoDate(new Date(today.getTime() - 86400000)), { allSeasons });
+    past.reverse();
+    const months = groupEventsByMonth(upcoming);
+    const scopeLabel = range === 'season' ? 'cette saison' : 'toutes saisons';
+
+    return `
+      ${toggleHtml}
+      ${headerHtml(`${upcoming.length} à venir · ${scopeLabel}`)}
+      ${upcoming.length === 0 && past.length === 0 ? `
+        <div class="empty">
+          <div class="empty-icon">○</div>
+          <div class="empty-title">Aucun événement</div>
+          <div class="empty-desc">Crée ton premier événement</div>
+        </div>
+      ` : `
+        ${months.map(mo => `
+          <div style="padding:14px 18px 6px"><div class="eyebrow">${mo.label}</div></div>
+          <div class="list-section">
+            ${mo.events.map(e => eventInstanceRow(e, isCoach)).join('')}
+          </div>
+        `).join('')}
+        ${past.length > 0 ? `
+          <div style="padding:18px 18px 6px"><div class="eyebrow-muted">Passées (${past.length})</div></div>
+          <div class="list-section" style="opacity:0.7">
+            ${past.slice(0, 50).map(e => eventInstanceRow(e, isCoach)).join('')}
+          </div>
+        ` : ''}
+      `}
+    `;
+  }
+
+  // ---- Vue par défaut (joueuse + coach) : 3 prochaines semaines ----
   const threeWeeksLater = new Date(today.getTime() + 21 * 86400000);
   const upcoming = getAllEventsBetween(todayStr, isoDate(threeWeeksLater));
 
@@ -11832,10 +11901,8 @@ function renderConvocs() {
   const weeks = groupEventsByWeek(upcoming, today);
 
   return `
-    <div style="padding:0 18px 12px;display:flex;justify-content:space-between;align-items:center">
-      <div style="font-size:12px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em">${upcoming.length} événement${upcoming.length>1?'s':''} sur 3 semaines</div>
-      ${isCoach ? `<button class="btn btn-primary" onclick="editConvoc()">+ Nouveau</button>` : ''}
-    </div>
+    ${toggleHtml}
+    ${headerHtml(`${upcoming.length} événement${upcoming.length>1?'s':''} sur 3 semaines`)}
 
     ${upcoming.length === 0 && past.length === 0 ? `
       <div class="empty">
@@ -11865,6 +11932,30 @@ function renderConvocs() {
       ` : ''}
     `}
   `;
+}
+
+// Toggle de portée des convocs (coach). Persisté en mémoire de session (pas de
+// migration) → revient à 'weeks' au reload, défaut visuel volontaire.
+function setConvocRange(range) {
+  state.convocRange = range;
+  render();
+}
+
+// Groupe une liste d'instances triées par mois calendaire (vue coach étendue).
+function groupEventsByMonth(events) {
+  const MOIS = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
+  const out = [];
+  const byKey = {};
+  events.forEach(e => {
+    const d = new Date(e.date + 'T00:00:00');
+    const key = d.getFullYear() + '-' + String(d.getMonth()).padStart(2, '0');
+    if (!byKey[key]) {
+      byKey[key] = { label: MOIS[d.getMonth()] + ' ' + d.getFullYear(), events: [] };
+      out.push(byKey[key]);
+    }
+    byKey[key].events.push(e);
+  });
+  return out;
 }
 
 function groupEventsByWeek(events, today) {
