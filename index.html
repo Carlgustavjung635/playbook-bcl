@@ -19517,10 +19517,21 @@ function ffbbMapsHref(s) {
   const q = [s.nom, s.adresse, s.cp, s.ville].filter(Boolean).join(' ');
   return q ? ('https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(q)) : null;
 }
+// « À venir » = strictement basé sur la DATE (date >= aujourd'hui), indépendamment
+// du score. Un match passé sans résultat saisi n'est PLUS à venir → il va dans
+// « Passés » (avec mention « score non saisi »). Sans date = à venir (à définir).
+function ffbbTodayStr() {
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+function ffbbIsUpcoming(m) {
+  if (!m || !m.date) return true;
+  return String(m.date).slice(0, 10) >= ffbbTodayStr();
+}
 function ffbbDateFilter(matches, mode) {
   if (!mode || mode === 'all') return matches;
-  if (mode === 'upcoming') return matches.filter(m => !m.played);
-  if (mode === 'past')     return matches.filter(m => m.played);
+  if (mode === 'upcoming') return matches.filter(ffbbIsUpcoming);
+  if (mode === 'past')     return matches.filter(m => !ffbbIsUpcoming(m));
   if (mode === 'week') {
     const now = Date.now(), back = 2 * 864e5, fwd = 9 * 864e5;
     return matches.filter(m => { const t = m.date ? Date.parse(m.date) : 0; return t && t >= now - back && t <= now + fwd; });
@@ -19791,9 +19802,13 @@ function ffbbDashMatchCard(m) {
     (m.played ? (win ? '<span style="color:var(--green,#16a34a);font-weight:700">V</span>'
                      : (loss ? '<span style="color:var(--red,#ef4444);font-weight:700">D</span>' : '·'))
               : '<span style="color:var(--orange)">→</span>');
+  const upcoming = ffbbIsUpcoming(m);
   const score = m.played
     ? `<div class="match-score" style="white-space:nowrap">${m.homeScore}–${m.awayScore}</div>`
-    : `<div style="font-family:'JetBrains Mono';font-size:11px;color:var(--orange);text-transform:uppercase;white-space:nowrap">${ffbbTime(m.date) || 'À venir'}</div>`;
+    : (upcoming
+      ? `<div style="font-family:'JetBrains Mono';font-size:11px;color:var(--orange);text-transform:uppercase;white-space:nowrap">${ffbbTime(m.date) || 'À venir'}</div>`
+      // Match passé sans résultat saisi (indication, pas un blocage).
+      : `<div style="font-family:'JetBrains Mono';font-size:10px;color:var(--ink-3);text-transform:uppercase;white-space:nowrap" title="Date passée, score non renseigné côté FFBB">📋 score non saisi</div>`);
   const maps = ffbbMapsHref(m.salle);
   const salleTxt = [m.salle.nom, m.salle.ville].filter(Boolean).join(' · ');
   return `
@@ -19939,8 +19954,10 @@ function renderFFBB() {
     listHtml = `<div class="empty"><div class="empty-icon">○</div><div class="empty-title">Aucun match</div><div class="empty-desc">Ajuste les filtres.</div></div>`;
   } else {
     // Tri : à venir d'abord (chrono), passés ensuite (anti-chrono) — pratique au quotidien.
-    const up = shown.filter(m => !m.played).sort((a, b) => (a.date || '').localeCompare(b.date || ''));
-    const pa = shown.filter(m => m.played).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    // Split par DATE (pas par score) : à venir = date >= aujourd'hui, chrono ;
+    // passés = date < aujourd'hui (joués OU non), anti-chrono.
+    const up = shown.filter(ffbbIsUpcoming).sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+    const pa = shown.filter(m => !ffbbIsUpcoming(m)).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
     const block = (title, arr) => arr.length ? `
       <div class="section-header"><div><div class="eyebrow">${title}</div></div></div>
       <div class="list-section">${arr.map(ffbbDashMatchCard).join('')}</div>` : '';
