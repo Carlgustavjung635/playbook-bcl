@@ -120,6 +120,11 @@
   }
   .topbar-logo {
     display: flex; align-items: center; gap: 10px;
+    flex: 0 1 auto; min-width: 0;
+  }
+  .topbar-logo > div { min-width: 0; }
+  .topbar-title, .topbar-sub {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .topbar-orb {
     width: 32px; height: 32px; border-radius: 50%;
@@ -145,6 +150,30 @@
     font-size: 9px; text-transform: uppercase; letter-spacing: 0.1em;
     font-weight: 700;
     border: 1px solid rgba(255, 107, 0, 0.3);
+  }
+  /* Conteneur des actions header (droite) : ne wrappe jamais, reste compact. */
+  .topbar-actions {
+    display: flex; align-items: center; gap: 6px;
+    flex-shrink: 0; min-width: 0;
+  }
+  /* Boutons d'action header : touch target confortable + alignement vertical. */
+  .role-badge.tb-act {
+    display: inline-flex; align-items: center; gap: 4px;
+    min-height: 38px; padding: 6px 10px; white-space: nowrap;
+  }
+  /* Bouton filtre équipe : label tronqué (ellipsis) pour les surnoms longs. */
+  .role-badge.tb-team { max-width: 104px; }
+  .role-badge.tb-team-on {
+    background: var(--orange); color: #000; border-color: var(--orange);
+  }
+  .tb-team-lbl {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    min-width: 0;
+  }
+  /* Le surnom de la joueuse dans le bouton ⚙ peut être tronqué si étroit. */
+  .tb-act-label {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    max-width: 120px; display: inline-block; vertical-align: middle;
   }
 
   /* ========== BOTTOM NAV ========== */
@@ -5499,12 +5528,11 @@ function renderTopbar() {
             : `<div class="topbar-sub">${state.team && state.team.displayNickname ? esc(state.team.displayNickname) : "BCL · L'Islois"}</div>`}
         </div>
       </div>
-      <div style="display:flex;gap:6px;align-items:center">
-        ${isCoach && activeLive ? `<button class="role-badge" style="background:#ff2222;color:white;border-color:#ff2222;cursor:pointer;animation:pulseGlow 2s infinite" onclick="openMatch('${activeLive.id}')">● LIVE</button>` : ''}
+      <div class="topbar-actions">
+        ${isCoach && activeLive ? `<button class="role-badge tb-act" style="background:#ff2222;color:white;border-color:#ff2222;cursor:pointer;animation:pulseGlow 2s infinite" onclick="openMatch('${activeLive.id}')" aria-label="Live en cours — gérer">🔴 LIVE</button>` : ''}
         ${renderTeamPill()}
         ${isCoach ? renderSeasonSwitcher() : ''}
-        ${isCoach ? `<button class="role-badge" style="cursor:pointer" onclick="openPublicShare()">🔗 Portail</button>` : ''}
-        <button class="role-badge" style="cursor:pointer;padding-left:10px;padding-right:10px" onclick="openSettings()" title="Menu">${player ? '#' + player.num + ' ' + esc(player.name) : esc(role ? role.label : '')} ⚙</button>
+        <button class="role-badge tb-act" style="cursor:pointer" onclick="openSettings()" title="Menu" aria-label="Menu${player ? ' — #' + player.num + ' ' + esc(player.name) : ''}" aria-haspopup="menu">${player ? '<span class="tb-act-label">#' + player.num + ' ' + esc(player.name) + '</span> ' : ''}⚙</button>
       </div>
     </header>
   `;
@@ -5518,34 +5546,81 @@ function renderTopbar() {
 // Pillule multi-effectif [E1 · E2 · Toutes] — visible UNIQUEMENT si le multi
 // est activé ET rôle coach/stat. Côté joueuse : rien (scope auto sur son tag).
 // Mono-équipe (multi off) : rien → topbar strictement identique à aujourd'hui.
+// Bouton compact "filtre équipe" (coach/stat, multi-effectif uniquement). Un seul
+// bouton 👥 affichant l'équipe active ; tap → bottom-sheet openTeamFilterMenu().
+// Remplace l'ancien segmented control 3 chips (E1/E2/Toutes) qui saturait le header
+// sur mobile 375px (cf. fix/header-multi-squad-ux-v1).
 function renderTeamPill() {
   if (!isMultiSquad()) return '';
   const role = state.auth && state.auth.role;
   if (role !== 'coach' && role !== 'stat') return '';
   const cur = state.teamFilter || 'all';
-  const seg = (tag, label) => {
-    const on = cur === tag;
-    return `<button onclick="setTeamFilter('${tag}')" style="border:none;background:${on ? 'var(--orange)' : 'transparent'};color:${on ? '#000' : 'var(--ink-2)'};font-family:'JetBrains Mono';font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;padding:5px 9px;cursor:pointer;border-radius:5px;transition:background .12s">${esc(label)}</button>`;
-  };
-  return `<div class="team-pill" style="display:inline-flex;gap:2px;padding:2px;background:var(--bg-3);border:1px solid var(--border);border-radius:7px" title="Filtrer par équipe">
-    ${seg('e1', teamLabel('e1', true))}
-    ${seg('e2', teamLabel('e2', true))}
-    ${seg('all', 'Toutes')}
-  </div>`;
+  const active = cur === 'e1' || cur === 'e2';
+  const label = active ? teamLabel(cur, true) : 'Toutes';
+  return `<button class="role-badge tb-act tb-team${active ? ' tb-team-on' : ''}" aria-haspopup="menu" aria-label="Filtre équipe : ${esc(label)} — changer" title="Filtrer par équipe" onclick="openTeamFilterMenu()">
+    <span aria-hidden="true">👥</span><span class="tb-team-lbl">${esc(label)}</span><span aria-hidden="true" style="opacity:.6">▾</span>
+  </button>`;
 }
 
+// Bottom-sheet de sélection d'équipe (3 options pleine largeur, touch ≥48px).
+// Réutilise l'infra openModal (escape, back-button, scroll-lock). setTeamFilter
+// re-render l'app ; on ferme la feuille ensuite.
+function openTeamFilterMenu() {
+  const cur = state.teamFilter || 'all';
+  const opts = [['e1', teamLabel('e1', false)], ['e2', teamLabel('e2', false)], ['all', 'Toutes les équipes']];
+  const row = (tag, label) => {
+    const on = cur === tag;
+    return `<button class="btn ${on ? 'btn-primary' : 'btn-secondary'} btn-block mb-2" role="menuitemradio" aria-checked="${on}" style="min-height:50px;display:flex;align-items:center;gap:10px;justify-content:flex-start;text-align:left" onclick="setTeamFilter('${tag}');closeModal()">
+      <span style="width:16px;flex:0 0 16px">${on ? '✓' : ''}</span><span>${esc(label)}</span>
+    </button>`;
+  };
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">👥 Filtre équipe</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body" role="menu" aria-label="Filtrer par équipe">
+      ${opts.map(o => row(o[0], o[1])).join('')}
+    </div>
+  `);
+}
+
+// Libellé court de saison pour le header mobile : "2026-2027" → "26-27".
+// Fallback sur les années de startDate/endDate, puis sur le nom tronqué.
+function seasonShortLabel(s) {
+  const yrs = ((s && s.name) || '').match(/\d{4}/g);
+  let a, b;
+  if (yrs && yrs.length >= 2) { a = yrs[0].slice(2); b = yrs[1].slice(2); }
+  else {
+    const sy = ((s && s.startDate) || '').slice(0, 4);
+    const ey = ((s && s.endDate) || '').slice(0, 4);
+    if (sy && ey) { a = sy.slice(2); b = ey.slice(2); }
+  }
+  if (a && b) return a + '-' + b;
+  return ((s && s.name) || '?').replace(/^saison\s*/i, '').slice(0, 7);
+}
+
+// Pillule saison compacte (coach). "📅 26-27" + pastille de statut (brouillon =
+// point orange, archivée = point gris). Tap → openSeasonsModal (comportement
+// inchangé). Le libellé long reste dans aria-label/title pour l'accessibilité.
 function renderSeasonSwitcher() {
   const seasons = state.seasons || [];
   if (seasons.length === 0) return '';
   const cur = getCurrentSeason();
-  const label = cur ? cur.name : 'Aucune saison';
-  const color = cur && cur.status === 'active' ? 'var(--green, #22c55e)'
-    : cur && cur.status === 'draft' ? 'var(--orange, #ff6b00)'
-    : 'var(--ink-3, #888)';
+  const color = cur && cur.status === 'active' ? '#22c55e'
+    : cur && cur.status === 'draft' ? '#ff6b00'
+    : '#888';
   const tag = cur && cur.status === 'draft' ? ' (brouillon)'
     : cur && cur.status === 'archived' ? ' (archivée)'
     : '';
-  return `<button class="role-badge" style="cursor:pointer;color:${color};border-color:${color}" onclick="openSeasonsModal()" title="Changer / gérer les saisons">📅 ${esc(label)}${tag}</button>`;
+  const short = cur ? seasonShortLabel(cur) : '—';
+  const fullLabel = (cur ? cur.name : 'Aucune saison') + tag;
+  const dot = cur && cur.status === 'draft'
+    ? `<span aria-hidden="true" style="width:6px;height:6px;border-radius:50%;background:#ff6b00;display:inline-block;box-shadow:0 0 6px #ff6b00;flex:0 0 auto"></span>`
+    : cur && cur.status === 'archived'
+    ? `<span aria-hidden="true" style="width:6px;height:6px;border-radius:50%;background:#888;display:inline-block;flex:0 0 auto"></span>`
+    : '';
+  return `<button class="role-badge tb-act" style="cursor:pointer;color:${color};border-color:${color};gap:4px" onclick="openSeasonsModal()" title="${esc(fullLabel)} · changer de saison" aria-label="Saison ${esc(fullLabel)} — changer">📅 ${esc(short)}${dot}</button>`;
 }
 
 // Modal gestion des saisons : liste + bouton "+ Nouvelle" + actions activer /
@@ -6161,6 +6236,9 @@ function openSettings() {
       ` : ''}
 
       ${role === 'coach' ? `
+        <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openPublicShare(),50)">
+          🔗 Portail public (partager le lien)
+        </button>
         ${_seasonsLoaded() ? `<button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openSeasonRosterEditor(),50)">
           👥 Effectif de la saison
         </button>` : ''}
