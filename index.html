@@ -6134,6 +6134,13 @@ function doLogout() {
   // on déconnecte aussi ce compte pour que la personne suivante reparte d'une
   // identité vierge (pas de fuite des données perso cloud entre utilisateurs).
   const wasBound = !!(state.auth && state.auth.role !== 'stat' && state.auth.boundUserId);
+  // CHANTIER D — reset des garde-fous broadcast de SESSION. Le logout SPA ne
+  // recharge pas la page : sans ce reset, le Set _broadcastSnoozed (« Plus tard »
+  // de la session) survit au changement de profil, et une joueuse qui se reconnecte
+  // (player→coach→player) ne reverrait jamais ses messages skippés. Le logout = fin
+  // de session pour cette identité → on repart d'une évaluation fraîche (statut DB).
+  window._broadcastSnoozed = null;
+  window._broadcastBootChecked = false;
   state.auth = null;
   state.authFlow = { stage: 'role', role: null, playerId: null, pinInput: '' };
   state.view = null;
