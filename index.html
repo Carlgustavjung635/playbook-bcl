@@ -4169,6 +4169,20 @@ function currentSeasonConvocations() { return _filterEventsByTeam(_convocsSeason
 function currentSeasonChallenges()   { return _filterEventsByTeam(_challengesSeasonId(state.currentSeasonId)); }
 function currentSeasonPlays(opts)    { return getSeasonPlays(state.currentSeasonId, opts); }
 
+// Ressentis équipe de la saison courante. teamReviews n'a PAS de season_id en
+// base → on filtre par plage de dates [season.startDate, season.endDate] (option
+// retenue : zéro migration). r.date est une chaîne ISO YYYY-MM-DD (cf.
+// saveTeamReview) → comparaison lexicographique fiable. Fallback rétrocompat :
+// pas de saison définie (ou pas de date de début) → on renvoie tout.
+function currentSeasonTeamReviews() {
+  const all = state.teamReviews || [];
+  const season = getCurrentSeason();
+  if (!season || !season.startDate) return all;
+  const start = season.startDate;
+  const end = season.endDate || '9999-12-31';
+  return all.filter(r => r.date && r.date >= start && r.date <= end);
+}
+
 // Helper court : joueuses de la saison courante. Fallback rétrocompat sur
 // state.players si seasons pas encore chargés (bypass legacy avant migration
 // DB, cf. _seasonsLoaded). Utilisé dans toutes les vues saison-scopées :
@@ -6144,11 +6158,12 @@ function renderHomeCoach() {
   const nextEvent = upcomingEvents[0];
 
   // Seuls les matchs joués (avec au moins un score > 0) entrent dans le bilan et l'historique
-  const playedMatches = state.matches.filter(m => (m.scoreUs || 0) > 0 || (m.scoreOpp || 0) > 0);
+  // Saison courante uniquement (fix #5 : sinon les stats de la saison passée s'affichent).
+  const playedMatches = currentSeasonMatches().filter(m => (m.scoreUs || 0) > 0 || (m.scoreOpp || 0) > 0);
   const recentMatches = [...playedMatches].sort((a,b) => b.date.localeCompare(a.date)).slice(0, 3);
   const wins = playedMatches.filter(m => m.scoreUs > m.scoreOpp).length;
   const losses = playedMatches.filter(m => m.scoreUs < m.scoreOpp).length;
-  const featuredPlays = state.plays.slice(0, 6);
+  const featuredPlays = currentSeasonPlays().slice(0, 6);
 
   return `
     <div class="fade-up">
@@ -6216,7 +6231,9 @@ function renderHomeCoach() {
 
       ${(() => {
         try {
-          const reviews = state.teamReviews || [];
+          // Saison courante uniquement : teamReviews agrégeait toutes les saisons
+          // (pas de season_id) → on filtre par plage de dates de la saison (fix #5).
+          const reviews = currentSeasonTeamReviews();
           if (reviews.length === 0) return '';
           // Dernière par joueuse
           const latestByPlayer = {};
@@ -6509,8 +6526,9 @@ function renderHomePlayer() {
   const upcoming = getAllEventsBetween(todayStr, isoDate(threeWeeksLater));
   const nextEvent = upcoming[0];
 
-  // Dernières stats persos (compact)
-  const myMatches = state.matches
+  // Dernières stats persos (compact) — saison courante uniquement (fix #5 :
+  // sinon « dernier match » remonte une rencontre de la saison passée).
+  const myMatches = currentSeasonMatches()
     .filter(m => m.playerStats && m.playerStats[p.id])
     .sort((a,b) => b.date.localeCompare(a.date));
   const lastStats = myMatches.length > 0 ? myMatches[0].playerStats[p.id] : null;
@@ -6520,7 +6538,7 @@ function renderHomePlayer() {
   const myBadgesCount = (p.badges || []).length;
 
   // Carrousel plays récents
-  const featuredPlays = state.plays.slice(0, 6);
+  const featuredPlays = currentSeasonPlays().slice(0, 6);
 
   return `
     <div class="fade-up">
