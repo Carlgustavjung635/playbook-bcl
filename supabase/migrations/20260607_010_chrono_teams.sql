@@ -1,0 +1,32 @@
+-- ============================================================================
+-- Chronomètre basket — équipes configurables (nom + couleur) pour le tableau
+-- de score live intégré à l'overlay du chronomètre.
+--
+-- Ajoute une colonne `chrono_teams` à team_settings (singleton id=1) : un
+-- tableau JSON d'objets { id, name, color } décrivant les équipes que le coach
+-- configure (ex. [{ "id": "home", "name": "Domicile", "color": "#2f6df6" },
+-- { "id": "away", "name": "Extérieur", "color": "#e23b3b" }]). Min 2, max 10.
+-- color = hex #rrggbb.
+--
+-- POURQUOI sur team_settings — et pas une table dédiée : c'est un réglage
+-- d'équipe singleton, exactement comme chrono_presets (20260607_008), le surnom
+-- de display ou le multi-effectif. Même cycle de vie, mêmes policies (anon ALL,
+-- lecture publique), même entité de sync ('team').
+--
+-- Défaut NULL (pas '[]') : NULL = « le coach n'a jamais configuré » → le front
+-- retombe sur 2 équipes par défaut (Domicile bleu / Extérieur rouge). Une fois
+-- le coach passé par l'éditeur, la colonne contient son tableau.
+--
+-- Les SCORES eux-mêmes ne sont PAS persistés (état de match volatile, propre à
+-- chaque rencontre) : seule la configuration des équipes l'est.
+--
+-- IDEMPOTENT : `add column if not exists` → ré-exécutable. Le front a un
+-- fallback (apply() ignore la colonne absente) donc l'app tourne MÊME avant
+-- application de cette migration (2 équipes par défaut only, non persistées).
+--
+-- Même table / mêmes policies que 20260606_001_team_settings.sql. Aucune
+-- nouvelle policy nécessaire.
+-- ============================================================================
+
+alter table public.team_settings
+  add column if not exists chrono_teams jsonb;

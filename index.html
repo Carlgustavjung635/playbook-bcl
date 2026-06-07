@@ -320,6 +320,74 @@
   #chrono-flash.chrono-flash-on { animation: chronoFullFlash 0.4s steps(1) 4; }
   @keyframes chronoFullFlash { 0%, 100% { opacity: 0; } 50% { opacity: 0.55; } }
 
+  /* ----- Sections de l'overlay (Score / Chronos / Presets) ----- */
+  .chrono-section { flex: none; margin-top: 16px; }
+  .chrono-section-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 10px; gap: 10px;
+  }
+  /* Tableau de score : une carte par équipe (couleur + score + boutons) */
+  .chrono-score-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px;
+  }
+  .chrono-team-card {
+    position: relative; overflow: hidden;
+    background: var(--bg-2); border: 2px solid var(--border); border-radius: 14px;
+    padding: 12px 10px 12px; display: flex; flex-direction: column;
+    align-items: center; gap: 7px;
+  }
+  .chrono-team-bar { position: absolute; top: 0; left: 0; right: 0; height: 6px; }
+  .chrono-team-name {
+    margin-top: 2px; font-family: 'Anton', sans-serif; text-transform: uppercase;
+    font-size: 15px; letter-spacing: 0.03em; color: var(--ink); text-align: center;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .chrono-team-score {
+    font-family: 'JetBrains Mono', monospace; font-weight: 700;
+    font-variant-numeric: tabular-nums; font-size: 46px; line-height: 1; color: var(--ink);
+  }
+  .chrono-team-add, .chrono-team-corr { display: flex; gap: 6px; width: 100%; }
+  .chrono-pt {
+    flex: 1; min-height: 48px; border-radius: 10px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--bg-3); color: var(--ink);
+    font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 16px;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .chrono-pt:active { transform: scale(0.96); }
+  .chrono-pt-minus, .chrono-pt-reset { font-size: 14px; color: var(--ink-2); }
+  /* Cartes chronos (multi-chrono) */
+  .chrono-cards { display: flex; flex-direction: column; gap: 10px; }
+  .chrono-card {
+    background: var(--bg-2); border: 2px solid var(--border); border-radius: 14px;
+    padding: 12px; cursor: pointer;
+  }
+  .chrono-card.is-active { border-color: var(--orange); }
+  .chrono-card-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 24px;
+  }
+  .chrono-card-label {
+    font-family: 'Anton', sans-serif; text-transform: uppercase; font-size: 15px;
+    letter-spacing: 0.03em; color: var(--orange);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .chrono-card-head-right { display: flex; align-items: center; gap: 8px; flex: none; }
+  .chrono-card-active {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--orange);
+    border: 1px solid var(--orange); border-radius: 6px; padding: 3px 7px;
+  }
+  .chrono-card .chrono-time {
+    display: block; text-align: center; font-size: clamp(44px, 15vw, 72px); margin: 2px 0;
+  }
+  .chrono-card .chrono-sub { margin-bottom: 8px; }
+  .chrono-card .chrono-controls { margin-top: 0; }
+  /* Éditeur : ligne équipe (color picker + nom) */
+  .chrono-team-edit-row input[type=color] {
+    width: 46px; height: 40px; flex: none; padding: 2px; cursor: pointer;
+    border: 1px solid var(--border); border-radius: 8px; background: var(--bg-3);
+  }
+  .chrono-team-edit-row input[type=text] { flex: 1; min-width: 0; }
+
   /* ========== TYPOGRAPHY ========== */
   .display-xl {
     font-family: 'Anton', sans-serif;
@@ -3222,7 +3290,10 @@ const ENTITIES = [
         // Chronomètre : presets de timers configurés par le coach. null tant
         // que jamais configuré (le front retombe sur des presets basket par
         // défaut) ; tableau (même vide) une fois passé par l'éditeur coach.
-        chrono_presets: Array.isArray(state.team.chronoPresets) ? state.team.chronoPresets : null
+        chrono_presets: Array.isArray(state.team.chronoPresets) ? state.team.chronoPresets : null,
+        // Chronomètre : équipes du tableau de score (nom + couleur). null tant
+        // que jamais configuré → 2 équipes par défaut (Domicile/Extérieur).
+        chrono_teams: Array.isArray(state.team.chronoTeams) ? state.team.chronoTeams : null
       } };
     },
     apply: (state, rows) => {
@@ -3238,6 +3309,13 @@ const ENTITIES = [
         chronoPresets: Array.isArray(r.chrono_presets)
           ? r.chrono_presets.filter(p => p && typeof p.label === 'string' && Number(p.seconds) > 0)
               .map(p => ({ label: String(p.label), seconds: Math.round(Number(p.seconds)) }))
+          : null,
+        // null/absent = jamais configuré → fallback front (2 équipes défaut). On
+        // ne matérialise que des objets valides { id, name, color hex }.
+        chronoTeams: Array.isArray(r.chrono_teams)
+          ? r.chrono_teams.filter(t => t && typeof t.name !== 'undefined')
+              .map(t => ({ id: String(t.id || ''), name: String(t.name || ''),
+                color: /^#[0-9a-fA-F]{6}$/.test(t.color) ? t.color : '#888888' }))
           : null
       };
     }
@@ -4249,7 +4327,7 @@ let state = {
   pins: load(K.pins, { coach: '1234', stat: '1234' }),
   ffbb: load(K.ffbb, { clubUrl: 'https://competitions.ffbb.com/ligues/occ/comites/0065/clubs/occ0032016', teamName: 'IE - BASKET CLUB L\'ISLOIS - 2', matches: [], standings: [], lastSync: null }),
   // Identité/branding équipe — surnom de display (topbar), séparé du nom FFBB.
-  team: load(K.team, { displayNickname: '', multiSquad: false, e1Label: '', e2Label: '', chronoPresets: null }),
+  team: load(K.team, { displayNickname: '', multiSquad: false, e1Label: '', e2Label: '', chronoPresets: null, chronoTeams: null }),
   lineups: load(K.lineups, []),
   pinAttempts: load(K.pinAttempts, {}), // { 'coach': {count, lockedUntil}, 'stat': {...}, 'pl1': {...} }
   teamReviews: load(K.teamReviews, []), // [{ id, pid, date, ambiance, roleClarity, playtime, physique, comment, updatedAt }]
@@ -13188,6 +13266,26 @@ function getChronoPresets() {
   return CHRONO_DEFAULT_PRESETS;
 }
 
+// --- Équipes du tableau de score (nom + couleur), configurées par le coach. ---
+const CHRONO_DEFAULT_TEAMS = [
+  { id: 'home', name: 'Domicile', color: '#2f6df6' },
+  { id: 'away', name: 'Extérieur', color: '#e23b3b' }
+];
+// Équipes effectives : config coach si ≥ 2 valides, sinon 2 équipes par défaut
+// (le score à une seule équipe n'a pas de sens). Max 10.
+function getChronoTeams() {
+  const cfg = state.team && state.team.chronoTeams;
+  if (Array.isArray(cfg)) {
+    const clean = cfg
+      .filter(t => t && typeof t.name !== 'undefined')
+      .map(t => ({ id: String(t.id || ''), name: String(t.name || '').trim() || 'Équipe',
+        color: /^#[0-9a-fA-F]{6}$/.test(t.color) ? t.color : '#888888' }))
+      .slice(0, 10);
+    if (clean.length >= 2) return clean;
+  }
+  return CHRONO_DEFAULT_TEAMS;
+}
+
 // FAB injecté dans render() (coach + joueuse, jamais sur l'écran d'auth ni le
 // portail public — render() y retourne avant l'injection).
 function renderChronoFab() {
@@ -13276,56 +13374,76 @@ function _chronoChipMain(seconds) {
   return s === 0 ? (m + "'") : (m + ':' + String(s).padStart(2, '0'));
 }
 
-// --- Moteur ---
+// --- Moteur multi-chrono ---
+// window._chronos = tableau de chronos INDÉPENDANTS { id, label, totalMs,
+// remainingMs, running, done, endAt }. Un SEUL ticker (window._chronoTimer)
+// pilote tous les chronos en cours (chacun a son échéance endAt). window.
+// _chronoActiveId = chrono qui reçoit les taps de presets. Max 4 en parallèle.
+const CHRONO_MAX = 4;
+function _chronoNewObj(preset) {
+  const p = preset || getChronoPresets()[0] || { label: '', seconds: 24 };
+  return { id: uid(), label: p.label || '', totalMs: p.seconds * 1000,
+    remainingMs: p.seconds * 1000, running: false, done: false, endAt: 0 };
+}
+function _chronoById(id) { return (window._chronos || []).find(c => c.id === id); }
+function _chronoAnyRunning() { return (window._chronos || []).some(c => c.running); }
 function _chronoEnsureState() {
-  if (!window._chrono) {
-    const p = getChronoPresets()[0] || { label: '', seconds: 24 };
-    window._chrono = {
-      totalMs: p.seconds * 1000, remainingMs: p.seconds * 1000,
-      running: false, done: false, label: p.label || '', endAt: 0, timer: null
-    };
+  if (!Array.isArray(window._chronos) || !window._chronos.length) {
+    window._chronos = [_chronoNewObj()];
   }
+  if (!window._chronoActiveId || !_chronoById(window._chronoActiveId)) {
+    window._chronoActiveId = window._chronos[0].id;
+  }
+}
+// Scores : VOLATILES (état de match propre à la rencontre, NON synchronisés ni
+// persistés). Indexés par id d'équipe ; élagués si une équipe disparaît.
+function _chronoEnsureScores() {
+  if (!window._chronoScores) window._chronoScores = {};
+  const teams = getChronoTeams();
+  const ids = new Set(teams.map(t => t.id));
+  Object.keys(window._chronoScores).forEach(k => { if (!ids.has(k)) delete window._chronoScores[k]; });
+  teams.forEach(t => { if (typeof window._chronoScores[t.id] !== 'number') window._chronoScores[t.id] = 0; });
 }
 function _chronoStopTicker() {
-  if (window._chrono && window._chrono.timer) {
-    clearInterval(window._chrono.timer);
-    window._chrono.timer = null;
-  }
+  if (window._chronoTimer) { clearInterval(window._chronoTimer); window._chronoTimer = null; }
 }
 function _chronoStartTicker() {
-  _chronoStopTicker();
-  window._chrono.timer = setInterval(_chronoTick, 100);
+  if (window._chronoTimer) return; // déjà actif : un seul ticker pour tous
+  window._chronoTimer = setInterval(_chronoTick, 100);
 }
 function _chronoTick() {
-  const c = window._chrono;
-  if (!c || !c.running) return;
-  c.remainingMs = c.endAt - Date.now();
-  if (c.remainingMs <= 0) { c.remainingMs = 0; _chronoDone(); return; }
-  _chronoUpdateDisplay();
+  (window._chronos || []).forEach(c => {
+    if (!c.running) return;
+    c.remainingMs = c.endAt - Date.now();
+    if (c.remainingMs <= 0) { c.remainingMs = 0; _chronoDone(c); }
+    else _chronoUpdateDisplay(c);
+  });
+  if (!_chronoAnyRunning()) _chronoStopTicker();
 }
-function _chronoUpdateDisplay() {
-  const c = window._chrono;
-  const el = document.getElementById('chrono-time');
-  if (!el) return; // overlay fermé : le tick devient un no-op visuel
+function _chronoCls(c) {
+  return c.done ? 'is-done' : c.running ? (c.remainingMs <= 5000 ? 'is-warn' : 'is-running') : '';
+}
+function _chronoUpdateDisplay(c) {
+  const el = document.getElementById('chrono-time-' + c.id);
+  if (!el) return; // carte absente (overlay fermé) : le tick devient un no-op
   el.textContent = _chronoFormat(c.remainingMs);
-  el.className = 'chrono-time ' + (c.done ? 'is-done' : c.running ? (c.remainingMs <= 5000 ? 'is-warn' : 'is-running') : '');
+  el.className = 'chrono-time ' + _chronoCls(c);
 }
-function _chronoDone() {
-  const c = window._chrono;
+// Fin d'UN chrono : bip + vibration + flash propres, puis re-render de SA carte.
+function _chronoDone(c) {
   c.running = false; c.done = true; c.remainingMs = 0;
-  _chronoStopTicker();
   _chronoBeep();
   _chronoVibrate([300, 120, 300, 120, 400]); // Android ; ignoré sur iOS
   _chronoFlash();                             // alerte visuelle (tous OS, dont iOS)
-  _chronoRenderScreen(); // bascule le bouton sur "Relancer" + état rouge
+  _chronoRenderCard(c); // bascule le bouton sur "Relancer" + état rouge
 }
-// Tap preset → (ré)arme à cette durée ET relance immédiatement.
+// Tap preset → (ré)arme le chrono ACTIF à cette durée ET le relance.
 function _chronoTapPreset(i) {
   _chronoEnsureState();
+  _chronoUnlockAudio();
   const p = getChronoPresets()[i];
   if (!p) return;
-  _chronoUnlockAudio();
-  const c = window._chrono;
+  const c = _chronoById(window._chronoActiveId) || window._chronos[0];
   c.totalMs = p.seconds * 1000;
   c.remainingMs = c.totalMs;
   c.label = p.label || '';
@@ -13333,34 +13451,78 @@ function _chronoTapPreset(i) {
   c.running = true;
   c.endAt = Date.now() + c.remainingMs;
   _chronoVibrate(20);
-  _chronoRenderScreen();
+  _chronoStartTicker();
+  _chronoRenderCard(c);
 }
-function _chronoToggle() {
+function _chronoToggle(id) {
   _chronoEnsureState();
   _chronoUnlockAudio();
-  const c = window._chrono;
+  const c = _chronoById(id);
+  if (!c) return;
+  window._chronoActiveId = id; // interagir avec un chrono le rend actif
   if (c.running) {
     c.remainingMs = Math.max(0, c.endAt - Date.now());
     c.running = false;
-    _chronoStopTicker();
+    if (!_chronoAnyRunning()) _chronoStopTicker();
   } else {
     if (c.done || c.remainingMs <= 0) { c.remainingMs = c.totalMs; c.done = false; }
     c.running = true;
     c.endAt = Date.now() + c.remainingMs;
+    _chronoStartTicker();
   }
+  _chronoRenderScreen(); // re-render complet : MAJ de la surbrillance "actif"
+}
+function _chronoReset(id) {
+  const c = _chronoById(id);
+  if (!c) return;
+  c.running = false; c.done = false; c.remainingMs = c.totalMs;
+  if (!_chronoAnyRunning()) _chronoStopTicker();
+  _chronoRenderCard(c);
+}
+function _chronoAddTimer() {
+  _chronoEnsureState();
+  if (window._chronos.length >= CHRONO_MAX) { alert(CHRONO_MAX + ' chronos maximum.'); return; }
+  const c = _chronoNewObj();
+  window._chronos.push(c);
+  window._chronoActiveId = c.id;
   _chronoRenderScreen();
 }
-function _chronoReset() {
+function _chronoRemoveTimer(id) {
   _chronoEnsureState();
-  const c = window._chrono;
-  c.running = false; c.done = false; c.remainingMs = c.totalMs;
-  _chronoStopTicker();
+  window._chronos = window._chronos.filter(c => c.id !== id);
+  if (!window._chronos.length) window._chronos = [_chronoNewObj()]; // jamais 0
+  if (!_chronoById(window._chronoActiveId)) window._chronoActiveId = window._chronos[0].id;
+  if (!_chronoAnyRunning()) _chronoStopTicker();
   _chronoRenderScreen();
+}
+function _chronoSetActive(id) {
+  if (_chronoById(id) && window._chronoActiveId !== id) { window._chronoActiveId = id; _chronoRenderScreen(); }
+}
+
+// --- Scores : +1/+2/+3, correction −1, reset par équipe ou global ---
+function _chronoAddScore(teamId, delta) {
+  _chronoEnsureScores();
+  window._chronoScores[teamId] = Math.max(0, (window._chronoScores[teamId] || 0) + delta);
+  _chronoUpdateScore(teamId);
+}
+function _chronoResetScore(teamId) {
+  _chronoEnsureScores();
+  window._chronoScores[teamId] = 0;
+  _chronoUpdateScore(teamId);
+}
+function _chronoResetAllScores() {
+  _chronoEnsureScores();
+  getChronoTeams().forEach(t => { window._chronoScores[t.id] = 0; _chronoUpdateScore(t.id); });
+}
+function _chronoUpdateScore(teamId) {
+  const el = document.getElementById('chrono-score-' + teamId);
+  if (el) el.textContent = window._chronoScores[teamId] || 0;
 }
 
 // --- Overlay ---
 function openChrono() {
   _chronoEnsureState();
+  _chronoEnsureScores();
   _chronoUnlockAudio();
   let host = document.getElementById('chrono-overlay');
   if (!host) { host = document.createElement('div'); host.id = 'chrono-overlay'; document.body.appendChild(host); }
@@ -13368,8 +13530,8 @@ function openChrono() {
   _chronoRenderScreen();
 }
 function closeChrono() {
-  const c = window._chrono;
-  if (c) { if (c.running) { c.remainingMs = Math.max(0, c.endAt - Date.now()); c.running = false; } }
+  // Figer le reste de chaque chrono en cours, puis les mettre en pause.
+  (window._chronos || []).forEach(c => { if (c.running) { c.remainingMs = Math.max(0, c.endAt - Date.now()); c.running = false; } });
   _chronoStopTicker();
   // IMPORTANT : RETIRER l'élément, pas seulement le vider. #chrono-overlay est
   // position:fixed inset:0 z-index:9000 ; un innerHTML='' le laisse en place,
@@ -13378,35 +13540,93 @@ function closeChrono() {
   if (host) host.remove();
   document.body.style.overflow = '';
 }
+// Contenu interne d'une carte chrono (réutilisé pour le re-render ciblé).
+function _chronoCardInner(c, idx, n) {
+  const active = c.id === window._chronoActiveId;
+  const startLabel = (c.done || c.remainingMs <= 0) ? 'Relancer' : 'Start';
+  const status = c.done ? '⏹ terminé' : c.running ? '● en cours' : (c.remainingMs < c.totalMs ? '⏸ pause' : 'prêt');
+  return `
+    <div class="chrono-card-head">
+      <span class="chrono-card-label">${esc(c.label || ('Chrono ' + (idx + 1)))}</span>
+      <div class="chrono-card-head-right">
+        ${active ? `<span class="chrono-card-active">actif</span>` : ''}
+        ${n > 1 ? `<button class="chrono-iconbtn" onclick="event.stopPropagation();_chronoRemoveTimer('${c.id}')" aria-label="Supprimer ce chrono">✕</button>` : ''}
+      </div>
+    </div>
+    <div id="chrono-time-${c.id}" class="chrono-time ${_chronoCls(c)}">${esc(_chronoFormat(c.remainingMs))}</div>
+    <div class="chrono-sub">${esc(status)}</div>
+    <div class="chrono-controls">
+      ${c.running
+        ? `<button class="chrono-btn chrono-btn-pause" onclick="event.stopPropagation();_chronoToggle('${c.id}')">⏸ Pause</button>`
+        : `<button class="chrono-btn chrono-btn-go" onclick="event.stopPropagation();_chronoToggle('${c.id}')">▶ ${startLabel}</button>`}
+      <button class="chrono-btn chrono-btn-reset" onclick="event.stopPropagation();_chronoReset('${c.id}')">↺ Reset</button>
+    </div>`;
+}
+// Re-render ciblé d'une seule carte chrono (tick de fin, toggle, reset).
+function _chronoRenderCard(c) {
+  const card = document.getElementById('chrono-card-' + c.id);
+  if (!card) return;
+  const list = window._chronos || [];
+  card.className = 'chrono-card' + (c.id === window._chronoActiveId ? ' is-active' : '');
+  card.innerHTML = _chronoCardInner(c, list.indexOf(c), list.length);
+}
 function _chronoRenderScreen() {
   const host = document.getElementById('chrono-overlay');
   if (!host) return;
-  const c = window._chrono;
+  _chronoEnsureState();
+  _chronoEnsureScores();
   const presets = getChronoPresets();
+  const teams = getChronoTeams();
+  const chronos = window._chronos;
   const isCoach = state.auth && state.auth.role === 'coach';
-  const cls = c.done ? 'is-done' : c.running ? (c.remainingMs <= 5000 ? 'is-warn' : 'is-running') : '';
-  const status = c.done ? '⏹ terminé' : c.running ? '● en cours' : (c.remainingMs < c.totalMs ? '⏸ pause' : 'prêt');
-  const startLabel = (c.done || c.remainingMs <= 0) ? 'Relancer' : 'Start';
+  const multi = chronos.length > 1;
   host.innerHTML = `
     <div class="chrono-screen">
       <div class="chrono-top">
         <div class="chrono-top-title">⏱ Chronomètre</div>
         <button class="chrono-iconbtn" onclick="closeChrono()" aria-label="Fermer">✕</button>
       </div>
-      <div class="chrono-center">
-        <div class="chrono-preset-label">${esc(c.label || '')}</div>
-        <div id="chrono-time" class="chrono-time ${cls}">${esc(_chronoFormat(c.remainingMs))}</div>
-        <div id="chrono-sub" class="chrono-sub">${esc(status)}</div>
+
+      <div class="chrono-section">
+        <div class="chrono-section-head">
+          <div class="eyebrow-muted">Score</div>
+          <button class="chrono-manage-btn" onclick="_chronoResetAllScores()">↺ Tout à 0</button>
+        </div>
+        <div class="chrono-score-grid">
+          ${teams.map(t => `
+            <div class="chrono-team-card" style="border-color:${esc(t.color)}">
+              <div class="chrono-team-bar" style="background:${esc(t.color)}"></div>
+              <div class="chrono-team-name">${esc(t.name)}</div>
+              <div class="chrono-team-score" id="chrono-score-${esc(t.id)}">${window._chronoScores[t.id] || 0}</div>
+              <div class="chrono-team-add">
+                <button class="chrono-pt" onclick="_chronoAddScore('${esc(t.id)}',1)">+1</button>
+                <button class="chrono-pt" onclick="_chronoAddScore('${esc(t.id)}',2)">+2</button>
+                <button class="chrono-pt" onclick="_chronoAddScore('${esc(t.id)}',3)">+3</button>
+              </div>
+              <div class="chrono-team-corr">
+                <button class="chrono-pt chrono-pt-minus" onclick="_chronoAddScore('${esc(t.id)}',-1)">−1</button>
+                <button class="chrono-pt chrono-pt-reset" onclick="_chronoResetScore('${esc(t.id)}')">↺ 0</button>
+              </div>
+            </div>`).join('')}
+        </div>
       </div>
-      <div class="chrono-controls">
-        ${c.running
-          ? `<button class="chrono-btn chrono-btn-pause" onclick="_chronoToggle()">⏸ Pause</button>`
-          : `<button class="chrono-btn chrono-btn-go" onclick="_chronoToggle()">▶ ${startLabel}</button>`}
-        <button class="chrono-btn chrono-btn-reset" onclick="_chronoReset()">↺ Reset</button>
+
+      <div class="chrono-section">
+        <div class="chrono-section-head">
+          <div class="eyebrow-muted">Chronos</div>
+          ${chronos.length < CHRONO_MAX ? `<button class="chrono-manage-btn" onclick="_chronoAddTimer()">➕ Ajouter chrono</button>` : ''}
+        </div>
+        <div class="chrono-cards">
+          ${chronos.map((c, i) => `
+            <div class="chrono-card${c.id === window._chronoActiveId ? ' is-active' : ''}" id="chrono-card-${c.id}" onclick="_chronoSetActive('${c.id}')">
+              ${_chronoCardInner(c, i, chronos.length)}
+            </div>`).join('')}
+        </div>
       </div>
-      <div class="chrono-presets-wrap">
-        <div class="chrono-presets-head">
-          <div class="eyebrow-muted">Presets</div>
+
+      <div class="chrono-section chrono-presets-wrap">
+        <div class="chrono-section-head">
+          <div class="eyebrow-muted">Presets${multi ? ' <span style="text-transform:none;letter-spacing:0;color:var(--ink-3)">→ chrono actif</span>' : ''}</div>
           ${isCoach ? `<button class="chrono-manage-btn" onclick="openChronoEditor()">⚙ Gérer</button>` : ''}
         </div>
         <div class="chrono-presets-grid">
@@ -13418,7 +13638,7 @@ function _chronoRenderScreen() {
         </div>
       </div>
     </div>`;
-  if (c.running) _chronoStartTicker(); else _chronoStopTicker();
+  if (_chronoAnyRunning()) _chronoStartTicker(); else _chronoStopTicker();
 }
 
 // --- Éditeur de presets (coach) ---
@@ -13429,37 +13649,70 @@ function _chronoRenderScreen() {
 function openChronoEditor() {
   if (!(state.auth && state.auth.role === 'coach')) return;
   // RETIRER l'overlay (pas innerHTML='') : sinon le div transparent z-9000 reste
-  // AU-DESSUS de la modale (z-100) et bloque tous les clics → presets ni
+  // AU-DESSUS de la modale (z-100) et bloque tous les clics → champs ni
   // éditables ni ajoutables. _chronoReopenAfterEdit() le recrée après édition.
   const host = document.getElementById('chrono-overlay');
   if (host) host.remove();
-  state._chronoEdit = getChronoPresets().map(p => ({ label: p.label || '', seconds: p.seconds }));
-  if (!state._chronoEdit.length) state._chronoEdit = [{ label: '', seconds: 24 }];
+  state._chronoEdit = {
+    teams: getChronoTeams().map(t => ({ id: t.id, name: t.name, color: t.color })),
+    presets: getChronoPresets().map(p => ({ label: p.label || '', seconds: p.seconds }))
+  };
+  if (!state._chronoEdit.presets.length) state._chronoEdit.presets = [{ label: '', seconds: 24 }];
   _chronoRenderEditor();
 }
-// Récupère les valeurs saisies depuis le DOM avant tout re-render (add/remove).
+// Récupère les valeurs saisies (équipes + presets) depuis le DOM avant tout
+// re-render (add/remove) ou la sauvegarde.
 function _chronoEditSyncFromDom() {
-  const rows = document.querySelectorAll('#modal-root .chrono-edit-row');
-  if (!rows.length) return;
-  state._chronoEdit = Array.from(rows).map(r => ({
+  const e = state._chronoEdit;
+  if (!e) return;
+  const teamRows = document.querySelectorAll('#modal-root .chrono-team-edit-row');
+  e.teams = Array.from(teamRows).map(r => ({
+    id: r.getAttribute('data-id') || '',
+    name: (r.querySelector('input[type=text]') || {}).value || '',
+    color: (r.querySelector('input[type=color]') || {}).value || '#888888'
+  }));
+  const presetRows = document.querySelectorAll('#modal-root .chrono-preset-edit-row');
+  e.presets = Array.from(presetRows).map(r => ({
     label: (r.querySelector('input[type=text]') || {}).value || '',
     seconds: Math.round(Number((r.querySelector('input[type=number]') || {}).value)) || 0
   }));
 }
+function _chronoEditAddTeam() {
+  _chronoEditSyncFromDom();
+  if (state._chronoEdit.teams.length >= 10) { alert('10 équipes maximum.'); return; }
+  // Palette de couleurs distinctes : on prend la 1re non encore utilisée.
+  const palette = ['#2f6df6', '#e23b3b', '#27ae60', '#f39c12', '#9b59b6', '#16a085', '#e84393', '#34495e', '#d35400', '#1abc9c'];
+  const used = new Set(state._chronoEdit.teams.map(t => (t.color || '').toLowerCase()));
+  const color = palette.find(c => !used.has(c)) || '#888888';
+  state._chronoEdit.teams.push({ id: uid(), name: '', color });
+  _chronoRenderEditor();
+}
+function _chronoEditRemoveTeam(i) {
+  _chronoEditSyncFromDom();
+  state._chronoEdit.teams.splice(i, 1);
+  _chronoRenderEditor();
+}
 function _chronoEditAdd() {
   _chronoEditSyncFromDom();
-  if (state._chronoEdit.length >= 15) { alert('15 presets maximum.'); return; }
-  state._chronoEdit.push({ label: '', seconds: 24 });
+  if (state._chronoEdit.presets.length >= 15) { alert('15 presets maximum.'); return; }
+  state._chronoEdit.presets.push({ label: '', seconds: 24 });
   _chronoRenderEditor();
 }
 function _chronoEditRemove(i) {
   _chronoEditSyncFromDom();
-  state._chronoEdit.splice(i, 1);
+  state._chronoEdit.presets.splice(i, 1);
   _chronoRenderEditor();
 }
 function _chronoRenderEditor() {
-  const rows = (state._chronoEdit || []).map((p, i) => `
-    <div class="chrono-edit-row">
+  const e = state._chronoEdit || { teams: [], presets: [] };
+  const teamRows = (e.teams || []).map((t, i) => `
+    <div class="chrono-edit-row chrono-team-edit-row" data-id="${esc(t.id || '')}">
+      <input type="color" value="${esc(/^#[0-9a-fA-F]{6}$/.test(t.color) ? t.color : '#888888')}" aria-label="Couleur">
+      <input type="text" value="${esc(t.name || '')}" placeholder="Nom équipe (ex. Domicile)" maxlength="20">
+      <button class="chrono-iconbtn" style="width:38px;height:38px;font-size:16px" onclick="_chronoEditRemoveTeam(${i})" aria-label="Supprimer">✕</button>
+    </div>`).join('');
+  const presetRows = (e.presets || []).map((p, i) => `
+    <div class="chrono-edit-row chrono-preset-edit-row">
       <input type="text" value="${esc(p.label || '')}" placeholder="Nom (ex. Possession)" maxlength="24">
       <input type="number" value="${p.seconds || ''}" min="1" max="3600" step="1" inputmode="numeric" aria-label="secondes">
       <span style="font-family:'JetBrains Mono';font-size:11px;color:var(--ink-3)">s</span>
@@ -13467,14 +13720,22 @@ function _chronoRenderEditor() {
     </div>`).join('');
   openModal(`
     <div class="modal-header">
-      <div class="modal-title">Presets du chronomètre</div>
+      <div class="modal-title">Réglages du chronomètre</div>
       <button class="modal-close" onclick="cancelChronoEditor()">✕</button>
     </div>
     <div class="modal-body">
-      <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:14px;font-size:12px;color:var(--ink-2);line-height:1.5">
-        Configure tes raccourcis de durée. Un tap sur un preset (côté coach <strong>et</strong> joueuse) relance le chrono à cette durée. Vide = presets basket par défaut.
+      <div class="eyebrow-muted" style="margin-bottom:8px">Équipes — tableau de score</div>
+      <div style="padding:8px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:12px;font-size:12px;color:var(--ink-2);line-height:1.5">
+        Nom + couleur de chaque équipe. Min 2, max 10.
       </div>
-      ${rows || '<div style="color:var(--ink-3);font-size:13px;margin-bottom:12px">Aucun preset — ajoute-en un ou laisse vide pour les défauts.</div>'}
+      ${teamRows}
+      <button class="btn btn-secondary" style="width:100%;margin:4px 0 20px" onclick="_chronoEditAddTeam()">➕ Ajouter une équipe</button>
+
+      <div class="eyebrow-muted" style="margin-bottom:8px">Presets — durées</div>
+      <div style="padding:8px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:12px;font-size:12px;color:var(--ink-2);line-height:1.5">
+        Raccourcis de durée. Un tap (côté coach <strong>et</strong> joueuse) relance le chrono actif à cette durée. Vide = presets basket par défaut.
+      </div>
+      ${presetRows || '<div style="color:var(--ink-3);font-size:13px;margin-bottom:12px">Aucun preset — ajoute-en un ou laisse vide pour les défauts.</div>'}
       <button class="btn btn-secondary" style="width:100%;margin-top:4px" onclick="_chronoEditAdd()">➕ Ajouter un preset</button>
     </div>
     <div class="modal-footer">
@@ -13489,22 +13750,33 @@ function cancelChronoEditor() {
 }
 function saveChronoEditor() {
   _chronoEditSyncFromDom();
-  const clean = (state._chronoEdit || [])
-    .map(p => ({ label: String(p.label || '').trim(), seconds: Math.round(Number(p.seconds)) }))
-    .filter(p => p.seconds > 0);
-  // Validation : au moins une seconde valide par preset (label optionnel).
-  if (state._chronoEdit && state._chronoEdit.some(p => Math.round(Number(p.seconds)) <= 0)) {
+  const e = state._chronoEdit || { teams: [], presets: [] };
+  // --- Validation équipes : nom obligatoire, couleur hex, min 2 / max 10. ---
+  const teams = (e.teams || []).map(t => ({
+    id: String(t.id || '') || uid(),
+    name: String(t.name || '').trim(),
+    color: /^#[0-9a-fA-F]{6}$/.test(t.color) ? t.color : '#888888'
+  }));
+  if (teams.some(t => !t.name)) { alert('Chaque équipe doit avoir un nom.'); return; }
+  if (teams.length < 2) { alert('Il faut au moins 2 équipes pour un tableau de score.'); return; }
+  if (teams.length > 10) { alert('10 équipes maximum.'); return; }
+  // --- Validation presets : durée > 0, max 15 (label optionnel). ---
+  if ((e.presets || []).some(p => Math.round(Number(p.seconds)) <= 0)) {
     alert('Chaque preset doit avoir une durée en secondes supérieure à 0.');
     return;
   }
-  if (clean.length > 15) { alert('15 presets maximum.'); return; }
+  const presets = (e.presets || [])
+    .map(p => ({ label: String(p.label || '').trim(), seconds: Math.round(Number(p.seconds)) }))
+    .filter(p => p.seconds > 0);
+  if (presets.length > 15) { alert('15 presets maximum.'); return; }
   if (!state.team) state.team = { displayNickname: '' };
-  // Tableau vide = retour explicite aux défauts basket (NULL en base).
-  state.team.chronoPresets = clean.length ? clean : null;
-  persist(); // → PbSync pousse l'entité 'team' (chrono_presets) en base
+  state.team.chronoTeams = teams;                              // toujours ≥ 2 ici
+  // Presets vide = retour explicite aux défauts basket (NULL en base).
+  state.team.chronoPresets = presets.length ? presets : null;
+  persist(); // → PbSync pousse l'entité 'team' (chrono_teams + chrono_presets)
   state._chronoEdit = null;
   closeModal();
-  showToast('⏱ Presets enregistrés');
+  showToast('⏱ Réglages enregistrés');
   _chronoReopenAfterEdit();
 }
 function _chronoReopenAfterEdit() {
