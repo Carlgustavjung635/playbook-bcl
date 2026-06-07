@@ -8462,6 +8462,161 @@ function renderDashRecords(matches) {
   `;
 }
 
+// ============================================================
+// PHASE MATCH — détection d'état pour adapter la vue détail
+// (Chantier A — refonte UX vue match). Source de vérité : m.status,
+// la date vs aujourd'hui, et le score saisi. Renvoie un des 6 états :
+//   upcoming-unprepared | upcoming-prepared | today | past-unscored
+//   | played | cancelled
+// ============================================================
+function getMatchPhase(m) {
+  if (!m) return 'upcoming-unprepared';
+  if (m.status === 'cancelled') return 'cancelled';
+  const today = new Date().toISOString().slice(0, 10);
+  if (m.status === 'played') return 'played';
+  // À partir d'ici : status 'to_play' (ou legacy non défini)
+  if (m.date > today) return isMatchPrepared(m) ? 'upcoming-prepared' : 'upcoming-unprepared';
+  if (m.date === today) return 'today';
+  // Date passée mais pas marqué joué → résultat à saisir / confirmer
+  return 'past-unscored';
+}
+
+// Statut de préparation : compte les signaux renseignés (compo, convoc,
+// plays, vidéos, notes). "Préparé" dès qu'au moins 2 signaux sont présents.
+function getMatchPrepStatus(m) {
+  const plays = getMatchPlayLinks(m.id).length;
+  const convoc = m.convocId ? (state.convocations || []).find(c => c.id === m.convocId) : null;
+  const responses = convoc ? Object.keys(convoc.responses || {}).length : 0;
+  const absents = convoc ? Object.values(convoc.responses || {}).filter(r => r && r.status === 'absent').length : 0;
+  const notes = !!(m.prepComment && m.prepComment.trim());
+  const videos = Array.isArray(m.prepVideos) ? m.prepVideos.length : 0;
+  const roster = !!(m.roster && Array.isArray(m.roster.included));
+  const signals = [plays > 0, responses > 0, notes, videos > 0, roster].filter(Boolean).length;
+  return { plays, responses, absents, notes, videos, roster, signals, prepared: signals >= 2 };
+}
+function isMatchPrepared(m) { return getMatchPrepStatus(m).prepared; }
+
+// Libellé compte à rebours lisible (J-X / Demain / Aujourd'hui / passé).
+function matchCountdownLabel(dateStr) {
+  const d = daysUntil(dateStr);
+  if (d === 0) return "Aujourd'hui";
+  if (d === 1) return 'Demain · J-1';
+  if (d > 1) return 'J-' + d;
+  if (d === -1) return 'Hier';
+  return 'Il y a ' + Math.abs(d) + ' jours';
+}
+
+// Bandeau contextuel principal : le cœur de la refonte. Affiche le bon CTA
+// et la bonne info selon la phase du match. Mobile-first (touch ≥ 44px).
+function renderMatchStateBanner(m, phase, isCoach, isStat) {
+  const cd = matchCountdownLabel(m.date);
+  const prep = getMatchPrepStatus(m);
+  const scoreEntered = (m.scoreUs | 0) > 0 || (m.scoreOpp | 0) > 0;
+
+  // Petite ligne checklist réutilisable (✓ fait / ○ à faire + CTA)
+  const checkRow = (done, label, sub, cta, action) => `
+    <div style="display:flex;align-items:center;gap:10px;padding:11px 0;border-bottom:1px solid var(--border-soft)">
+      <span style="font-size:18px;line-height:1;width:20px;text-align:center;color:${done ? 'var(--green)' : 'var(--ink-4)'}">${done ? '✓' : '○'}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;letter-spacing:0.02em;color:${done ? 'var(--ink)' : 'var(--ink-2)'}">${label}</div>
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">${sub}</div>
+      </div>
+      ${isCoach && action ? `<button class="btn btn-ghost" style="font-size:11px;min-height:44px;padding-left:12px;padding-right:12px" onclick="${action}">${cta}</button>` : ''}
+    </div>`;
+
+  if (phase === 'cancelled') {
+    return `
+      <div style="margin-top:16px;padding:16px;background:var(--bg-2);border:1.5px solid var(--border);border-radius:var(--radius);text-align:center">
+        <div style="font-size:32px;line-height:1">⛔</div>
+        <div style="font-family:'Anton';font-size:18px;text-transform:uppercase;letter-spacing:0.03em;margin-top:6px">Match annulé</div>
+        <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:6px;line-height:1.5">Annulé automatiquement (disparu du calendrier FFBB).<br>Les données de prépa sont conservées.</div>
+        ${isCoach ? `<button class="btn btn-ghost" style="margin-top:12px;font-size:11px;color:var(--ink-3)" onclick="markMatchAs('${m.id}','to_play')">↶ Réactiver le match</button>` : ''}
+      </div>`;
+  }
+
+  if (phase === 'upcoming-unprepared') {
+    return `
+      <div style="margin-top:16px;padding:16px;background:linear-gradient(135deg,rgba(255,107,0,0.12),var(--surface));border:1.5px solid var(--orange);border-radius:var(--radius)">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px">
+          <div>
+            <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em">Compte à rebours</div>
+            <div style="font-family:'Anton';font-size:30px;color:var(--orange);line-height:1">${cd}</div>
+          </div>
+          <span style="font-size:34px;line-height:1">📋</span>
+        </div>
+        ${isCoach ? `
+          <div style="font-size:11px;color:var(--ink-2);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px">Préparation · ${prep.signals}/5</div>
+          ${checkRow(prep.roster, 'Composition', prep.roster ? 'Effectif défini' : 'Définir les joueuses présentes', prep.roster ? 'Modifier' : 'Définir', `openRosterManager('${m.id}')`)}
+          ${checkRow(prep.responses > 0, 'Convocation', prep.responses > 0 ? `${prep.responses} réponse(s)${prep.absents ? ' · ' + prep.absents + ' absente(s)' : ''}` : 'Aucune réponse pour l\'instant', 'Gérer', `state.section='team';state.teamTab='convoc';state.view=null;render()`)}
+          ${checkRow(prep.plays > 0, 'Plays / tactique', prep.plays > 0 ? `${prep.plays} play(s) lié(s)` : 'Lier les systèmes à exécuter', prep.plays > 0 ? 'Modifier' : 'Lier', `openMatchPlayPicker('${m.id}')`)}
+          ${checkRow(prep.notes, 'Consignes coach', prep.notes ? 'Notes de brief rédigées' : 'Focus tactique, points d\'attention', prep.notes ? 'Éditer' : 'Écrire', `editPrepComment('${m.id}')`)}
+        ` : `
+          <div style="font-size:12px;color:var(--ink-2);line-height:1.5;font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.03em">Match à venir — la prépa du coach apparaîtra ici.</div>
+        `}
+      </div>`;
+  }
+
+  if (phase === 'upcoming-prepared') {
+    return `
+      <div style="margin-top:16px;padding:16px;background:linear-gradient(135deg,rgba(34,197,94,0.10),var(--surface));border:1.5px solid var(--green);border-radius:var(--radius)">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+          <div>
+            <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em">Compte à rebours</div>
+            <div style="font-family:'Anton';font-size:30px;color:var(--orange);line-height:1">${cd}</div>
+          </div>
+          <span class="chip chip-green" style="font-weight:700;letter-spacing:0.04em">PRÊT ✓</span>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+          ${prep.roster ? '<span class="chip">👥 Compo</span>' : ''}
+          ${prep.responses > 0 ? `<span class="chip">📨 ${prep.responses} rép.${prep.absents ? ' · ' + prep.absents + ' abs.' : ''}</span>` : ''}
+          ${prep.plays > 0 ? `<span class="chip">📚 ${prep.plays} play${prep.plays > 1 ? 's' : ''}</span>` : ''}
+          ${prep.videos > 0 ? `<span class="chip">▶ ${prep.videos} vidéo${prep.videos > 1 ? 's' : ''}</span>` : ''}
+          ${prep.notes ? '<span class="chip">📝 Consignes</span>' : ''}
+        </div>
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:10px;line-height:1.4">Détail de la prépa ci-dessous · ajustable jusqu'au coup d'envoi.</div>
+      </div>`;
+  }
+
+  if (phase === 'today') {
+    return `
+      <div style="margin-top:16px;padding:16px;background:linear-gradient(135deg,rgba(255,34,34,0.14),var(--surface));border:1.5px solid #ff2222;border-radius:var(--radius)">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+          <span style="font-size:26px;line-height:1;animation:pulseGlow 2s infinite">🔥</span>
+          <div>
+            <div style="font-family:'Anton';font-size:20px;text-transform:uppercase;letter-spacing:0.03em;color:#ff2222">C'est aujourd'hui</div>
+            <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">${esc(m.time || 'Heure ?')}${m.place ? ' · ' + esc(m.place) : ''}</div>
+          </div>
+        </div>
+        ${(isCoach || isStat) ? `
+          <button class="btn btn-primary btn-block btn-lg" onclick="startLive('${m.id}')" style="min-height:52px">● Lancer le tracker live</button>
+          <button class="btn btn-secondary btn-block" style="margin-top:8px;min-height:44px" onclick="editMatch('${m.id}')">⚡ Saisir le score rapide</button>
+        ` : `
+          <div style="font-size:12px;color:var(--ink-2);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.03em">Jour de match — bonne chance ! 💪</div>
+        `}
+      </div>`;
+  }
+
+  if (phase === 'past-unscored') {
+    return `
+      <div style="margin-top:16px;padding:16px;background:linear-gradient(135deg,${scoreEntered ? 'rgba(34,197,94,0.12)' : 'rgba(255,107,0,0.14)'},var(--surface));border:1.5px solid ${scoreEntered ? 'var(--green)' : 'var(--orange)'};border-radius:var(--radius)">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+          <span style="font-size:26px;line-height:1">${scoreEntered ? '🏁' : '📋'}</span>
+          <div style="flex:1;min-width:0">
+            <div style="font-family:'Anton';font-size:17px;text-transform:uppercase;letter-spacing:0.02em;color:${scoreEntered ? 'var(--green)' : 'var(--orange)'}">${scoreEntered ? 'Résultat à confirmer' : 'Résultat à saisir'}</div>
+            <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;line-height:1.4">${scoreEntered ? 'Score saisi (' + (m.scoreUs | 0) + '·' + (m.scoreOpp | 0) + ') — bascule en "joué" pour débloquer stats & selfie.' : 'Ce match est passé. Renseigne le score pour archiver le résultat.'}</div>
+          </div>
+        </div>
+        ${isCoach ? (scoreEntered
+          ? `<button class="btn btn-primary btn-block btn-lg" style="min-height:48px" onclick="markMatchAs('${m.id}','played')">✓ Marquer comme joué</button>`
+          : `<button class="btn btn-primary btn-block btn-lg" style="min-height:48px" onclick="editMatch('${m.id}')">✎ Saisir le résultat</button>`)
+          : `<div style="font-size:12px;color:var(--ink-2);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.03em">En attente du résultat du coach.</div>`}
+      </div>`;
+  }
+
+  // phase === 'played' → le hero score est déjà affiché plus haut, pas de bandeau.
+  return '';
+}
+
 function renderMatchDetail() {
   const m = state.matches.find(x => x.id === state.view.id);
   if (!m) { state.view = null; return renderMatches(); }
@@ -8481,6 +8636,9 @@ function renderMatchDetail() {
   const stats = m.playerStats || {};
   const isCoach = state.auth.role === 'coach';
   const isStat = state.auth.role === 'stat';
+  // Refonte UX : phase du match → vue adaptée (chantier A).
+  const phase = getMatchPhase(m);
+  const cancelled = phase === 'cancelled';
   // Toggle UI : "Voir la prépa" pour les matchs déjà joués (historique).
   const showPrepArchive = isCoach && played && state._showPrepArchive === m.id;
 
@@ -8490,9 +8648,16 @@ function renderMatchDetail() {
 
       <div class="px" style="padding-top:6px">
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;align-items:center">
-          ${played
+          ${cancelled
+            ? `<span class="chip" style="background:var(--bg-2);border-color:var(--border);color:var(--ink-3);font-weight:700;letter-spacing:0.04em">⛔ ANNULÉ</span>`
+            : played
             ? `<span class="chip ${win ? 'chip-green' : 'chip-red'}" style="font-weight:700;letter-spacing:0.04em">🏀 JOUÉ · ${win ? 'Victoire' : 'Défaite'}</span>`
-            : `<span class="chip" style="background:rgba(255,107,0,0.14);border-color:var(--orange);color:var(--orange);font-weight:700;letter-spacing:0.04em">${upcoming ? '⏳ À VENIR' : '○ À JOUER'}</span>`}
+            : phase === 'today'
+            ? `<span class="chip" style="background:rgba(255,34,34,0.16);border-color:#ff2222;color:#ff2222;font-weight:700;letter-spacing:0.04em">🔥 AUJOURD'HUI</span>`
+            : phase === 'past-unscored'
+            ? `<span class="chip" style="background:rgba(255,107,0,0.14);border-color:var(--orange);color:var(--orange);font-weight:700;letter-spacing:0.04em">📋 À SAISIR</span>`
+            : `<span class="chip" style="background:rgba(255,107,0,0.14);border-color:var(--orange);color:var(--orange);font-weight:700;letter-spacing:0.04em">⏳ ${matchCountdownLabel(m.date).toUpperCase()}</span>`}
+          ${phase === 'upcoming-prepared' ? '<span class="chip chip-green" style="font-weight:700">PRÊT ✓</span>' : ''}
           <span class="chip">${m.home ? 'Domicile' : 'Extérieur'}</span>
           <span class="chip">${formatDate(m.date, 'long')}</span>
         </div>
@@ -8514,7 +8679,10 @@ function renderMatchDetail() {
             </div>
           </div>
         `}
-        ${(isCoach || isStat) ? `
+
+        ${renderMatchStateBanner(m, phase, isCoach, isStat)}
+
+        ${(isCoach || isStat) && !cancelled ? `
           <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
             ${isStat ? `<button class="btn btn-primary" onclick="startLive('${m.id}')">● Saisir Live</button>` : ''}
             ${isCoach ? `<button class="btn ${m.isLive?'btn-primary':'btn-secondary'}" onclick="editLiveStream('${m.id}')" style="${m.isLive?'background:#ff2222;color:white':''}">${m.isLive?'● Live ON':'Live public'}</button>` : ''}
@@ -8525,8 +8693,10 @@ function renderMatchDetail() {
           </div>
         ` : ''}
         ${(() => {
-          // Joueuse : bouton 'Mon ressenti' toujours visible (même sans stats enregistrées)
+          // Joueuse : bouton 'Mon ressenti' (auto-éval post-match) — visible
+          // uniquement une fois le match joué/passé (pas avant ni si annulé).
           if (state.auth.role !== 'player') return '';
+          if (phase !== 'played' && phase !== 'past-unscored') return '';
           const myPid = state.auth.playerId;
           const myReview = (m.playerReviews || {})[myPid];
           const filled = !!myReview;
@@ -8736,7 +8906,7 @@ function renderMatchDetail() {
         `;
       })()}
 
-      ${isToPlay && scoreEntered && isCoach ? `
+      ${phase === 'today' && scoreEntered && isCoach ? `
         <div style="margin:0 18px 12px;padding:12px 14px;background:linear-gradient(135deg,rgba(34,197,94,0.10),var(--surface));border:1.5px solid var(--green);border-radius:10px;display:flex;align-items:center;gap:10px">
           <span style="font-size:20px">🏁</span>
           <div style="flex:1;min-width:0">
@@ -8747,7 +8917,7 @@ function renderMatchDetail() {
         </div>
       ` : ''}
 
-      ${isToPlay ? renderMatchPrep(m) : `
+      ${cancelled ? '' : isToPlay ? renderMatchPrep(m) : `
         ${isCoach ? `
           <div style="padding:0 18px 6px;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
             <button class="btn btn-ghost" onclick="state._showPrepArchive=${showPrepArchive?'null':`'${m.id}'`};render()" style="font-size:11px">
@@ -10200,38 +10370,26 @@ function renderMatchPrep(m) {
   const playsById = Object.fromEntries((state.plays || []).map(p => [p.id, p]));
   const prepVideos = Array.isArray(m.prepVideos) ? m.prepVideos : [];
   const prepComment = m.prepComment || '';
+  const phase = getMatchPhase(m);
+  // Sous-titre contextuel : la prépa se lit différemment avant / pendant /
+  // après le match (les infos générales sont déjà dans le hero, plus de Brief).
+  const prepIntro = phase === 'past-unscored'
+    ? 'Rappel de ce qui était prévu pour ce match.'
+    : phase === 'today'
+    ? 'Dernier check avant le coup d\'envoi.'
+    : 'Compo, tactique et consignes à préparer.';
 
   return `
-    <!-- BRIEF -->
+    ${isCoach ? `
+    <!-- EN-TÊTE PRÉPA -->
     <div class="section-header">
       <div>
         <div class="eyebrow">📋 Préparation</div>
-        <h2 class="display-md mt-2">Brief</h2>
-      </div>
-      ${isCoach ? `<button class="section-action" onclick="editMatch('${m.id}')">✎ Éditer</button>` : ''}
-    </div>
-    <div class="list-section">
-      <div style="padding:14px 16px;display:grid;grid-template-columns:1fr 1fr;gap:14px">
-        <div>
-          <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em">Adversaire</div>
-          <div style="font-family:'Anton';font-size:16px;margin-top:2px">${esc(m.opponent || '—')}</div>
-        </div>
-        <div>
-          <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em">Date</div>
-          <div style="font-family:'Anton';font-size:16px;margin-top:2px">${formatDate(m.date, 'long')}</div>
-        </div>
-        <div>
-          <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em">Heure</div>
-          <div style="font-family:'Anton';font-size:16px;margin-top:2px;color:var(--orange)">${esc(m.time || '—')}</div>
-        </div>
-        <div>
-          <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em">Lieu</div>
-          <div style="font-family:'Anton';font-size:14px;margin-top:2px;line-height:1.3">${esc(m.place || (m.home ? 'Domicile' : 'Extérieur'))}</div>
-        </div>
+        <h2 class="display-md mt-2">Plan de match</h2>
+        <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px">${prepIntro}</div>
       </div>
     </div>
 
-    ${isCoach ? `
     <!-- PLAYS LIÉS -->
     <div class="section-header">
       <div>
