@@ -4169,6 +4169,20 @@ function currentSeasonConvocations() { return _filterEventsByTeam(_convocsSeason
 function currentSeasonChallenges()   { return _filterEventsByTeam(_challengesSeasonId(state.currentSeasonId)); }
 function currentSeasonPlays(opts)    { return getSeasonPlays(state.currentSeasonId, opts); }
 
+// Ressentis équipe de la saison courante. teamReviews n'a PAS de season_id en
+// base → on filtre par plage de dates [season.startDate, season.endDate] (option
+// retenue : zéro migration). r.date est une chaîne ISO YYYY-MM-DD (cf.
+// saveTeamReview) → comparaison lexicographique fiable. Fallback rétrocompat :
+// pas de saison définie (ou pas de date de début) → on renvoie tout.
+function currentSeasonTeamReviews() {
+  const all = state.teamReviews || [];
+  const season = getCurrentSeason();
+  if (!season || !season.startDate) return all;
+  const start = season.startDate;
+  const end = season.endDate || '9999-12-31';
+  return all.filter(r => r.date && r.date >= start && r.date <= end);
+}
+
 // Helper court : joueuses de la saison courante. Fallback rétrocompat sur
 // state.players si seasons pas encore chargés (bypass legacy avant migration
 // DB, cf. _seasonsLoaded). Utilisé dans toutes les vues saison-scopées :
@@ -4584,9 +4598,14 @@ function makeConvocInstance(convoc, dateStr) {
 // Pas d'argument de saison explicite : on s'appuie sur le state global,
 // car les vues coach et joueuse partagent la même source. La joueuse a
 // currentSeasonId forcé sur active au boot, donc le résultat est correct.
-function getAllEventsBetween(fromISO, toISO) {
+function getAllEventsBetween(fromISO, toISO, opts) {
   const all = [];
-  const convocs = currentSeasonConvocations();
+  // opts.allSeasons : vue coach « Toutes » — on sort du scope saison courante
+  // pour voir aussi les convocs des saisons futures (préparées à l'avance).
+  // On garde le filtre effectif (E1/E2) pour rester cohérent multi-effectif.
+  const convocs = (opts && opts.allSeasons)
+    ? _filterEventsByTeam(state.convocations || [])
+    : currentSeasonConvocations();
   convocs.forEach(c => {
     getConvocInstances(c, fromISO, toISO).forEach(i => all.push(i));
   });
@@ -6144,11 +6163,12 @@ function renderHomeCoach() {
   const nextEvent = upcomingEvents[0];
 
   // Seuls les matchs joués (avec au moins un score > 0) entrent dans le bilan et l'historique
-  const playedMatches = state.matches.filter(m => (m.scoreUs || 0) > 0 || (m.scoreOpp || 0) > 0);
+  // Saison courante uniquement (fix #5 : sinon les stats de la saison passée s'affichent).
+  const playedMatches = currentSeasonMatches().filter(m => (m.scoreUs || 0) > 0 || (m.scoreOpp || 0) > 0);
   const recentMatches = [...playedMatches].sort((a,b) => b.date.localeCompare(a.date)).slice(0, 3);
   const wins = playedMatches.filter(m => m.scoreUs > m.scoreOpp).length;
   const losses = playedMatches.filter(m => m.scoreUs < m.scoreOpp).length;
-  const featuredPlays = state.plays.slice(0, 6);
+  const featuredPlays = currentSeasonPlays().slice(0, 6);
 
   return `
     <div class="fade-up">
@@ -6216,7 +6236,9 @@ function renderHomeCoach() {
 
       ${(() => {
         try {
-          const reviews = state.teamReviews || [];
+          // Saison courante uniquement : teamReviews agrégeait toutes les saisons
+          // (pas de season_id) → on filtre par plage de dates de la saison (fix #5).
+          const reviews = currentSeasonTeamReviews();
           if (reviews.length === 0) return '';
           // Dernière par joueuse
           const latestByPlayer = {};
@@ -6509,8 +6531,9 @@ function renderHomePlayer() {
   const upcoming = getAllEventsBetween(todayStr, isoDate(threeWeeksLater));
   const nextEvent = upcoming[0];
 
-  // Dernières stats persos (compact)
-  const myMatches = state.matches
+  // Dernières stats persos (compact) — saison courante uniquement (fix #5 :
+  // sinon « dernier match » remonte une rencontre de la saison passée).
+  const myMatches = currentSeasonMatches()
     .filter(m => m.playerStats && m.playerStats[p.id])
     .sort((a,b) => b.date.localeCompare(a.date));
   const lastStats = myMatches.length > 0 ? myMatches[0].playerStats[p.id] : null;
@@ -6520,7 +6543,7 @@ function renderHomePlayer() {
   const myBadgesCount = (p.badges || []).length;
 
   // Carrousel plays récents
-  const featuredPlays = state.plays.slice(0, 6);
+  const featuredPlays = currentSeasonPlays().slice(0, 6);
 
   return `
     <div class="fade-up">
@@ -10108,7 +10131,7 @@ function renderMatchPlayPicker() {
     </div>
     <div class="modal-body">
       <div class="fld">
-        <input id="mpicker-search" placeholder="Rechercher dans les plays..." value="${esc(filter.search)}" oninput="state._matchPlayPicker.filter.search=this.value;renderMatchPlayPicker()">
+        <input id="mpicker-search" placeholder="Rechercher dans les plays... (min 3 lettres)" value="${esc(filter.search)}" oninput="debouncedPickerSearch(this.value, v=>state._matchPlayPicker.filter.search=v, renderMatchPlayPicker, 'mpicker-search')">
       </div>
       <div class="segmented" style="margin-bottom:10px;overflow-x:auto;flex-wrap:nowrap">
         <button class="segmented-btn ${filter.cat==='all'?'active':''}" onclick="state._matchPlayPicker.filter.cat='all';renderMatchPlayPicker()">Tous</button>
@@ -11801,7 +11824,71 @@ function renderConvocs() {
   const todayStr = isoDate(today);
   const isCoach = state.auth.role === 'coach';
 
-  // 3 prochaines semaines d'instances
+  // Fix #2 : le coach doit pouvoir voir/éditer les convocs préparées à l'avance
+  // (parfois la saison prochaine), masquées par le filtre « 3 semaines » par
+  // défaut. Toggle opt-in : weeks (défaut visuel) / season / all. La joueuse
+  // reste sur la vue 3 semaines (pas besoin de voir 6 mois en avance).
+  const range = isCoach ? (state.convocRange || 'weeks') : 'weeks';
+
+  const toggleHtml = isCoach ? `
+    <div class="segmented" style="margin:0 18px 12px;overflow-x:auto;flex-wrap:nowrap">
+      <button class="segmented-btn ${range==='weeks'?'active':''}" onclick="setConvocRange('weeks')">Prochaines semaines</button>
+      <button class="segmented-btn ${range==='season'?'active':''}" onclick="setConvocRange('season')">Cette saison</button>
+      <button class="segmented-btn ${range==='all'?'active':''}" onclick="setConvocRange('all')">Toutes</button>
+    </div>
+  ` : '';
+
+  const headerHtml = (countLabel) => `
+    <div style="padding:0 18px 12px;display:flex;justify-content:space-between;align-items:center">
+      <div style="font-size:12px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em">${countLabel}</div>
+      ${isCoach ? `<button class="btn btn-primary" onclick="editConvoc()">+ Nouveau</button>` : ''}
+    </div>`;
+
+  // ---- Vue étendue coach (season / all) : liste chrono groupée par mois ----
+  if (range !== 'weeks') {
+    const season = getCurrentSeason();
+    let toISO, pastFromISO, allSeasons = false;
+    if (range === 'season') {
+      toISO = (season && season.endDate) || isoDate(new Date(today.getTime() + 365 * 86400000));
+      pastFromISO = (season && season.startDate) || isoDate(new Date(today.getTime() - 365 * 86400000));
+    } else { // 'all' : couvre aussi la saison prochaine (~18 mois autour d'aujourd'hui)
+      toISO = isoDate(new Date(today.getTime() + 550 * 86400000));
+      pastFromISO = isoDate(new Date(today.getTime() - 550 * 86400000));
+      allSeasons = true;
+    }
+    const upcoming = getAllEventsBetween(todayStr, toISO, { allSeasons });
+    const past = getAllEventsBetween(pastFromISO, isoDate(new Date(today.getTime() - 86400000)), { allSeasons });
+    past.reverse();
+    const months = groupEventsByMonth(upcoming);
+    const scopeLabel = range === 'season' ? 'cette saison' : 'toutes saisons';
+
+    return `
+      ${toggleHtml}
+      ${headerHtml(`${upcoming.length} à venir · ${scopeLabel}`)}
+      ${upcoming.length === 0 && past.length === 0 ? `
+        <div class="empty">
+          <div class="empty-icon">○</div>
+          <div class="empty-title">Aucun événement</div>
+          <div class="empty-desc">Crée ton premier événement</div>
+        </div>
+      ` : `
+        ${months.map(mo => `
+          <div style="padding:14px 18px 6px"><div class="eyebrow">${mo.label}</div></div>
+          <div class="list-section">
+            ${mo.events.map(e => eventInstanceRow(e, isCoach)).join('')}
+          </div>
+        `).join('')}
+        ${past.length > 0 ? `
+          <div style="padding:18px 18px 6px"><div class="eyebrow-muted">Passées (${past.length})</div></div>
+          <div class="list-section" style="opacity:0.7">
+            ${past.slice(0, 50).map(e => eventInstanceRow(e, isCoach)).join('')}
+          </div>
+        ` : ''}
+      `}
+    `;
+  }
+
+  // ---- Vue par défaut (joueuse + coach) : 3 prochaines semaines ----
   const threeWeeksLater = new Date(today.getTime() + 21 * 86400000);
   const upcoming = getAllEventsBetween(todayStr, isoDate(threeWeeksLater));
 
@@ -11814,10 +11901,8 @@ function renderConvocs() {
   const weeks = groupEventsByWeek(upcoming, today);
 
   return `
-    <div style="padding:0 18px 12px;display:flex;justify-content:space-between;align-items:center">
-      <div style="font-size:12px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em">${upcoming.length} événement${upcoming.length>1?'s':''} sur 3 semaines</div>
-      ${isCoach ? `<button class="btn btn-primary" onclick="editConvoc()">+ Nouveau</button>` : ''}
-    </div>
+    ${toggleHtml}
+    ${headerHtml(`${upcoming.length} événement${upcoming.length>1?'s':''} sur 3 semaines`)}
 
     ${upcoming.length === 0 && past.length === 0 ? `
       <div class="empty">
@@ -11847,6 +11932,30 @@ function renderConvocs() {
       ` : ''}
     `}
   `;
+}
+
+// Toggle de portée des convocs (coach). Persisté en mémoire de session (pas de
+// migration) → revient à 'weeks' au reload, défaut visuel volontaire.
+function setConvocRange(range) {
+  state.convocRange = range;
+  render();
+}
+
+// Groupe une liste d'instances triées par mois calendaire (vue coach étendue).
+function groupEventsByMonth(events) {
+  const MOIS = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
+  const out = [];
+  const byKey = {};
+  events.forEach(e => {
+    const d = new Date(e.date + 'T00:00:00');
+    const key = d.getFullYear() + '-' + String(d.getMonth()).padStart(2, '0');
+    if (!byKey[key]) {
+      byKey[key] = { label: MOIS[d.getMonth()] + ' ' + d.getFullYear(), events: [] };
+      out.push(byKey[key]);
+    }
+    byKey[key].events.push(e);
+  });
+  return out;
 }
 
 function groupEventsByWeek(events, today) {
@@ -12755,6 +12864,28 @@ function unvalidateTrainingPlan() {
   renderTrainingPlanEditor();
 }
 
+// Recherche des pickers (plays / exos plan d'entraînement) : ces modales se
+// reconstruisent ENTIÈREMENT (openModal) à chaque frappe → perte du focus et
+// mini-scroll qui sortent du champ. On attend donc min 3 lettres avant de
+// filtrer/re-render, + un debounce de 200ms ; champ vidé → re-render immédiat
+// (retour liste complète). applyFn stocke la valeur dans le state (le champ DOM
+// garde le texte tant qu'on ne re-render pas), rerenderFn reconstruit la modale,
+// inputId restaure focus + curseur après le re-render.
+let _pickerSearchTimer = null;
+function debouncedPickerSearch(value, applyFn, rerenderFn, inputId) {
+  applyFn(value);
+  if (_pickerSearchTimer) { clearTimeout(_pickerSearchTimer); _pickerSearchTimer = null; }
+  const v = (value || '').trim();
+  if (v.length > 0 && v.length < 3) return; // 1-2 lettres : on n'écrase pas le focus
+  _pickerSearchTimer = setTimeout(() => {
+    rerenderFn();
+    if (inputId) {
+      const el = document.getElementById(inputId);
+      if (el) { el.focus(); const n = el.value.length; try { el.setSelectionRange(n, n); } catch (e) {} }
+    }
+  }, 200);
+}
+
 // === Picker depuis la bibliothèque plays ===
 function openPlayPicker() {
   if (!state._editingTraining) {
@@ -12795,7 +12926,7 @@ function renderPlayPicker() {
     <div class="modal-body">
       <!-- Recherche -->
       <div class="fld">
-        <input id="picker-search" placeholder="Rechercher dans les plays..." value="${esc(filter.search)}" oninput="state._playPickerFilter.search=this.value;renderPlayPicker()">
+        <input id="picker-search" placeholder="Rechercher dans les plays... (min 3 lettres)" value="${esc(filter.search)}" oninput="debouncedPickerSearch(this.value, v=>state._playPickerFilter.search=v, renderPlayPicker, 'picker-search')">
       </div>
 
       <!-- Filtre catégorie -->
@@ -19755,7 +19886,9 @@ async function ffbbReconcileConvocs(curMatches, prevIds) {
     const newDate = fm.date ? fm.date.slice(0, 10) : null;
     const newTime = ffbbTime(fm.date) || '';
     const newLoc  = [fm.salle.nom, fm.salle.adresse, [fm.salle.cp, fm.salle.ville].filter(Boolean).join(' ')].filter(Boolean).join(', ') || '';
-    // Match : date / heure / lieu (on NE touche PAS scores/notes). status : on
+    // Match : date / heure / lieu (on NE touche PAS scores/notes/lineup/MVP —
+    // fix #4 : le payload mUpd ci-dessous N'INCLUT JAMAIS score_us/score_opp, donc
+    // un re-sync FFBB ne peut pas écraser un score saisi par le coach). status : on
     // dé-annule si le match réapparaît (cancelled → to_play/played selon scores).
     if (localM) {
       const wasCancelled = localM.status === 'cancelled';
@@ -20217,28 +20350,42 @@ async function ffbbDoImport() {
   const btn = document.getElementById('ffbb-imp-go');
   if (btn) { btn.disabled = true; btn.textContent = 'Création…'; }
 
+  // Préservation coach (fix #4) : un ré-import ne doit JAMAIS écraser ce que le
+  // coach a saisi localement. On indexe matchs/convocs existants pour, le cas
+  // échéant, conserver score/statut/notes (match) et note (convoc) plutôt que
+  // de reprendre les valeurs FFBB (qui valent 0/'Importé…' pour un match futur).
+  const localMById = Object.fromEntries((state.matches || []).map(x => [x.id, x]));
+  const localCById = Object.fromEntries((state.convocations || []).map(x => [x.id, x]));
   const matchRows = [], convocRows = [];
   ids.forEach(id => {
     const m = byId[id]; if (!m) return;
     const mid = 'ffbb-' + m.id, cid = 'ffbbc-' + m.id;
     const opp = m.weHome ? m.away : m.home;
-    const usScore  = m.played ? (m.weHome ? m.homeScore : m.awayScore) : 0;
-    const oppScore = m.played ? (m.weHome ? m.awayScore : m.homeScore) : 0;
+    const ffbbUs  = m.played ? (m.weHome ? m.homeScore : m.awayScore) : 0;
+    const ffbbOpp = m.played ? (m.weHome ? m.awayScore : m.homeScore) : 0;
+    const localM = localMById[mid];
+    // Score déjà saisi localement (> 0) → on le garde, on ne le réécrit pas.
+    const hasLocalScore = localM && (((localM.scoreUs | 0) > 0) || ((localM.scoreOpp | 0) > 0));
+    const usScore  = hasLocalScore ? (localM.scoreUs | 0) : ffbbUs;
+    const oppScore = hasLocalScore ? (localM.scoreOpp | 0) : ffbbOpp;
+    const status   = hasLocalScore ? (localM.status || 'played') : (m.played ? 'played' : 'to_play');
+    const notes    = (localM && localM.notes) ? localM.notes : ('Importé depuis FFBB (' + (m._compNom || '') + ')');
+    const localC   = localCById[cid];
     const loc = [m.salle.nom, m.salle.adresse, [m.salle.cp, m.salle.ville].filter(Boolean).join(' ')].filter(Boolean).join(', ');
     matchRows.push({
       id: mid, date: m.date ? m.date.slice(0, 10) : new Date().toISOString().slice(0, 10),
       opponent: opp || 'Adversaire', home: !!m.weHome,
       score_us: usScore, score_opp: oppScore,
-      status: m.played ? 'played' : 'to_play',
+      status: status,
       location: loc || null, time: ffbbTime(m.date) || null,
       season_id: seasonId, team_tag: tag,
-      notes: 'Importé depuis FFBB (' + (m._compNom || '') + ')'
+      notes: notes
     });
     convocRows.push({
       id: cid, type: 'match', title: 'Vs ' + (opp || 'Adversaire'),
       date: m.date ? m.date.slice(0, 10) : new Date().toISOString().slice(0, 10),
       time: ffbbTime(m.date) || null, location: loc || null,
-      note: null, season_id: seasonId, team_tag: tag
+      note: (localC && localC.note) || null, season_id: seasonId, team_tag: tag
     });
   });
 
@@ -20249,19 +20396,25 @@ async function ffbbDoImport() {
     if (r2.error) throw r2.error;
 
     // Reflète localement (shape app) pour affichage immédiat, sans attendre un resync.
+    // Fix #4 : sur un ré-import, on conserve les sous-objets coach existants
+    // (quarters/positives/negatives/playerStats, responses/attachments/overrides)
+    // au lieu de les réinitialiser à vide.
     const mById = Object.fromEntries((state.matches || []).map(x => [x.id, x]));
-    matchRows.forEach(r => { mById[r.id] = Object.assign(mById[r.id] || {}, {
+    matchRows.forEach(r => { const prev = mById[r.id] || {}; mById[r.id] = Object.assign({}, prev, {
       id: r.id, date: r.date, opponent: r.opponent, home: r.home,
       scoreUs: r.score_us, scoreOpp: r.score_opp, status: r.status,
       place: r.location || '', time: r.time || '', seasonId: r.season_id,
-      teamTag: r.team_tag, notes: r.notes || '', quarters: {}, positives: [], negatives: [], playerStats: {}
+      teamTag: r.team_tag, notes: r.notes || '',
+      quarters: prev.quarters || {}, positives: prev.positives || [],
+      negatives: prev.negatives || [], playerStats: prev.playerStats || {}
     }); });
     state.matches = Object.values(mById);
     const cById = Object.fromEntries((state.convocations || []).map(x => [x.id, x]));
-    convocRows.forEach(r => { cById[r.id] = Object.assign(cById[r.id] || {}, {
+    convocRows.forEach(r => { const prev = cById[r.id] || {}; cById[r.id] = Object.assign({}, prev, {
       id: r.id, type: r.type, title: r.title, date: r.date, time: r.time || '',
-      location: r.location || '', note: '', seasonId: r.season_id, teamTag: r.team_tag,
-      responses: {}, cancelledInstances: [], instanceOverrides: {}, attachments: []
+      location: r.location || '', note: prev.note || '', seasonId: r.season_id, teamTag: r.team_tag,
+      responses: prev.responses || {}, cancelledInstances: prev.cancelledInstances || [],
+      instanceOverrides: prev.instanceOverrides || {}, attachments: prev.attachments || []
     }); });
     state.convocations = Object.values(cById);
     persist();
