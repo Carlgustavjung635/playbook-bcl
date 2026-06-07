@@ -261,6 +261,19 @@
     cursor: pointer; padding: 4px 0;
   }
   .section-action:active { opacity: 0.6; }
+  /* Variante "vrai bouton" : pilule bordée pour que l'action soit lisible
+     comme cliquable (et non comme un titre). Cf. audit UX vue Équipe. */
+  .section-action-btn {
+    background: var(--bg-2); border: 1px solid var(--border);
+    color: var(--orange);
+    font-size: 11px; font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    cursor: pointer; padding: 7px 11px; border-radius: 8px;
+    display: inline-flex; align-items: center; gap: 5px;
+    min-height: 34px;
+  }
+  .section-action-btn:active { opacity: 0.6; background: var(--bg-3); }
 
   /* ========== CARDS ========== */
   .card {
@@ -999,7 +1012,7 @@
   .lb-medal.silver { background: linear-gradient(135deg, #d4d4d4, #888); color: #000; border-color: #c0c0c0; }
   .lb-medal.bronze { background: linear-gradient(135deg, #cd7f32, #8b4513); color: white; border-color: #cd7f32; }
   .lb-progress {
-    height: 3px; background: var(--bg-3); border-radius: 2px;
+    height: 5px; background: var(--bg-3); border-radius: 3px;
     overflow: hidden; margin-top: 6px;
   }
   .lb-progress-fill {
@@ -1053,15 +1066,16 @@
 
   /* ========== DETAIL ========== */
   .detail-back {
-    display: inline-flex; align-items: center; gap: 4px;
-    background: none; border: none; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 5px;
+    background: var(--bg-2); border: 1px solid var(--border-soft); cursor: pointer;
     color: var(--ink-2);
     font-family: 'JetBrains Mono', monospace;
     font-size: 10px; font-weight: 600;
     text-transform: uppercase; letter-spacing: 0.08em;
-    padding: 14px 18px 0;
+    padding: 7px 12px; border-radius: 999px;
+    margin: 12px 0 0 18px;
   }
-  .detail-back:active { color: var(--orange); }
+  .detail-back:active { color: var(--orange); border-color: var(--orange); }
   .detail-title {
     font-family: 'Anton', sans-serif;
     font-size: 38px; line-height: 0.95;
@@ -9278,9 +9292,13 @@ function renderMatchDetail() {
             ${isCoach ? `<button class="btn ${m.isLive?'btn-primary':'btn-secondary'}" onclick="editLiveStream('${m.id}')" style="${m.isLive?'background:#ff2222;color:white':''}">${m.isLive?'● Live ON':'Live public'}</button>` : ''}
             ${isCoach ? `<button class="btn btn-secondary" onclick="openPlayerReviewsList('${m.id}')">📝 Ressentis joueuses</button>` : ''}
             ${isCoach ? `<button class="btn btn-secondary" onclick="openExportMenu('${m.id}')">📤 Exporter</button>` : ''}
-            ${isCoach ? `<button class="btn btn-secondary" onclick="editMatch('${m.id}')">Modifier</button>` : ''}
-            ${isCoach ? `<button class="btn btn-danger" onclick="deleteMatch('${m.id}')">Supprimer</button>` : ''}
+            ${isCoach ? `<button class="btn btn-secondary" onclick="editMatch('${m.id}')">✎ Modifier</button>` : ''}
           </div>
+          ${isCoach ? `
+            <div style="display:flex;justify-content:flex-end;margin-top:10px;padding-top:10px;border-top:1px solid var(--border-soft)">
+              <button class="btn btn-danger" onclick="deleteMatch('${m.id}')" aria-label="Supprimer le match">🗑 Supprimer le match</button>
+            </div>
+          ` : ''}
         ` : ''}
         ${(() => {
           // Joueuse : bouton 'Mon ressenti' (auto-éval post-match) — visible
@@ -9510,10 +9528,10 @@ function renderMatchDetail() {
       ${cancelled ? '' : isToPlay ? renderMatchPrep(m) : `
         ${isCoach ? `
           <div style="padding:0 18px 6px;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
-            <button class="btn btn-ghost" onclick="state._showPrepArchive=${showPrepArchive?'null':`'${m.id}'`};render()" style="font-size:11px">
-              ${showPrepArchive ? '▲ Masquer la prépa' : '▼ Voir la prépa du match'}
+            <button class="btn btn-secondary" onclick="state._showPrepArchive=${showPrepArchive?'null':`'${m.id}'`};render()" style="font-size:11px">
+              ${showPrepArchive ? '📋 Masquer la prépa' : '📋 Voir la prépa du match'}
             </button>
-            <button class="btn btn-ghost" onclick="markMatchAs('${m.id}','to_play')" style="font-size:11px;color:var(--ink-3)">↶ Repasser en "à jouer"</button>
+            <button class="btn btn-secondary" onclick="markMatchAs('${m.id}','to_play')" style="font-size:11px;color:var(--ink-3)" aria-label="Repasser ce match en à jouer">↶ Repasser en « à jouer »</button>
           </div>
           ${showPrepArchive ? `<div style="opacity:0.85">${renderMatchPrep(m)}</div>` : ''}
         ` : ''}
@@ -12540,8 +12558,8 @@ function renderTeam() {
         </div>
         ${isCoach ? `
           <div style="display:flex;gap:6px;flex-wrap:wrap">
-            ${_seasonsLoaded() ? `<button class="section-action" onclick="openSeasonRosterEditor()">Effectif →</button>` : ''}
-            <button class="section-action" onclick="managePlayers()">Gérer →</button>
+            ${_seasonsLoaded() ? `<button class="section-action-btn" onclick="openSeasonRosterEditor()" aria-label="Gérer l'effectif de la saison">👥 Effectif</button>` : ''}
+            <button class="section-action-btn" onclick="managePlayers()" aria-label="Gérer les joueuses">⚙ Gérer</button>
           </div>
         ` : ''}
       </div>
@@ -12549,7 +12567,7 @@ function renderTeam() {
       <div class="segmented">
         <button class="segmented-btn ${state.teamTab === 'convoc' ? 'active' : ''}" onclick="state.teamTab='convoc';render()">Convocations</button>
         <button class="segmented-btn ${state.teamTab === 'challenges' ? 'active' : ''}" onclick="state.teamTab='challenges';render()">Challenges</button>
-        ${isCoach ? `<button class="segmented-btn ${state.teamTab === 'lineups' ? 'active' : ''}" onclick="state.teamTab='lineups';render()">Compos 🔒</button>` : ''}
+        ${isCoach ? `<button class="segmented-btn ${state.teamTab === 'lineups' ? 'active' : ''}" onclick="state.teamTab='lineups';render()" title="Tes compositions tactiques — privées, visibles uniquement par toi (coach)" aria-label="Compos — privées, visibles uniquement par le coach">Compos 🔒</button>` : ''}
       </div>
 
       ${state.teamTab === 'convoc' ? renderConvocs() : ''}
@@ -16966,9 +16984,9 @@ function challengeCard(c, isCoach) {
             <div style="display:flex;gap:4px;margin-top:12px;justify-content:flex-end;flex-wrap:wrap">
               ${topContributors.length > 0 ? `<button class="btn btn-secondary" onclick="openChallengeStoryModal('${c.id}')" style="font-size:10px;padding:6px 10px">📸 Exporter victoire</button>` : ''}
               ${!c.badgesAwarded ? `<button class="btn btn-secondary" onclick="closeChallengeNow('${c.id}')" style="font-size:10px;padding:6px 10px">🏁 Clôturer & attribuer trophées</button>` : '<span class="chip chip-green">🏆 Trophées attribués</span>'}
-              <button class="btn btn-icon" onclick="editChallenge('${c.id}')" title="Modifier">✎</button>
-              <button class="btn btn-icon" onclick="resetCollective('${c.id}')" title="Réinitialiser le compteur">↺</button>
-              <button class="btn btn-icon" onclick="deleteChallenge('${c.id}')" style="color:var(--red)">🗑</button>
+              <button class="btn btn-icon" onclick="editChallenge('${c.id}')" title="Modifier le défi" aria-label="Modifier le défi">✎</button>
+              <button class="btn btn-icon" onclick="resetCollective('${c.id}')" title="Réinitialiser le compteur" aria-label="Réinitialiser le compteur">↺</button>
+              <button class="btn btn-icon" onclick="deleteChallenge('${c.id}')" style="color:var(--red)" title="Supprimer le défi" aria-label="Supprimer le défi">🗑</button>
             </div>
           ` : ''}
         </div>
@@ -17029,13 +17047,18 @@ function challengeCard(c, isCoach) {
           <div style="display:flex;gap:4px;margin-top:10px;justify-content:flex-end;flex-wrap:wrap">
             ${entries.some(e => e.score > 0) ? `<button class="btn btn-secondary" onclick="openChallengeStoryModal('${c.id}')" style="font-size:10px;padding:6px 10px">📸 Exporter victoire</button>` : ''}
             ${(c.scope === 'individual' && !c.badgesAwarded) ? `<button class="btn btn-secondary" onclick="closeChallengeNow('${c.id}')" style="font-size:10px;padding:6px 10px">🏁 Clôturer & attribuer trophées</button>` : (c.scope === 'individual' && c.badgesAwarded ? '<span class="chip chip-green">🏆 Trophées attribués</span>' : '')}
-            <button class="btn btn-icon" onclick="editChallenge('${c.id}')">✎</button>
-            <button class="btn btn-icon" onclick="deleteChallenge('${c.id}')" style="color:var(--red)">🗑</button>
+            <button class="btn btn-icon" onclick="editChallenge('${c.id}')" title="Modifier le défi" aria-label="Modifier le défi">✎</button>
+            <button class="btn btn-icon" onclick="deleteChallenge('${c.id}')" style="color:var(--red)" title="Supprimer le défi" aria-label="Supprimer le défi">🗑</button>
           </div>
         ` : ''}
       </div>
-      ${entries.map((e, i) => {
-        const medal = i === 0 ? 'gold' : i === 1 ? 'silver' : i === 2 ? 'bronze' : '';
+      ${(() => {
+        // Refonte UX (audit) : ne couronne pas une "leader" à 0. Tant que
+        // personne n'a marqué, le classement reste neutre (pas de médaille
+        // or/argent/bronze sur des scores nuls) → évite le faux podium.
+        const anyScore = entries.some(e => e.score > 0);
+        return entries.map((e, i) => {
+        const medal = (e.score > 0 && anyScore) ? (i === 0 ? 'gold' : i === 1 ? 'silver' : i === 2 ? 'bronze' : '') : '';
         const myPid = state.auth && state.auth.role === 'player' ? state.auth.playerId : null;
         const isMine = myPid && myPid === e.id;
         const canEdit = !isAuto && (isCoach || isMine);
@@ -17056,7 +17079,8 @@ function challengeCard(c, isCoach) {
             </div>
           </div>
         `;
-      }).join('')}
+        }).join('');
+      })()}
     </div>
   `;
 }
