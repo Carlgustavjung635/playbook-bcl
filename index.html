@@ -19795,7 +19795,9 @@ async function ffbbReconcileConvocs(curMatches, prevIds) {
     const newDate = fm.date ? fm.date.slice(0, 10) : null;
     const newTime = ffbbTime(fm.date) || '';
     const newLoc  = [fm.salle.nom, fm.salle.adresse, [fm.salle.cp, fm.salle.ville].filter(Boolean).join(' ')].filter(Boolean).join(', ') || '';
-    // Match : date / heure / lieu (on NE touche PAS scores/notes). status : on
+    // Match : date / heure / lieu (on NE touche PAS scores/notes/lineup/MVP —
+    // fix #4 : le payload mUpd ci-dessous N'INCLUT JAMAIS score_us/score_opp, donc
+    // un re-sync FFBB ne peut pas écraser un score saisi par le coach). status : on
     // dé-annule si le match réapparaît (cancelled → to_play/played selon scores).
     if (localM) {
       const wasCancelled = localM.status === 'cancelled';
@@ -20257,28 +20259,42 @@ async function ffbbDoImport() {
   const btn = document.getElementById('ffbb-imp-go');
   if (btn) { btn.disabled = true; btn.textContent = 'Création…'; }
 
+  // Préservation coach (fix #4) : un ré-import ne doit JAMAIS écraser ce que le
+  // coach a saisi localement. On indexe matchs/convocs existants pour, le cas
+  // échéant, conserver score/statut/notes (match) et note (convoc) plutôt que
+  // de reprendre les valeurs FFBB (qui valent 0/'Importé…' pour un match futur).
+  const localMById = Object.fromEntries((state.matches || []).map(x => [x.id, x]));
+  const localCById = Object.fromEntries((state.convocations || []).map(x => [x.id, x]));
   const matchRows = [], convocRows = [];
   ids.forEach(id => {
     const m = byId[id]; if (!m) return;
     const mid = 'ffbb-' + m.id, cid = 'ffbbc-' + m.id;
     const opp = m.weHome ? m.away : m.home;
-    const usScore  = m.played ? (m.weHome ? m.homeScore : m.awayScore) : 0;
-    const oppScore = m.played ? (m.weHome ? m.awayScore : m.homeScore) : 0;
+    const ffbbUs  = m.played ? (m.weHome ? m.homeScore : m.awayScore) : 0;
+    const ffbbOpp = m.played ? (m.weHome ? m.awayScore : m.homeScore) : 0;
+    const localM = localMById[mid];
+    // Score déjà saisi localement (> 0) → on le garde, on ne le réécrit pas.
+    const hasLocalScore = localM && (((localM.scoreUs | 0) > 0) || ((localM.scoreOpp | 0) > 0));
+    const usScore  = hasLocalScore ? (localM.scoreUs | 0) : ffbbUs;
+    const oppScore = hasLocalScore ? (localM.scoreOpp | 0) : ffbbOpp;
+    const status   = hasLocalScore ? (localM.status || 'played') : (m.played ? 'played' : 'to_play');
+    const notes    = (localM && localM.notes) ? localM.notes : ('Importé depuis FFBB (' + (m._compNom || '') + ')');
+    const localC   = localCById[cid];
     const loc = [m.salle.nom, m.salle.adresse, [m.salle.cp, m.salle.ville].filter(Boolean).join(' ')].filter(Boolean).join(', ');
     matchRows.push({
       id: mid, date: m.date ? m.date.slice(0, 10) : new Date().toISOString().slice(0, 10),
       opponent: opp || 'Adversaire', home: !!m.weHome,
       score_us: usScore, score_opp: oppScore,
-      status: m.played ? 'played' : 'to_play',
+      status: status,
       location: loc || null, time: ffbbTime(m.date) || null,
       season_id: seasonId, team_tag: tag,
-      notes: 'Importé depuis FFBB (' + (m._compNom || '') + ')'
+      notes: notes
     });
     convocRows.push({
       id: cid, type: 'match', title: 'Vs ' + (opp || 'Adversaire'),
       date: m.date ? m.date.slice(0, 10) : new Date().toISOString().slice(0, 10),
       time: ffbbTime(m.date) || null, location: loc || null,
-      note: null, season_id: seasonId, team_tag: tag
+      note: (localC && localC.note) || null, season_id: seasonId, team_tag: tag
     });
   });
 
@@ -20289,19 +20305,25 @@ async function ffbbDoImport() {
     if (r2.error) throw r2.error;
 
     // Reflète localement (shape app) pour affichage immédiat, sans attendre un resync.
+    // Fix #4 : sur un ré-import, on conserve les sous-objets coach existants
+    // (quarters/positives/negatives/playerStats, responses/attachments/overrides)
+    // au lieu de les réinitialiser à vide.
     const mById = Object.fromEntries((state.matches || []).map(x => [x.id, x]));
-    matchRows.forEach(r => { mById[r.id] = Object.assign(mById[r.id] || {}, {
+    matchRows.forEach(r => { const prev = mById[r.id] || {}; mById[r.id] = Object.assign({}, prev, {
       id: r.id, date: r.date, opponent: r.opponent, home: r.home,
       scoreUs: r.score_us, scoreOpp: r.score_opp, status: r.status,
       place: r.location || '', time: r.time || '', seasonId: r.season_id,
-      teamTag: r.team_tag, notes: r.notes || '', quarters: {}, positives: [], negatives: [], playerStats: {}
+      teamTag: r.team_tag, notes: r.notes || '',
+      quarters: prev.quarters || {}, positives: prev.positives || [],
+      negatives: prev.negatives || [], playerStats: prev.playerStats || {}
     }); });
     state.matches = Object.values(mById);
     const cById = Object.fromEntries((state.convocations || []).map(x => [x.id, x]));
-    convocRows.forEach(r => { cById[r.id] = Object.assign(cById[r.id] || {}, {
+    convocRows.forEach(r => { const prev = cById[r.id] || {}; cById[r.id] = Object.assign({}, prev, {
       id: r.id, type: r.type, title: r.title, date: r.date, time: r.time || '',
-      location: r.location || '', note: '', seasonId: r.season_id, teamTag: r.team_tag,
-      responses: {}, cancelledInstances: [], instanceOverrides: {}, attachments: []
+      location: r.location || '', note: prev.note || '', seasonId: r.season_id, teamTag: r.team_tag,
+      responses: prev.responses || {}, cancelledInstances: prev.cancelledInstances || [],
+      instanceOverrides: prev.instanceOverrides || {}, attachments: prev.attachments || []
     }); });
     state.convocations = Object.values(cById);
     persist();
