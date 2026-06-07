@@ -3556,6 +3556,9 @@ const ENTITIES = [
       target_type: ['team', 'players', 'e1', 'e2'].includes(b.targetType) ? b.targetType : 'team',
       target_player_ids: Array.isArray(b.targetPlayerIds) ? b.targetPlayerIds : [],
       season_id: b.seasonId || null,
+      // SONDAGE (migration _006) : poll_options null = simple message.
+      poll_options: (Array.isArray(b.pollOptions) && b.pollOptions.length >= 2) ? b.pollOptions.map(o => String(o)) : null,
+      poll_multi: !!b.pollMulti,
       // created_at / expires_at : fixés une fois à la création → hash stable.
       created_at: b.createdAt ? new Date(b.createdAt).toISOString() : null,
       expires_at: b.expiresAt ? new Date(b.expiresAt).toISOString() : null,
@@ -3570,6 +3573,8 @@ const ENTITIES = [
         targetType: r.target_type || 'team',
         targetPlayerIds: Array.isArray(r.target_player_ids) ? r.target_player_ids : [],
         seasonId: r.season_id || null,
+        pollOptions: (Array.isArray(r.poll_options) && r.poll_options.length >= 2) ? r.poll_options.map(o => String(o)) : null,
+        pollMulti: !!r.poll_multi,
         createdAt: r.created_at ? Date.parse(r.created_at) : null,
         expiresAt: r.expires_at ? Date.parse(r.expires_at) : null,
         archived: !!r.archived
@@ -3590,7 +3595,8 @@ const ENTITIES = [
           broadcast_id: r.broadcastId, player_id: r.playerId,
           status: ['pending', 'seen', 'skipped', 'acknowledged'].includes(r.status) ? r.status : 'pending',
           seen_at: r.seenAt ? new Date(r.seenAt).toISOString() : null,
-          acted_at: r.actedAt ? new Date(r.actedAt).toISOString() : null
+          acted_at: r.actedAt ? new Date(r.actedAt).toISOString() : null,
+          poll_choice: (Array.isArray(r.pollChoice) && r.pollChoice.length) ? r.pollChoice.map(n => Number(n)).filter(n => Number.isInteger(n)) : null
         };
       });
       return out;
@@ -3617,7 +3623,8 @@ const ENTITIES = [
           broadcastId: r.broadcast_id, playerId: r.player_id,
           status: remoteStatus,
           seenAt: r.seen_at ? Date.parse(r.seen_at) : null,
-          actedAt: r.acted_at ? Date.parse(r.acted_at) : null
+          actedAt: r.acted_at ? Date.parse(r.acted_at) : null,
+          pollChoice: Array.isArray(r.poll_choice) ? r.poll_choice.map(n => Number(n)).filter(n => Number.isInteger(n)) : null
         };
       });
       // Préserve les receipts locaux pas encore en remote (créés à l'instant).
@@ -4146,9 +4153,12 @@ let state = {
   // === DIFFUSIONS COACH (chantier D — cf. migration 20260607_004_broadcasts) ===
   // broadcasts : [{ id, coachId, message, mediaUrl, mediaType:'image'|'video'|null,
   //   targetType:'team'|'players'|'e1'|'e2', targetPlayerIds:[], seasonId,
-  //   createdAt(ms), expiresAt(ms)|null, archived }]
+  //   createdAt(ms), expiresAt(ms)|null, archived,
+  //   pollOptions:[str…]|null (SONDAGE, 2-6 options ; null = simple message),
+  //   pollMulti:bool (true = choix multiples) — cf. migration _006_broadcast_polls }]
   // broadcastReceipts : [{ broadcastId, playerId, status:'pending'|'seen'|
-  //   'skipped'|'acknowledged', seenAt(ms)|null, actedAt(ms)|null }]
+  //   'skipped'|'acknowledged', seenAt(ms)|null, actedAt(ms)|null,
+  //   pollChoice:[index…]|null (SONDAGE : options votées ; null = pas voté) }]
   broadcasts: load(K.broadcasts, []),
   broadcastReceipts: load(K.broadcastReceipts, []),
 
@@ -13036,6 +13046,10 @@ function createBroadcast(payload) {
     targetType: ['team', 'players', 'e1', 'e2'].includes(payload.targetType) ? payload.targetType : 'team',
     targetPlayerIds: Array.isArray(payload.targetPlayerIds) ? payload.targetPlayerIds.slice() : [],
     seasonId: payload.seasonId || getActiveSeasonId() || null,
+    // SONDAGE : pollOptions = array de 2 à 6 strings (null = simple message).
+    pollOptions: (Array.isArray(payload.pollOptions) && payload.pollOptions.length >= 2)
+      ? payload.pollOptions.slice(0, 6).map(o => String(o)) : null,
+    pollMulti: !!payload.pollMulti,
     createdAt: now,
     expiresAt: payload.expiresAt || null,
     archived: false
@@ -13054,18 +13068,24 @@ function createBroadcast(payload) {
 }
 
 // --- MAJ statut d'un receipt (côté joueuse) ---
-function markReceiptStatus(broadcastId, playerId, status) {
+// pollChoice (optionnel) : array d'index d'options votées (sondage). undefined =
+// on ne touche pas au vote existant ; array = on l'enregistre.
+function markReceiptStatus(broadcastId, playerId, status, pollChoice) {
   if (!['pending', 'seen', 'skipped', 'acknowledged'].includes(status)) return;
   if (!state.broadcastReceipts) state.broadcastReceipts = [];
   let r = getBroadcastReceipt(broadcastId, playerId);
   if (!r) {
-    r = { broadcastId, playerId, status: 'pending', seenAt: null, actedAt: null };
+    r = { broadcastId, playerId, status: 'pending', seenAt: null, actedAt: null, pollChoice: null };
     state.broadcastReceipts.push(r);
   }
   const now = Date.now();
   if (!r.seenAt) r.seenAt = now;
   r.status = status;
   if (status === 'skipped' || status === 'acknowledged') r.actedAt = now;
+  if (pollChoice !== undefined) {
+    r.pollChoice = (Array.isArray(pollChoice) && pollChoice.length)
+      ? pollChoice.map(n => Number(n)).filter(n => Number.isInteger(n)) : null;
+  }
   persist();
   if (window.PbSync) PbSync.flushNow(state).catch(() => {});
 }
@@ -13085,6 +13105,58 @@ function broadcastStats(b) {
     else pending++;
   });
   return { total: ids.size, acknowledged, skipped, seen, pending };
+}
+
+// ------------------------------------------------------------
+// SONDAGES (polls) — helpers (migration _006)
+// ------------------------------------------------------------
+// Un broadcast est un sondage ssi pollOptions est un array de >= 2 strings.
+function isPollBroadcast(b) {
+  return !!(b && Array.isArray(b.pollOptions) && b.pollOptions.length >= 2);
+}
+
+// Agrège les votes d'un sondage. Retourne :
+//   { opts, counts[], voters, multi }
+//   counts[i] = nb de joueuses ayant choisi l'option i
+//   voters    = nb de joueuses ayant voté (>= 1 choix). En choix simple,
+//               sum(counts) === voters ; en multi, sum(counts) peut dépasser.
+function pollResults(b) {
+  const opts = Array.isArray(b.pollOptions) ? b.pollOptions : [];
+  const counts = opts.map(() => 0);
+  let voters = 0;
+  (state.broadcastReceipts || []).forEach(r => {
+    if (r.broadcastId !== b.id) return;
+    if (Array.isArray(r.pollChoice) && r.pollChoice.length) {
+      voters++;
+      r.pollChoice.forEach(i => { if (i >= 0 && i < counts.length) counts[i]++; });
+    }
+  });
+  return { opts, counts, voters, multi: !!b.pollMulti };
+}
+
+// Barres de résultats (coach dashboard + détail + écran "merci" joueuse).
+// opts.highlight (array d'index) → entoure les options choisies par la joueuse.
+function renderPollBars(b, opts) {
+  opts = opts || {};
+  const { counts, voters } = pollResults(b);
+  const options = Array.isArray(b.pollOptions) ? b.pollOptions : [];
+  const max = Math.max(1, ...counts);
+  const hi = new Set(Array.isArray(opts.highlight) ? opts.highlight : []);
+  return options.map((label, i) => {
+    const c = counts[i];
+    const pct = voters ? Math.round((c / voters) * 100) : 0;
+    const w = Math.round((c / max) * 100);
+    const mine = hi.has(i);
+    return `<div style="margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:13px;margin-bottom:3px">
+        <span style="color:${mine ? 'var(--orange)' : 'var(--ink)'};font-weight:${mine ? '600' : '400'};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${mine ? '✓ ' : ''}${esc(label)}</span>
+        <span style="font-family:'JetBrains Mono';font-size:11px;color:var(--ink-3);flex-shrink:0">${pct}% · ${c}</span>
+      </div>
+      <div style="height:9px;background:var(--bg-3);border-radius:5px;overflow:hidden">
+        <div style="height:100%;width:${w}%;background:${mine ? 'var(--orange)' : 'var(--orange-2,var(--orange))'};opacity:${mine ? 1 : 0.65};border-radius:5px;transition:width .3s"></div>
+      </div>
+    </div>`;
+  }).join('');
 }
 
 // Set des broadcasts « Plus tard » (skippés) CETTE session. Var window → vidée
@@ -13286,6 +13358,9 @@ function previewBroadcastUrl(val) {
 function openBroadcastComposer() {
   state._composeBroadcast = {
     id: uid(),
+    kind: 'message',     // 'message' | 'poll' (sondage)
+    pollOptions: ['', ''], // sondage : 2 options vides au départ (min 2, max 6)
+    pollMulti: false,    // sondage : true = choix multiples autorisés
     message: '',
     mediaUrl: '', mediaType: null,
     mediaMode: 'file',   // 'file' (upload) | 'url' (vidéo hébergée)
@@ -13318,6 +13393,42 @@ function setBroadcastExpiry(days) {
   d.expiresInDays = days === '' ? 0 : Number(days);
 }
 
+// --- SONDAGE : type Message/Sondage + édition des options ---
+function setBroadcastKind(kind) {
+  const d = state._composeBroadcast;
+  if (!d || d.kind === kind) return;
+  d.kind = (kind === 'poll') ? 'poll' : 'message';
+  if (d.kind === 'poll' && (!Array.isArray(d.pollOptions) || d.pollOptions.length < 2)) {
+    d.pollOptions = ['', ''];
+  }
+  renderBroadcastComposer();
+}
+// oninput sur un champ option → MAJ silencieuse (préserve le focus, pas de re-render).
+function setPollOption(i, val) {
+  const d = state._composeBroadcast;
+  if (d && Array.isArray(d.pollOptions) && i >= 0 && i < d.pollOptions.length) d.pollOptions[i] = val;
+}
+function addPollOption() {
+  const d = state._composeBroadcast;
+  if (!d) return;
+  if (!Array.isArray(d.pollOptions)) d.pollOptions = [];
+  if (d.pollOptions.length >= 6) return;
+  d.pollOptions.push('');
+  renderBroadcastComposer();
+}
+function removePollOption(i) {
+  const d = state._composeBroadcast;
+  if (!d || !Array.isArray(d.pollOptions) || d.pollOptions.length <= 2) return;
+  d.pollOptions.splice(i, 1);
+  renderBroadcastComposer();
+}
+function toggleBroadcastPollMulti() {
+  const d = state._composeBroadcast;
+  if (!d) return;
+  d.pollMulti = !d.pollMulti;
+  renderBroadcastComposer();
+}
+
 function renderBroadcastComposer() {
   const d = state._composeBroadcast;
   if (!d) return;
@@ -13337,6 +13448,24 @@ function renderBroadcastComposer() {
     : `<img src="${esc(d.mediaUrl)}" alt="" style="width:100%;max-height:200px;object-fit:contain;border-radius:8px;background:#000">`);
   const mode = d.mediaMode || 'file';
   const modeBtn = (id, label) => `<button onclick="setBroadcastMediaMode('${id}')" style="flex:1;padding:8px;border-radius:8px;font-size:12px;cursor:pointer;border:1px solid ${mode === id ? 'var(--orange)' : 'var(--border)'};background:${mode === id ? 'var(--orange-soft)' : 'var(--bg-3)'};color:${mode === id ? 'var(--orange)' : 'var(--ink-2)'};font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.04em">${label}</button>`;
+  const kind = d.kind || 'message';
+  const isPoll = kind === 'poll';
+  const kindBtn = (id, label) => `<button onclick="setBroadcastKind('${id}')" style="flex:1;padding:10px;border-radius:8px;font-size:13px;cursor:pointer;border:1px solid ${kind === id ? 'var(--orange)' : 'var(--border)'};background:${kind === id ? 'var(--orange-soft)' : 'var(--bg-3)'};color:${kind === id ? 'var(--orange)' : 'var(--ink-2)'};font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.04em;font-weight:600">${label}</button>`;
+  const pollOptionsHtml = !isPoll ? '' : `
+      <label class="eyebrow-muted" style="display:block;margin:16px 0 6px">Options du sondage (2 à 6)</label>
+      ${(d.pollOptions || []).map((opt, i) => `
+        <div style="display:flex;gap:6px;margin-bottom:6px;align-items:center">
+          <input id="bc-poll-opt-${i}" type="text" maxlength="80" value="${esc(opt)}" placeholder="Option ${i + 1}"
+            oninput="setPollOption(${i},this.value)"
+            style="flex:1;background:var(--bg-3);border:1px solid var(--border);border-radius:8px;color:var(--ink);padding:10px 12px;font-size:14px;font-family:inherit;box-sizing:border-box">
+          ${(d.pollOptions || []).length > 2 ? `<button onclick="removePollOption(${i})" title="Supprimer" style="flex:0 0 auto;width:38px;height:38px;border-radius:8px;border:1px solid var(--border);background:var(--bg-3);color:var(--red);font-size:18px;cursor:pointer">➖</button>` : ''}
+        </div>
+      `).join('')}
+      ${(d.pollOptions || []).length < 6 ? `<button onclick="addPollOption()" style="width:100%;padding:9px;border-radius:8px;border:1px dashed var(--border);background:transparent;color:var(--ink-2);font-size:13px;cursor:pointer;margin-bottom:8px">➕ Ajouter une option</button>` : ''}
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--ink-2);margin:4px 0 4px">
+        <input type="checkbox" ${d.pollMulti ? 'checked' : ''} onchange="toggleBroadcastPollMulti()" style="width:18px;height:18px;accent-color:var(--orange);cursor:pointer">
+        Choix multiples autorisés
+      </label>`;
 
   openModal(`
     <div class="modal-header">
@@ -13344,11 +13473,18 @@ function renderBroadcastComposer() {
       <button class="modal-close" onclick="state._composeBroadcast=null;closeModal()">✕</button>
     </div>
     <div class="modal-body">
-      <label class="eyebrow-muted" style="display:block;margin-bottom:6px">Message</label>
-      <textarea id="bc-message" maxlength="500" placeholder="Ton message aux joueuses…" rows="4"
+      <label class="eyebrow-muted" style="display:block;margin-bottom:6px">Type de message</label>
+      <div style="display:flex;gap:6px;margin-bottom:16px">
+        ${kindBtn('message', '💬 Message')}
+        ${kindBtn('poll', '📊 Sondage')}
+      </div>
+
+      <label class="eyebrow-muted" style="display:block;margin-bottom:6px">${isPoll ? 'Question' : 'Message'}</label>
+      <textarea id="bc-message" maxlength="500" placeholder="${isPoll ? 'Pose ta question aux joueuses…' : 'Ton message aux joueuses…'}" rows="${isPoll ? '2' : '4'}"
         oninput="state._composeBroadcast.message=this.value;var c=document.getElementById('bc-count');if(c)c.textContent=this.value.length+'/500'"
         style="width:100%;background:var(--bg-3);border:1px solid var(--border);border-radius:8px;color:var(--ink);padding:12px;font-size:15px;font-family:inherit;resize:vertical;line-height:1.4;box-sizing:border-box">${esc(d.message)}</textarea>
       <div id="bc-count" style="text-align:right;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">${(d.message || '').length}/500</div>
+      ${pollOptionsHtml}
 
       <label class="eyebrow-muted" style="display:block;margin:14px 0 6px">Média (optionnel)</label>
       <div style="display:flex;gap:6px;margin-bottom:10px">
@@ -13403,7 +13539,7 @@ function renderBroadcastComposer() {
         <option value="" ${!d.expiresInDays ? 'selected' : ''}>Pas d'expiration</option>
       </select>
 
-      <button class="btn btn-primary btn-block" ${d._uploading ? 'disabled' : ''} onclick="submitBroadcast()">📢 Envoyer la diffusion</button>
+      <button class="btn btn-primary btn-block" ${d._uploading ? 'disabled' : ''} onclick="submitBroadcast()">${isPoll ? '📊 Lancer le sondage' : '📢 Envoyer la diffusion'}</button>
     </div>
   `);
 }
@@ -13412,11 +13548,23 @@ function submitBroadcast() {
   const d = state._composeBroadcast;
   if (!d) return;
   const msg = (d.message || '').trim();
+  const isPoll = d.kind === 'poll';
   // Mode URL : si un lien est saisi mais invalide → on bloque (sinon perte silencieuse).
   if (d.mediaMode === 'url' && (d.urlDraft || '').trim() && !d.mediaUrl) {
     alert('Le lien vidéo est invalide. Corrige-le ou bascule sur « Fichier ».'); return;
   }
-  if (!msg && !d.mediaUrl) { alert('Ajoute un message ou un média avant d\'envoyer.'); return; }
+  // SONDAGE : question obligatoire + 2 à 6 options non vides.
+  let pollOptions = null;
+  if (isPoll) {
+    if (!msg) { alert('Ajoute une question au sondage.'); return; }
+    pollOptions = (d.pollOptions || []).map(o => (o || '').trim()).filter(Boolean);
+    if (pollOptions.length < 2) { alert('Un sondage doit avoir au moins 2 options remplies.'); return; }
+    if (pollOptions.length > 6) { alert('6 options maximum.'); return; }
+    const seen = new Set(); const dup = pollOptions.find(o => { const k = o.toLowerCase(); if (seen.has(k)) return true; seen.add(k); return false; });
+    if (dup) { alert('Deux options sont identiques (« ' + dup + ' »). Différencie-les.'); return; }
+  } else if (!msg && !d.mediaUrl) {
+    alert('Ajoute un message ou un média avant d\'envoyer.'); return;
+  }
   if (d.targetType === 'players' && (!d.targetPlayerIds || d.targetPlayerIds.length === 0)) {
     alert('Sélectionne au moins une joueuse.'); return;
   }
@@ -13425,11 +13573,12 @@ function submitBroadcast() {
   const expiresAt = d.expiresInDays ? Date.now() + d.expiresInDays * 86400000 : null;
   createBroadcast({
     id: d.id, message: msg, mediaUrl: d.mediaUrl, mediaType: d.mediaType,
-    targetType: d.targetType, targetPlayerIds: d.targetPlayerIds, expiresAt
+    targetType: d.targetType, targetPlayerIds: d.targetPlayerIds, expiresAt,
+    pollOptions: isPoll ? pollOptions : null, pollMulti: isPoll ? !!d.pollMulti : false
   });
   state._composeBroadcast = null;
   closeModal();
-  showToast('📢 Diffusion envoyée à ' + targets.length + ' joueuse' + (targets.length > 1 ? 's' : ''));
+  showToast((isPoll ? '📊 Sondage envoyé à ' : '📢 Diffusion envoyée à ') + targets.length + ' joueuse' + (targets.length > 1 ? 's' : ''));
   setTimeout(() => { try { openBroadcastManager(); } catch (e) {} }, 200);
 }
 
@@ -13482,18 +13631,28 @@ function renderBroadcastManager() {
 
 function broadcastManagerRow(b) {
   const s = broadcastStats(b);
+  const poll = isPollBroadcast(b);
   const preview = esc((b.message || '').trim().slice(0, 90)) || '<span style="color:var(--ink-3)">(média seul)</span>';
-  const icon = b.mediaType === 'video' ? '🎬 ' : (b.mediaType === 'image' ? '🖼 ' : (b.mediaType === 'embed' ? '🔗 ' : ''));
+  const icon = poll ? '📊 ' : (b.mediaType === 'video' ? '🎬 ' : (b.mediaType === 'image' ? '🖼 ' : (b.mediaType === 'embed' ? '🔗 ' : '')));
   const expired = b.expiresAt && Date.now() > b.expiresAt;
+  const pr = poll ? pollResults(b) : null;
   return `
     <div style="padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:10px;${b.archived ? 'opacity:0.6' : ''}">
       <div style="font-size:14px;color:var(--ink);line-height:1.4;margin-bottom:8px">${icon}${preview}</div>
+      ${poll ? `
+        <div style="margin:8px 0 10px">${renderPollBars(b)}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
+          <span style="font-size:11px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--green-soft);color:var(--green)">🗳 ${pr.voters}/${s.total} ont voté</span>
+          ${b.pollMulti ? `<span style="font-size:11px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--bg-3);color:var(--ink-3)">choix multiples</span>` : ''}
+          ${expired ? `<span style="font-size:10px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--red-soft);color:var(--red)">clôturé</span>` : ''}
+        </div>
+      ` : `
       <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
         <span style="font-size:11px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--green-soft);color:var(--green)">✓ ${s.acknowledged}/${s.total} compris</span>
         ${s.skipped ? `<span title="Reverront le message à leur prochaine ouverture" style="font-size:11px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--bg-3);color:var(--ink-3)">⏭ ${s.skipped} plus tard</span>` : ''}
         ${s.pending ? `<span style="font-size:11px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--orange-soft);color:var(--orange)">● ${s.pending} pas vu</span>` : ''}
         ${expired ? `<span style="font-size:10px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--red-soft);color:var(--red)">expiré</span>` : ''}
-      </div>
+      </div>`}
       <div style="display:flex;gap:6px">
         <button class="btn btn-secondary" style="font-size:12px;padding:7px 12px;flex:1" onclick="openBroadcastDetail('${esc(b.id)}')">Voir détails</button>
         <button class="btn btn-ghost" style="font-size:12px;padding:7px 12px;color:${b.archived ? 'var(--green)' : 'var(--ink-3)'}" onclick="${b.archived ? 'unarchiveBroadcast' : 'archiveBroadcast'}('${esc(b.id)}')">${b.archived ? '↺ Rétablir' : '🗄 Archiver'}</button>
@@ -13514,25 +13673,34 @@ function openBroadcastDetail(id) {
     pending: { label: 'Pas vu', color: 'var(--orange)', dot: '○' }
   };
   const RANK = { pending: 0, seen: 1, skipped: 2, acknowledged: 3 };
+  const poll = isPollBroadcast(b);
   const rows = Array.from(ids).map(pid => {
     const p = (state.players || []).find(x => x.id === pid);
-    const status = (getBroadcastReceipt(b.id, pid) || {}).status || 'pending';
-    return { name: p ? p.name : pid, st: STATUS[status] || STATUS.pending, rank: RANK[status] || 0 };
+    const r = getBroadcastReceipt(b.id, pid) || {};
+    const status = r.status || 'pending';
+    const choiceTxt = (poll && Array.isArray(r.pollChoice) && r.pollChoice.length)
+      ? r.pollChoice.map(i => b.pollOptions[i]).filter(v => v != null).join(', ') : null;
+    return { name: p ? p.name : pid, st: STATUS[status] || STATUS.pending, rank: RANK[status] || 0, choiceTxt };
   }).sort((a, b2) => a.rank - b2.rank || a.name.localeCompare(b2.name));
   const s = broadcastStats(b);
+  const pr = poll ? pollResults(b) : null;
   openModal(`
     <div class="modal-header">
-      <div class="modal-title">Détail diffusion</div>
+      <div class="modal-title">${poll ? 'Détail sondage' : 'Détail diffusion'}</div>
       <button class="modal-close" onclick="closeModal();setTimeout(()=>openBroadcastManager(),50)">✕</button>
     </div>
     <div class="modal-body">
       <div style="padding:12px;background:var(--bg-3);border-radius:8px;font-size:14px;color:var(--ink);line-height:1.4;margin-bottom:6px;white-space:pre-wrap">${esc(b.message || '(média seul)')}</div>
-      <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-bottom:14px">Envoyé ${b.createdAt ? formatDate(isoDate(new Date(b.createdAt))) : ''} · ${s.acknowledged}/${s.total} compris</div>
+      <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-bottom:14px">Envoyé ${b.createdAt ? formatDate(isoDate(new Date(b.createdAt))) : ''} · ${poll ? (pr.voters + '/' + s.total + ' ont voté' + (b.pollMulti ? ' · choix multiples' : '')) : (s.acknowledged + '/' + s.total + ' compris')}</div>
+      ${poll ? `<div style="margin-bottom:16px">${renderPollBars(b)}</div>
+        <div class="eyebrow-muted" style="margin-bottom:6px">Réponses par joueuse</div>` : ''}
       <div class="list-section">
         ${rows.map(row => `
-          <div style="display:flex;align-items:center;justify-content:space-between;padding:11px 12px;border-bottom:1px solid var(--border-soft)">
-            <span style="font-size:14px;color:var(--ink)">${esc(row.name)}</span>
-            <span style="font-size:12px;font-family:'JetBrains Mono';color:${row.st.color}">${row.st.dot} ${row.st.label}</span>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 12px;border-bottom:1px solid var(--border-soft)">
+            <span style="font-size:14px;color:var(--ink);flex-shrink:0">${esc(row.name)}</span>
+            ${poll
+              ? `<span style="font-size:12px;text-align:right;color:${row.choiceTxt ? 'var(--orange)' : 'var(--ink-3)'};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${row.choiceTxt ? esc(row.choiceTxt) : '— pas voté'}</span>`
+              : `<span style="font-size:12px;font-family:'JetBrains Mono';color:${row.st.color}">${row.st.dot} ${row.st.label}</span>`}
           </div>
         `).join('')}
       </div>
@@ -13595,6 +13763,41 @@ function _resolveBroadcast(id, status) {
   if (next.length) setTimeout(() => showBroadcastPopup(next[0]), 250);
 }
 
+// --- SONDAGE côté joueuse : sélection + vote ---
+// state._pollVote = { id, choices:[index…] } : sélection EN COURS (pas encore validée).
+function selectPollOption(id, i, multi) {
+  if (!state._pollVote || state._pollVote.id !== id) state._pollVote = { id, choices: [] };
+  const ch = state._pollVote.choices;
+  if (multi) {
+    const k = ch.indexOf(i);
+    if (k >= 0) ch.splice(k, 1); else ch.push(i);
+  } else {
+    // Choix simple : (re)cliquer la même option la désélectionne.
+    state._pollVote.choices = (ch.length === 1 && ch[0] === i) ? [] : [i];
+  }
+  const b = (state.broadcasts || []).find(x => x.id === id);
+  if (b) showBroadcastPopup(b); // re-render (surligne la sélection + active le bouton Voter)
+}
+function votePoll(id) {
+  const pid = state.auth && state.auth.playerId;
+  if (!pid) return;
+  const sel = (state._pollVote && state._pollVote.id === id) ? state._pollVote.choices.slice() : [];
+  if (!sel.length) { alert('Choisis au moins une option avant de voter.'); return; }
+  // MVP : un vote final → status 'acknowledged' + poll_choice. Pas de modif après.
+  markReceiptStatus(id, pid, 'acknowledged', sel.sort((a, b) => a - b));
+  showToast('Merci pour ton vote ! 🗳');
+  const b = (state.broadcasts || []).find(x => x.id === id);
+  if (b) showBroadcastPopup(b); // re-render → écran résultats
+}
+// Fermer l'écran résultats d'un sondage déjà voté → passe au broadcast suivant.
+function closePollResults(id) {
+  const pid = state.auth && state.auth.playerId;
+  state._pollVote = null;
+  closeBroadcastPopup();
+  const next = getPendingBroadcastsForPlayer(pid);
+  if (next.length) setTimeout(() => showBroadcastPopup(next[0]), 250);
+}
+
 function renderBroadcastPopup(b) {
   const teamName = (state.team && state.team.displayNickname) || '';
   const hasMedia = b.mediaUrl && b.mediaType;
@@ -13602,23 +13805,67 @@ function renderBroadcastPopup(b) {
     : b.mediaType === 'embed' ? renderBroadcastEmbed(b, { compact: false })
     : b.mediaType === 'video' ? `<video src="${esc(b.mediaUrl)}" controls playsinline style="width:100%;max-height:42vh;border-radius:12px;background:#000;margin:16px 0"></video>`
     : `<img src="${esc(b.mediaUrl)}" alt="" style="width:100%;max-height:42vh;object-fit:contain;border-radius:12px;background:#000;margin:16px 0">`;
+
+  const poll = isPollBroadcast(b);
+  const pid = state.auth && state.auth.playerId;
+  const myReceipt = poll ? getBroadcastReceipt(b.id, pid) : null;
+  const alreadyVoted = !!(poll && myReceipt && myReceipt.status === 'acknowledged' && Array.isArray(myReceipt.pollChoice) && myReceipt.pollChoice.length);
+
+  let bodyExtra = '';
+  let footer = '';
+
+  if (poll && alreadyVoted) {
+    // Écran RÉSULTATS (après vote) : merci + barres, ses choix surlignés.
+    bodyExtra = `
+      <div style="margin-top:18px;padding:12px 14px;border-radius:12px;background:var(--green-soft);color:var(--green);font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px">🗳 Merci pour ton vote !</div>
+      <div style="margin-top:16px">${renderPollBars(b, { highlight: myReceipt.pollChoice })}</div>`;
+    footer = `
+      <button onclick="closePollResults('${esc(b.id)}')" style="flex:1;min-height:52px;border-radius:12px;border:none;background:var(--green);color:#06240f;font-family:'Anton';font-size:19px;text-transform:uppercase;letter-spacing:0.03em;cursor:pointer">OK 👍</button>`;
+  } else if (poll) {
+    // Écran VOTE : options cliquables (radio/checkbox) + bouton Voter.
+    const sel = (state._pollVote && state._pollVote.id === b.id) ? state._pollVote.choices : [];
+    const multi = !!b.pollMulti;
+    bodyExtra = `
+      <div style="margin-top:16px;display:flex;flex-direction:column;gap:10px">
+        ${(b.pollOptions || []).map((opt, i) => {
+          const on = sel.includes(i);
+          const box = multi
+            ? `<span style="flex-shrink:0;width:22px;height:22px;border-radius:6px;border:2px solid ${on ? 'var(--orange)' : 'var(--border)'};background:${on ? 'var(--orange)' : 'transparent'};color:#1a0d00;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700">${on ? '✓' : ''}</span>`
+            : `<span style="flex-shrink:0;width:22px;height:22px;border-radius:50%;border:2px solid ${on ? 'var(--orange)' : 'var(--border)'};display:flex;align-items:center;justify-content:center">${on ? '<span style=\'width:11px;height:11px;border-radius:50%;background:var(--orange)\'></span>' : ''}</span>`;
+          return `<button onclick="selectPollOption('${esc(b.id)}',${i},${multi})" style="display:flex;align-items:center;gap:12px;text-align:left;padding:14px;border-radius:12px;cursor:pointer;border:1px solid ${on ? 'var(--orange)' : 'var(--border)'};background:${on ? 'var(--orange-soft)' : 'var(--bg-3)'};color:var(--ink);font-size:16px;font-family:inherit;width:100%">
+            ${box}<span style="flex:1">${esc(opt)}</span>
+          </button>`;
+        }).join('')}
+      </div>
+      <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:10px;text-transform:uppercase;letter-spacing:0.04em">${multi ? 'Plusieurs choix possibles' : 'Un seul choix'}</div>`;
+    const canVote = sel.length > 0;
+    footer = `
+      <button onclick="skipBroadcast('${esc(b.id)}')" title="Le sondage réapparaîtra à la prochaine ouverture" style="flex:0 0 auto;min-height:52px;padding:0 18px;border-radius:12px;border:1px solid var(--border);background:var(--bg-3);color:var(--ink-3);font-family:'JetBrains Mono';font-size:12px;text-transform:uppercase;letter-spacing:0.04em;cursor:pointer">Plus tard</button>
+      <button onclick="votePoll('${esc(b.id)}')" ${canVote ? '' : 'disabled'} style="flex:1;min-height:52px;border-radius:12px;border:none;background:${canVote ? 'var(--green)' : 'var(--bg-3)'};color:${canVote ? '#06240f' : 'var(--ink-3)'};font-family:'Anton';font-size:19px;text-transform:uppercase;letter-spacing:0.03em;cursor:${canVote ? 'pointer' : 'not-allowed'}">Voter 🗳</button>`;
+  } else {
+    // Message classique : Plus tard / Compris.
+    footer = `
+      <button onclick="skipBroadcast('${esc(b.id)}')" title="Le message réapparaîtra à la prochaine ouverture" style="flex:0 0 auto;min-height:52px;padding:0 18px;border-radius:12px;border:1px solid var(--border);background:var(--bg-3);color:var(--ink-3);font-family:'JetBrains Mono';font-size:12px;text-transform:uppercase;letter-spacing:0.04em;cursor:pointer">Plus tard</button>
+      <button onclick="ackBroadcast('${esc(b.id)}')" style="flex:1;min-height:52px;border-radius:12px;border:none;background:var(--green);color:#06240f;font-family:'Anton';font-size:19px;text-transform:uppercase;letter-spacing:0.03em;cursor:pointer">Compris 🫡</button>`;
+  }
+
   return `
     <div style="position:fixed;inset:0;z-index:9999;background:rgba(8,10,14,0.94);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);display:flex;flex-direction:column">
       <div style="flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:calc(28px + env(safe-area-inset-top)) 20px 12px;display:flex;flex-direction:column">
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">
-          <div style="width:48px;height:48px;border-radius:50%;background:linear-gradient(135deg,var(--orange),var(--orange-2));display:flex;align-items:center;justify-content:center;font-size:24px;flex-shrink:0">🏀</div>
+          <div style="width:48px;height:48px;border-radius:50%;background:linear-gradient(135deg,var(--orange),var(--orange-2));display:flex;align-items:center;justify-content:center;font-size:24px;flex-shrink:0">${poll ? '📊' : '🏀'}</div>
           <div style="min-width:0">
-            <div style="font-family:'Anton';font-size:17px;letter-spacing:0.02em;text-transform:uppercase;color:var(--ink)">Message du coach</div>
+            <div style="font-family:'Anton';font-size:17px;letter-spacing:0.02em;text-transform:uppercase;color:var(--ink)">${poll ? 'Sondage du coach' : 'Message du coach'}</div>
             ${teamName ? `<div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em;margin-top:1px">${esc(teamName)}</div>` : ''}
           </div>
         </div>
         ${mediaHtml}
-        ${b.message ? `<div style="font-size:16px;line-height:1.55;color:var(--ink);white-space:pre-wrap;margin-top:10px">${esc(b.message)}</div>` : ''}
+        ${b.message ? `<div style="font-size:${poll ? '18px' : '16px'};font-weight:${poll ? '600' : '400'};line-height:1.5;color:var(--ink);white-space:pre-wrap;margin-top:${poll ? '14px' : '10px'}">${esc(b.message)}</div>` : ''}
+        ${bodyExtra}
         <div style="flex:1;min-height:20px"></div>
       </div>
       <div style="display:flex;gap:10px;padding:12px 20px calc(14px + env(safe-area-inset-bottom));border-top:1px solid var(--border);background:var(--bg-1)">
-        <button onclick="skipBroadcast('${esc(b.id)}')" title="Le message réapparaîtra à la prochaine ouverture" style="flex:0 0 auto;min-height:52px;padding:0 18px;border-radius:12px;border:1px solid var(--border);background:var(--bg-3);color:var(--ink-3);font-family:'JetBrains Mono';font-size:12px;text-transform:uppercase;letter-spacing:0.04em;cursor:pointer">Plus tard</button>
-        <button onclick="ackBroadcast('${esc(b.id)}')" style="flex:1;min-height:52px;border-radius:12px;border:none;background:var(--green);color:#06240f;font-family:'Anton';font-size:19px;text-transform:uppercase;letter-spacing:0.03em;cursor:pointer">Compris 🫡</button>
+        ${footer}
       </div>
     </div>
   `;
