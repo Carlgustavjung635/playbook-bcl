@@ -6126,6 +6126,11 @@ function goSection(id) {
   _pbGoSectionHistory(id, _pbChanged);
   render();
   _scrollTopApp();
+  // Chantier 4 — auto-sync FFBB à l'ouverture de la vue (coach uniquement,
+  // debounce 1h). Met à jour calendrier/classement/convocs sans action manuelle.
+  if (id === 'ffbb' && state.auth && state.auth.role === 'coach') {
+    try { ffbbMaybeAutoSync(); } catch (e) { console.warn('[ffbb] autosync', e); }
+  }
 }
 
 // ============================================================
@@ -19287,8 +19292,14 @@ function renderFFBB_legacyScraper() {
 //   - classement : calculé côté client depuis les scores (V=2 / D=1, approx FFBB)
 //   - arbitres : VOLONTAIREMENT ABANDONNÉS (indisponibles en clair pour ce club)
 // ============================================================================
-const FFBB_CLUB_CODE   = 'OCC0032016';                  // BC L'Islois (organisme)
-const FFBB_CLUB_SEARCH = 'ISLOIS';                      // terme de recherche engagements
+const FFBB_CLUB_CODE_DEFAULT   = 'OCC0032016';          // BC L'Islois (organisme) — défaut
+const FFBB_CLUB_SEARCH_DEFAULT = 'ISLOIS';              // terme de recherche engagements — défaut
+// Club configurable depuis l'UI (⚙ FFBB) — persisté dans state.ffbb.dash
+// (localStorage ; cf. migration 20260607_002 pour la persistance cross-device).
+function ffbbClubCode()   { return ((ffbbDash().clubCode   || FFBB_CLUB_CODE_DEFAULT)   + '').trim().toUpperCase(); }
+function ffbbClubSearch() { return ((ffbbDash().clubSearch || FFBB_CLUB_SEARCH_DEFAULT) + '').trim(); }
+// Regex (échappée) pour la détection "nos matchs" via le nom d'équipe FFBB.
+function ffbbClubRe()     { const s = ffbbClubSearch().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); return new RegExp(s || 'ISLOIS', 'i'); }
 const FFBB_MS_URL      = 'https://meilisearch-prod.ffbb.app/multi-search';
 const FFBB_API_BASE    = 'https://api.ffbb.app/';
 const FFBB_RENC_FIELDS = [
@@ -19313,16 +19324,28 @@ async function ffbbMeili(indexUid, query) {
   return (j.results && j.results[0] && j.results[0].hits) || [];
 }
 
-async function ffbbDirectus(path, params) {
+function ffbbDirectusUrl(path, params) {
   const url = new URL(FFBB_API_BASE + path);
   if (params.filter) url.searchParams.set('filter', JSON.stringify(params.filter));
   (params.fields || []).forEach(f => url.searchParams.append('fields[]', f));
   (params.sort   || []).forEach(s => url.searchParams.append('sort[]', s));
   if (params.limit) url.searchParams.set('limit', String(params.limit));
-  const resp = await ffbbProxy(url.toString(), { method: 'GET' });
+  return url.toString();
+}
+
+async function ffbbDirectus(path, params) {
+  const resp = await ffbbProxy(ffbbDirectusUrl(path, params), { method: 'GET' });
   if (!resp.ok) throw new Error('Directus HTTP ' + resp.status);
   const j = await resp.json();
   return j.data || [];
+}
+
+// Variante item unique (items/<coll>/<id>) : Directus renvoie data en OBJET.
+async function ffbbDirectusOne(path, params) {
+  const resp = await ffbbProxy(ffbbDirectusUrl(path, params || {}), { method: 'GET' });
+  if (!resp.ok) throw new Error('Directus HTTP ' + resp.status);
+  const j = await resp.json();
+  return j.data || null;
 }
 
 // Coupe / Trophée / Finale = phase finale (pas de classement, on l'isole).
@@ -19331,29 +19354,74 @@ function ffbbIsPhaseFinale(nom) {
 }
 
 async function ffbbFetchEngagements() {
-  const hits = await ffbbMeili('ffbbserver_engagements', { q: FFBB_CLUB_SEARCH, limit: 50 });
+  const term = ffbbClubSearch().toUpperCase();
+  const code = ffbbClubCode();
+  const hits = await ffbbMeili('ffbbserver_engagements', { q: ffbbClubSearch(), limit: 50 });
   const byComp = {};
   hits.forEach(e => {
     const blob = ((e.nomEquipe || '') + (e.nomClub || '') + (e.nom || '')).toUpperCase();
-    if (!blob.includes('ISLOIS')) return;
-    if (e.codeClub && e.codeClub !== FFBB_CLUB_CODE) return; // exclut un éventuel CTC partenaire
+    if (!blob.includes(term)) return;
+    if (e.codeClub && e.codeClub !== code) return; // exclut un éventuel CTC partenaire
     const comp = e.idCompetition || {}, poule = e.idPoule || {};
     const cid = comp.id;
     if (!cid || byComp[cid]) return;
+    // Catégorie : code FFBB (SE/U20/U18…) prioritaire, sinon libellé, sinon regex sur le nom.
+    const catObj = comp.categorie || e.categorie || {};
     byComp[cid] = {
       compId: String(cid), compNom: comp.nom || '', code: comp.code || '',
-      sexe: comp.sexe || '', categorie: (comp.categorie || {}).libelle || '',
+      sexe: comp.sexe || e.sexe || '',
+      categorie: (catObj.libelle) || (typeof e.categorie === 'string' ? e.categorie : '') || '',
+      catCode: (catObj.code || '').toUpperCase(),
       pouleId: poule.id ? String(poule.id) : null, pouleNom: poule.nom || '',
-      equipe: e.nomEquipe || '', phase: ffbbIsPhaseFinale(comp.nom)
+      equipe: e.nomEquipe || '', phase: ffbbIsPhaseFinale(comp.nom),
+      lastDate: null   // renseigné après coup (ffbbFetchEngLastDates) pour le tri par activité
     };
   });
   const list = Object.values(byComp);
-  // Tri : championnats avant phases finales ; seniors avant jeunes ; puis alpha.
+  // Tri par défaut (avant enrichissement dates) : championnats avant phases finales ;
+  // seniors avant jeunes ; puis alpha. Le tri final (favoris + activité) se fait au rendu.
   list.sort((a, b) =>
     (a.phase - b.phase) ||
     ((b.categorie === 'Seniors') - (a.categorie === 'Seniors')) ||
     a.compNom.localeCompare(b.compNom));
   return list;
+}
+
+// Chantier 3 — enrichit chaque engagement de la date du match le plus récent de
+// sa poule (pour trier les compétitions par activité : les brassages d'octobre
+// passent en queue quand on est en finale d'avril). 1 requête légère / poule.
+async function ffbbFetchEngLastDates(engs) {
+  await Promise.all((engs || []).map(async e => {
+    if (!e.pouleId) return;
+    try {
+      const rows = await ffbbDirectus('items/ffbbserver_rencontres', {
+        filter: { idPoule: { _eq: Number(e.pouleId) } },
+        fields: ['date_rencontre'], sort: ['-date_rencontre'], limit: 1
+      });
+      e.lastDate = (rows[0] && rows[0].date_rencontre) || null;
+    } catch { /* tri retombe sur l'ordre par défaut si indispo */ }
+  }));
+}
+
+// Catégorie d'affichage normalisée (groupement chantier 3). Code FFBB d'abord,
+// sinon regex sur le nom de compétition (U7…U20, Séniors, Coupe…).
+function ffbbCatLabel(e) {
+  const c = (e.catCode || '').toUpperCase();
+  if (/^U\d+/.test(c)) return c;
+  if (c === 'SE' || /senior|s[ée]nior/i.test(e.categorie)) return 'Séniors';
+  const m = (e.compNom + ' ' + (e.code || '')).match(/\bU(?:7|9|11|13|15|17|18|20)\b/i);
+  if (m) return m[0].toUpperCase();
+  if (/coup|troph|finale/i.test(e.compNom)) return 'Coupes / Finales';
+  if (e.categorie) return e.categorie;
+  return 'Autres';
+}
+// Rang d'une catégorie pour ordonner les sections (Séniors en tête, puis U20→U7).
+function ffbbCatRank(label) {
+  if (/séniors/i.test(label)) return 0;
+  const m = label.match(/^U(\d+)/i);
+  if (m) return 100 - Number(m[1]);  // U20 avant U7
+  if (/coup|final/i.test(label)) return 900;
+  return 800;
 }
 
 function ffbbMapMatch(r) {
@@ -19363,9 +19431,10 @@ function ffbbMapMatch(r) {
   const c2 = (r.idOrganismeEquipe2 || {}).code || null;
   const r1 = r.resultatEquipe1, r2 = r.resultatEquipe2;
   const has = r1 != null && r2 != null && r1 !== '' && r2 !== '';
-  const ours = (c1 === FFBB_CLUB_CODE || c2 === FFBB_CLUB_CODE) ||
-               /ISLOIS/i.test((r.nomEquipe1 || '') + '|' + (r.nomEquipe2 || ''));
-  const weHome = (c1 === FFBB_CLUB_CODE) || /ISLOIS/i.test(r.nomEquipe1 || '');
+  const code = ffbbClubCode(), re = ffbbClubRe();
+  const ours = (c1 === code || c2 === code) ||
+               re.test((r.nomEquipe1 || '') + '|' + (r.nomEquipe2 || ''));
+  const weHome = (c1 === code) || re.test(r.nomEquipe1 || '');
   return {
     id: String(r.id),
     date: r.date_rencontre || null,                 // "YYYY-MM-DDTHH:mm:ss"
@@ -19388,6 +19457,34 @@ async function ffbbFetchPouleMatches(pouleId) {
     fields: FFBB_RENC_FIELDS, sort: ['date_rencontre'], limit: 400
   });
   return raw.map(ffbbMapMatch);
+}
+
+// Chantier 1 — CLASSEMENT OFFICIEL FFBB.
+// La poule Directus (items/ffbbserver_poules/<id>) embarque le classement OFFICIEL
+// déjà calculé par la FFBB (champ relationnel `classements`), points/forfaits/
+// pénalités inclus. On le récupère tel quel — fini le recalcul local approximatif
+// (qui ratait notamment un 0-0 gagné sur forfait → V comptée à tort comme nulle).
+const FFBB_CLAS_FIELDS = [
+  'classements.position', 'classements.points', 'classements.matchJoues',
+  'classements.gagnes', 'classements.perdus', 'classements.nuls',
+  'classements.nombreForfaits', 'classements.paniersMarques',
+  'classements.paniersEncaisses', 'classements.difference',
+  'classements.quotient', 'classements.organisme_nom', 'classements.horsClassement'
+];
+async function ffbbFetchPouleClassement(pouleId) {
+  const data = await ffbbDirectusOne('items/ffbbserver_poules/' + pouleId, { fields: FFBB_CLAS_FIELDS });
+  const cls = (data && data.classements) || [];
+  const N = v => (v == null || v === '') ? 0 : Number(v);
+  return cls
+    .filter(c => !c.horsClassement)
+    .map(c => ({
+      pos: N(c.position), team: c.organisme_nom || '',
+      played: N(c.matchJoues), wins: N(c.gagnes), losses: N(c.perdus), draws: N(c.nuls),
+      ff: N(c.nombreForfaits), pf: N(c.paniersMarques), pa: N(c.paniersEncaisses),
+      diff: (c.difference != null && c.difference !== '') ? N(c.difference) : (N(c.paniersMarques) - N(c.paniersEncaisses)),
+      pts: N(c.points), quotient: c.quotient != null ? Number(c.quotient) : null
+    }))
+    .sort((a, b) => a.pos - b.pos || b.pts - a.pts);
 }
 
 // Classement calculé (approx FFBB : victoire=2, défaite=1 ; forfaits/pénalités ignorés).
@@ -19450,33 +19547,209 @@ function ffbbSyncLegacyMatches() {
 
 function ffbbDash() {
   const f = state.ffbb;
-  if (!f.dash) f.dash = { engagements: [], compId: null, poules: {}, lastSync: null, oursOnly: false, dateMode: 'all' };
-  return f.dash;
+  if (!f.dash) f.dash = {};
+  const d = f.dash;
+  // Backfill idempotent (anciens dash sans les champs itération 2).
+  if (!Array.isArray(d.engagements)) d.engagements = [];
+  if (d.compId === undefined) d.compId = null;
+  if (!d.poules) d.poules = {};
+  if (d.lastSync === undefined) d.lastSync = null;
+  if (d.oursOnly === undefined) d.oursOnly = false;
+  if (!d.dateMode) d.dateMode = 'all';
+  if (!Array.isArray(d.favorites)) d.favorites = [];      // ids compétitions favorites
+  if (!Array.isArray(d.collapsedCats)) d.collapsedCats = []; // catégories repliées
+  if (d.autoUpdate === undefined) d.autoUpdate = true;    // MAJ auto convocs (default ON)
+  return d;
 }
 
 async function ffbbLoadPoule(pouleId, force) {
   const d = ffbbDash();
   if (!pouleId) return;
   if (!force && d.poules[pouleId]) return;
-  d.poules[pouleId] = { matches: await ffbbFetchPouleMatches(pouleId), fetchedAt: Date.now() };
+  // Ids des matchs DÉJÀ connus de cette poule (avant refetch) → permet de détecter
+  // un match disparu côté FFBB (annulation) pour le reconcile convocs (chantier 4).
+  const prev = d.poules[pouleId];
+  const prevIds = prev ? new Set((prev.matches || []).map(m => m.id)) : null;
+  // Calendrier + classement OFFICIEL en parallèle.
+  const [matches, standings] = await Promise.all([
+    ffbbFetchPouleMatches(pouleId),
+    ffbbFetchPouleClassement(pouleId).catch(() => [])  // repli : recalc local au rendu
+  ]);
+  d.poules[pouleId] = { matches, standings, fetchedAt: Date.now() };
   ffbbSyncLegacyMatches();
+  // Auto-update des convocs importées de cette poule (logistique + annulations).
+  if (d.autoUpdate) {
+    try { await ffbbReconcileConvocs(matches, prevIds); } catch (e) { console.warn('[ffbb] reconcile', e); }
+  }
 }
 
 // Sync principal (bouton "Synchroniser"). Récupère engagements + poule sélectionnée.
 async function syncFFBB() {
   const d = ffbbDash();
-  d.loading = true; d.error = null; render();
+  d.loading = true; d.error = null;
+  d._recon = { updated: 0, cancelled: 0 };  // cumul reconcile pour le toast (chantier 4)
+  render();
   try {
     const engs = await ffbbFetchEngagements();
     d.engagements = engs;
-    if (!d.compId || !engs.find(e => e.compId === d.compId)) d.compId = engs.length ? engs[0].compId : null;
+    // Choix de la compétition courante : on conserve la sélection si valide,
+    // sinon priorité à un favori, sinon la première compétition.
+    if (!d.compId || !engs.find(e => e.compId === d.compId)) {
+      const fav = engs.find(e => (d.favorites || []).includes(e.compId));
+      d.compId = (fav && fav.compId) || (engs.length ? engs[0].compId : null);
+    }
+    // Tri par activité (date du dernier match) — non bloquant pour la poule courante.
+    await ffbbFetchEngLastDates(engs);
     const cur = engs.find(e => e.compId === d.compId);
     if (cur && cur.pouleId) await ffbbLoadPoule(cur.pouleId, true);
     d.lastSync = new Date().toISOString();
+    d.lastAutoSync = Date.now();
     d.loading = false;
-    persist(); render();
+    persist();
+    const rc = d._recon || {};
+    if (rc.updated || rc.cancelled) {
+      const parts = [];
+      if (rc.updated)   parts.push(rc.updated + ' convoc(s) mise(s) à jour');
+      if (rc.cancelled) parts.push(rc.cancelled + ' annulée(s)');
+      ffbbToast('🔄 ' + parts.join(' · ') + ' depuis FFBB');
+    }
+    render();
   } catch (e) {
     d.loading = false; d.error = e.message || String(e); render();
+  }
+}
+
+// Auto-sync silencieux (ouverture vue FFBB / login coach), debounce 1h pour ne
+// pas spammer l'API. N'affiche pas d'erreur bloquante.
+function ffbbMaybeAutoSync() {
+  const d = ffbbDash();
+  if (d.loading) return;
+  const last = d.lastAutoSync || (d.lastSync ? Date.parse(d.lastSync) : 0);
+  if (last && (Date.now() - last) < 3600e3) return;  // < 1h → skip
+  syncFFBB();
+}
+
+// Toast non bloquant (auto-update convocs). Self-contained, retiré après ~4,5 s.
+function ffbbToast(msg) {
+  try {
+    let host = document.getElementById('ffbb-toast-host');
+    if (!host) {
+      host = document.createElement('div');
+      host.id = 'ffbb-toast-host';
+      host.style.cssText = 'position:fixed;left:50%;bottom:84px;transform:translateX(-50%);z-index:9999;display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none';
+      document.body.appendChild(host);
+    }
+    const el = document.createElement('div');
+    el.style.cssText = 'background:var(--ink-1,#111);color:#fff;padding:10px 16px;border-radius:22px;font-family:\'JetBrains Mono\',monospace;font-size:12px;box-shadow:0 6px 24px rgba(0,0,0,.35);max-width:90vw;text-align:center;opacity:0;transition:opacity .2s,transform .2s;transform:translateY(8px)';
+    el.textContent = msg;
+    host.appendChild(el);
+    requestAnimationFrame(() => { el.style.opacity = '1'; el.style.transform = 'translateY(0)'; });
+    setTimeout(() => { el.style.opacity = '0'; el.style.transform = 'translateY(8px)'; setTimeout(() => el.remove(), 250); }, 4500);
+  } catch { /* toast best-effort */ }
+}
+
+// Chantier 4 — reconcile convocs importées avec FFBB.
+// `curMatches` = matchs FFBB frais d'une poule. `prevIds` = ids de matchs FFBB
+// connus de cette poule au refetch précédent (pour détecter une disparition =
+// annulation). On met à jour la LOGISTIQUE (date / heure / lieu) des convocs déjà
+// importées sans toucher aux champs saisis par le coach (scores, notes, lineup…).
+const FFBB_CANCEL_PREFIX = '⛔ ANNULÉ — ';
+async function ffbbReconcileConvocs(curMatches, prevIds) {
+  const d = ffbbDash();
+  if (!d._recon) d._recon = { updated: 0, cancelled: 0 };
+  if (!window.sb) return;  // pas de DB → rien à reconcilier côté serveur
+
+  const matchById = Object.fromEntries((state.matches || []).map(m => [m.id, m]));
+  const convById  = Object.fromEntries((state.convocations || []).map(c => [c.id, c]));
+  // Upserts PARTIELS : seulement les colonnes logistiques → le merge ON CONFLICT
+  // ne touche pas aux scores/notes/lineup/responses (préservation coach). Les
+  // colonnes NOT NULL existantes de la row sont conservées par l'UPDATE partiel.
+  const mUpd = [], cUpd = [];
+
+  // 1) MAJ logistique des matchs encore présents (+ réactivation si réapparu).
+  (curMatches || []).forEach(fm => {
+    if (!fm.ours) return;
+    const mid = 'ffbb-' + fm.id, cid = 'ffbbc-' + fm.id;
+    const localM = matchById[mid];
+    const localC = convById[cid];
+    if (!localM && !localC) return;  // pas importé → rien à faire
+    const newDate = fm.date ? fm.date.slice(0, 10) : null;
+    const newTime = ffbbTime(fm.date) || '';
+    const newLoc  = [fm.salle.nom, fm.salle.adresse, [fm.salle.cp, fm.salle.ville].filter(Boolean).join(' ')].filter(Boolean).join(', ') || '';
+    // Match : date / heure / lieu (on NE touche PAS scores/notes). status : on
+    // dé-annule si le match réapparaît (cancelled → to_play/played selon scores).
+    if (localM) {
+      const wasCancelled = localM.status === 'cancelled';
+      const changed = (localM.date || '') !== (newDate || '')
+        || ((localM.time || '') !== newTime)
+        || ((localM.place || '') !== newLoc) || wasCancelled;
+      if (changed) {
+        if (newDate) localM.date = newDate;
+        localM.time = newTime;
+        localM.place = newLoc;
+        if (wasCancelled) localM.status = ((localM.scoreUs | 0) || (localM.scoreOpp | 0)) ? 'played' : 'to_play';
+        mUpd.push({ id: mid, date: localM.date, time: newTime || null, location: newLoc || null, status: localM.status });
+      }
+    }
+    // Convoc : date / heure / lieu (responses, attachments préservés). Retire le
+    // préfixe d'annulation si présent (match réapparu).
+    if (localC) {
+      const baseTitle = (localC.title || '').startsWith(FFBB_CANCEL_PREFIX)
+        ? localC.title.slice(FFBB_CANCEL_PREFIX.length) : localC.title;
+      const titleChanged = baseTitle !== localC.title;
+      const changedC = (localC.date || '') !== (newDate || '')
+        || ((localC.time || '') !== newTime)
+        || ((localC.location || '') !== newLoc) || titleChanged;
+      if (changedC) {
+        if (newDate) localC.date = newDate;
+        localC.time = newTime;
+        localC.location = newLoc;
+        localC.title = baseTitle;
+        cUpd.push({ id: cid, date: localC.date, time: newTime || null, location: newLoc || null, title: baseTitle });
+        d._recon.updated++;
+      }
+    }
+  });
+
+  // 2) ANNULATIONS : un match importé présent dans CETTE poule au fetch précédent
+  // et disparu maintenant → on marque le match status='cancelled' et on préfixe le
+  // titre de la convoc (jamais de suppression : perte de données coach évitée).
+  if (prevIds && prevIds.size) {
+    const nowIds = new Set((curMatches || []).map(m => 'ffbb-' + m.id));
+    prevIds.forEach(pid => {
+      const mid = 'ffbb-' + pid, cid = 'ffbbc-' + pid;
+      if (nowIds.has(mid)) return;  // toujours présent → pas annulé
+      const localM = matchById[mid];
+      if (localM && localM.status !== 'cancelled') {
+        localM.status = 'cancelled';
+        mUpd.push({ id: mid, status: 'cancelled' });
+      }
+      const localC = convById[cid];
+      if (localC && !(localC.title || '').startsWith(FFBB_CANCEL_PREFIX)) {
+        localC.title = FFBB_CANCEL_PREFIX + (localC.title || '');
+        cUpd.push({ id: cid, title: localC.title });
+        d._recon.cancelled++;
+      }
+    });
+  }
+
+  if (!mUpd.length && !cUpd.length) return;
+  state.matches = Object.values(matchById);
+  state.convocations = Object.values(convById);
+  // UPDATE partiel par row (et NON upsert) : les rows existent déjà, et un upsert
+  // partiel échouerait sur les colonnes NOT NULL sans default (date/opponent/title).
+  // L'UPDATE ne touche que les colonnes logistiques → scores/notes/lineup intacts.
+  try {
+    await Promise.all([
+      ...mUpd.map(({ id, ...patch }) => window.sb.from('matches').update(patch).eq('id', id)
+        .then(r => { if (r.error) throw r.error; })),
+      ...cUpd.map(({ id, ...patch }) => window.sb.from('convocations').update(patch).eq('id', id)
+        .then(r => { if (r.error) throw r.error; }))
+    ]);
+    persist();
+  } catch (e) {
+    console.warn('[ffbb] reconcile update', e.message || e);
+    // Reflet local conservé ; un resync ultérieur ré-tentera l'écriture.
   }
 }
 
@@ -19495,6 +19768,20 @@ async function ffbbSelectComp(compId) {
 
 function ffbbSetOurs(v)  { ffbbDash().oursOnly = !!v; render(); }
 function ffbbSetDate(m)  { ffbbDash().dateMode = m; render(); }
+// Chantier 3 — favoris + sections catégories repliables.
+function ffbbToggleFav(compId) {
+  const d = ffbbDash();
+  const i = d.favorites.indexOf(compId);
+  if (i < 0) d.favorites.push(compId); else d.favorites.splice(i, 1);
+  persist(); render();
+}
+function ffbbToggleCat(cat) {
+  const d = ffbbDash();
+  const i = d.collapsedCats.indexOf(cat);
+  if (i < 0) d.collapsedCats.push(cat); else d.collapsedCats.splice(i, 1);
+  render();
+}
+function ffbbSetAutoUpdate(v) { ffbbDash().autoUpdate = !!v; persist(); }
 
 function ffbbDashMatchCard(m) {
   const ours = m.ours;
@@ -19537,7 +19824,12 @@ function renderFFBB() {
   let shown = d.oursOnly ? allMatches.filter(m => m.ours) : allMatches;
   shown = ffbbDateFilter(shown, d.dateMode);
 
-  const standings = (cur && !cur.phase) ? ffbbComputeStandings(allMatches) : [];
+  // Classement : OFFICIEL FFBB (poule.standings) en priorité, repli sur le calcul
+  // local approximatif uniquement s'il est indisponible. Pas de classement en phase finale.
+  const official = poule && Array.isArray(poule.standings) ? poule.standings : [];
+  const standings = cur && cur.phase ? []
+    : (official.length ? official : ffbbComputeStandings(allMatches));
+  const standingsOfficial = official.length > 0;
   const ourCount = allMatches.filter(m => m.ours).length;
 
   // Bloc en-tête + bouton sync
@@ -19571,19 +19863,48 @@ function renderFFBB() {
       </div></div>`;
   }
 
-  // Sélecteur d'engagements (chips scrollables)
-  const chips = `
-    <div class="px" style="margin-bottom:12px">
-      <div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch">
-        ${engs.map(e => {
-          const active = e.compId === d.compId;
-          const label = (e.code || e.compNom).slice(0, 22);
-          return `<button onclick="ffbbSelectComp('${e.compId}')" style="flex:none;min-height:44px;padding:8px 14px;border-radius:20px;border:1px solid ${active ? 'var(--orange)' : 'var(--border)'};background:${active ? 'var(--orange)' : 'var(--surface)'};color:${active ? '#fff' : 'var(--ink-2)'};font-family:'Anton';font-size:12px;text-transform:uppercase;letter-spacing:.02em;cursor:pointer;white-space:nowrap">
-            ${e.phase ? '🏆 ' : ''}${esc(label)}
-          </button>`;
-        }).join('')}
+  // Sélecteur d'engagements — chantier 3 : favoris en tête, sections par catégorie
+  // (repliables), tri intra-section par activité (date du dernier match, DESC).
+  const favSet = new Set(d.favorites || []);
+  // Une chip réutilisable. La date d'activité est affichée en sous-texte discret.
+  const chipBtn = (e) => {
+    const active = e.compId === d.compId;
+    const fav = favSet.has(e.compId);
+    const label = (e.code || e.compNom).slice(0, 24);
+    const star = `<span onclick="event.stopPropagation();ffbbToggleFav('${e.compId}')" title="${fav ? 'Retirer des favoris' : 'Marquer favori'}" style="cursor:pointer;font-size:14px;line-height:1;flex:none;color:${fav ? '#f5b50a' : (active ? 'rgba(255,255,255,.6)' : 'var(--ink-3)')}">${fav ? '★' : '☆'}</span>`;
+    return `<div style="flex:none;display:inline-flex;align-items:center;gap:6px;min-height:44px;padding:6px 12px;border-radius:20px;border:1px solid ${active ? 'var(--orange)' : 'var(--border)'};background:${active ? 'var(--orange)' : 'var(--surface)'};white-space:nowrap">
+        ${star}
+        <button onclick="ffbbSelectComp('${e.compId}')" style="background:none;border:none;padding:0;color:${active ? '#fff' : 'var(--ink-2)'};font-family:'Anton';font-size:12px;text-transform:uppercase;letter-spacing:.02em;cursor:pointer;white-space:nowrap">${e.phase ? '🏆 ' : ''}${esc(label)}</button>
+      </div>`;
+  };
+  const byActivity = (a, b) => (b.lastDate || '').localeCompare(a.lastDate || '') || a.compNom.localeCompare(b.compNom);
+  // Section "★ Favoris" (toutes catégories confondues), si au moins un favori.
+  const favList = engs.filter(e => favSet.has(e.compId)).sort(byActivity);
+  const favSection = favList.length ? `
+    <div class="px" style="margin-bottom:6px"><div class="eyebrow" style="color:#f5b50a">★ Favoris</div></div>
+    <div class="px" style="margin-bottom:10px"><div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch">${favList.map(chipBtn).join('')}</div></div>` : '';
+  // Groupement par catégorie.
+  const groups = {};
+  engs.forEach(e => { const c = ffbbCatLabel(e); (groups[c] = groups[c] || []).push(e); });
+  const catLabels = Object.keys(groups).sort((a, b) => ffbbCatRank(a) - ffbbCatRank(b) || a.localeCompare(b));
+  const catSections = catLabels.map(cat => {
+    const list = groups[cat].slice().sort((a, b) => (favSet.has(b.compId) - favSet.has(a.compId)) || byActivity(a, b));
+    const collapsed = (d.collapsedCats || []).includes(cat);
+    const hasActive = list.some(e => e.compId === d.compId);
+    const open = hasActive || !collapsed;  // on garde ouverte la catégorie de la compétition courante
+    return `
+      <div class="px" style="margin-bottom:6px">
+        <div onclick="ffbbToggleCat('${esc(cat).replace(/'/g, "\\'")}')" style="display:flex;align-items:center;gap:8px;cursor:pointer;min-height:36px">
+          <span style="font-family:'JetBrains Mono';font-size:11px;color:var(--ink-3);transition:transform .15s;display:inline-block;transform:rotate(${open ? 90 : 0}deg)">▸</span>
+          <span style="display:inline-flex;align-items:center;gap:6px">
+            <span style="background:var(--bg-3);border:1px solid var(--border);border-radius:6px;padding:2px 8px;font-family:'Anton';font-size:12px;text-transform:uppercase;letter-spacing:.04em">${esc(cat)}</span>
+            <span style="font-family:'JetBrains Mono';font-size:10px;color:var(--ink-4)">${list.length}</span>
+          </span>
+        </div>
       </div>
-    </div>`;
+      ${open ? `<div class="px" style="margin-bottom:10px"><div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch">${list.map(chipBtn).join('')}</div></div>` : ''}`;
+  }).join('');
+  const chips = favSection + catSections;
 
   // Carte compétition courante
   const compCard = cur ? `
@@ -19626,24 +19947,28 @@ function renderFFBB() {
     listHtml = block('À venir', up) + block('Résultats', pa);
   }
 
-  // Classement
-  const teamLower = (f.teamName || FFBB_CLUB_SEARCH).toLowerCase();
+  // Classement (chantier 1 — officiel FFBB en priorité)
+  const teamLower = ffbbClubSearch().toLowerCase();
   const standingsHtml = standings.length ? `
     <div class="section-header"><div><div class="eyebrow">Classement</div><h2 class="display-md mt-2" style="font-size:15px;color:var(--ink-2)">Poule ${esc(cur.pouleNom || '')}</h2></div></div>
     <div class="list-section"><div class="stats-wrap"><table class="stats-table">
       <thead><tr><th>#</th><th>Équipe</th><th>MJ</th><th>V</th><th>D</th><th>+/-</th><th>Pts</th></tr></thead>
       <tbody>
         ${standings.map((s, i) => {
-          const me = (s.team || '').toLowerCase().includes('islois');
+          const me = (s.team || '').toLowerCase().includes(teamLower);
+          const rank = standingsOfficial && s.pos ? s.pos : (i + 1);
+          const diff = (s.diff != null) ? s.diff : ((s.pf || 0) - (s.pa || 0));
           return `<tr style="${me ? 'background:var(--orange-soft)' : ''}">
-            <td class="num">${i + 1}</td>
+            <td class="num">${rank}</td>
             <td style="font-family:'Anton';font-size:12px;text-transform:uppercase">${esc(s.team)}</td>
             <td>${s.played}</td><td>${s.wins}</td><td>${s.losses}</td>
-            <td class="num">${(s.pf - s.pa) > 0 ? '+' : ''}${s.pf - s.pa}</td>
+            <td class="num">${diff > 0 ? '+' : ''}${diff}</td>
             <td class="num">${s.pts}</td></tr>`;
         }).join('')}
       </tbody></table></div>
-      <div style="padding:8px 14px;font-size:9px;color:var(--ink-4);font-family:'JetBrains Mono'">Classement calculé depuis les scores (approx. V=2/D=1, hors forfaits/pénalités).</div>
+      <div style="padding:8px 14px;font-size:9px;color:var(--ink-4);font-family:'JetBrains Mono'">${standingsOfficial
+        ? '✓ Classement OFFICIEL FFBB (api.ffbb.app) — points, forfaits et pénalités inclus.'
+        : '⚠ Classement calculé localement (officiel indisponible) — approx. V=2/D=1, hors forfaits/pénalités.'}</div>
     </div>` : '';
 
   return `<div class="fade-up">
@@ -19827,14 +20152,37 @@ function ffbbMatchRow(m, myTeamName) {
 
 function editFFBBConfig() {
   const f = state.ffbb;
+  const d = ffbbDash();
   openModal(`
     <div class="modal-header">
       <div class="modal-title">Configuration FFBB</div>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <div class="modal-body">
-      <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:14px;font-size:12px;color:var(--ink-2);line-height:1.5">
-        Va sur <strong>competitions.ffbb.com</strong>, cherche ton club, copie l'URL de la page de ton équipe (qui contient ton calendrier et classement).
+      <div style="padding:10px 12px;background:var(--orange-soft,#fff3e6);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:14px;font-size:12px;color:var(--ink-2);line-height:1.5">
+        <strong>Dashboard officiel (api.ffbb.app)</strong> — règle ici le <strong>code club</strong> FFBB pour paramétrer le championnat (calendrier, résultats, classement officiel, import convocs).
+      </div>
+      <div class="fld">
+        <label class="fld-label">Code club FFBB (organisme)</label>
+        <input id="ffbb-club-code" value="${esc(d.clubCode || '')}" placeholder="${FFBB_CLUB_CODE_DEFAULT}" style="text-transform:uppercase">
+        <div style="margin-top:6px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">Code organisme (ex. ${FFBB_CLUB_CODE_DEFAULT}). Visible sur la fiche club FFBB. Vide = ${FFBB_CLUB_CODE_DEFAULT} (BC L'Islois).</div>
+      </div>
+      <div class="fld">
+        <label class="fld-label">Terme de recherche du club</label>
+        <input id="ffbb-club-search" value="${esc(d.clubSearch || '')}" placeholder="${FFBB_CLUB_SEARCH_DEFAULT}">
+        <div style="margin-top:6px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">Mot-clé du nom du club pour retrouver les engagements (ex. ${FFBB_CLUB_SEARCH_DEFAULT}). Vide = ${FFBB_CLUB_SEARCH_DEFAULT}.</div>
+      </div>
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:14px 0 4px">
+        <input type="checkbox" id="ffbb-auto-update" ${d.autoUpdate !== false ? 'checked' : ''} style="width:18px;height:18px;flex:none">
+        <span style="font-family:'Anton';text-transform:uppercase;font-size:13px">MAJ auto des convocs importées</span>
+      </label>
+      <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';line-height:1.5;margin-bottom:6px">À chaque sync, met à jour salle / heure / date des convocs importées si elles changent côté FFBB (scores, notes et compos saisis sont préservés). Un match annulé côté FFBB marque la convoc « ⛔ ANNULÉ » sans la supprimer.</div>
+
+      <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border)">
+        <div class="eyebrow-muted" style="margin-bottom:8px">Ancien scraper (legacy · vues joueuses)</div>
+      </div>
+      <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--border);border-radius:6px;margin-bottom:14px;font-size:11px;color:var(--ink-3);line-height:1.5">
+        Optionnel — utilisé seulement par l'ancien affichage scrapé. Le dashboard officiel ci-dessus n'en a pas besoin.
       </div>
       <div class="fld">
         <label class="fld-label">URL de la page club/équipe FFBB</label>
@@ -19861,8 +20209,21 @@ function editFFBBConfig() {
 }
 
 function saveFFBBConfig() {
-  state.ffbb.clubUrl = document.getElementById('ffbb-url').value.trim();
-  state.ffbb.teamName = document.getElementById('ffbb-team').value.trim();
+  const d = ffbbDash();
+  const prevCode = ffbbClubCode(), prevSearch = ffbbClubSearch();
+  // Dashboard officiel (chantier 2)
+  const code = (document.getElementById('ffbb-club-code').value || '').trim().toUpperCase();
+  const search = (document.getElementById('ffbb-club-search').value || '').trim();
+  d.clubCode = code || null;
+  d.clubSearch = search || null;
+  d.autoUpdate = !!(document.getElementById('ffbb-auto-update') || {}).checked;
+  // Legacy scraper (inchangé)
+  state.ffbb.clubUrl = (document.getElementById('ffbb-url') || {}).value?.trim() || state.ffbb.clubUrl;
+  state.ffbb.teamName = (document.getElementById('ffbb-team') || {}).value?.trim() || state.ffbb.teamName;
+  // Si le club a changé → on repart de zéro (engagements/poules obsolètes).
+  if (ffbbClubCode() !== prevCode || ffbbClubSearch() !== prevSearch) {
+    d.engagements = []; d.poules = {}; d.compId = null;
+  }
   persist();
   closeModal();
   syncFFBB();
