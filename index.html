@@ -10126,7 +10126,7 @@ function renderMatchPlayPicker() {
     </div>
     <div class="modal-body">
       <div class="fld">
-        <input id="mpicker-search" placeholder="Rechercher dans les plays..." value="${esc(filter.search)}" oninput="state._matchPlayPicker.filter.search=this.value;renderMatchPlayPicker()">
+        <input id="mpicker-search" placeholder="Rechercher dans les plays... (min 3 lettres)" value="${esc(filter.search)}" oninput="debouncedPickerSearch(this.value, v=>state._matchPlayPicker.filter.search=v, renderMatchPlayPicker, 'mpicker-search')">
       </div>
       <div class="segmented" style="margin-bottom:10px;overflow-x:auto;flex-wrap:nowrap">
         <button class="segmented-btn ${filter.cat==='all'?'active':''}" onclick="state._matchPlayPicker.filter.cat='all';renderMatchPlayPicker()">Tous</button>
@@ -12773,6 +12773,28 @@ function unvalidateTrainingPlan() {
   renderTrainingPlanEditor();
 }
 
+// Recherche des pickers (plays / exos plan d'entraînement) : ces modales se
+// reconstruisent ENTIÈREMENT (openModal) à chaque frappe → perte du focus et
+// mini-scroll qui sortent du champ. On attend donc min 3 lettres avant de
+// filtrer/re-render, + un debounce de 200ms ; champ vidé → re-render immédiat
+// (retour liste complète). applyFn stocke la valeur dans le state (le champ DOM
+// garde le texte tant qu'on ne re-render pas), rerenderFn reconstruit la modale,
+// inputId restaure focus + curseur après le re-render.
+let _pickerSearchTimer = null;
+function debouncedPickerSearch(value, applyFn, rerenderFn, inputId) {
+  applyFn(value);
+  if (_pickerSearchTimer) { clearTimeout(_pickerSearchTimer); _pickerSearchTimer = null; }
+  const v = (value || '').trim();
+  if (v.length > 0 && v.length < 3) return; // 1-2 lettres : on n'écrase pas le focus
+  _pickerSearchTimer = setTimeout(() => {
+    rerenderFn();
+    if (inputId) {
+      const el = document.getElementById(inputId);
+      if (el) { el.focus(); const n = el.value.length; try { el.setSelectionRange(n, n); } catch (e) {} }
+    }
+  }, 200);
+}
+
 // === Picker depuis la bibliothèque plays ===
 function openPlayPicker() {
   if (!state._editingTraining) {
@@ -12813,7 +12835,7 @@ function renderPlayPicker() {
     <div class="modal-body">
       <!-- Recherche -->
       <div class="fld">
-        <input id="picker-search" placeholder="Rechercher dans les plays..." value="${esc(filter.search)}" oninput="state._playPickerFilter.search=this.value;renderPlayPicker()">
+        <input id="picker-search" placeholder="Rechercher dans les plays... (min 3 lettres)" value="${esc(filter.search)}" oninput="debouncedPickerSearch(this.value, v=>state._playPickerFilter.search=v, renderPlayPicker, 'picker-search')">
       </div>
 
       <!-- Filtre catégorie -->
