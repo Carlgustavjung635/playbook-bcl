@@ -1096,6 +1096,34 @@
     0%, 100% { box-shadow: 0 0 60px var(--orange-glow), inset 0 0 30px rgba(0,0,0,0.3); }
     50% { box-shadow: 0 0 100px rgba(255, 107, 0, 0.5), inset 0 0 30px rgba(0,0,0,0.3); }
   }
+  /* Toast non-bloquant (CHANTIER B : notice clôture entraînement) */
+  #toast-host {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    z-index: 4000; pointer-events: none;
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    padding: 0 14px calc(14px + env(safe-area-inset-bottom));
+  }
+  .toast {
+    pointer-events: auto; cursor: pointer;
+    max-width: 460px; width: 100%;
+    background: var(--surface); color: var(--ink);
+    border: 1.5px solid var(--orange); border-radius: 12px;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.45);
+    padding: 13px 15px;
+    font-size: 13px; line-height: 1.35;
+    display: flex; align-items: center; gap: 10px;
+    transform: translateY(140%); opacity: 0;
+    transition: transform 0.28s cubic-bezier(.2,.8,.2,1), opacity 0.28s;
+  }
+  .toast.toast-show { transform: translateY(0); opacity: 1; }
+  .toast-action {
+    margin-left: auto; flex-shrink: 0;
+    background: var(--orange); color: #000;
+    border: none; border-radius: 8px;
+    padding: 7px 12px; cursor: pointer;
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em;
+  }
   .auth-title {
     font-family: 'Anton', sans-serif;
     font-size: 38px; letter-spacing: 0.02em;
@@ -6172,6 +6200,7 @@ function renderHomeCoach() {
 
   return `
     <div class="fade-up">
+      ${renderOverdueTrainingsBanner()}
       ${nextEvent ? heroCard(nextEvent) : ''}
 
       <div class="section-header">
@@ -6412,6 +6441,11 @@ function eventInstanceRow(ev, isCoach) {
   const isCancelled = parentConvoc && (parentConvoc.cancelledInstances || []).includes(instanceDate);
   const showGuestUI = isCoach && !isMatch && !isCancelled;
   const guestCount = showGuestUI ? getTrainingGuests(parentId, instanceDate).length : 0;
+  // CHANTIER B : badge « À clôturer » sur un entraînement passé non clôturé
+  // (coach + saison active, cohérent avec le bandeau home).
+  const isOverdueTraining = isCoach && !isMatch && !isCancelled && !ev.closed
+    && typeof _autoCloseEnabled === 'function' && _autoCloseEnabled()
+    && _isTrainingOverdue(instanceDate, ev.time);
   return `
     <div class="list-row" onclick="openEventInstance('${parentId}','${instanceDate}')">
       <div class="event-date-badge">
@@ -6423,6 +6457,7 @@ function eventInstanceRow(ev, isCoach) {
           <div class="list-row-title">${esc(ev.title)}</div>
           ${isMatch ? '<span class="chip chip-orange" style="font-size:9px;padding:2px 6px">MATCH</span>' : ''}
           ${isToday ? '<span class="chip chip-red" style="font-size:9px;padding:2px 6px">AUJOURD\'HUI</span>' : ''}
+          ${isOverdueTraining ? '<span class="chip" style="font-size:9px;padding:2px 6px;background:rgba(255,107,0,0.18);border-color:var(--orange);color:var(--orange)">À CLÔTURER</span>' : ''}
           ${guestCount > 0 ? `<span class="chip" style="font-size:9px;padding:2px 6px;background:rgba(255,107,0,0.15);border-color:var(--orange);color:var(--orange)" title="${guestCount} invitée${guestCount>1?'s':''}">+${guestCount} 👤</span>` : ''}
         </div>
         <div class="list-row-subtitle">${dayName}${ev.time ? ' · ' + ev.time : ''}${ev.location ? ' · ' + esc(ev.location) : ''}</div>
@@ -12493,9 +12528,15 @@ function deleteConvoc(id) {
   persist(); render();
 }
 
-function closeConvocation(cid, instanceDate) {
-  const c = state.convocations.find(x => x.id === cid);
-  if (!c) return;
+// Cœur de la clôture : comptabilise les présences (défi attendance_training /
+// attendance_match) et marque l'instance/convoc comme clôturée. NE fait NI
+// confirm() NI persist()/render() — réutilisable par la clôture MANUELLE
+// (closeConvocation, avec confirm) ET la clôture AUTO (autoCloseTraining, sans
+// confirm). Retourne true si une clôture effective a eu lieu (false si déjà
+// clôturée). Présomption favorable : toute joueuse de l'effectif n'ayant PAS
+// signalé d'absence est comptée présente (cohérent avec l'appel / l'UI).
+function _applyConvocClosure(c, instanceDate) {
+  if (!c) return false;
   // SAISON : comptabilise uniquement les joueuses de la saison de la convoc.
   // MULTI-EFFECTIF : scopé sur l'équipe de la convoc ('both' → tout l'effectif).
   const _seasonId = c.seasonId || state.currentSeasonId;
@@ -12503,36 +12544,248 @@ function closeConvocation(cid, instanceDate) {
   const _seasonPool = _seasonsLoaded() && _seasonId
     ? getSeasonPlayers(_seasonId, { team: _convTeam })
     : (state.players || []);
+  const targetType = c.type === 'match' ? 'attendance_match' : 'attendance_training';
+  const ch = state.challenges.find(x => x.type === targetType && x.autoCount);
+  const credit = (responses) => {
+    if (!ch) return;
+    const presentPlayers = _seasonPool.filter(p => !responses[p.id] || responses[p.id].status === 'present');
+    ch.scores = ch.scores || {};
+    presentPlayers.forEach(p => { ch.scores[p.id] = (ch.scores[p.id] || 0) + 1; });
+  };
   // Pour récurrence : clôturer l'instance spécifique
   if (c.recurrence && instanceDate) {
     c.instanceOverrides = c.instanceOverrides || {};
     c.instanceOverrides[instanceDate] = c.instanceOverrides[instanceDate] || {};
-    if (c.instanceOverrides[instanceDate].closed) return;
-    if (!confirm("Cloturer cette occurrence ?\nLes presences seront comptabilisees.")) return;
     const ov = c.instanceOverrides[instanceDate];
-    const responses = ov.responses || c.responses || {};
-    const presentPlayers = _seasonPool.filter(p => !responses[p.id] || responses[p.id].status === 'present');
-    const targetType = c.type === 'match' ? 'attendance_match' : 'attendance_training';
-    const ch = state.challenges.find(x => x.type === targetType && x.autoCount);
-    if (ch) {
-      ch.scores = ch.scores || {};
-      presentPlayers.forEach(p => { ch.scores[p.id] = (ch.scores[p.id] || 0) + 1; });
-    }
+    if (ov.closed) return false;
+    credit(ov.responses || c.responses || {});
     ov.closed = true;
+  } else {
+    if (c.closed) return false;
+    credit(c.responses || {});
+    c.closed = true;
+  }
+  return true;
+}
+
+function closeConvocation(cid, instanceDate) {
+  const c = state.convocations.find(x => x.id === cid);
+  if (!c) return;
+  // Garde-fou « déjà clôturé » AVANT le confirm (évite un dialogue inutile).
+  if (c.recurrence && instanceDate) {
+    if (((c.instanceOverrides || {})[instanceDate] || {}).closed) return;
+    if (!confirm("Cloturer cette occurrence ?\nLes presences seront comptabilisees.")) return;
   } else {
     if (c.closed) return;
     if (!confirm("Cloturer cette convocation ?\nLes presences seront comptabilisees.")) return;
-    const responses = c.responses || {};
-    const presentPlayers = _seasonPool.filter(p => !responses[p.id] || responses[p.id].status === 'present');
-    const targetType = c.type === 'match' ? 'attendance_match' : 'attendance_training';
-    const ch = state.challenges.find(x => x.type === targetType && x.autoCount);
-    if (ch) {
-      ch.scores = ch.scores || {};
-      presentPlayers.forEach(p => { ch.scores[p.id] = (ch.scores[p.id] || 0) + 1; });
-    }
-    c.closed = true;
   }
+  _applyConvocClosure(c, c.recurrence ? instanceDate : null);
   persist(); render();
+}
+
+// ============================================================
+// CHANTIER B — Clôture AUTO des entraînements passés + comptabilisation
+// ------------------------------------------------------------
+// Besoin : un entraînement passé reste « ouvert » tant que le coach ne clique
+// pas « Clôturer ». Résultat : présences/retards non comptabilisés, oubli
+// fréquent. On détecte les entraînements terminés (heure début + grâce
+// dépassée) NON clôturés et on propose une clôture en 1 geste (toast au boot +
+// bandeau home + modale de revue). Pas de cron/backend : la détection se fait à
+// l'ouverture de l'app par le coach (option simple, cf. V2 possible en edge fn).
+//
+// GARDE-FOU CROSS-SAISON : la feature n'opère QUE si le coach est sur la saison
+// ACTIVE (state.currentSeasonId === getActiveSeasonId()). Les défis auto
+// (attendance_training) étant stockés globalement, on évite ainsi d'incrémenter
+// depuis l'historique d'une autre saison (bug cross-saison connu, non aggravé).
+// ============================================================
+// Délai de grâce après l'heure de début : au-delà, l'entraînement est « terminé ».
+const TRAINING_AUTOCLOSE_GRACE_MS = 2 * 60 * 60 * 1000; // 2h
+// Fenêtre de rattrapage : on ne remonte pas au-delà (évite une clôture de masse
+// d'un historique ancien si le coach n'a pas ouvert l'app depuis longtemps).
+const TRAINING_AUTOCLOSE_LOOKBACK_DAYS = 60;
+
+// true si la feature auto-clôture doit opérer dans le contexte courant
+// (coach + seasons chargées + saison courante == active).
+function _autoCloseEnabled() {
+  return _seasonsLoaded()
+    && state.currentSeasonId
+    && state.currentSeasonId === getActiveSeasonId();
+}
+
+// Timestamp (ms) de début d'une instance (date + heure, défaut minuit).
+function _instanceStartMs(dateStr, time) {
+  const t = (time || '00:00').padStart(5, '0');
+  return new Date(dateStr + 'T' + t + ':00').getTime();
+}
+
+// true si une instance d'entraînement (date/heure) est « terminée » (grâce
+// dépassée). Utilisé par le badge de ligne et la détection.
+function _isTrainingOverdue(dateStr, time, now) {
+  const startMs = _instanceStartMs(dateStr, time);
+  if (isNaN(startMs)) return false;
+  return (now || Date.now()) > startMs + TRAINING_AUTOCLOSE_GRACE_MS;
+}
+
+// Retourne les instances d'entraînement passées (grâce dépassée) NON clôturées
+// et NON annulées, sur la saison ACTIVE uniquement. Chaque entrée :
+// { convocId, instanceDate, instance, startMs }. Triées par date croissante.
+function getOverdueTrainings() {
+  if (!_autoCloseEnabled()) return [];
+  const now = Date.now();
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const fromISO = isoDate(new Date(today.getTime() - TRAINING_AUTOCLOSE_LOOKBACK_DAYS * 86400000));
+  const todayISO = isoDate(today);
+  const out = [];
+  currentSeasonConvocations()
+    .filter(c => c.type === 'training')
+    .forEach(c => {
+      // getConvocInstances exclut déjà les instances annulées (cancelledInstances).
+      getConvocInstances(c, fromISO, todayISO).forEach(inst => {
+        if (inst.closed) return;
+        if (!_isTrainingOverdue(inst.date, inst.time, now)) return;
+        out.push({ convocId: c.id, instanceDate: inst.date, instance: inst, startMs: _instanceStartMs(inst.date, inst.time) });
+      });
+    });
+  return out.sort((a, b) => a.startMs - b.startMs);
+}
+
+// Clôture auto d'une instance d'entraînement (mêmes règles de comptabilisation
+// que la clôture manuelle, SANS confirm). Ne persiste/render PAS (l'appelant
+// s'en charge en lot). Retourne true si une clôture effective a eu lieu.
+function autoCloseTraining(convocId, instanceDate) {
+  const c = state.convocations.find(x => x.id === convocId);
+  if (!c || c.type !== 'training') return false;
+  return _applyConvocClosure(c, c.recurrence ? instanceDate : null);
+}
+
+// Clôture en masse tous les entraînements en retard. Persiste + render une
+// seule fois. Retourne le nombre d'instances effectivement clôturées.
+function bulkAutoCloseOverdueTrainings() {
+  const overdue = getOverdueTrainings();
+  let n = 0;
+  overdue.forEach(o => { if (autoCloseTraining(o.convocId, o.instanceDate)) n++; });
+  if (n > 0) { persist(); render(); }
+  if (typeof showToast === 'function') {
+    showToast(n > 0
+      ? `✓ ${n} entraînement${n > 1 ? 's' : ''} clôturé${n > 1 ? 's' : ''} · présences comptabilisées`
+      : 'Aucun entraînement à clôturer');
+  }
+  return n;
+}
+
+// Clôture rapide d'un seul entraînement depuis la modale de revue, puis refresh.
+function quickCloseOverdueTraining(convocId, instanceDate) {
+  if (autoCloseTraining(convocId, instanceDate)) { persist(); render(); }
+  openOverdueTrainingsModal(); // refresh (gère le cas « plus rien à clôturer »)
+}
+
+// Bandeau home coach : N entraînements terminés à valider. '' si aucun.
+function renderOverdueTrainingsBanner() {
+  let overdue = [];
+  try { overdue = getOverdueTrainings(); } catch (e) { return ''; }
+  if (!overdue.length) return '';
+  const n = overdue.length;
+  return `
+    <div style="margin:0 18px 14px;padding:14px 16px;background:linear-gradient(135deg,rgba(255,107,0,0.12),var(--surface));border:1.5px solid var(--orange);border-radius:var(--radius)">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <span style="font-size:20px">⏱</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-family:'Anton';font-size:15px;text-transform:uppercase;letter-spacing:0.03em;line-height:1.1">${n} entraînement${n > 1 ? 's' : ''} à clôturer</div>
+          <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;text-transform:uppercase">Terminé${n > 1 ? 's' : ''} · présences à comptabiliser</div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+        <button class="btn btn-secondary" onclick="openOverdueTrainingsModal()">Revoir</button>
+        <button class="btn btn-primary" onclick="bulkAutoCloseOverdueTrainings()">✓ Tout clôturer</button>
+      </div>
+    </div>
+  `;
+}
+
+// Modale de revue : liste les entraînements en retard avec présences/absences
+// et actions par ligne (faire l'appel / clôturer) + clôture globale.
+function openOverdueTrainingsModal() {
+  const overdue = getOverdueTrainings();
+  if (!overdue.length) {
+    closeModal();
+    if (typeof showToast === 'function') showToast('✓ Tous les entraînements sont clôturés');
+    return;
+  }
+  const rows = overdue.map(o => {
+    const inst = o.instance;
+    const c = state.convocations.find(x => x.id === o.convocId);
+    const _seasonId = (c && c.seasonId) || state.currentSeasonId;
+    const _convTeam = c && c.teamTag === 'both' ? 'all' : (c && c.teamTag === 'e2' ? 'e2' : 'e1');
+    const pool = _seasonsLoaded() && _seasonId ? getSeasonPlayers(_seasonId, { team: _convTeam }) : (state.players || []);
+    const responses = inst.responses || {};
+    const present = pool.filter(p => !responses[p.id] || responses[p.id].status === 'present').length;
+    const absent = pool.filter(p => responses[p.id] && responses[p.id].status === 'absent').length;
+    return `
+      <div style="padding:12px;border:1px solid var(--border-soft);border-radius:10px;margin-bottom:8px;background:var(--surface)">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">
+          <div style="min-width:0">
+            <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;line-height:1.15">${esc(inst.title)}</div>
+            <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">${formatDate(o.instanceDate, 'long')}${inst.time ? ' · ' + inst.time : ''}</div>
+          </div>
+          <div style="text-align:right;flex-shrink:0">
+            <div style="font-family:'Anton';font-size:16px;color:var(--green);line-height:1">${present}<span style="color:var(--ink-4);font-size:11px"> prés.</span></div>
+            ${absent > 0 ? `<div style="font-size:10px;color:var(--red);font-family:'JetBrains Mono'">${absent} abs.</div>` : ''}
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+          <button class="btn btn-ghost" style="font-size:11px" onclick="closeModal();setTimeout(()=>openCallSheet('${o.convocId}','${o.instanceDate}'),60)">📋 Faire l'appel</button>
+          <button class="btn btn-primary" style="font-size:11px" onclick="quickCloseOverdueTraining('${o.convocId}','${o.instanceDate}')">✓ Clôturer</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">⏱ ${overdue.length} entraînement${overdue.length > 1 ? 's' : ''} à clôturer</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:12px;color:var(--ink-2);line-height:1.5;margin-bottom:12px">
+        Ces entraînements sont passés. Par défaut, toute joueuse n'ayant pas signalé d'absence est comptée <b>présente</b>. Vérifie l'appel si besoin, puis clôture pour comptabiliser présences &amp; retards.
+      </div>
+      ${rows}
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary btn-block" onclick="closeModal()">Plus tard</button>
+      <button class="btn btn-primary btn-block" onclick="bulkAutoCloseOverdueTrainings();closeModal()">✓ Tout clôturer (${overdue.length})</button>
+    </div>
+  `);
+}
+
+// Toast non-bloquant (bas d'écran, auto-dismiss). Action optionnelle.
+function showToast(msg, opts) {
+  opts = opts || {};
+  let host = document.getElementById('toast-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'toast-host';
+    document.body.appendChild(host);
+  }
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.innerHTML = `<span style="flex:1;min-width:0">${esc(msg)}</span>` +
+    (opts.actionLabel ? `<button class="toast-action">${esc(opts.actionLabel)}</button>` : '');
+  let timer = null;
+  const dismiss = () => {
+    if (timer) { clearTimeout(timer); timer = null; }
+    el.classList.remove('toast-show');
+    setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, 280);
+  };
+  if (opts.actionLabel && typeof opts.onAction === 'function') {
+    el.querySelector('.toast-action').addEventListener('click', (e) => {
+      e.stopPropagation(); dismiss(); opts.onAction();
+    });
+  }
+  el.addEventListener('click', () => dismiss());
+  host.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('toast-show'));
+  timer = setTimeout(dismiss, opts.duration || (opts.actionLabel ? 9000 : 4000));
+  return dismiss;
 }
 
 // Ouvre la modale détail d'une instance (récurrente ou non)
@@ -21003,6 +21256,23 @@ function _initPlayersSync() {
         try { _migrateLegacyWorkshopRotations(); } catch(e) { console.warn('[migration] workshop rotations:', e.message); }
         persist();
         render();
+        // CHANTIER B : à la 1re sync complète, si le coach a des entraînements
+        // passés non clôturés (saison active), toast non-bloquant « X à valider »
+        // avec action « Tout clôturer ». One-shot par session (flag window).
+        try {
+          if (state.auth && state.auth.role === 'coach' && !window._overdueTrainingNoticeShown) {
+            const overdue = getOverdueTrainings();
+            if (overdue.length > 0) {
+              window._overdueTrainingNoticeShown = true;
+              setTimeout(() => {
+                showToast(`${overdue.length} entraînement${overdue.length > 1 ? 's' : ''} terminé${overdue.length > 1 ? 's' : ''} à valider`, {
+                  actionLabel: 'Tout clôturer',
+                  onAction: () => bulkAutoCloseOverdueTrainings(),
+                });
+              }, 800);
+            }
+          }
+        } catch (e) { console.warn('[autoclose] notice:', e.message); }
         // Subscribe Realtime sur toutes les entités configurées. On utilise
         // scheduleRender (debouncé 100ms) au lieu de render() direct pour
         // collapser plusieurs events Realtime en un seul re-render.
