@@ -6452,7 +6452,10 @@ function renderHomeCoach() {
                 <div class="eyebrow" style="color:${active?'var(--orange)':'var(--ink-3)'}">${active ? '🗓 Journalier · actif' : '○ Journalier · inactif'}</div>
                 <h2 class="display-md mt-2">${esc(o.title)}</h2>
               </div>
-              <button class="section-action" onclick="openOffseasonDashboard()">Suivi →</button>
+              <div style="display:flex;gap:10px;align-items:center">
+                <button class="section-action" onclick="openOffseasonConfig()">⚙ Gérer</button>
+                <button class="section-action" onclick="openOffseasonDashboard()">Suivi →</button>
+              </div>
             </div>
             <div style="padding:0 18px;margin-bottom:18px">
               <div onclick="openOffseasonDashboard()" style="padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer">
@@ -6493,7 +6496,10 @@ function renderHomeCoach() {
               <div class="eyebrow" style="color:${active?'var(--orange)':'var(--ink-3)'}">${active ? '☀ Actif · ' + formatWeekRange() : '○ Inactif · ' + formatDate(o.startDate, 'short') + ' → ' + formatDate(o.endDate, 'short')}</div>
               <h2 class="display-md mt-2">${esc(o.title)}</h2>
             </div>
-            <button class="section-action" onclick="openOffseasonDashboard()">Suivi →</button>
+            <div style="display:flex;gap:10px;align-items:center">
+              <button class="section-action" onclick="openOffseasonConfig()">⚙ Gérer</button>
+              <button class="section-action" onclick="openOffseasonDashboard()">Suivi →</button>
+            </div>
           </div>
           <div style="padding:0 18px;margin-bottom:18px">
             <div onclick="openOffseasonDashboard()" style="padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer">
