@@ -2692,6 +2692,38 @@ window.PbStore = {
   }
 };
 
+// Multi-PDF stats FFBB (migration 20260607_009). matches.stats_pdfs jsonb [].
+// Item client = {id,url,filename,shared,uploadedAt}. Rétro-compat : si la liste
+// est vide mais l'ancien champ singulier stats_pdf_url est rempli (cas migration
+// partielle / edge case), on construit un array d'1 élément pour ne rien perdre.
+function _matchPdfsFromDb(r) {
+  let arr = Array.isArray(r.stats_pdfs) ? r.stats_pdfs : [];
+  if (!arr.length && r.stats_pdf_url) {
+    arr = [{ id: r.id + '-legacy', url: r.stats_pdf_url, filename: r.stats_pdf_filename, shared: r.stats_pdf_shared, uploaded_at: r.stats_pdf_uploaded_at }];
+  }
+  return arr
+    .filter(p => p && p.url)
+    .map(p => ({
+      id: p.id || (typeof uid === 'function' ? uid() : 'p' + Date.now()),
+      url: p.url,
+      filename: p.filename || 'Document.pdf',
+      shared: !!p.shared,
+      uploadedAt: p.uploaded_at ? Date.parse(p.uploaded_at) : (p.uploadedAt || null)
+    }));
+}
+function _matchPdfsToDb(m) {
+  const arr = Array.isArray(m.statsPdfs) ? m.statsPdfs : [];
+  return arr
+    .filter(p => p && typeof p.url === 'string' && /^https?:\/\//i.test(p.url))
+    .map(p => ({
+      id: p.id || null,
+      url: p.url,
+      filename: p.filename || 'Document.pdf',
+      shared: !!p.shared,
+      uploaded_at: p.uploadedAt ? new Date(p.uploadedAt).toISOString() : null
+    }));
+}
+
 function _dbMatchToClient(r) {
   return {
     id: r.id, date: r.date, opponent: r.opponent, home: r.home,
@@ -2717,6 +2749,7 @@ function _dbMatchToClient(r) {
     statsPdfFilename: r.stats_pdf_filename || '',
     statsPdfShared: !!r.stats_pdf_shared,
     statsPdfUploadedAt: r.stats_pdf_uploaded_at ? Date.parse(r.stats_pdf_uploaded_at) : null,
+    statsPdfs: _matchPdfsFromDb(r),
     positives: [], negatives: [], playerStats: {}
   };
 }
@@ -2856,7 +2889,10 @@ const ENTITIES = [
         stats_pdf_url: (typeof m.statsPdfUrl === 'string' && /^https?:\/\//i.test(m.statsPdfUrl)) ? m.statsPdfUrl : null,
         stats_pdf_filename: m.statsPdfFilename || null,
         stats_pdf_shared: !!m.statsPdfShared,
-        stats_pdf_uploaded_at: m.statsPdfUploadedAt ? new Date(m.statsPdfUploadedAt).toISOString() : null
+        stats_pdf_uploaded_at: m.statsPdfUploadedAt ? new Date(m.statsPdfUploadedAt).toISOString() : null,
+        // Multi-PDF (migration 009) : liste source de vérité ; les champs
+        // singuliers ci-dessus restent écrits pour la rétro-compat front.
+        stats_pdfs: _matchPdfsToDb(m)
       }];
     })),
     apply: (state, rows) => {
@@ -2906,7 +2942,9 @@ const ENTITIES = [
           statsPdfUrl: r.stats_pdf_url || '',
           statsPdfFilename: r.stats_pdf_filename || '',
           statsPdfShared: !!r.stats_pdf_shared,
-          statsPdfUploadedAt: r.stats_pdf_uploaded_at ? Date.parse(r.stats_pdf_uploaded_at) : null
+          statsPdfUploadedAt: r.stats_pdf_uploaded_at ? Date.parse(r.stats_pdf_uploaded_at) : null,
+          // Multi-PDF (migration 009). Remote = source de vérité (array Storage).
+          statsPdfs: _matchPdfsFromDb(r)
         };
       });
       // Préserve les matches locaux non encore push (id format uid() = 'x...')
@@ -9453,68 +9491,77 @@ function renderMatchDetail() {
       `}
 
       ${(() => {
-        // ── Stats FFBB (PDF) ──────────────────────────────────────────────
-        // Coach : import + diffusion. Joueuse : visible uniquement si partagé.
-        const url = m.statsPdfUrl || '';
-        const fname = m.statsPdfFilename || 'Feuille de stats FFBB.pdf';
-        const uploading = !!m._statsPdfUploading;
+        // ── Stats FFBB (multi-PDF) ────────────────────────────────────────
+        // La FFBB fournit plusieurs documents par match (feuille de match, stats
+        // équipe, stats individuelles…). Coach : liste + ajout + diffusion PAR
+        // PDF. Joueuse : uniquement les PDF marqués shared. Rétro-compat assurée
+        // par _normalizeMatchPdfs (ancien format singulier → array d'1 élément).
+        const pdfs = _normalizeMatchPdfs(m);
+        const uploading = !!m._pdfUploading;
         if (isCoach) {
           return `
             <div class="section-header">
               <div>
                 <div class="eyebrow">📄 Stats FFBB</div>
-                <h2 class="display-md mt-2">Feuille de match</h2>
+                <h2 class="display-md mt-2">Documents du match</h2>
               </div>
             </div>
             <div class="px" style="padding-bottom:14px">
-              ${url ? `
-                <div style="padding:12px 14px;background:var(--surface);border:1px solid var(--border);border-radius:10px">
-                  <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;min-width:0">
-                    <span style="font-size:26px;flex:none">📄</span>
-                    <div style="flex:1;min-width:0">
-                      <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;letter-spacing:.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(fname)}</div>
-                      <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${m.statsPdfUploadedAt ? 'Importé le ' + formatDate(new Date(m.statsPdfUploadedAt).toISOString().slice(0,10), 'short') : 'PDF importé'}</div>
+              ${pdfs.length ? `
+                <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px">
+                  ${pdfs.map(p => `
+                    <div style="padding:12px 14px;background:var(--surface);border:1px solid var(--border);border-radius:10px">
+                      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;min-width:0">
+                        <span style="font-size:24px;flex:none">📄</span>
+                        <div style="flex:1;min-width:0;cursor:pointer" onclick="openMatchPdf('${m.id}','${p.id}')">
+                          <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;letter-spacing:.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.filename)}</div>
+                          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${p.uploadedAt ? 'Importé le ' + formatDate(new Date(p.uploadedAt).toISOString().slice(0,10), 'short') : 'PDF importé'} · Toucher pour ouvrir</div>
+                        </div>
+                        <button class="btn btn-ghost" style="color:var(--red);flex:none;min-width:44px;min-height:44px;padding:0" onclick="removeMatchPdf('${m.id}','${p.id}')" aria-label="Supprimer ce PDF">🗑</button>
+                      </div>
+                      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 12px;min-height:44px;background:${p.shared ? 'rgba(34,197,94,0.10)' : 'var(--bg-2)'};border:1.5px solid ${p.shared ? 'var(--green)' : 'var(--border)'};border-radius:8px">
+                        <input type="checkbox" ${p.shared ? 'checked' : ''} onchange="toggleMatchPdfShared('${m.id}','${p.id}', this.checked)" style="width:20px;height:20px;flex:none">
+                        <div style="flex:1;min-width:0">
+                          <div style="font-family:'Anton';font-size:12px;text-transform:uppercase;letter-spacing:.02em;color:${p.shared ? 'var(--green)' : 'var(--ink-2)'}">Diffuser aux joueuses</div>
+                          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${p.shared ? 'Visible dans leur vue match' : 'Visible coach uniquement'}</div>
+                        </div>
+                      </label>
                     </div>
-                  </div>
-                  <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
-                    <button class="btn btn-secondary" onclick="openMatchStatsPdf('${m.id}')">Voir</button>
-                    <label class="btn btn-secondary" style="cursor:pointer;display:inline-block">
-                      Remplacer
-                      <input type="file" accept="application/pdf,.pdf" style="display:none" onchange="uploadMatchStatsPdf('${m.id}', event)">
-                    </label>
-                    <button class="btn btn-ghost" style="color:var(--red)" onclick="removeMatchStatsPdf('${m.id}')">Supprimer</button>
-                  </div>
-                  <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 12px;background:${m.statsPdfShared ? 'rgba(34,197,94,0.10)' : 'var(--bg-2)'};border:1.5px solid ${m.statsPdfShared ? 'var(--green)' : 'var(--border)'};border-radius:8px">
-                    <input type="checkbox" ${m.statsPdfShared ? 'checked' : ''} onchange="toggleMatchStatsShared('${m.id}', this.checked)" style="width:20px;height:20px;flex:none">
-                    <div style="flex:1;min-width:0">
-                      <div style="font-family:'Anton';font-size:12px;text-transform:uppercase;letter-spacing:.02em;color:${m.statsPdfShared ? 'var(--green)' : 'var(--ink-2)'}">Diffuser aux joueuses</div>
-                      <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${m.statsPdfShared ? 'Visible dans leur vue match' : 'Visible coach uniquement'}</div>
-                    </div>
-                  </label>
+                  `).join('')}
                 </div>
               ` : `
-                <div style="padding:18px 14px;background:var(--surface);border:1px dashed var(--border);border-radius:10px;text-align:center">
+                <div style="padding:18px 14px;background:var(--surface);border:1px dashed var(--border);border-radius:10px;text-align:center;margin-bottom:12px">
                   <div style="font-size:30px;margin-bottom:6px">📄</div>
-                  <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-bottom:12px;text-transform:uppercase;line-height:1.5">Importe la feuille de stats officielle FFBB (PDF, max 10 Mo)</div>
-                  <label class="btn ${uploading ? 'btn-secondary' : 'btn-primary'}" style="cursor:${uploading ? 'wait' : 'pointer'};display:inline-block">
-                    ${uploading ? '⟳ Import en cours…' : 'Importer PDF FFBB'}
-                    <input type="file" accept="application/pdf,.pdf" style="display:none" ${uploading ? 'disabled' : ''} onchange="uploadMatchStatsPdf('${m.id}', event)">
-                  </label>
+                  <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;line-height:1.5">Aucun document. Importe les PDF officiels FFBB (feuille de match, stats équipe / individuelles…)</div>
                 </div>
+              `}
+              ${pdfs.length < MATCH_PDF_MAX ? `
+                <label class="btn ${uploading ? 'btn-secondary' : 'btn-primary'} btn-block" style="cursor:${uploading ? 'wait' : 'pointer'};display:block;text-align:center;min-height:44px">
+                  ${uploading ? '⟳ Import en cours…' : '＋ Ajouter un PDF'}
+                  <input type="file" accept="application/pdf,.pdf" style="display:none" ${uploading ? 'disabled' : ''} onchange="addMatchPdf('${m.id}', event)">
+                </label>
+              ` : `
+                <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-align:center;text-transform:uppercase">Maximum ${MATCH_PDF_MAX} PDF par match</div>
               `}
             </div>`;
         }
-        // Joueuse : section uniquement si un PDF est partagé.
-        if (url && m.statsPdfShared) {
+        // Joueuse : uniquement les PDF marqués "Diffuser". Section masquée sinon.
+        const shared = pdfs.filter(p => p.shared && p.url);
+        if (shared.length) {
           return `
             <div class="section-header">
               <div>
                 <div class="eyebrow">📄 Stats du match</div>
-                <h2 class="display-md mt-2">Feuille FFBB</h2>
+                <h2 class="display-md mt-2">Documents FFBB</h2>
               </div>
             </div>
-            <div class="px" style="padding-bottom:14px">
-              <button class="btn btn-primary btn-block" onclick="openMatchStatsPdf('${m.id}')">Ouvrir les stats FFBB →</button>
+            <div class="px" style="padding-bottom:14px;display:flex;flex-direction:column;gap:8px">
+              ${shared.map(p => `
+                <button class="btn btn-secondary btn-block" style="display:flex;align-items:center;gap:10px;justify-content:space-between;text-align:left;min-height:44px" onclick="openMatchPdf('${m.id}','${p.id}')">
+                  <span style="display:flex;align-items:center;gap:8px;min-width:0"><span style="flex:none">📄</span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.filename)}</span></span>
+                  <span style="flex:none">Ouvrir →</span>
+                </button>
+              `).join('')}
             </div>`;
         }
         return '';
@@ -9770,6 +9817,7 @@ function saveMatch(id, isNew) {
     statsPdfFilename: existing ? (existing.statsPdfFilename || '') : '',
     statsPdfShared: existing ? !!existing.statsPdfShared : false,
     statsPdfUploadedAt: existing ? (existing.statsPdfUploadedAt || null) : null,
+    statsPdfs: existing ? (Array.isArray(existing.statsPdfs) ? existing.statsPdfs : []) : [],
     // Multi-effectif : un match appartient à E1 ou E2. Sélecteur absent (multi
     // off) → préserve l'existant / 'e1' par défaut.
     teamTag: (() => {
@@ -10208,11 +10256,16 @@ async function migrateLocalSelfiesToStorage() {
 }
 
 // ------------------------------------------------------------
-// STATS PDF FFBB — import coach + diffusion joueuses (Feature 1)
-// Bucket Storage 'match-stats' (PDF, public read, anon write). Le coach importe
-// le PDF officiel FFBB ; la checkbox `statsPdfShared` décide de la visibilité
-// côté joueuse. Pattern calqué sur uploadBroadcastMedia / changeWinSelfie.
+// STATS PDF FFBB — multi-PDF par match (migration 20260607_009)
+// La FFBB fournit plusieurs documents par match (feuille de match, stats équipe,
+// stats individuelles…). Le coach importe N PDF dans m.statsPdfs [] ; chaque PDF
+// porte son propre flag `shared` (diffusion individuelle aux joueuses).
+// Bucket Storage 'match-stats' (PDF, public read, anon write).
+// Rétro-compat : un match au format singulier (statsPdfUrl) est normalisé à la
+// volée en array d'1 élément par _normalizeMatchPdfs().
 // ------------------------------------------------------------
+const MATCH_PDF_MAX = 10; // plafond raisonnable par match (anti-abus Storage)
+
 function _matchStatsPdfKey(url) {
   if (typeof url !== 'string' || !url.includes('/match-stats/')) return null;
   const m = url.match(/\/match-stats\/(.+?)(?:\?|$)/);
@@ -10223,7 +10276,34 @@ function _removeMatchStatsPdfFile(url) {
   if (key && window.sb) sb.storage.from('match-stats').remove([key]).catch(() => {});
 }
 
-async function uploadMatchStatsPdf(matchId, event) {
+// Normalise m.statsPdfs en array de {id,url,filename,shared,uploadedAt}.
+// Rétro-compat : si vide mais singulier rempli (ancien format / edge case),
+// construit un array d'1 élément. Lecture seule (ne mute pas le state).
+function _normalizeMatchPdfs(m) {
+  if (!m) return [];
+  let arr = Array.isArray(m.statsPdfs) ? m.statsPdfs : [];
+  if (!arr.length && m.statsPdfUrl) {
+    arr = [{ id: m.id + '-legacy', url: m.statsPdfUrl, filename: m.statsPdfFilename || 'Feuille de stats FFBB.pdf', shared: !!m.statsPdfShared, uploadedAt: m.statsPdfUploadedAt || null }];
+  }
+  return arr
+    .filter(p => p && p.url)
+    .map(p => ({
+      id: p.id || uid(),
+      url: p.url,
+      filename: p.filename || 'Document.pdf',
+      shared: !!p.shared,
+      uploadedAt: p.uploadedAt || null
+    }));
+}
+
+// Pose l'array sur le match et neutralise les champs singuliers legacy pour
+// qu'ils ne réapparaissent pas via la rétro-compat de _normalizeMatchPdfs.
+function _setMatchPdfs(m, pdfs) {
+  m.statsPdfs = pdfs;
+  m.statsPdfUrl = ''; m.statsPdfFilename = ''; m.statsPdfShared = false; m.statsPdfUploadedAt = null;
+}
+
+async function addMatchPdf(matchId, event) {
   const file = (event.target.files || [])[0];
   event.target.value = '';
   if (!file) return;
@@ -10233,6 +10313,11 @@ async function uploadMatchStatsPdf(matchId, event) {
     alert('⚠ Hors ligne. Reconnecte-toi pour importer un PDF.');
     return;
   }
+  const pdfs = _normalizeMatchPdfs(m);
+  if (pdfs.length >= MATCH_PDF_MAX) {
+    alert('⚠ Maximum ' + MATCH_PDF_MAX + ' PDF par match. Supprime-en un avant d\'en ajouter.');
+    return;
+  }
   const isPdf = /pdf$/i.test(file.type) || /\.pdf$/i.test(file.name || '');
   if (!isPdf) { alert('⚠ Le fichier doit être un PDF (export FFBB).'); return; }
   const MAX = 10 * 1024 * 1024; // 10 Mo (= file_size_limit du bucket)
@@ -10240,7 +10325,7 @@ async function uploadMatchStatsPdf(matchId, event) {
     alert('⚠ PDF trop lourd (' + Math.round(file.size / 1048576) + ' Mo). Maximum 10 Mo.');
     return;
   }
-  m._statsPdfUploading = true;
+  m._pdfUploading = true;
   render();
   try {
     const fname = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.pdf`;
@@ -10251,51 +10336,61 @@ async function uploadMatchStatsPdf(matchId, event) {
     if (upErr) throw upErr;
     const { data: pub } = sb.storage.from('match-stats').getPublicUrl(path);
     if (!pub || !pub.publicUrl) throw new Error('publicUrl manquante');
-    _removeMatchStatsPdfFile(m.statsPdfUrl); // best-effort : purge l'ancien
-    m.statsPdfUrl = pub.publicUrl;
-    m.statsPdfFilename = (file.name || 'stats-ffbb.pdf').slice(0, 120);
-    m.statsPdfUploadedAt = Date.now();
-    m._statsPdfUploading = false;
+    pdfs.push({
+      id: uid(),
+      url: pub.publicUrl,
+      filename: (file.name || 'stats-ffbb.pdf').slice(0, 120),
+      shared: false,
+      uploadedAt: Date.now()
+    });
+    _setMatchPdfs(m, pdfs);
+    m._pdfUploading = false;
     persist();
     if (window.PbSync) PbSync.flushNow(state).catch(() => {});
     render();
     showToast('📄 PDF importé');
   } catch (e) {
     console.error('[match-stats pdf]', e && e.message ? e.message : e);
-    m._statsPdfUploading = false;
+    m._pdfUploading = false;
     render();
     alert('⚠ Échec de l\'upload du PDF. Vérifie ta connexion puis recommence.');
   }
 }
 
-function removeMatchStatsPdf(matchId) {
+function removeMatchPdf(matchId, pdfId) {
   const m = (state.matches || []).find(x => x.id === matchId);
-  if (!m || !m.statsPdfUrl) return;
-  if (!confirm('Supprimer le PDF de stats de ce match ?')) return;
-  _removeMatchStatsPdfFile(m.statsPdfUrl);
-  m.statsPdfUrl = '';
-  m.statsPdfFilename = '';
-  m.statsPdfShared = false;
-  m.statsPdfUploadedAt = null;
+  if (!m) return;
+  const pdfs = _normalizeMatchPdfs(m);
+  const target = pdfs.find(p => p.id === pdfId);
+  if (!target) return;
+  if (!confirm('Supprimer « ' + (target.filename || 'ce PDF') + ' » ?')) return;
+  _removeMatchStatsPdfFile(target.url);
+  _setMatchPdfs(m, pdfs.filter(p => p.id !== pdfId));
   persist();
   if (window.PbSync) PbSync.flushNow(state).catch(() => {});
   render();
   showToast('🗑 PDF supprimé');
 }
 
-function openMatchStatsPdf(matchId) {
-  const m = (state.matches || []).find(x => x.id === matchId);
-  if (m && m.statsPdfUrl) window.open(m.statsPdfUrl, '_blank', 'noopener');
-}
-
-function toggleMatchStatsShared(matchId, shared) {
+function toggleMatchPdfShared(matchId, pdfId, shared) {
   const m = (state.matches || []).find(x => x.id === matchId);
   if (!m) return;
-  m.statsPdfShared = !!shared;
+  const pdfs = _normalizeMatchPdfs(m);
+  const target = pdfs.find(p => p.id === pdfId);
+  if (!target) return;
+  target.shared = !!shared;
+  _setMatchPdfs(m, pdfs);
   persist();
   if (window.PbSync) PbSync.flushNow(state).catch(() => {});
   render();
-  showToast(shared ? '✅ Stats diffusées aux joueuses' : '🔒 Diffusion désactivée');
+  showToast(shared ? '✅ PDF diffusé aux joueuses' : '🔒 Diffusion désactivée');
+}
+
+function openMatchPdf(matchId, pdfId) {
+  const m = (state.matches || []).find(x => x.id === matchId);
+  if (!m) return;
+  const p = _normalizeMatchPdfs(m).find(x => x.id === pdfId);
+  if (p && p.url) window.open(p.url, '_blank', 'noopener');
 }
 
 // Visualiseur d'image plein écran pour le selfie
