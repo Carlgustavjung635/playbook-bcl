@@ -19424,6 +19424,69 @@ function ffbbCatRank(label) {
   return 800;
 }
 
+// ----------------------------------------------------------------------------
+// ITÉR.4 — TYPE de compétition (tag de chaque match dans la liste unifiée).
+// Détection par regex sur le nom (l'API n'expose pas de type natif fiable :
+// typeCompetitionGenerique = objet logo/null, inexploitable). Priorité :
+// Brassage → Coupe → Phase finale → Championnat. Un « Trophée … Finale » reste
+// une COUPE (tournoi nommé) ; « D2F AB 1/2 FINALE » = Phase finale (playoff du
+// championnat, sans trophée). Validé sur les 21 compétitions du club Islois.
+function ffbbCompType(e) {
+  const n = ((e && e.compNom) || '').toLowerCase();
+  if (/brassage|qualif/.test(n))
+    return { key: 'brassage', label: 'Brassage', emoji: '⚡', bg: 'rgba(100,116,139,.16)', fg: '#64748b' };
+  if (/coupe|troph|trophy/.test(n))
+    return { key: 'coupe', label: 'Coupe', emoji: '🏅', bg: 'rgba(217,164,6,.18)', fg: '#b07d06' };
+  if (/phase\s*final|playoff|play-off|\bfinales?\b|1\/2|1\/4|1\/8|\bdemi|\bquart/.test(n))
+    return { key: 'finale', label: 'Phase finale', emoji: '🏆', bg: 'var(--orange-soft)', fg: 'var(--orange)' };
+  return { key: 'champ', label: 'Championnat', emoji: '🎯', bg: 'rgba(22,163,74,.14)', fg: '#16a34a' };
+}
+
+// Catégories où le club est engagé, ordonnées (Séniors puis U20→U7).
+function ffbbCatsAvailable() {
+  const d = ffbbDash();
+  return [...new Set((d.engagements || []).map(ffbbCatLabel))]
+    .sort((a, b) => ffbbCatRank(a) - ffbbCatRank(b) || a.localeCompare(b));
+}
+
+// Tous les matchs d'une catégorie = fusion des matchs de TOUTES ses compétitions
+// (championnat + coupes + brassages + phases finales), chacun annoté de son type
+// et nom de compétition. Dédupe par id (un match = une seule rencontre).
+function ffbbCatMatches(cat) {
+  const d = ffbbDash();
+  const out = [], seen = new Set();
+  (d.engagements || []).filter(e => ffbbCatLabel(e) === cat).forEach(e => {
+    const p = e.pouleId && d.poules[e.pouleId];
+    if (!p) return;
+    const t = ffbbCompType(e);
+    (p.matches || []).forEach(m => {
+      if (seen.has(m.id)) return; seen.add(m.id);
+      out.push(Object.assign({}, m, { _type: t, _compNom: e.compNom }));
+    });
+  });
+  return out;
+}
+
+// Charge en parallèle les poules de toutes les compétitions d'une catégorie.
+async function ffbbLoadCat(cat, force) {
+  const d = ffbbDash();
+  const engs = (d.engagements || []).filter(e => ffbbCatLabel(e) === cat && e.pouleId);
+  await Promise.all(engs.map(e =>
+    ffbbLoadPoule(e.pouleId, force).catch(err => console.warn('[ffbb] poule', e.pouleId, err && err.message))));
+}
+
+async function ffbbSelectCat(cat) {
+  const d = ffbbDash();
+  d.catTab = cat;
+  const engs = (d.engagements || []).filter(e => ffbbCatLabel(e) === cat && e.pouleId);
+  if (engs.some(e => !d.poules[e.pouleId])) {
+    d.loading = true; render();
+    try { await ffbbLoadCat(cat, false); } catch (e) { d.error = e.message || String(e); }
+    d.loading = false; persist();
+  }
+  render();
+}
+
 function ffbbMapMatch(r) {
   const s = r.salle || {};
   const com = (s && s.commune) || {};
@@ -19565,11 +19628,12 @@ function ffbbDash() {
   if (d.compId === undefined) d.compId = null;
   if (!d.poules) d.poules = {};
   if (d.lastSync === undefined) d.lastSync = null;
-  if (d.oursOnly === undefined) d.oursOnly = false;
+  if (d.oursOnly === undefined) d.oursOnly = true;  // itér.4 : vue unifiée multi-poules → NOS matchs par défaut (toggle pour tout voir)
   if (!d.dateMode) d.dateMode = 'all';
-  if (!Array.isArray(d.favorites)) d.favorites = [];      // ids compétitions favorites
-  if (!Array.isArray(d.collapsedCats)) d.collapsedCats = []; // catégories repliées
+  if (!Array.isArray(d.favorites)) d.favorites = [];      // ids compétitions favorites (legacy itér.3, inerte)
+  if (!Array.isArray(d.collapsedCats)) d.collapsedCats = []; // catégories repliées (legacy, inerte)
   if (d.autoUpdate === undefined) d.autoUpdate = true;    // MAJ auto convocs (default ON)
+  if (d.catTab === undefined) d.catTab = null;            // itér.4 : catégorie sélectionnée (U13/U15/U18/Séniors)
   return d;
 }
 
@@ -19603,16 +19667,20 @@ async function syncFFBB() {
   try {
     const engs = await ffbbFetchEngagements();
     d.engagements = engs;
-    // Choix de la compétition courante : on conserve la sélection si valide,
-    // sinon priorité à un favori, sinon la première compétition.
-    if (!d.compId || !engs.find(e => e.compId === d.compId)) {
-      const fav = engs.find(e => (d.favorites || []).includes(e.compId));
-      d.compId = (fav && fav.compId) || (engs.length ? engs[0].compId : null);
-    }
-    // Tri par activité (date du dernier match) — non bloquant pour la poule courante.
+    // Tri par activité (date du dernier match) — utilisé pour le tri des compétitions.
     await ffbbFetchEngLastDates(engs);
-    const cur = engs.find(e => e.compId === d.compId);
-    if (cur && cur.pouleId) await ffbbLoadPoule(cur.pouleId, true);
+    // Itér.4 : la vue est CATÉGORIE-d'abord. On choisit l'onglet catégorie par
+    // défaut (catégorie de l'ancienne sélection si connue, sinon la 1ère) et on
+    // charge en parallèle les poules de TOUTES ses compétitions.
+    const cats = ffbbCatsAvailable();
+    if (!d.catTab || !cats.includes(d.catTab)) {
+      const ce = engs.find(e => e.compId === d.compId);
+      d.catTab = (ce && ffbbCatLabel(ce)) || cats[0] || null;
+    }
+    // compId conservé (rétrocompat reconcile/legacy), recalé sur la catégorie.
+    const catEngs = engs.filter(e => ffbbCatLabel(e) === d.catTab);
+    if (!d.compId || !catEngs.find(e => e.compId === d.compId)) d.compId = (catEngs[0] && catEngs[0].compId) || null;
+    if (d.catTab) await ffbbLoadCat(d.catTab, true);
     d.lastSync = new Date().toISOString();
     d.lastAutoSync = Date.now();
     d.loading = false;
@@ -19902,9 +19970,16 @@ function ffbbDashMatchCard(m) {
       : `<div style="font-family:'JetBrains Mono';font-size:10px;color:var(--ink-3);text-transform:uppercase;white-space:nowrap" title="Date passée, score non renseigné côté FFBB">📋 score non saisi</div>`);
   const maps = ffbbMapsHref(m.salle);
   const salleTxt = [m.salle.nom, m.salle.ville].filter(Boolean).join(' · ');
+  // Itér.4 — tag type de compétition (présent dans la liste unifiée par catégorie).
+  const t = m._type;
+  const tag = t ? `<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;min-width:0">
+      <span style="flex:none;font-size:9px;font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:.04em;padding:2px 7px;border-radius:5px;background:${t.bg};color:${t.fg};white-space:nowrap">${t.emoji} ${t.label}</span>
+      ${m._compNom ? `<span style="flex:1;min-width:0;font-size:9px;color:var(--ink-4);font-family:'JetBrains Mono';text-transform:uppercase;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m._compNom)}</span>` : ''}
+    </div>` : '';
   return `
     <div class="match-row" style="${ours ? 'border-left:3px solid var(--orange);' : ''}cursor:default;align-items:flex-start">
       <div style="flex:1;min-width:0">
+        ${tag}
         <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;letter-spacing:.02em;line-height:1.25;${ours ? 'color:var(--orange)' : ''}">
           ${esc(m.home)} <span style="color:var(--ink-3)">vs</span> ${esc(m.away)}
         </div>
@@ -19917,26 +19992,58 @@ function ffbbDashMatchCard(m) {
     </div>`;
 }
 
+// Une carte classement (officiel FFBB en priorité), labellisée par compétition.
+function ffbbStandingsCardHtml(eng, standings, official) {
+  const teamLower = ffbbClubSearch().toLowerCase();
+  const t = ffbbCompType(eng);
+  return `
+    <div class="px" style="margin-top:10px"><div style="display:flex;align-items:center;gap:6px;margin-bottom:5px">
+      <span style="flex:none;font-size:9px;font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:.04em;padding:2px 7px;border-radius:5px;background:${t.bg};color:${t.fg}">${t.emoji} ${t.label}</span>
+      <span style="font-family:'Anton';font-size:13px;text-transform:uppercase;letter-spacing:.02em;color:var(--ink-2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(eng.compNom)}${eng.pouleNom ? ' · ' + esc(eng.pouleNom) : ''}</span>
+    </div></div>
+    <div class="list-section"><div class="stats-wrap"><table class="stats-table">
+      <thead><tr><th>#</th><th>Équipe</th><th>MJ</th><th>V</th><th>D</th><th>+/-</th><th>Pts</th></tr></thead>
+      <tbody>
+        ${standings.map((s, i) => {
+          const me = (s.team || '').toLowerCase().includes(teamLower);
+          const rank = official && s.pos ? s.pos : (i + 1);
+          const diff = (s.diff != null) ? s.diff : ((s.pf || 0) - (s.pa || 0));
+          return `<tr style="${me ? 'background:var(--orange-soft)' : ''}">
+            <td class="num">${rank}</td>
+            <td style="font-family:'Anton';font-size:12px;text-transform:uppercase">${esc(s.team)}</td>
+            <td>${s.played}</td><td>${s.wins}</td><td>${s.losses}</td>
+            <td class="num">${diff > 0 ? '+' : ''}${diff}</td>
+            <td class="num">${s.pts}</td></tr>`;
+        }).join('')}
+      </tbody></table></div>
+      <div style="padding:8px 14px;font-size:9px;color:var(--ink-4);font-family:'JetBrains Mono'">${official
+        ? '✓ Classement OFFICIEL FFBB — points, forfaits et pénalités inclus.'
+        : '⚠ Classement calculé localement (officiel indisponible) — approx. V=2/D=1.'}</div>
+    </div>`;
+}
+
 function renderFFBB() {
   const f = state.ffbb;
   const d = ffbbDash();
   const isCoach = state.auth.role === 'coach';
   const engs = d.engagements || [];
-  const cur = engs.find(e => e.compId === d.compId) || null;
-  const poule = cur && cur.pouleId ? d.poules[cur.pouleId] : null;
-  const allMatches = poule ? (poule.matches || []) : [];
 
-  // Filtres
-  let shown = d.oursOnly ? allMatches.filter(m => m.ours) : allMatches;
+  // Itér.4 — vue CATÉGORIE-d'abord : segments U13/U15/U18/Séniors → liste unifiée
+  // de TOUS les matchs de la catégorie (toutes compétitions confondues, chacun
+  // tagué de son type) + classement(s) par poule en bas.
+  const cats = ffbbCatsAvailable();
+  if (cats.length && (!d.catTab || !cats.includes(d.catTab))) {
+    const ce = engs.find(e => e.compId === d.compId);
+    d.catTab = (ce && ffbbCatLabel(ce)) || cats[0];
+  }
+  const catTab = d.catTab;
+  const catEngs = engs.filter(e => ffbbCatLabel(e) === catTab);
+  const catLoading = d.loading || catEngs.some(e => e.pouleId && !d.poules[e.pouleId]);
+
+  const catMatches = ffbbCatMatches(catTab);
+  let shown = d.oursOnly ? catMatches.filter(m => m.ours) : catMatches;
   shown = ffbbDateFilter(shown, d.dateMode);
-
-  // Classement : OFFICIEL FFBB (poule.standings) en priorité, repli sur le calcul
-  // local approximatif uniquement s'il est indisponible. Pas de classement en phase finale.
-  const official = poule && Array.isArray(poule.standings) ? poule.standings : [];
-  const standings = cur && cur.phase ? []
-    : (official.length ? official : ffbbComputeStandings(allMatches));
-  const standingsOfficial = official.length > 0;
-  const ourCount = allMatches.filter(m => m.ours).length;
+  const ourCount = catMatches.filter(m => m.ours).length;
 
   // Bloc en-tête + bouton sync
   const header = `
@@ -19969,29 +20076,20 @@ function renderFFBB() {
       </div></div>`;
   }
 
-  // Sélecteur compact (refonte UX itér.3) — la compétition active DOMINE sur une
-  // seule ligne ; favoris + catégories passent dans une feuille modale ouverte au
-  // tap « Changer ». Avant : 21 chips + 21 étoiles sur 4 sections ouvertes
-  // mangeaient >1 viewport (~830px) avant le dashboard. Cf. ffbbOpenCompPicker.
-  const favSet = new Set(d.favorites || []);
-  const curFav = cur && favSet.has(cur.compId);
-  const selector = cur ? `
-    <div class="px" style="margin-bottom:12px">
-      <div class="eyebrow" style="margin-bottom:6px">Compétition</div>
-      <div style="display:flex;align-items:stretch;gap:8px">
-        <button onclick="ffbbOpenCompPicker()" style="flex:1;min-width:0;text-align:left;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;cursor:pointer">
-          <div style="display:flex;align-items:center;gap:7px">
-            ${curFav ? '<span style="color:#f5b50a;font-size:14px;flex:none">★</span>' : ''}${cur.phase ? '<span style="flex:none">🏆</span>' : ''}
-            <span style="font-family:'Anton';font-size:16px;text-transform:uppercase;letter-spacing:.02em;line-height:1.15;color:var(--ink-1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(cur.compNom)}</span>
-          </div>
-          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:5px;text-transform:uppercase">
-            Poule ${esc(cur.pouleNom || '?')} · ${allMatches.length} matchs · ${ourCount} à nous${cur.phase ? ' · phase finale' : ''}
-          </div>
-        </button>
-        <button onclick="ffbbOpenCompPicker()" aria-label="Changer de compétition" style="flex:none;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:0 14px;font-family:'JetBrains Mono';font-size:11px;text-transform:uppercase;color:var(--ink-2);cursor:pointer;white-space:nowrap">Changer ▾</button>
+  // Segments catégorie (n'affiche que celles où le club est engagé).
+  const catTabsHtml = `
+    <div class="px" style="margin-bottom:10px">
+      <div class="eyebrow" style="margin-bottom:6px">Catégorie</div>
+      <div style="display:flex;gap:6px;overflow-x:auto;padding-bottom:2px;-webkit-overflow-scrolling:touch">
+        ${cats.map(c => `<button onclick="ffbbSelectCat('${esc(c).replace(/'/g, "\\'")}')" style="flex:none;min-height:42px;padding:9px 18px;border-radius:22px;border:1px solid ${c === catTab ? 'var(--orange)' : 'var(--border)'};background:${c === catTab ? 'var(--orange)' : 'var(--surface)'};color:${c === catTab ? '#fff' : 'var(--ink-2)'};font-family:'Anton';font-size:14px;text-transform:uppercase;letter-spacing:.02em;cursor:pointer;white-space:nowrap">${esc(c)}</button>`).join('')}
       </div>
-      ${d.lastSync ? `<div style="font-size:9px;color:var(--ink-4);font-family:'JetBrains Mono';margin-top:6px;text-transform:uppercase">${engs.length} compétitions · sync ${new Date(d.lastSync).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' })}</div>` : ''}
-    </div>` : '';
+    </div>`;
+
+  // Ligne d'info : nb compétitions + matchs de la catégorie + dernière sync.
+  const infoLine = `
+    <div class="px" style="margin-bottom:10px"><div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;line-height:1.5">
+      ${catEngs.length} compétition${catEngs.length > 1 ? 's' : ''} · ${catMatches.length} matchs · ${ourCount} à nous${d.lastSync ? ' · sync ' + new Date(d.lastSync).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' }) : ''}
+    </div></div>`;
 
   // Filtres
   const filters = `
@@ -20008,16 +20106,14 @@ function renderFFBB() {
       ${isCoach && ourCount > 0 ? `<button class="btn btn-primary btn-block" style="margin-top:10px" onclick="ffbbOpenImport()">＋ Importer nos matchs en convocations</button>` : ''}
     </div>`;
 
-  // Liste matchs groupés par journée
+  // Liste unifiée — tous les matchs de la catégorie, tagués par type, triés par
+  // date (à venir chrono / passés anti-chrono, split par DATE via ffbbIsUpcoming).
   let listHtml;
-  if (d.loading) {
-    listHtml = `<div class="px"><div style="text-align:center;padding:30px;color:var(--ink-3);font-family:'JetBrains Mono';font-size:12px">⟳ Chargement…</div></div>`;
+  if (catLoading && !catMatches.length) {
+    listHtml = `<div class="px"><div style="text-align:center;padding:30px;color:var(--ink-3);font-family:'JetBrains Mono';font-size:12px">⟳ Chargement de la catégorie…</div></div>`;
   } else if (!shown.length) {
     listHtml = `<div class="empty"><div class="empty-icon">○</div><div class="empty-title">Aucun match</div><div class="empty-desc">Ajuste les filtres.</div></div>`;
   } else {
-    // Tri : à venir d'abord (chrono), passés ensuite (anti-chrono) — pratique au quotidien.
-    // Split par DATE (pas par score) : à venir = date >= aujourd'hui, chrono ;
-    // passés = date < aujourd'hui (joués OU non), anti-chrono.
     const up = shown.filter(ffbbIsUpcoming).sort((a, b) => (a.date || '').localeCompare(b.date || ''));
     const pa = shown.filter(m => !ffbbIsUpcoming(m)).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
     const block = (title, arr) => arr.length ? `
@@ -20026,32 +20122,25 @@ function renderFFBB() {
     listHtml = block('À venir', up) + block('Résultats', pa);
   }
 
-  // Classement (chantier 1 — officiel FFBB en priorité)
-  const teamLower = ffbbClubSearch().toLowerCase();
-  const standingsHtml = standings.length ? `
-    <div class="section-header"><div><div class="eyebrow">Classement</div><h2 class="display-md mt-2" style="font-size:15px;color:var(--ink-2)">Poule ${esc(cur.pouleNom || '')}</h2></div></div>
-    <div class="list-section"><div class="stats-wrap"><table class="stats-table">
-      <thead><tr><th>#</th><th>Équipe</th><th>MJ</th><th>V</th><th>D</th><th>+/-</th><th>Pts</th></tr></thead>
-      <tbody>
-        ${standings.map((s, i) => {
-          const me = (s.team || '').toLowerCase().includes(teamLower);
-          const rank = standingsOfficial && s.pos ? s.pos : (i + 1);
-          const diff = (s.diff != null) ? s.diff : ((s.pf || 0) - (s.pa || 0));
-          return `<tr style="${me ? 'background:var(--orange-soft)' : ''}">
-            <td class="num">${rank}</td>
-            <td style="font-family:'Anton';font-size:12px;text-transform:uppercase">${esc(s.team)}</td>
-            <td>${s.played}</td><td>${s.wins}</td><td>${s.losses}</td>
-            <td class="num">${diff > 0 ? '+' : ''}${diff}</td>
-            <td class="num">${s.pts}</td></tr>`;
-        }).join('')}
-      </tbody></table></div>
-      <div style="padding:8px 14px;font-size:9px;color:var(--ink-4);font-family:'JetBrains Mono'">${standingsOfficial
-        ? '✓ Classement OFFICIEL FFBB (api.ffbb.app) — points, forfaits et pénalités inclus.'
-        : '⚠ Classement calculé localement (officiel indisponible) — approx. V=2/D=1, hors forfaits/pénalités.'}</div>
-    </div>` : '';
+  // Classement(s) — un par compétition de la catégorie qui a une poule classée
+  // (un classement n'a de sens que dans une poule : coupes / phases finales = aucun).
+  const standCards = catEngs
+    .slice()
+    .sort((a, b) => (b.lastDate || '').localeCompare(a.lastDate || ''))
+    .map(e => {
+      if (e.phase) return '';
+      const p = e.pouleId && d.poules[e.pouleId];
+      if (!p) return '';
+      const official = Array.isArray(p.standings) ? p.standings : [];
+      const st = official.length ? official : ffbbComputeStandings(p.matches || []);
+      return st.length ? ffbbStandingsCardHtml(e, st, official.length > 0) : '';
+    }).join('');
+  const standingsHtml = standCards
+    ? `<div class="section-header"><div><div class="eyebrow">Classement${catEngs.filter(e => !e.phase).length > 1 ? 's' : ''}</div></div></div>${standCards}`
+    : '';
 
   return `<div class="fade-up">
-    ${header}${selector}${filters}${listHtml}${standingsHtml}
+    ${header}${catTabsHtml}${infoLine}${filters}${listHtml}${standingsHtml}
     <div style="padding:20px 18px;text-align:center;font-size:10px;color:var(--ink-4);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:.1em">Données : api.ffbb.app (officiel)</div>
   </div>`;
 }
@@ -20064,21 +20153,22 @@ function renderFFBB() {
 // ---------------------------------------------------------------------------
 function ffbbOpenImport() {
   const d = ffbbDash();
-  const cur = d.engagements.find(e => e.compId === d.compId);
-  const poule = cur && cur.pouleId ? d.poules[cur.pouleId] : null;
-  const ours = (poule ? poule.matches : []).filter(m => m.ours);
-  if (!ours.length) { alert('Aucun de nos matchs dans cette poule.'); return; }
+  // Itér.4 : on importe NOS matchs de toute la CATÉGORIE (toutes compétitions).
+  const ours = ffbbCatMatches(d.catTab).filter(m => m.ours);
+  if (!ours.length) { alert('Aucun de nos matchs dans cette catégorie.'); return; }
 
   const existing = new Set((state.matches || []).map(m => m.id));
-  // Présélection : matchs à venir non encore importés.
-  const rows = ours.map(m => {
+  // Présélection : matchs à venir non encore importés. Tri par date pour lisibilité.
+  const rows = ours.slice().sort((a, b) => (a.date || '').localeCompare(b.date || '')).map(m => {
     const mid = 'ffbb-' + m.id;
     const already = existing.has(mid);
     const opp = m.weHome ? m.away : m.home;
-    const checked = (!already && !m.played) ? 'checked' : '';
+    const checked = (!already && ffbbIsUpcoming(m)) ? 'checked' : '';
+    const tag = m._type ? `<span style="font-size:9px;font-family:'JetBrains Mono';padding:1px 5px;border-radius:4px;background:${m._type.bg};color:${m._type.fg};margin-right:5px">${m._type.emoji} ${m._type.label}</span>` : '';
     return `<label style="display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-bottom:1px solid var(--border);cursor:${already ? 'not-allowed' : 'pointer'};opacity:${already ? '.5' : '1'}">
       <input type="checkbox" class="ffbb-imp" value="${m.id}" ${checked} ${already ? 'disabled' : ''} style="width:18px;height:18px;margin-top:2px;flex:none">
       <div style="flex:1;min-width:0">
+        <div style="margin-bottom:3px">${tag}</div>
         <div style="font-family:'Anton';font-size:13px;text-transform:uppercase">${m.weHome ? '' : '@ '}${esc(opp)}${already ? ' <span style="color:var(--ink-3);font-size:10px">(déjà importé)</span>' : ''}</div>
         <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">${ffbbFmtDate(m.date)}${ffbbTime(m.date) ? ' · ' + ffbbTime(m.date) : ''} · ${esc(m.salle.nom || 'salle ?')}</div>
       </div>
@@ -20117,9 +20207,8 @@ function ffbbOpenImport() {
 
 async function ffbbDoImport() {
   const d = ffbbDash();
-  const cur = d.engagements.find(e => e.compId === d.compId);
-  const poule = cur && cur.pouleId ? d.poules[cur.pouleId] : null;
-  const byId = Object.fromEntries((poule ? poule.matches : []).map(m => [m.id, m]));
+  // Itér.4 : la sélection couvre toute la catégorie (matchs annotés _compNom/_type).
+  const byId = Object.fromEntries(ffbbCatMatches(d.catTab).map(m => [m.id, m]));
   const ids = Array.from(document.querySelectorAll('.ffbb-imp:checked')).map(c => c.value);
   if (!ids.length) { alert('Sélectionne au moins un match.'); return; }
   const tag = (document.getElementById('ffbb-imp-tag') || {}).value || defaultEventTag();
@@ -20143,7 +20232,7 @@ async function ffbbDoImport() {
       status: m.played ? 'played' : 'to_play',
       location: loc || null, time: ffbbTime(m.date) || null,
       season_id: seasonId, team_tag: tag,
-      notes: 'Importé depuis FFBB (' + (cur ? cur.compNom : '') + ')'
+      notes: 'Importé depuis FFBB (' + (m._compNom || '') + ')'
     });
     convocRows.push({
       id: cid, type: 'match', title: 'Vs ' + (opp || 'Adversaire'),
