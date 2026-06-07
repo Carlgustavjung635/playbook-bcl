@@ -19794,6 +19794,97 @@ function ffbbToggleCat(cat) {
 }
 function ffbbSetAutoUpdate(v) { ffbbDash().autoUpdate = !!v; persist(); }
 
+// ---------------------------------------------------------------------------
+// SÉLECTEUR DE COMPÉTITION — feuille modale (refonte UX itér.3)
+// Remplace les 21 chips + 21 étoiles empilées par : recherche + favoris en tête
+// + catégories en accordéon (fermées par défaut, sauf celle de l'active / si
+// recherche). Étoile à gauche de chaque ligne = pin/unpin in-place (sans fermer).
+// L'état transitoire (recherche, accordéons ouverts) vit hors de state.ffbb.dash
+// — c'est purement UI de la modale, jeté à la fermeture.
+// ---------------------------------------------------------------------------
+let _ffbbPicker = { q: '', open: {} };
+
+function ffbbOpenCompPicker() {
+  const d = ffbbDash();
+  const cur = (d.engagements || []).find(e => e.compId === d.compId);
+  _ffbbPicker = { q: '', open: {} };
+  if (cur) _ffbbPicker.open[ffbbCatLabel(cur)] = true;  // ouvre la catégorie courante
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">Changer de compétition</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <input id="ffbb-picker-q" placeholder="🔍 Rechercher…" oninput="ffbbPickerSearch(this.value)" autocomplete="off"
+        style="width:100%;margin-bottom:12px;padding:11px 12px;border:1px solid var(--border);border-radius:10px;background:var(--bg-1);font-size:15px;color:var(--ink-1)">
+      <div id="ffbb-picker-list">${ffbbPickerListHtml()}</div>
+    </div>`);
+  setTimeout(() => { const el = document.getElementById('ffbb-picker-q'); if (el) el.focus(); }, 80);
+}
+
+function ffbbPickerRefresh() {
+  const el = document.getElementById('ffbb-picker-list');
+  if (el) el.innerHTML = ffbbPickerListHtml();
+}
+function ffbbPickerSearch(v) { _ffbbPicker.q = v || ''; ffbbPickerRefresh(); }
+function ffbbPickerToggleCat(cat) { _ffbbPicker.open[cat] = !_ffbbPicker.open[cat]; ffbbPickerRefresh(); }
+function ffbbPickerToggleFav(compId) {
+  const d = ffbbDash();
+  const i = d.favorites.indexOf(compId);
+  if (i < 0) d.favorites.push(compId); else d.favorites.splice(i, 1);
+  persist();            // persiste le favori (localStorage) sans fermer la modale
+  ffbbPickerRefresh();  // ré-ordonne in-place (le favori remonte dans ★ Favoris)
+}
+async function ffbbPickerPick(compId) { closeModal(); await ffbbSelectComp(compId); }
+
+function ffbbPickerListHtml() {
+  const d = ffbbDash();
+  const engs = d.engagements || [];
+  const favSet = new Set(d.favorites || []);
+  const q = (_ffbbPicker.q || '').trim().toLowerCase();
+  const match = e => !q || ((e.compNom || '') + ' ' + (e.code || '') + ' ' + (e.pouleNom || '') + ' ' + ffbbCatLabel(e)).toLowerCase().includes(q);
+  const byActivity = (a, b) => (b.lastDate || '').localeCompare(a.lastDate || '') || a.compNom.localeCompare(b.compNom);
+  const row = (e) => {
+    const active = e.compId === d.compId;
+    const fav = favSet.has(e.compId);
+    return `<div style="display:flex;align-items:center;gap:8px;padding:11px 10px;border-bottom:1px solid var(--border);${active ? 'background:var(--orange-soft)' : ''}">
+        <span onclick="ffbbPickerToggleFav('${e.compId}')" title="${fav ? 'Retirer des favoris' : 'Marquer favori'}" style="cursor:pointer;font-size:22px;line-height:1;flex:none;width:30px;text-align:center;color:${fav ? '#f5b50a' : 'var(--ink-3)'}">${fav ? '★' : '☆'}</span>
+        <button onclick="ffbbPickerPick('${e.compId}')" style="flex:1;min-width:0;text-align:left;background:none;border:none;padding:0;cursor:pointer">
+          <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;letter-spacing:.01em;line-height:1.2;color:${active ? 'var(--orange)' : 'var(--ink-1)'}">${e.phase ? '🏆 ' : ''}${esc(e.compNom)}</div>
+          <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${esc(e.pouleNom ? 'Poule ' + e.pouleNom : (e.code || ''))}${active ? ' · actuelle' : ''}</div>
+        </button>
+      </div>`;
+  };
+  let html = '';
+  // ★ Favoris (toutes catégories), toujours en tête.
+  const favList = engs.filter(e => favSet.has(e.compId) && match(e)).sort(byActivity);
+  if (favList.length) {
+    html += `<div style="font-family:'JetBrains Mono';font-size:10px;color:#f5b50a;text-transform:uppercase;letter-spacing:.08em;margin:2px 0 5px">★ Mes favoris</div>
+      <div style="border:1px solid var(--border);border-radius:10px;overflow:hidden;margin-bottom:16px">${favList.map(row).join('')}</div>`;
+  }
+  // Catégories en accordéon.
+  const groups = {};
+  engs.forEach(e => { if (!match(e)) return; const c = ffbbCatLabel(e); (groups[c] = groups[c] || []).push(e); });
+  const cats = Object.keys(groups).sort((a, b) => ffbbCatRank(a) - ffbbCatRank(b) || a.localeCompare(b));
+  if (!cats.length && !favList.length) {
+    return `<div style="text-align:center;padding:24px;color:var(--ink-3);font-family:'JetBrains Mono';font-size:12px">Aucune compétition${q ? ' pour « ' + esc(_ffbbPicker.q) + ' »' : ''}.</div>`;
+  }
+  cats.forEach(cat => {
+    const list = groups[cat].slice().sort((a, b) => (favSet.has(b.compId) - favSet.has(a.compId)) || byActivity(a, b));
+    // Ouverte si : explicitement dépliée, OU recherche active, OU contient l'active.
+    const open = !!_ffbbPicker.open[cat] || !!q || list.some(e => e.compId === d.compId);
+    html += `<div style="margin-bottom:8px">
+        <div onclick="ffbbPickerToggleCat('${esc(cat).replace(/'/g, "\\'")}')" style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:8px 2px;min-height:40px">
+          <span style="font-family:'JetBrains Mono';font-size:12px;color:var(--ink-3);display:inline-block;transition:transform .15s;transform:rotate(${open ? 90 : 0}deg)">▸</span>
+          <span style="font-family:'Anton';font-size:14px;text-transform:uppercase;letter-spacing:.03em;flex:1">${esc(cat)}</span>
+          <span style="font-family:'JetBrains Mono';font-size:11px;color:var(--ink-4)">${list.length}</span>
+        </div>
+        ${open ? `<div style="border:1px solid var(--border);border-radius:10px;overflow:hidden">${list.map(row).join('')}</div>` : ''}
+      </div>`;
+  });
+  return html;
+}
+
 function ffbbDashMatchCard(m) {
   const ours = m.ours;
   const win  = m.played && ((m.weHome && m.homeScore > m.awayScore) || (!m.weHome && m.awayScore > m.homeScore));
@@ -19878,58 +19969,29 @@ function renderFFBB() {
       </div></div>`;
   }
 
-  // Sélecteur d'engagements — chantier 3 : favoris en tête, sections par catégorie
-  // (repliables), tri intra-section par activité (date du dernier match, DESC).
+  // Sélecteur compact (refonte UX itér.3) — la compétition active DOMINE sur une
+  // seule ligne ; favoris + catégories passent dans une feuille modale ouverte au
+  // tap « Changer ». Avant : 21 chips + 21 étoiles sur 4 sections ouvertes
+  // mangeaient >1 viewport (~830px) avant le dashboard. Cf. ffbbOpenCompPicker.
   const favSet = new Set(d.favorites || []);
-  // Une chip réutilisable. La date d'activité est affichée en sous-texte discret.
-  const chipBtn = (e) => {
-    const active = e.compId === d.compId;
-    const fav = favSet.has(e.compId);
-    const label = (e.code || e.compNom).slice(0, 24);
-    const star = `<span onclick="event.stopPropagation();ffbbToggleFav('${e.compId}')" title="${fav ? 'Retirer des favoris' : 'Marquer favori'}" style="cursor:pointer;font-size:14px;line-height:1;flex:none;color:${fav ? '#f5b50a' : (active ? 'rgba(255,255,255,.6)' : 'var(--ink-3)')}">${fav ? '★' : '☆'}</span>`;
-    return `<div style="flex:none;display:inline-flex;align-items:center;gap:6px;min-height:44px;padding:6px 12px;border-radius:20px;border:1px solid ${active ? 'var(--orange)' : 'var(--border)'};background:${active ? 'var(--orange)' : 'var(--surface)'};white-space:nowrap">
-        ${star}
-        <button onclick="ffbbSelectComp('${e.compId}')" style="background:none;border:none;padding:0;color:${active ? '#fff' : 'var(--ink-2)'};font-family:'Anton';font-size:12px;text-transform:uppercase;letter-spacing:.02em;cursor:pointer;white-space:nowrap">${e.phase ? '🏆 ' : ''}${esc(label)}</button>
-      </div>`;
-  };
-  const byActivity = (a, b) => (b.lastDate || '').localeCompare(a.lastDate || '') || a.compNom.localeCompare(b.compNom);
-  // Section "★ Favoris" (toutes catégories confondues), si au moins un favori.
-  const favList = engs.filter(e => favSet.has(e.compId)).sort(byActivity);
-  const favSection = favList.length ? `
-    <div class="px" style="margin-bottom:6px"><div class="eyebrow" style="color:#f5b50a">★ Favoris</div></div>
-    <div class="px" style="margin-bottom:10px"><div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch">${favList.map(chipBtn).join('')}</div></div>` : '';
-  // Groupement par catégorie.
-  const groups = {};
-  engs.forEach(e => { const c = ffbbCatLabel(e); (groups[c] = groups[c] || []).push(e); });
-  const catLabels = Object.keys(groups).sort((a, b) => ffbbCatRank(a) - ffbbCatRank(b) || a.localeCompare(b));
-  const catSections = catLabels.map(cat => {
-    const list = groups[cat].slice().sort((a, b) => (favSet.has(b.compId) - favSet.has(a.compId)) || byActivity(a, b));
-    const collapsed = (d.collapsedCats || []).includes(cat);
-    const hasActive = list.some(e => e.compId === d.compId);
-    const open = hasActive || !collapsed;  // on garde ouverte la catégorie de la compétition courante
-    return `
-      <div class="px" style="margin-bottom:6px">
-        <div onclick="ffbbToggleCat('${esc(cat).replace(/'/g, "\\'")}')" style="display:flex;align-items:center;gap:8px;cursor:pointer;min-height:36px">
-          <span style="font-family:'JetBrains Mono';font-size:11px;color:var(--ink-3);transition:transform .15s;display:inline-block;transform:rotate(${open ? 90 : 0}deg)">▸</span>
-          <span style="display:inline-flex;align-items:center;gap:6px">
-            <span style="background:var(--bg-3);border:1px solid var(--border);border-radius:6px;padding:2px 8px;font-family:'Anton';font-size:12px;text-transform:uppercase;letter-spacing:.04em">${esc(cat)}</span>
-            <span style="font-family:'JetBrains Mono';font-size:10px;color:var(--ink-4)">${list.length}</span>
-          </span>
-        </div>
+  const curFav = cur && favSet.has(cur.compId);
+  const selector = cur ? `
+    <div class="px" style="margin-bottom:12px">
+      <div class="eyebrow" style="margin-bottom:6px">Compétition</div>
+      <div style="display:flex;align-items:stretch;gap:8px">
+        <button onclick="ffbbOpenCompPicker()" style="flex:1;min-width:0;text-align:left;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;cursor:pointer">
+          <div style="display:flex;align-items:center;gap:7px">
+            ${curFav ? '<span style="color:#f5b50a;font-size:14px;flex:none">★</span>' : ''}${cur.phase ? '<span style="flex:none">🏆</span>' : ''}
+            <span style="font-family:'Anton';font-size:16px;text-transform:uppercase;letter-spacing:.02em;line-height:1.15;color:var(--ink-1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(cur.compNom)}</span>
+          </div>
+          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:5px;text-transform:uppercase">
+            Poule ${esc(cur.pouleNom || '?')} · ${allMatches.length} matchs · ${ourCount} à nous${cur.phase ? ' · phase finale' : ''}
+          </div>
+        </button>
+        <button onclick="ffbbOpenCompPicker()" aria-label="Changer de compétition" style="flex:none;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:0 14px;font-family:'JetBrains Mono';font-size:11px;text-transform:uppercase;color:var(--ink-2);cursor:pointer;white-space:nowrap">Changer ▾</button>
       </div>
-      ${open ? `<div class="px" style="margin-bottom:10px"><div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch">${list.map(chipBtn).join('')}</div></div>` : ''}`;
-  }).join('');
-  const chips = favSection + catSections;
-
-  // Carte compétition courante
-  const compCard = cur ? `
-    <div class="px"><div style="padding:12px 14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:12px">
-      <div style="font-family:'Anton';font-size:15px;text-transform:uppercase;letter-spacing:.02em;line-height:1.2">${esc(cur.compNom)}</div>
-      <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px;text-transform:uppercase">
-        Poule ${esc(cur.pouleNom || '?')} · ${allMatches.length} matchs · ${ourCount} à nous${cur.phase ? ' · Phase finale' : ''}
-        ${d.lastSync ? ' · sync ' + new Date(d.lastSync).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' }) : ''}
-      </div>
-    </div></div>` : '';
+      ${d.lastSync ? `<div style="font-size:9px;color:var(--ink-4);font-family:'JetBrains Mono';margin-top:6px;text-transform:uppercase">${engs.length} compétitions · sync ${new Date(d.lastSync).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' })}</div>` : ''}
+    </div>` : '';
 
   // Filtres
   const filters = `
@@ -19989,7 +20051,7 @@ function renderFFBB() {
     </div>` : '';
 
   return `<div class="fade-up">
-    ${header}${chips}${compCard}${filters}${listHtml}${standingsHtml}
+    ${header}${selector}${filters}${listHtml}${standingsHtml}
     <div style="padding:20px 18px;text-align:center;font-size:10px;color:var(--ink-4);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:.1em">Données : api.ffbb.app (officiel)</div>
   </div>`;
 }
