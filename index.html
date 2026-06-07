@@ -13080,17 +13080,30 @@ function broadcastStats(b) {
   return { total: ids.size, acknowledged, skipped, seen, pending };
 }
 
-// --- Broadcasts en attente pour la joueuse courante (popup au boot) ---
+// Set des broadcasts « Plus tard » (skippés) CETTE session. Var window → vidée
+// à chaque reload, donc fraîche par session. Garde-fou indispensable : sans lui,
+// comme getPendingBroadcastsForPlayer renvoie aussi les 'skipped', _resolveBroadcast
+// (et le filet de re-render) rouvriraient la popup IMMÉDIATEMENT après un Skip
+// (boucle). Avec lui : Skip ferme pour la session, réapparaît au prochain BOOT.
+function _broadcastSnoozeSet() {
+  if (!window._broadcastSnoozed) window._broadcastSnoozed = new Set();
+  return window._broadcastSnoozed;
+}
+
+// --- Broadcasts à montrer à la joueuse courante (popup au boot / live) ---
+// RÈGLE (précision user) : seul 'acknowledged' (Compris 🫡) dismisse pour de bon.
+// 'skipped' (Plus tard) = snoozé → réapparaît au prochain boot. On retourne donc
+// les receipts 'pending' OU 'skipped', en excluant ceux snoozés dans la session.
 function getPendingBroadcastsForPlayer(pid) {
   if (!pid) return [];
   const now = Date.now();
+  const snoozed = _broadcastSnoozeSet();
   const out = [];
   (state.broadcastReceipts || []).forEach(r => {
-    // 'pending' ET 'skipped' réapparaissent : Skip = "plus tard" (repopup au
-    // prochain boot). Seul 'acknowledged' (Compris 🫡) ou 'seen' (expiré) dismiss.
     if (r.playerId !== pid || (r.status !== 'pending' && r.status !== 'skipped')) return;
     const b = (state.broadcasts || []).find(x => x.id === r.broadcastId);
     if (!b || b.archived) return;
+    if (snoozed.has(b.id)) return; // « Plus tard » cliqué cette session → pas avant le prochain boot
     if (b.expiresAt && now > b.expiresAt) {
       // Expiré : marqué 'seen' (sans popup) — la joueuse n'a plus à agir.
       markReceiptStatus(b.id, pid, 'seen');
@@ -13470,7 +13483,7 @@ function broadcastManagerRow(b) {
       <div style="font-size:14px;color:var(--ink);line-height:1.4;margin-bottom:8px">${icon}${preview}</div>
       <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
         <span style="font-size:11px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--green-soft);color:var(--green)">✓ ${s.acknowledged}/${s.total} compris</span>
-        ${s.skipped ? `<span style="font-size:11px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--bg-3);color:var(--ink-3)">⏭ ${s.skipped} skip</span>` : ''}
+        ${s.skipped ? `<span title="Reverront le message à leur prochaine ouverture" style="font-size:11px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--bg-3);color:var(--ink-3)">⏭ ${s.skipped} plus tard</span>` : ''}
         ${s.pending ? `<span style="font-size:11px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--orange-soft);color:var(--orange)">● ${s.pending} pas vu</span>` : ''}
         ${expired ? `<span style="font-size:10px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--red-soft);color:var(--red)">expiré</span>` : ''}
       </div>
@@ -13489,7 +13502,7 @@ function openBroadcastDetail(id) {
   (state.broadcastReceipts || []).forEach(r => { if (r.broadcastId === b.id) ids.add(r.playerId); });
   const STATUS = {
     acknowledged: { label: 'Compris 🫡', color: 'var(--green)', dot: '●' },
-    skipped: { label: 'Skip', color: 'var(--ink-3)', dot: '⏭' },
+    skipped: { label: 'Plus tard', color: 'var(--ink-3)', dot: '⏭' },
     seen: { label: 'Vu', color: 'var(--blue)', dot: '◐' },
     pending: { label: 'Pas vu', color: 'var(--orange)', dot: '○' }
   };
@@ -13566,6 +13579,9 @@ function skipBroadcast(id) { _resolveBroadcast(id, 'skipped'); }
 function _resolveBroadcast(id, status) {
   const pid = state.auth && state.auth.playerId;
   markReceiptStatus(id, pid, status);
+  // « Plus tard » : on snooze pour la session courante uniquement → réapparaît
+  // au prochain boot (le Set window est vidé au reload). Compris → définitif.
+  if (status === 'skipped') _broadcastSnoozeSet().add(id);
   closeBroadcastPopup();
   if (status === 'acknowledged') showToast('Message confirmé ✓');
   const next = getPendingBroadcastsForPlayer(pid);
@@ -13594,7 +13610,7 @@ function renderBroadcastPopup(b) {
         <div style="flex:1;min-height:20px"></div>
       </div>
       <div style="display:flex;gap:10px;padding:12px 20px calc(14px + env(safe-area-inset-bottom));border-top:1px solid var(--border);background:var(--bg-1)">
-        <button onclick="skipBroadcast('${esc(b.id)}')" style="flex:0 0 auto;min-height:52px;padding:0 22px;border-radius:12px;border:1px solid var(--border);background:var(--bg-3);color:var(--ink-3);font-family:'JetBrains Mono';font-size:13px;text-transform:uppercase;letter-spacing:0.05em;cursor:pointer">Skip</button>
+        <button onclick="skipBroadcast('${esc(b.id)}')" title="Le message réapparaîtra à la prochaine ouverture" style="flex:0 0 auto;min-height:52px;padding:0 18px;border-radius:12px;border:1px solid var(--border);background:var(--bg-3);color:var(--ink-3);font-family:'JetBrains Mono';font-size:12px;text-transform:uppercase;letter-spacing:0.04em;cursor:pointer">Plus tard</button>
         <button onclick="ackBroadcast('${esc(b.id)}')" style="flex:1;min-height:52px;border-radius:12px;border:none;background:var(--green);color:#06240f;font-family:'Anton';font-size:19px;text-transform:uppercase;letter-spacing:0.03em;cursor:pointer">Compris 🫡</button>
       </div>
     </div>
