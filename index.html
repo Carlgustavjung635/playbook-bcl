@@ -188,6 +188,130 @@
     .nav-btn-label { font-size: 8px; letter-spacing: 0.02em; }
   }
 
+  /* ========== CHRONOMÈTRE (FAB + overlay) ========== */
+  /* Bouton flottant accessible coach + joueuse, posé AU-DESSUS de la nav. */
+  .chrono-fab {
+    position: fixed; right: 16px;
+    bottom: calc(80px + env(safe-area-inset-bottom));
+    z-index: 8000;
+    width: 56px; height: 56px; border-radius: 50%;
+    border: none; cursor: pointer;
+    background: radial-gradient(circle at 30% 30%, var(--orange-2), var(--orange));
+    box-shadow: 0 6px 20px var(--orange-glow), 0 2px 6px rgba(0,0,0,0.4);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 26px; line-height: 1;
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .chrono-fab:active { transform: scale(0.92); }
+  @media (min-width: 768px) {
+    /* Aligner le FAB sur le bord droit du conteneur centré (max 560px). */
+    .chrono-fab { right: calc(50% - 280px + 16px); }
+  }
+
+  #chrono-overlay { position: fixed; inset: 0; z-index: 9000; }
+  .chrono-screen {
+    position: fixed; inset: 0;
+    background: radial-gradient(circle at 50% 28%, #1a1a1a, #050505 75%);
+    display: flex; flex-direction: column;
+    padding: calc(16px + env(safe-area-inset-top)) 18px calc(20px + env(safe-area-inset-bottom));
+    overflow-y: auto;
+  }
+  .chrono-top {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; flex: none;
+  }
+  .chrono-top-title {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    text-transform: uppercase; letter-spacing: 0.18em; color: var(--ink-3);
+  }
+  .chrono-iconbtn {
+    width: 44px; height: 44px; border-radius: 12px;
+    border: 1px solid var(--border); background: var(--bg-3);
+    color: var(--ink); font-size: 20px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .chrono-iconbtn:active { background: var(--bg-2); }
+  .chrono-center {
+    flex: 1; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 8px; min-height: 0;
+  }
+  .chrono-preset-label {
+    font-family: 'Anton', sans-serif; text-transform: uppercase;
+    font-size: 18px; letter-spacing: 0.04em; color: var(--orange);
+    min-height: 22px; text-align: center;
+  }
+  .chrono-time {
+    font-family: 'JetBrains Mono', monospace; font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    font-size: clamp(72px, 26vw, 132px); line-height: 0.95;
+    color: var(--ink); letter-spacing: -0.02em;
+    transition: color 0.2s;
+  }
+  .chrono-time.is-running { color: var(--green); }
+  .chrono-time.is-warn    { color: var(--orange-2); }
+  .chrono-time.is-done    { color: #ff3b3b; animation: chronoFlash 0.5s steps(1) infinite; }
+  @keyframes chronoFlash { 50% { opacity: 0.25; } }
+  .chrono-sub {
+    font-family: 'JetBrains Mono', monospace; font-size: 12px;
+    color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.1em;
+    min-height: 16px; text-align: center;
+  }
+  .chrono-controls {
+    display: flex; gap: 10px; flex: none; margin-top: 12px;
+  }
+  .chrono-btn {
+    flex: 1; min-height: 60px; border-radius: 14px; cursor: pointer;
+    font-family: 'Anton', sans-serif; text-transform: uppercase;
+    font-size: 20px; letter-spacing: 0.03em; border: 1px solid var(--border);
+    -webkit-tap-highlight-color: transparent;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+  }
+  .chrono-btn:active { transform: scale(0.97); }
+  .chrono-btn-go    { background: var(--green); color: #06240f; border-color: var(--green); }
+  .chrono-btn-pause { background: var(--orange); color: #1a0d00; border-color: var(--orange); }
+  .chrono-btn-reset { background: var(--bg-3); color: var(--ink-2); }
+  .chrono-presets-wrap { flex: none; margin-top: 18px; }
+  .chrono-presets-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .chrono-presets-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    gap: 8px;
+  }
+  .chrono-chip {
+    min-height: 56px; border-radius: 12px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--bg-2);
+    color: var(--ink); padding: 8px 6px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .chrono-chip:active { background: var(--bg-3); border-color: var(--orange); }
+  .chrono-chip-secs {
+    font-family: 'JetBrains Mono', monospace; font-weight: 700;
+    font-size: 19px; color: var(--orange);
+  }
+  .chrono-chip-label {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px;
+    text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-2);
+    text-align: center; max-width: 100%;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .chrono-manage-btn {
+    background: none; border: none; cursor: pointer;
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-3);
+    padding: 4px 0;
+  }
+  /* Éditeur de presets coach (lignes dans la modale standard). */
+  .chrono-edit-row {
+    display: flex; gap: 8px; align-items: center; margin-bottom: 8px;
+  }
+  .chrono-edit-row input[type=text] { flex: 1; min-width: 0; }
+  .chrono-edit-row input[type=number] { width: 76px; flex: none; }
+
   /* ========== TYPOGRAPHY ========== */
   .display-xl {
     font-family: 'Anton', sans-serif;
@@ -3086,7 +3210,11 @@ const ENTITIES = [
         // Multi-effectif : flag d'activation + libellés perso des 2 équipes.
         multi_squad: !!state.team.multiSquad,
         e1_label: state.team.e1Label || null,
-        e2_label: state.team.e2Label || null
+        e2_label: state.team.e2Label || null,
+        // Chronomètre : presets de timers configurés par le coach. null tant
+        // que jamais configuré (le front retombe sur des presets basket par
+        // défaut) ; tableau (même vide) une fois passé par l'éditeur coach.
+        chrono_presets: Array.isArray(state.team.chronoPresets) ? state.team.chronoPresets : null
       } };
     },
     apply: (state, rows) => {
@@ -3096,7 +3224,13 @@ const ENTITIES = [
         // Rétrocompat : colonnes absentes (migration non appliquée) → off / ''.
         multiSquad: !!r.multi_squad,
         e1Label: r.e1_label || '',
-        e2Label: r.e2_label || ''
+        e2Label: r.e2_label || '',
+        // null/absent = coach n'a jamais configuré → fallback front. On ne
+        // matérialise que des objets valides { label, seconds>0 }.
+        chronoPresets: Array.isArray(r.chrono_presets)
+          ? r.chrono_presets.filter(p => p && typeof p.label === 'string' && Number(p.seconds) > 0)
+              .map(p => ({ label: String(p.label), seconds: Math.round(Number(p.seconds)) }))
+          : null
       };
     }
   },
@@ -4107,7 +4241,7 @@ let state = {
   pins: load(K.pins, { coach: '1234', stat: '1234' }),
   ffbb: load(K.ffbb, { clubUrl: 'https://competitions.ffbb.com/ligues/occ/comites/0065/clubs/occ0032016', teamName: 'IE - BASKET CLUB L\'ISLOIS - 2', matches: [], standings: [], lastSync: null }),
   // Identité/branding équipe — surnom de display (topbar), séparé du nom FFBB.
-  team: load(K.team, { displayNickname: '', multiSquad: false, e1Label: '', e2Label: '' }),
+  team: load(K.team, { displayNickname: '', multiSquad: false, e1Label: '', e2Label: '', chronoPresets: null }),
   lineups: load(K.lineups, []),
   pinAttempts: load(K.pinAttempts, {}), // { 'coach': {count, lockedUntil}, 'stat': {...}, 'pl1': {...} }
   teamReviews: load(K.teamReviews, []), // [{ id, pid, date, ambiance, roleClarity, playtime, physique, comment, updatedAt }]
@@ -13005,6 +13139,337 @@ function showToast(msg, opts) {
   requestAnimationFrame(() => el.classList.add('toast-show'));
   timer = setTimeout(dismiss, opts.duration || (opts.actionLabel ? 9000 : 4000));
   return dismiss;
+}
+
+// ============================================================
+// CHRONOMÈTRE BASKET (FAB flottant + overlay + presets coach)
+// ------------------------------------------------------------
+// Bouton flottant ⏱ visible coach + joueuse sur toutes les vues. Tap → overlay
+// plein écran "scoreboard" : gros décompte MM:SS (tenths sous 10 s), Start /
+// Pause / Reset, et une grille de PRESETS. Un tap sur un preset (re)lance
+// immédiatement le décompte à cette durée (comportement demandé). À 0 : bip
+// (Web Audio) + vibration (Android ; iOS Safari ignore navigator.vibrate).
+//
+// Les presets sont CONFIGURABLES par le coach (state.team.chronoPresets, synchro
+// via l'entité 'team' / colonne team_settings.chrono_presets). Fallback basket
+// raisonnable si jamais configuré (le coach veut éviter le figé, mais il faut un
+// défaut). Modèle d'état runtime : window._chrono (volatile, hors state synchro).
+//
+// Précision : décompte basé sur une échéance (endAt = now + remaining) → pas de
+// dérive cumulée du setInterval. L'affichage se met à jour toutes les 100 ms en
+// ne touchant QUE le noeud #chrono-time (pas de re-render complet par tick).
+// ============================================================
+const CHRONO_DEFAULT_PRESETS = [
+  { label: 'Possession', seconds: 24 },
+  { label: 'Rebond off.', seconds: 14 },
+  { label: 'Remise en jeu', seconds: 8 },
+  { label: 'Sortie de balle', seconds: 5 },
+  { label: 'Temps-mort', seconds: 60 }
+];
+
+// Presets effectifs : config coach si présente et non vide, sinon défaut basket.
+function getChronoPresets() {
+  const cfg = state.team && state.team.chronoPresets;
+  if (Array.isArray(cfg)) {
+    const clean = cfg
+      .map(p => ({ label: String((p && p.label) || ''), seconds: Math.round(Number(p && p.seconds)) }))
+      .filter(p => p.seconds > 0)
+      .slice(0, 15);
+    if (clean.length) return clean;
+  }
+  return CHRONO_DEFAULT_PRESETS;
+}
+
+// FAB injecté dans render() (coach + joueuse, jamais sur l'écran d'auth ni le
+// portail public — render() y retourne avant l'injection).
+function renderChronoFab() {
+  if (!state.auth) return '';
+  const role = state.auth.role;
+  if (role !== 'coach' && role !== 'player') return '';
+  return `<button class="chrono-fab" onclick="openChrono()" aria-label="Chronomètre" title="Chronomètre">⏱</button>`;
+}
+
+// --- Audio (Web Audio API) : créé/repris sur geste utilisateur pour débloquer
+// iOS Safari, puis le bip de fin peut sonner même hors geste (contexte déjà
+// "running"). ---
+function _chronoUnlockAudio() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    if (!window._chronoAudio) window._chronoAudio = new Ctx();
+    if (window._chronoAudio.state === 'suspended') window._chronoAudio.resume();
+  } catch (e) { /* audio non dispo : silencieux */ }
+}
+function _chronoBeep() {
+  try {
+    const ac = window._chronoAudio;
+    if (!ac) return;
+    if (ac.state === 'suspended') ac.resume();
+    const t0 = ac.currentTime;
+    [0, 0.18, 0.36].forEach((dt, i) => {
+      const osc = ac.createOscillator();
+      const g = ac.createGain();
+      osc.type = 'square';
+      osc.frequency.value = i === 2 ? 1320 : 880; // dernier bip plus aigu
+      g.gain.setValueAtTime(0.0001, t0 + dt);
+      g.gain.exponentialRampToValueAtTime(0.35, t0 + dt + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dt + 0.15);
+      osc.connect(g); g.connect(ac.destination);
+      osc.start(t0 + dt); osc.stop(t0 + dt + 0.16);
+    });
+  } catch (e) { /* silencieux */ }
+}
+function _chronoVibrate(pattern) {
+  try { if (navigator.vibrate) navigator.vibrate(pattern); } catch (e) {}
+}
+
+// --- Formatage --- MM:SS au-dessus de 10 s, dixièmes en dessous (précision
+// utile sur une fin de possession). ceil sur les secondes pleines = ressenti
+// décompte standard (affiche 24 dès l'armement).
+function _chronoFormat(ms) {
+  ms = Math.max(0, ms);
+  if (ms < 10000) return (Math.floor(ms / 100) / 10).toFixed(1);
+  const totalSec = Math.ceil(ms / 1000);
+  const m = Math.floor(totalSec / 60), s = totalSec % 60;
+  return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+}
+// Valeur compacte affichée sur une puce preset (24" / 1' / 1:30).
+function _chronoChipMain(seconds) {
+  if (seconds < 60) return seconds + '"';
+  const m = Math.floor(seconds / 60), s = seconds % 60;
+  return s === 0 ? (m + "'") : (m + ':' + String(s).padStart(2, '0'));
+}
+
+// --- Moteur ---
+function _chronoEnsureState() {
+  if (!window._chrono) {
+    const p = getChronoPresets()[0] || { label: '', seconds: 24 };
+    window._chrono = {
+      totalMs: p.seconds * 1000, remainingMs: p.seconds * 1000,
+      running: false, done: false, label: p.label || '', endAt: 0, timer: null
+    };
+  }
+}
+function _chronoStopTicker() {
+  if (window._chrono && window._chrono.timer) {
+    clearInterval(window._chrono.timer);
+    window._chrono.timer = null;
+  }
+}
+function _chronoStartTicker() {
+  _chronoStopTicker();
+  window._chrono.timer = setInterval(_chronoTick, 100);
+}
+function _chronoTick() {
+  const c = window._chrono;
+  if (!c || !c.running) return;
+  c.remainingMs = c.endAt - Date.now();
+  if (c.remainingMs <= 0) { c.remainingMs = 0; _chronoDone(); return; }
+  _chronoUpdateDisplay();
+}
+function _chronoUpdateDisplay() {
+  const c = window._chrono;
+  const el = document.getElementById('chrono-time');
+  if (!el) return; // overlay fermé : le tick devient un no-op visuel
+  el.textContent = _chronoFormat(c.remainingMs);
+  el.className = 'chrono-time ' + (c.done ? 'is-done' : c.running ? (c.remainingMs <= 5000 ? 'is-warn' : 'is-running') : '');
+}
+function _chronoDone() {
+  const c = window._chrono;
+  c.running = false; c.done = true; c.remainingMs = 0;
+  _chronoStopTicker();
+  _chronoBeep();
+  _chronoVibrate([200, 80, 200]);
+  _chronoRenderScreen(); // bascule le bouton sur "Relancer" + état rouge
+}
+// Tap preset → (ré)arme à cette durée ET relance immédiatement.
+function _chronoTapPreset(i) {
+  _chronoEnsureState();
+  const p = getChronoPresets()[i];
+  if (!p) return;
+  _chronoUnlockAudio();
+  const c = window._chrono;
+  c.totalMs = p.seconds * 1000;
+  c.remainingMs = c.totalMs;
+  c.label = p.label || '';
+  c.done = false;
+  c.running = true;
+  c.endAt = Date.now() + c.remainingMs;
+  _chronoVibrate(20);
+  _chronoRenderScreen();
+}
+function _chronoToggle() {
+  _chronoEnsureState();
+  _chronoUnlockAudio();
+  const c = window._chrono;
+  if (c.running) {
+    c.remainingMs = Math.max(0, c.endAt - Date.now());
+    c.running = false;
+    _chronoStopTicker();
+  } else {
+    if (c.done || c.remainingMs <= 0) { c.remainingMs = c.totalMs; c.done = false; }
+    c.running = true;
+    c.endAt = Date.now() + c.remainingMs;
+  }
+  _chronoRenderScreen();
+}
+function _chronoReset() {
+  _chronoEnsureState();
+  const c = window._chrono;
+  c.running = false; c.done = false; c.remainingMs = c.totalMs;
+  _chronoStopTicker();
+  _chronoRenderScreen();
+}
+
+// --- Overlay ---
+function openChrono() {
+  _chronoEnsureState();
+  _chronoUnlockAudio();
+  let host = document.getElementById('chrono-overlay');
+  if (!host) { host = document.createElement('div'); host.id = 'chrono-overlay'; document.body.appendChild(host); }
+  document.body.style.overflow = 'hidden';
+  _chronoRenderScreen();
+}
+function closeChrono() {
+  const c = window._chrono;
+  if (c) { if (c.running) { c.remainingMs = Math.max(0, c.endAt - Date.now()); c.running = false; } }
+  _chronoStopTicker();
+  const host = document.getElementById('chrono-overlay');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+}
+function _chronoRenderScreen() {
+  const host = document.getElementById('chrono-overlay');
+  if (!host) return;
+  const c = window._chrono;
+  const presets = getChronoPresets();
+  const isCoach = state.auth && state.auth.role === 'coach';
+  const cls = c.done ? 'is-done' : c.running ? (c.remainingMs <= 5000 ? 'is-warn' : 'is-running') : '';
+  const status = c.done ? '⏹ terminé' : c.running ? '● en cours' : (c.remainingMs < c.totalMs ? '⏸ pause' : 'prêt');
+  const startLabel = (c.done || c.remainingMs <= 0) ? 'Relancer' : 'Start';
+  host.innerHTML = `
+    <div class="chrono-screen">
+      <div class="chrono-top">
+        <div class="chrono-top-title">⏱ Chronomètre</div>
+        <button class="chrono-iconbtn" onclick="closeChrono()" aria-label="Fermer">✕</button>
+      </div>
+      <div class="chrono-center">
+        <div class="chrono-preset-label">${esc(c.label || '')}</div>
+        <div id="chrono-time" class="chrono-time ${cls}">${esc(_chronoFormat(c.remainingMs))}</div>
+        <div id="chrono-sub" class="chrono-sub">${esc(status)}</div>
+      </div>
+      <div class="chrono-controls">
+        ${c.running
+          ? `<button class="chrono-btn chrono-btn-pause" onclick="_chronoToggle()">⏸ Pause</button>`
+          : `<button class="chrono-btn chrono-btn-go" onclick="_chronoToggle()">▶ ${startLabel}</button>`}
+        <button class="chrono-btn chrono-btn-reset" onclick="_chronoReset()">↺ Reset</button>
+      </div>
+      <div class="chrono-presets-wrap">
+        <div class="chrono-presets-head">
+          <div class="eyebrow-muted">Presets</div>
+          ${isCoach ? `<button class="chrono-manage-btn" onclick="openChronoEditor()">⚙ Gérer</button>` : ''}
+        </div>
+        <div class="chrono-presets-grid">
+          ${presets.map((p, i) => `
+            <button class="chrono-chip" onclick="_chronoTapPreset(${i})">
+              <span class="chrono-chip-secs">${esc(_chronoChipMain(p.seconds))}</span>
+              <span class="chrono-chip-label">${esc(p.label || _chronoChipMain(p.seconds))}</span>
+            </button>`).join('')}
+        </div>
+      </div>
+    </div>`;
+  if (c.running) _chronoStartTicker(); else _chronoStopTicker();
+}
+
+// --- Éditeur de presets (coach) ---
+// La modale standard vit dans #modal-root (z-index 100), SOUS l'overlay chrono
+// (9000). On masque donc temporairement l'overlay le temps d'éditer, puis on le
+// re-render (le chrono continue de tourner en fond : son setInterval persiste,
+// _chronoUpdateDisplay devient un no-op tant que #chrono-time est absent).
+function openChronoEditor() {
+  if (!(state.auth && state.auth.role === 'coach')) return;
+  const host = document.getElementById('chrono-overlay');
+  if (host) host.innerHTML = '';
+  state._chronoEdit = getChronoPresets().map(p => ({ label: p.label || '', seconds: p.seconds }));
+  if (!state._chronoEdit.length) state._chronoEdit = [{ label: '', seconds: 24 }];
+  _chronoRenderEditor();
+}
+// Récupère les valeurs saisies depuis le DOM avant tout re-render (add/remove).
+function _chronoEditSyncFromDom() {
+  const rows = document.querySelectorAll('#modal-root .chrono-edit-row');
+  if (!rows.length) return;
+  state._chronoEdit = Array.from(rows).map(r => ({
+    label: (r.querySelector('input[type=text]') || {}).value || '',
+    seconds: Math.round(Number((r.querySelector('input[type=number]') || {}).value)) || 0
+  }));
+}
+function _chronoEditAdd() {
+  _chronoEditSyncFromDom();
+  if (state._chronoEdit.length >= 15) { alert('15 presets maximum.'); return; }
+  state._chronoEdit.push({ label: '', seconds: 24 });
+  _chronoRenderEditor();
+}
+function _chronoEditRemove(i) {
+  _chronoEditSyncFromDom();
+  state._chronoEdit.splice(i, 1);
+  _chronoRenderEditor();
+}
+function _chronoRenderEditor() {
+  const rows = (state._chronoEdit || []).map((p, i) => `
+    <div class="chrono-edit-row">
+      <input type="text" value="${esc(p.label || '')}" placeholder="Nom (ex. Possession)" maxlength="24">
+      <input type="number" value="${p.seconds || ''}" min="1" max="3600" step="1" inputmode="numeric" aria-label="secondes">
+      <span style="font-family:'JetBrains Mono';font-size:11px;color:var(--ink-3)">s</span>
+      <button class="chrono-iconbtn" style="width:38px;height:38px;font-size:16px" onclick="_chronoEditRemove(${i})" aria-label="Supprimer">✕</button>
+    </div>`).join('');
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">Presets du chronomètre</div>
+      <button class="modal-close" onclick="cancelChronoEditor()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:14px;font-size:12px;color:var(--ink-2);line-height:1.5">
+        Configure tes raccourcis de durée. Un tap sur un preset (côté coach <strong>et</strong> joueuse) relance le chrono à cette durée. Vide = presets basket par défaut.
+      </div>
+      ${rows || '<div style="color:var(--ink-3);font-size:13px;margin-bottom:12px">Aucun preset — ajoute-en un ou laisse vide pour les défauts.</div>'}
+      <button class="btn btn-secondary" style="width:100%;margin-top:4px" onclick="_chronoEditAdd()">➕ Ajouter un preset</button>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="cancelChronoEditor()">Annuler</button>
+      <button class="btn btn-primary" onclick="saveChronoEditor()">Enregistrer</button>
+    </div>
+  `);
+}
+function cancelChronoEditor() {
+  closeModal();
+  _chronoReopenAfterEdit();
+}
+function saveChronoEditor() {
+  _chronoEditSyncFromDom();
+  const clean = (state._chronoEdit || [])
+    .map(p => ({ label: String(p.label || '').trim(), seconds: Math.round(Number(p.seconds)) }))
+    .filter(p => p.seconds > 0);
+  // Validation : au moins une seconde valide par preset (label optionnel).
+  if (state._chronoEdit && state._chronoEdit.some(p => Math.round(Number(p.seconds)) <= 0)) {
+    alert('Chaque preset doit avoir une durée en secondes supérieure à 0.');
+    return;
+  }
+  if (clean.length > 15) { alert('15 presets maximum.'); return; }
+  if (!state.team) state.team = { displayNickname: '' };
+  // Tableau vide = retour explicite aux défauts basket (NULL en base).
+  state.team.chronoPresets = clean.length ? clean : null;
+  persist(); // → PbSync pousse l'entité 'team' (chrono_presets) en base
+  state._chronoEdit = null;
+  closeModal();
+  showToast('⏱ Presets enregistrés');
+  _chronoReopenAfterEdit();
+}
+function _chronoReopenAfterEdit() {
+  let host = document.getElementById('chrono-overlay');
+  if (!host) { host = document.createElement('div'); host.id = 'chrono-overlay'; document.body.appendChild(host); }
+  document.body.style.overflow = 'hidden';
+  _chronoEnsureState();
+  _chronoRenderScreen();
 }
 
 // ============================================================
@@ -22830,6 +23295,7 @@ function _renderBody() {
       <main>${content}</main>
     </div>
     ${renderNav()}
+    ${renderChronoFab()}
   `;
 
   // CHANTIER D : filet pour la joueuse qui se connecte EN COURS de session
