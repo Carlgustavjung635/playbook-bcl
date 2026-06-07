@@ -305,12 +305,8 @@
     text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-3);
     padding: 4px 0;
   }
-  /* Éditeur de presets coach (lignes dans la modale standard). */
-  .chrono-edit-row {
-    display: flex; gap: 8px; align-items: center; margin-bottom: 8px;
-  }
-  .chrono-edit-row input[type=text] { flex: 1; min-width: 0; }
-  .chrono-edit-row input[type=number] { width: 76px; flex: none; }
+  /* Éditeur chrono (modale Gérer) : styles consolidés et PRÉFIXÉS #modal-root
+     plus bas (cf. "Éditeur chrono"), pour battre la règle FORMS input{width:100%}. */
   /* Flash plein écran de fin de décompte : alerte visuelle au-dessus de TOUT
      (overlay chrono inclus). pointer-events:none → ne bloque jamais l'UI. */
   #chrono-flash {
@@ -381,12 +377,49 @@
   }
   .chrono-card .chrono-sub { margin-bottom: 8px; }
   .chrono-card .chrono-controls { margin-top: 0; }
-  /* Éditeur : ligne équipe (color picker + nom) */
-  .chrono-team-edit-row input[type=color] {
-    width: 46px; height: 40px; flex: none; padding: 2px; cursor: pointer;
-    border: 1px solid var(--border); border-radius: 8px; background: var(--bg-3);
+  /* ----- Éditeur chrono (modale "⚙ Gérer") -----
+     IMPORTANT : tout est préfixé #modal-root pour AJOUTER un id à la spécificité
+     et battre la règle globale `input:not(...){width:100%}` (section FORMS, plus
+     bas dans la feuille → gagnait à spécificité égale et écrasait les largeurs,
+     d'où color picker en pleine barre + labels écrasés à 0). */
+  #modal-root .chrono-edit-row {
+    display: flex; gap: 10px; align-items: center; margin-bottom: 10px;
   }
-  .chrono-team-edit-row input[type=text] { flex: 1; min-width: 0; }
+  #modal-root .chrono-edit-row input[type=text] {
+    flex: 1 1 0; min-width: 0; width: auto; min-height: 48px;
+  }
+  #modal-root .chrono-edit-row input[type=number] {
+    flex: 0 0 80px; width: 80px; min-height: 48px; text-align: center;
+  }
+  #modal-root .chrono-team-edit-row input[type=color] {
+    flex: 0 0 44px; width: 44px; height: 44px; padding: 2px; cursor: pointer;
+    border: 1px solid var(--border); border-radius: 10px; background: var(--bg-3);
+  }
+  #modal-root .chrono-row-del {
+    flex: 0 0 auto; width: 48px; height: 48px; border-radius: 10px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--bg-3); color: var(--ink-2);
+    font-size: 18px; display: flex; align-items: center; justify-content: center;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #modal-root .chrono-row-del:active { background: var(--bg-2); }
+  .chrono-editor-sec-title {
+    font-family: 'Anton', sans-serif; text-transform: uppercase; letter-spacing: 0.04em;
+    font-size: 16px; color: var(--ink); margin-bottom: 12px;
+    padding-bottom: 8px; border-bottom: 1px solid var(--border-soft);
+  }
+  .chrono-editor-hint {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0;
+    text-transform: none; color: var(--ink-3); font-weight: 400;
+  }
+  .chrono-editor-empty { color: var(--ink-3); font-size: 13px; margin-bottom: 10px; }
+  .chrono-editor-add { width: 100%; margin-top: 4px; }
+  /* Header + footer COLLANTS (le conteneur de scroll est .modal lui-même). */
+  .chrono-editor-bar { position: sticky; z-index: 2; background: var(--bg-2); }
+  .chrono-editor-bar-top { top: 0; }
+  .chrono-editor-bar-bottom { bottom: 0; padding-bottom: calc(14px + env(safe-area-inset-bottom)); }
+  /* Masquer le FAB ⏱ dès qu'une modale est ouverte (sinon son z-8000 passe
+     AU-DESSUS de la modale z-100). :has() est supporté par Safari iOS 15.4+. */
+  body:has(#modal-root .modal) .chrono-fab { display: none; }
 
   /* ========== TYPOGRAPHY ========== */
   .display-xl {
@@ -13707,40 +13740,33 @@ function _chronoRenderEditor() {
   const e = state._chronoEdit || { teams: [], presets: [] };
   const teamRows = (e.teams || []).map((t, i) => `
     <div class="chrono-edit-row chrono-team-edit-row" data-id="${esc(t.id || '')}">
-      <input type="color" value="${esc(/^#[0-9a-fA-F]{6}$/.test(t.color) ? t.color : '#888888')}" aria-label="Couleur">
-      <input type="text" value="${esc(t.name || '')}" placeholder="Nom équipe (ex. Domicile)" maxlength="20">
-      <button class="chrono-iconbtn" style="width:38px;height:38px;font-size:16px" onclick="_chronoEditRemoveTeam(${i})" aria-label="Supprimer">✕</button>
+      <input type="color" value="${esc(/^#[0-9a-fA-F]{6}$/.test(t.color) ? t.color : '#888888')}" aria-label="Couleur de l'équipe" title="Couleur">
+      <input type="text" value="${esc(t.name || '')}" placeholder="Nom de l'équipe" maxlength="20" aria-label="Nom de l'équipe">
+      <button class="chrono-row-del" onclick="_chronoEditRemoveTeam(${i})" aria-label="Supprimer cette équipe">🗑</button>
     </div>`).join('');
   const presetRows = (e.presets || []).map((p, i) => `
     <div class="chrono-edit-row chrono-preset-edit-row">
-      <input type="text" value="${esc(p.label || '')}" placeholder="Nom (ex. Possession)" maxlength="24">
-      <input type="number" value="${p.seconds || ''}" min="1" max="3600" step="1" inputmode="numeric" aria-label="secondes">
-      <span style="font-family:'JetBrains Mono';font-size:11px;color:var(--ink-3)">s</span>
-      <button class="chrono-iconbtn" style="width:38px;height:38px;font-size:16px" onclick="_chronoEditRemove(${i})" aria-label="Supprimer">✕</button>
+      <input type="text" value="${esc(p.label || '')}" placeholder="Nom du preset (ex. Possession)" maxlength="24" aria-label="Nom du preset">
+      <input type="number" value="${p.seconds || ''}" min="1" max="3600" step="1" inputmode="numeric" placeholder="sec" aria-label="Durée en secondes">
+      <button class="chrono-row-del" onclick="_chronoEditRemove(${i})" aria-label="Supprimer ce preset">🗑</button>
     </div>`).join('');
   openModal(`
-    <div class="modal-header">
-      <div class="modal-title">Réglages du chronomètre</div>
-      <button class="modal-close" onclick="cancelChronoEditor()">✕</button>
+    <div class="modal-header chrono-editor-bar chrono-editor-bar-top">
+      <div class="modal-title">⏱ Réglages du chrono</div>
+      <button class="modal-close" onclick="cancelChronoEditor()" aria-label="Fermer">✕</button>
     </div>
     <div class="modal-body">
-      <div class="eyebrow-muted" style="margin-bottom:8px">Équipes — tableau de score</div>
-      <div style="padding:8px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:12px;font-size:12px;color:var(--ink-2);line-height:1.5">
-        Nom + couleur de chaque équipe. Min 2, max 10.
-      </div>
+      <div class="chrono-editor-sec-title">Équipes <span class="chrono-editor-hint">· tableau de score · min 2, max 10</span></div>
       ${teamRows}
-      <button class="btn btn-secondary" style="width:100%;margin:4px 0 20px" onclick="_chronoEditAddTeam()">➕ Ajouter une équipe</button>
+      <button class="btn btn-secondary chrono-editor-add" style="margin-bottom:22px" onclick="_chronoEditAddTeam()">➕ Ajouter une équipe</button>
 
-      <div class="eyebrow-muted" style="margin-bottom:8px">Presets — durées</div>
-      <div style="padding:8px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:12px;font-size:12px;color:var(--ink-2);line-height:1.5">
-        Raccourcis de durée. Un tap (côté coach <strong>et</strong> joueuse) relance le chrono actif à cette durée. Vide = presets basket par défaut.
-      </div>
-      ${presetRows || '<div style="color:var(--ink-3);font-size:13px;margin-bottom:12px">Aucun preset — ajoute-en un ou laisse vide pour les défauts.</div>'}
-      <button class="btn btn-secondary" style="width:100%;margin-top:4px" onclick="_chronoEditAdd()">➕ Ajouter un preset</button>
+      <div class="chrono-editor-sec-title">Presets <span class="chrono-editor-hint">· durées · un tap relance le chrono actif</span></div>
+      ${presetRows || '<div class="chrono-editor-empty">Aucun preset — ajoute-en un, ou laisse vide pour les durées basket par défaut.</div>'}
+      <button class="btn btn-secondary chrono-editor-add" onclick="_chronoEditAdd()">➕ Ajouter un preset</button>
     </div>
-    <div class="modal-footer">
+    <div class="modal-footer chrono-editor-bar chrono-editor-bar-bottom">
       <button class="btn btn-secondary" onclick="cancelChronoEditor()">Annuler</button>
-      <button class="btn btn-primary" onclick="saveChronoEditor()">Enregistrer</button>
+      <button class="btn btn-primary" onclick="saveChronoEditor()">💾 Enregistrer</button>
     </div>
   `);
 }
