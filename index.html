@@ -4682,13 +4682,13 @@ function renderAuth() {
 
   if (flow.stage === 'pickPlayer') {
     return `
-      <div class="auth-screen" style="justify-content:flex-start;padding-top:60px;overflow-y:auto;-webkit-overflow-scrolling:touch;padding-bottom:calc(40px + env(safe-area-inset-bottom))">
+      <div class="auth-screen" style="position:fixed;inset:0;justify-content:flex-start;padding-top:60px;overflow-y:auto;-webkit-overflow-scrolling:touch;padding-bottom:calc(96px + env(safe-area-inset-bottom))">
         <div class="auth-bg-glow"></div>
         <div class="auth-logo" style="width:60px;height:60px;font-size:32px">🏀</div>
         <div class="auth-title" style="font-size:28px">Qui es-tu ?</div>
         <div class="auth-subtitle">Choisis ton nom</div>
         <div style="width:100%;max-width:340px;display:grid;grid-template-columns:repeat(2,1fr);gap:10px">
-          ${state.players.map(p => `
+          ${getSeasonPlayers(getActiveSeasonId(), { team: 'all' }).map(p => `
             <button class="role-btn" style="padding:14px;flex-direction:column;text-align:center;align-items:center" onclick="pickPlayer('${p.id}')">
               ${p.photo ? `<img src="${p.photo}" style="width:54px;height:54px;border-radius:50%;object-fit:cover;border:2px solid var(--orange);box-shadow:0 0 12px var(--orange-glow)">` : `<div class="role-icon" style="width:54px;height:54px;font-size:20px;border-radius:50%">${p.num}</div>`}
               <div class="role-name" style="font-size:13px;margin-top:8px;line-height:1.2">${esc(p.name)}</div>
