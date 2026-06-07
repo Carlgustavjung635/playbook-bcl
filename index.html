@@ -2713,6 +2713,10 @@ function _dbMatchToClient(r) {
     prepComment: r.prep_comment || '',
     place: r.location || '',
     time: r.time || '',
+    statsPdfUrl: r.stats_pdf_url || '',
+    statsPdfFilename: r.stats_pdf_filename || '',
+    statsPdfShared: !!r.stats_pdf_shared,
+    statsPdfUploadedAt: r.stats_pdf_uploaded_at ? Date.parse(r.stats_pdf_uploaded_at) : null,
     positives: [], negatives: [], playerStats: {}
   };
 }
@@ -2846,7 +2850,13 @@ const ENTITIES = [
         prep_comment: m.prepComment || null,
         location: m.place || null,
         time: m.time || null,
-        team_tag: (m.teamTag === 'e2') ? 'e2' : 'e1'  // multi-effectif : e1 | e2 (jamais both pour un match)
+        team_tag: (m.teamTag === 'e2') ? 'e2' : 'e1',  // multi-effectif : e1 | e2 (jamais both pour un match)
+        // Feature : PDF stats FFBB (cf. migration 20260607_007). On ne pousse que
+        // les URLs Storage (http/https) ; null sinon.
+        stats_pdf_url: (typeof m.statsPdfUrl === 'string' && /^https?:\/\//i.test(m.statsPdfUrl)) ? m.statsPdfUrl : null,
+        stats_pdf_filename: m.statsPdfFilename || null,
+        stats_pdf_shared: !!m.statsPdfShared,
+        stats_pdf_uploaded_at: m.statsPdfUploadedAt ? new Date(m.statsPdfUploadedAt).toISOString() : null
       }];
     })),
     apply: (state, rows) => {
@@ -2891,7 +2901,12 @@ const ENTITIES = [
           positives: local.positives || [], negatives: local.negatives || [],
           playerStats: local.playerStats || {},
           seasonId: r.season_id || local.seasonId || null,
-          teamTag: (r.team_tag === 'e2') ? 'e2' : 'e1'  // rétrocompat : colonne absente → 'e1'
+          teamTag: (r.team_tag === 'e2') ? 'e2' : 'e1',  // rétrocompat : colonne absente → 'e1'
+          // Feature : PDF stats FFBB. Remote = source de vérité (URL Storage).
+          statsPdfUrl: r.stats_pdf_url || '',
+          statsPdfFilename: r.stats_pdf_filename || '',
+          statsPdfShared: !!r.stats_pdf_shared,
+          statsPdfUploadedAt: r.stats_pdf_uploaded_at ? Date.parse(r.stats_pdf_uploaded_at) : null
         };
       });
       // Préserve les matches locaux non encore push (id format uid() = 'x...')
@@ -6877,8 +6892,76 @@ function renderHomePlayer() {
         </div>
       ` : '')}
 
+      ${renderHomePlayerFFBB()}
+
     </div>
   `;
+}
+
+// Feature 2 — section FFBB condensée en bas de la home joueuse. Réutilise le
+// dashboard v2 (ffbbDash / ffbbCatMatches / ffbbDashMatchCard). Données fetchées
+// en lecture seule sur le device joueuse (cf. ffbbPlayerEnsureData ci-dessous).
+function renderHomePlayerFFBB() {
+  let fd, ffbbCats;
+  try { fd = ffbbDash(); ffbbCats = ffbbCatsAvailable(); }
+  catch (e) { return ''; }
+  const engs = fd.engagements || [];
+
+  // Pas encore de données sur ce device → on déclenche un fetch auto en
+  // arrière-plan et on affiche un état d'attente discret (ou rien si pas de DB).
+  if (!engs.length) {
+    setTimeout(() => { try { ffbbPlayerEnsureData(); } catch (e) {} }, 60);
+    if (!fd.loading) return '';
+    return `
+      <div class="section-header">
+        <div><div class="eyebrow">🏀 Championnat</div><h2 class="display-md mt-2">FFBB</h2></div>
+      </div>
+      <div class="px" style="padding-bottom:14px"><div style="text-align:center;padding:24px;color:var(--ink-3);font-family:'JetBrains Mono';font-size:12px">⟳ Chargement du championnat…</div></div>`;
+  }
+
+  // Catégorie courante (auto si non définie / invalide).
+  let cat = fd.catTab;
+  if (!ffbbCats.includes(cat)) cat = ffbbCats[0];
+  const catM = ffbbCatMatches(cat).filter(m => m.ours);
+  const up = catM.filter(ffbbIsUpcoming).sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+  const pa = catM.filter(m => !ffbbIsUpcoming(m)).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  // Priorité aux matchs à venir ; complète avec des résultats récents (max 4).
+  const list = [...up.slice(0, 4), ...pa.slice(0, Math.max(0, 4 - up.slice(0, 4).length))].slice(0, 4);
+
+  const catSelector = ffbbCats.length > 1 ? `
+    <div class="px" style="margin-bottom:8px">
+      <div style="display:flex;gap:6px;overflow-x:auto;padding-bottom:2px;-webkit-overflow-scrolling:touch">
+        ${ffbbCats.map(c => `<button onclick="ffbbSelectCat('${esc(c).replace(/'/g, "\\'")}')" style="flex:none;min-height:38px;padding:7px 14px;border-radius:20px;border:1px solid ${c === cat ? 'var(--orange)' : 'var(--border)'};background:${c === cat ? 'var(--orange)' : 'var(--surface)'};color:${c === cat ? '#fff' : 'var(--ink-2)'};font-family:'Anton';font-size:12px;text-transform:uppercase;letter-spacing:.02em;cursor:pointer;white-space:nowrap">${esc(c)}</button>`).join('')}
+      </div>
+    </div>` : '';
+
+  return `
+    <div class="section-header">
+      <div><div class="eyebrow">🏀 Championnat</div><h2 class="display-md mt-2">FFBB</h2></div>
+      <button class="section-action" onclick="openPlayerFFBB()">Voir tout →</button>
+    </div>
+    ${catSelector}
+    ${list.length
+      ? `<div class="list-section">${list.map(ffbbDashMatchCard).join('')}</div>`
+      : `<div class="px" style="padding-bottom:14px"><div style="text-align:center;padding:18px;color:var(--ink-3);font-family:'JetBrains Mono';font-size:11px;text-transform:uppercase">Aucun match dans cette catégorie</div></div>`}
+    <div class="px" style="padding-bottom:18px">
+      <button class="btn btn-secondary btn-block" onclick="openPlayerFFBB()">Voir tout le championnat →</button>
+    </div>`;
+}
+
+// Fetch FFBB côté joueuse, lecture seule. Réutilise la mécanique du coach
+// (syncFFBB) mais en s'appuyant sur ffbbSyncLegacyMatches() qui no-op pour la
+// joueuse → AUCUNE écriture sur la config partagée ffbb_config. Debounce 1h.
+function ffbbPlayerEnsureData() {
+  const d = ffbbDash();
+  if (d.loading || window._ffbbPlayerSyncInflight) return;
+  const last = d.lastAutoSync || (d.lastSync ? Date.parse(d.lastSync) : 0);
+  if (last && (Date.now() - last) < 3600e3) return;  // < 1h → skip
+  window._ffbbPlayerSyncInflight = true;
+  Promise.resolve()
+    .then(() => syncFFBB())
+    .catch(() => {})
+    .finally(() => { window._ffbbPlayerSyncInflight = false; });
 }
 
 // Ressenti équipe : CTA réutilisable (rendu dans l'onglet Forme). Demande
@@ -8466,6 +8549,16 @@ function openMatch(id) {
   render(); _scrollTopApp();
 }
 
+// Feature 2 — ouvre le dashboard FFBB complet en LECTURE SEULE depuis la home
+// joueuse (state.view = {type:'ffbb'} → render() route vers renderFFBB() qui
+// détecte le rôle 'player' et masque Sync / import). Déclenche un rafraîchissement
+// auto des données (debounce 1h, identique au coach).
+function openPlayerFFBB() {
+  state.view = { type: 'ffbb' };
+  render(); _scrollTopApp();
+  try { ffbbMaybeAutoSync(); } catch (e) { console.warn('[ffbb] player autosync', e); }
+}
+
 // ============================================================
 // DASHBOARD SAISON
 // ============================================================
@@ -9359,6 +9452,74 @@ function renderMatchDetail() {
         `}
       `}
 
+      ${(() => {
+        // ── Stats FFBB (PDF) ──────────────────────────────────────────────
+        // Coach : import + diffusion. Joueuse : visible uniquement si partagé.
+        const url = m.statsPdfUrl || '';
+        const fname = m.statsPdfFilename || 'Feuille de stats FFBB.pdf';
+        const uploading = !!m._statsPdfUploading;
+        if (isCoach) {
+          return `
+            <div class="section-header">
+              <div>
+                <div class="eyebrow">📄 Stats FFBB</div>
+                <h2 class="display-md mt-2">Feuille de match</h2>
+              </div>
+            </div>
+            <div class="px" style="padding-bottom:14px">
+              ${url ? `
+                <div style="padding:12px 14px;background:var(--surface);border:1px solid var(--border);border-radius:10px">
+                  <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;min-width:0">
+                    <span style="font-size:26px;flex:none">📄</span>
+                    <div style="flex:1;min-width:0">
+                      <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;letter-spacing:.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(fname)}</div>
+                      <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${m.statsPdfUploadedAt ? 'Importé le ' + formatDate(new Date(m.statsPdfUploadedAt).toISOString().slice(0,10), 'short') : 'PDF importé'}</div>
+                    </div>
+                  </div>
+                  <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+                    <button class="btn btn-secondary" onclick="openMatchStatsPdf('${m.id}')">Voir</button>
+                    <label class="btn btn-secondary" style="cursor:pointer;display:inline-block">
+                      Remplacer
+                      <input type="file" accept="application/pdf,.pdf" style="display:none" onchange="uploadMatchStatsPdf('${m.id}', event)">
+                    </label>
+                    <button class="btn btn-ghost" style="color:var(--red)" onclick="removeMatchStatsPdf('${m.id}')">Supprimer</button>
+                  </div>
+                  <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 12px;background:${m.statsPdfShared ? 'rgba(34,197,94,0.10)' : 'var(--bg-2)'};border:1.5px solid ${m.statsPdfShared ? 'var(--green)' : 'var(--border)'};border-radius:8px">
+                    <input type="checkbox" ${m.statsPdfShared ? 'checked' : ''} onchange="toggleMatchStatsShared('${m.id}', this.checked)" style="width:20px;height:20px;flex:none">
+                    <div style="flex:1;min-width:0">
+                      <div style="font-family:'Anton';font-size:12px;text-transform:uppercase;letter-spacing:.02em;color:${m.statsPdfShared ? 'var(--green)' : 'var(--ink-2)'}">Diffuser aux joueuses</div>
+                      <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${m.statsPdfShared ? 'Visible dans leur vue match' : 'Visible coach uniquement'}</div>
+                    </div>
+                  </label>
+                </div>
+              ` : `
+                <div style="padding:18px 14px;background:var(--surface);border:1px dashed var(--border);border-radius:10px;text-align:center">
+                  <div style="font-size:30px;margin-bottom:6px">📄</div>
+                  <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-bottom:12px;text-transform:uppercase;line-height:1.5">Importe la feuille de stats officielle FFBB (PDF, max 10 Mo)</div>
+                  <label class="btn ${uploading ? 'btn-secondary' : 'btn-primary'}" style="cursor:${uploading ? 'wait' : 'pointer'};display:inline-block">
+                    ${uploading ? '⟳ Import en cours…' : 'Importer PDF FFBB'}
+                    <input type="file" accept="application/pdf,.pdf" style="display:none" ${uploading ? 'disabled' : ''} onchange="uploadMatchStatsPdf('${m.id}', event)">
+                  </label>
+                </div>
+              `}
+            </div>`;
+        }
+        // Joueuse : section uniquement si un PDF est partagé.
+        if (url && m.statsPdfShared) {
+          return `
+            <div class="section-header">
+              <div>
+                <div class="eyebrow">📄 Stats du match</div>
+                <h2 class="display-md mt-2">Feuille FFBB</h2>
+              </div>
+            </div>
+            <div class="px" style="padding-bottom:14px">
+              <button class="btn btn-primary btn-block" onclick="openMatchStatsPdf('${m.id}')">Ouvrir les stats FFBB →</button>
+            </div>`;
+        }
+        return '';
+      })()}
+
       <div style="height:24px"></div>
     </div>
   `;
@@ -9603,6 +9764,12 @@ function saveMatch(id, isNew) {
     status: nextStatus,
     prepVideos: existing ? (existing.prepVideos || []) : [],
     prepComment: existing ? (existing.prepComment || '') : '',
+    // Feature : PDF stats FFBB — préservé tel quel sur édition (jamais saisi
+    // dans ce formulaire, géré par la section dédiée de la fiche match).
+    statsPdfUrl: existing ? (existing.statsPdfUrl || '') : '',
+    statsPdfFilename: existing ? (existing.statsPdfFilename || '') : '',
+    statsPdfShared: existing ? !!existing.statsPdfShared : false,
+    statsPdfUploadedAt: existing ? (existing.statsPdfUploadedAt || null) : null,
     // Multi-effectif : un match appartient à E1 ou E2. Sélecteur absent (multi
     // off) → préserve l'existant / 'e1' par défaut.
     teamTag: (() => {
@@ -10038,6 +10205,97 @@ async function migrateLocalSelfiesToStorage() {
     console.info(`[selfie-migration] ${migrated}/${candidates.length} selfie(s) migré(s)`);
   }
   localStorage.setItem('pb8_selfie_migration_done', '1');
+}
+
+// ------------------------------------------------------------
+// STATS PDF FFBB — import coach + diffusion joueuses (Feature 1)
+// Bucket Storage 'match-stats' (PDF, public read, anon write). Le coach importe
+// le PDF officiel FFBB ; la checkbox `statsPdfShared` décide de la visibilité
+// côté joueuse. Pattern calqué sur uploadBroadcastMedia / changeWinSelfie.
+// ------------------------------------------------------------
+function _matchStatsPdfKey(url) {
+  if (typeof url !== 'string' || !url.includes('/match-stats/')) return null;
+  const m = url.match(/\/match-stats\/(.+?)(?:\?|$)/);
+  return (m && m[1]) ? decodeURIComponent(m[1]) : null;
+}
+function _removeMatchStatsPdfFile(url) {
+  const key = _matchStatsPdfKey(url);
+  if (key && window.sb) sb.storage.from('match-stats').remove([key]).catch(() => {});
+}
+
+async function uploadMatchStatsPdf(matchId, event) {
+  const file = (event.target.files || [])[0];
+  event.target.value = '';
+  if (!file) return;
+  const m = (state.matches || []).find(x => x.id === matchId);
+  if (!m) return;
+  if (!window.sb || !window.Pb || !window.Pb.online) {
+    alert('⚠ Hors ligne. Reconnecte-toi pour importer un PDF.');
+    return;
+  }
+  const isPdf = /pdf$/i.test(file.type) || /\.pdf$/i.test(file.name || '');
+  if (!isPdf) { alert('⚠ Le fichier doit être un PDF (export FFBB).'); return; }
+  const MAX = 10 * 1024 * 1024; // 10 Mo (= file_size_limit du bucket)
+  if (file.size > MAX) {
+    alert('⚠ PDF trop lourd (' + Math.round(file.size / 1048576) + ' Mo). Maximum 10 Mo.');
+    return;
+  }
+  m._statsPdfUploading = true;
+  render();
+  try {
+    const fname = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.pdf`;
+    const path = `${matchId}/${fname}`;
+    const { error: upErr } = await sb.storage.from('match-stats').upload(path, file, {
+      contentType: 'application/pdf', cacheControl: '31536000', upsert: false
+    });
+    if (upErr) throw upErr;
+    const { data: pub } = sb.storage.from('match-stats').getPublicUrl(path);
+    if (!pub || !pub.publicUrl) throw new Error('publicUrl manquante');
+    _removeMatchStatsPdfFile(m.statsPdfUrl); // best-effort : purge l'ancien
+    m.statsPdfUrl = pub.publicUrl;
+    m.statsPdfFilename = (file.name || 'stats-ffbb.pdf').slice(0, 120);
+    m.statsPdfUploadedAt = Date.now();
+    m._statsPdfUploading = false;
+    persist();
+    if (window.PbSync) PbSync.flushNow(state).catch(() => {});
+    render();
+    showToast('📄 PDF importé');
+  } catch (e) {
+    console.error('[match-stats pdf]', e && e.message ? e.message : e);
+    m._statsPdfUploading = false;
+    render();
+    alert('⚠ Échec de l\'upload du PDF. Vérifie ta connexion puis recommence.');
+  }
+}
+
+function removeMatchStatsPdf(matchId) {
+  const m = (state.matches || []).find(x => x.id === matchId);
+  if (!m || !m.statsPdfUrl) return;
+  if (!confirm('Supprimer le PDF de stats de ce match ?')) return;
+  _removeMatchStatsPdfFile(m.statsPdfUrl);
+  m.statsPdfUrl = '';
+  m.statsPdfFilename = '';
+  m.statsPdfShared = false;
+  m.statsPdfUploadedAt = null;
+  persist();
+  if (window.PbSync) PbSync.flushNow(state).catch(() => {});
+  render();
+  showToast('🗑 PDF supprimé');
+}
+
+function openMatchStatsPdf(matchId) {
+  const m = (state.matches || []).find(x => x.id === matchId);
+  if (m && m.statsPdfUrl) window.open(m.statsPdfUrl, '_blank', 'noopener');
+}
+
+function toggleMatchStatsShared(matchId, shared) {
+  const m = (state.matches || []).find(x => x.id === matchId);
+  if (!m) return;
+  m.statsPdfShared = !!shared;
+  persist();
+  if (window.PbSync) PbSync.flushNow(state).catch(() => {});
+  render();
+  showToast(shared ? '✅ Stats diffusées aux joueuses' : '🔒 Diffusion désactivée');
 }
 
 // Visualiseur d'image plein écran pour le selfie
@@ -21457,6 +21715,12 @@ function ffbbDateFilter(matches, mode) {
 // Alimente state.ffbb.matches (shape legacy) pour que les vues joueuses
 // (calendrier/agenda) continuent d'afficher NOS matchs sans dépendre du scraper.
 function ffbbSyncLegacyMatches() {
+  // Feature 2 — la joueuse consulte le championnat en LECTURE SEULE. On ne
+  // laisse JAMAIS son device réécrire state.ffbb.matches (champ legacy v1, seul
+  // contenu synchronisé de l'entité ffbb_config partagée) : sinon son fetch
+  // pousserait des données sur la config commune du coach. Le dashboard v2
+  // (state.ffbb.dash) reste 100% local et n'est pas synchronisé.
+  if (state.auth && state.auth.role === 'player') return;
   const d = state.ffbb.dash || {};
   const out = [], seen = new Set();
   Object.values(d.poules || {}).forEach(p => (p.matches || []).forEach(m => {
@@ -21880,6 +22144,10 @@ function renderFFBB() {
   const f = state.ffbb;
   const d = ffbbDash();
   const isCoach = state.auth.role === 'coach';
+  // Feature 2 — variant LECTURE SEULE pour la joueuse (accès via la home →
+  // state.view = {type:'ffbb'}). Pas de Sync manuelle ni d'import convocs :
+  // juste consultation. La donnée est rafraîchie en auto à l'ouverture.
+  const readOnly = state.auth.role === 'player';
   const engs = d.engagements || [];
 
   // Itér.4 — vue CATÉGORIE-d'abord : segments U13/U15/U18/Séniors → liste unifiée
@@ -21899,8 +22167,11 @@ function renderFFBB() {
   shown = ffbbDateFilter(shown, d.dateMode);
   const ourCount = catMatches.filter(m => m.ours).length;
 
-  // Bloc en-tête + bouton sync
-  const header = `
+  // Bloc en-tête + bouton sync (masqué en lecture seule joueuse).
+  const backBtn = readOnly
+    ? `<button class="detail-back" onclick="state.view=null;render()">← Accueil</button>`
+    : '';
+  const header = backBtn + `
     <div class="section-header">
       <div>
         <div class="eyebrow">Championnat</div>
@@ -21908,9 +22179,10 @@ function renderFFBB() {
       </div>
       <div style="display:flex;gap:6px">
         ${isCoach ? `<button class="btn btn-secondary" onclick="editFFBBConfig()">⚙</button>` : ''}
+        ${readOnly ? `<span class="chip">${d.loading ? '⟳ MAJ…' : 'Lecture seule'}</span>` : `
         <button class="btn ${d.loading ? 'btn-secondary' : 'btn-primary'}" onclick="syncFFBB()" ${d.loading ? 'disabled' : ''}>
           ${d.loading ? '⟳…' : '⟳ Sync'}
-        </button>
+        </button>`}
       </div>
     </div>`;
 
@@ -21925,8 +22197,8 @@ function renderFFBB() {
     return `<div class="fade-up">${header}
       <div class="empty">
         <div class="empty-icon">○</div>
-        <div class="empty-title">${d.lastSync ? 'Aucun engagement trouvé' : 'Pas encore synchronisé'}</div>
-        <div class="empty-desc">${d.loading ? 'Chargement des compétitions…' : 'Lance « Sync » pour récupérer tout le championnat (calendrier, résultats, classement).'}</div>
+        <div class="empty-title">${d.lastSync ? 'Aucun engagement trouvé' : (readOnly ? 'Championnat indisponible' : 'Pas encore synchronisé')}</div>
+        <div class="empty-desc">${d.loading ? 'Chargement des compétitions…' : (readOnly ? 'Les données du championnat ne sont pas encore disponibles. Reviens plus tard.' : 'Lance « Sync » pour récupérer tout le championnat (calendrier, résultats, classement).')}</div>
       </div></div>`;
   }
 
@@ -22815,6 +23087,7 @@ function _renderBody() {
     // par section.
     if (state.view && state.view.type === 'match') content = renderMatchDetail();
     else if (state.view && state.view.type === 'play') content = renderPlayDetail();
+    else if (state.view && state.view.type === 'ffbb') content = renderFFBB();  // Feature 2 : dashboard FFBB lecture seule
     else if (state.section === 'home') content = renderHomePlayer();
     else if (state.section === 'plays') content = renderPlays();
     else if (state.section === 'challenges') content = renderPlayerChallenges();
