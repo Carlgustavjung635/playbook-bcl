@@ -13086,7 +13086,9 @@ function getPendingBroadcastsForPlayer(pid) {
   const now = Date.now();
   const out = [];
   (state.broadcastReceipts || []).forEach(r => {
-    if (r.playerId !== pid || r.status !== 'pending') return;
+    // 'pending' ET 'skipped' réapparaissent : Skip = "plus tard" (repopup au
+    // prochain boot). Seul 'acknowledged' (Compris 🫡) ou 'seen' (expiré) dismiss.
+    if (r.playerId !== pid || (r.status !== 'pending' && r.status !== 'skipped')) return;
     const b = (state.broadcasts || []).find(x => x.id === r.broadcastId);
     if (!b || b.archived) return;
     if (b.expiresAt && now > b.expiresAt) {
