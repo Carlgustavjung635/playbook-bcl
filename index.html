@@ -311,6 +311,14 @@
   }
   .chrono-edit-row input[type=text] { flex: 1; min-width: 0; }
   .chrono-edit-row input[type=number] { width: 76px; flex: none; }
+  /* Flash plein écran de fin de décompte : alerte visuelle au-dessus de TOUT
+     (overlay chrono inclus). pointer-events:none → ne bloque jamais l'UI. */
+  #chrono-flash {
+    position: fixed; inset: 0; z-index: 99999; pointer-events: none;
+    background: #ff1a1a; opacity: 0;
+  }
+  #chrono-flash.chrono-flash-on { animation: chronoFullFlash 0.4s steps(1) 4; }
+  @keyframes chronoFullFlash { 0%, 100% { opacity: 0; } 50% { opacity: 0.55; } }
 
   /* ========== TYPOGRAPHY ========== */
   .display-xl {
@@ -13197,30 +13205,58 @@ function _chronoUnlockAudio() {
     const Ctx = window.AudioContext || window.webkitAudioContext;
     if (!Ctx) return;
     if (!window._chronoAudio) window._chronoAudio = new Ctx();
-    if (window._chronoAudio.state === 'suspended') window._chronoAudio.resume();
+    const ac = window._chronoAudio;
+    if (ac.state === 'suspended') ac.resume();
+    // Amorçage iOS : jouer un buffer silencieux pendant le geste utilisateur
+    // débloque durablement le contexte (sinon le bip de fin, hors geste, reste
+    // muet sur Safari iOS même si resume() a été appelé).
+    const buf = ac.createBuffer(1, 1, 22050);
+    const src = ac.createBufferSource();
+    src.buffer = buf; src.connect(ac.destination); src.start(0);
   } catch (e) { /* audio non dispo : silencieux */ }
 }
+// Bip de fin : 3 salves carrées de 0,2 s espacées de 0,15 s, gain élevé (0,5)
+// pour percer le bruit d'un gymnase. La dernière salve monte en fréquence.
 function _chronoBeep() {
   try {
     const ac = window._chronoAudio;
     if (!ac) return;
     if (ac.state === 'suspended') ac.resume();
     const t0 = ac.currentTime;
-    [0, 0.18, 0.36].forEach((dt, i) => {
+    [0, 0.35, 0.70].forEach((dt, i) => {
       const osc = ac.createOscillator();
       const g = ac.createGain();
       osc.type = 'square';
-      osc.frequency.value = i === 2 ? 1320 : 880; // dernier bip plus aigu
+      osc.frequency.value = i === 2 ? 1320 : 988; // dernier bip plus aigu
       g.gain.setValueAtTime(0.0001, t0 + dt);
-      g.gain.exponentialRampToValueAtTime(0.35, t0 + dt + 0.012);
-      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dt + 0.15);
+      g.gain.exponentialRampToValueAtTime(0.5, t0 + dt + 0.015);
+      g.gain.setValueAtTime(0.5, t0 + dt + 0.18);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dt + 0.22);
       osc.connect(g); g.connect(ac.destination);
-      osc.start(t0 + dt); osc.stop(t0 + dt + 0.16);
+      osc.start(t0 + dt); osc.stop(t0 + dt + 0.24);
     });
   } catch (e) { /* silencieux */ }
 }
+// Android Chrome : vibre. iOS Safari : navigator.vibrate est absent → no-op
+// (limitation OS, non contournable depuis le web) ; le flash visuel prend le
+// relais comme alerte principale sur iOS.
 function _chronoVibrate(pattern) {
   try { if (navigator.vibrate) navigator.vibrate(pattern); } catch (e) {}
+}
+// Flash plein écran rouge : alerte visuelle forte, indépendante du son et de la
+// vibration (essentielle sur iOS où la vibration n'existe pas). pointer-events:
+// none → ne peut JAMAIS bloquer l'UI. S'auto-retire après l'animation (~1,6 s).
+function _chronoFlash() {
+  try {
+    let f = document.getElementById('chrono-flash');
+    if (!f) { f = document.createElement('div'); f.id = 'chrono-flash'; document.body.appendChild(f); }
+    // Forcer un reflow pour rejouer l'animation si un flash précédent traîne.
+    f.classList.remove('chrono-flash-on'); void f.offsetWidth; f.classList.add('chrono-flash-on');
+    if (window._chronoFlashTo) clearTimeout(window._chronoFlashTo);
+    window._chronoFlashTo = setTimeout(() => {
+      const n = document.getElementById('chrono-flash'); if (n) n.remove();
+    }, 1600);
+  } catch (e) { /* silencieux */ }
 }
 
 // --- Formatage --- MM:SS au-dessus de 10 s, dixièmes en dessous (précision
@@ -13279,7 +13315,8 @@ function _chronoDone() {
   c.running = false; c.done = true; c.remainingMs = 0;
   _chronoStopTicker();
   _chronoBeep();
-  _chronoVibrate([200, 80, 200]);
+  _chronoVibrate([300, 120, 300, 120, 400]); // Android ; ignoré sur iOS
+  _chronoFlash();                             // alerte visuelle (tous OS, dont iOS)
   _chronoRenderScreen(); // bascule le bouton sur "Relancer" + état rouge
 }
 // Tap preset → (ré)arme à cette durée ET relance immédiatement.
@@ -13334,8 +13371,11 @@ function closeChrono() {
   const c = window._chrono;
   if (c) { if (c.running) { c.remainingMs = Math.max(0, c.endAt - Date.now()); c.running = false; } }
   _chronoStopTicker();
+  // IMPORTANT : RETIRER l'élément, pas seulement le vider. #chrono-overlay est
+  // position:fixed inset:0 z-index:9000 ; un innerHTML='' le laisse en place,
+  // transparent mais capturant tous les clics → écran "figé" (rien cliquable).
   const host = document.getElementById('chrono-overlay');
-  if (host) host.innerHTML = '';
+  if (host) host.remove();
   document.body.style.overflow = '';
 }
 function _chronoRenderScreen() {
@@ -13388,8 +13428,11 @@ function _chronoRenderScreen() {
 // _chronoUpdateDisplay devient un no-op tant que #chrono-time est absent).
 function openChronoEditor() {
   if (!(state.auth && state.auth.role === 'coach')) return;
+  // RETIRER l'overlay (pas innerHTML='') : sinon le div transparent z-9000 reste
+  // AU-DESSUS de la modale (z-100) et bloque tous les clics → presets ni
+  // éditables ni ajoutables. _chronoReopenAfterEdit() le recrée après édition.
   const host = document.getElementById('chrono-overlay');
-  if (host) host.innerHTML = '';
+  if (host) host.remove();
   state._chronoEdit = getChronoPresets().map(p => ({ label: p.label || '', seconds: p.seconds }));
   if (!state._chronoEdit.length) state._chronoEdit = [{ label: '', seconds: 24 }];
   _chronoRenderEditor();
