@@ -4451,6 +4451,23 @@ function currentSeasonConvocations() { return _filterEventsByTeam(_convocsSeason
 function currentSeasonChallenges()   { return _filterEventsByTeam(_challengesSeasonId(state.currentSeasonId)); }
 function currentSeasonPlays(opts)    { return getSeasonPlays(state.currentSeasonId, opts); }
 
+// DIFFUSIONS (broadcasts + sondages) — même logique saison que matchs/convocs/
+// défis. Empêche le cumul cross-saison : une diffusion de la saison N ne doit
+// plus apparaître (popup joueuse, dashboard coach, badge) en saison N+1.
+// Rétrocompat : un broadcast legacy sans seasonId est rattaché à la saison
+// ACTIVE (tes ~10 diffusions actuelles restent visibles tant qu'on est dessus).
+// Le backfill SQL (migration 011) assigne ces legacy à '2025-2026' en DB ; le
+// fallback ici couvre la fenêtre avant sync / tout broadcast non rattaché.
+function _broadcastInSeason(b, seasonId) {
+  if (!_seasonsLoaded()) return true;
+  const activeId = getActiveSeasonId();
+  if (b.seasonId) return b.seasonId === seasonId;
+  return seasonId === activeId; // legacy : rattaché à active par défaut
+}
+function currentSeasonBroadcasts() {
+  return (state.broadcasts || []).filter(b => _broadcastInSeason(b, state.currentSeasonId));
+}
+
 // ============================================================
 // DÉFIS AUTO PAR SAISON — anti-cumul cross-saison
 // ------------------------------------------------------------
@@ -13624,6 +13641,7 @@ function getPendingBroadcastsForPlayer(pid) {
     if (r.playerId !== pid || (r.status !== 'pending' && r.status !== 'skipped')) return;
     const b = (state.broadcasts || []).find(x => x.id === r.broadcastId);
     if (!b || b.archived) return;
+    if (!_broadcastInSeason(b, state.currentSeasonId)) return; // saison précédente → plus de popup
     if (snoozed.has(b.id)) return; // « Plus tard » cliqué cette session → pas avant le prochain boot
     if (b.expiresAt && now > b.expiresAt) {
       // Expiré : marqué 'seen' (sans popup) — la joueuse n'a plus à agir.
@@ -13638,7 +13656,7 @@ function getPendingBroadcastsForPlayer(pid) {
 
 // Nb de joueuses pas encore "vu" sur les diffusions actives (badge coach).
 function broadcastsPendingCount() {
-  const activeIds = new Set((state.broadcasts || []).filter(b => !b.archived).map(b => b.id));
+  const activeIds = new Set(currentSeasonBroadcasts().filter(b => !b.archived).map(b => b.id));
   return (state.broadcastReceipts || []).filter(r => activeIds.has(r.broadcastId) && r.status === 'pending').length;
 }
 
@@ -14026,7 +14044,7 @@ function submitBroadcast() {
 
 // Carte d'accès sur la home coach (entrée + badge "N pas vu").
 function renderBroadcastCoachCard() {
-  const active = (state.broadcasts || []).filter(b => !b.archived);
+  const active = currentSeasonBroadcasts().filter(b => !b.archived);
   const pending = broadcastsPendingCount();
   return `
     <div style="padding:0 18px;margin-bottom:18px">
@@ -14050,7 +14068,7 @@ function renderBroadcastCoachCard() {
 function openBroadcastManager() { renderBroadcastManager(); }
 
 function renderBroadcastManager() {
-  const all = (state.broadcasts || []).slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const all = currentSeasonBroadcasts().slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const active = all.filter(b => !b.archived);
   const archived = all.filter(b => b.archived);
   openModal(`
