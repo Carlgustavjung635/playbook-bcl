@@ -120,6 +120,11 @@
   }
   .topbar-logo {
     display: flex; align-items: center; gap: 10px;
+    flex: 0 1 auto; min-width: 0;
+  }
+  .topbar-logo > div { min-width: 0; }
+  .topbar-title, .topbar-sub {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .topbar-orb {
     width: 32px; height: 32px; border-radius: 50%;
@@ -145,6 +150,30 @@
     font-size: 9px; text-transform: uppercase; letter-spacing: 0.1em;
     font-weight: 700;
     border: 1px solid rgba(255, 107, 0, 0.3);
+  }
+  /* Conteneur des actions header (droite) : ne wrappe jamais, reste compact. */
+  .topbar-actions {
+    display: flex; align-items: center; gap: 6px;
+    flex-shrink: 0; min-width: 0;
+  }
+  /* Boutons d'action header : touch target confortable + alignement vertical. */
+  .role-badge.tb-act {
+    display: inline-flex; align-items: center; gap: 4px;
+    min-height: 38px; padding: 6px 10px; white-space: nowrap;
+  }
+  /* Bouton filtre équipe : label tronqué (ellipsis) pour les surnoms longs. */
+  .role-badge.tb-team { max-width: 104px; }
+  .role-badge.tb-team-on {
+    background: var(--orange); color: #000; border-color: var(--orange);
+  }
+  .tb-team-lbl {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    min-width: 0;
+  }
+  /* Le surnom de la joueuse dans le bouton ⚙ peut être tronqué si étroit. */
+  .tb-act-label {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    max-width: 120px; display: inline-block; vertical-align: middle;
   }
 
   /* ========== BOTTOM NAV ========== */
@@ -465,6 +494,19 @@
     cursor: pointer; padding: 4px 0;
   }
   .section-action:active { opacity: 0.6; }
+  /* Variante "vrai bouton" : pilule bordée pour que l'action soit lisible
+     comme cliquable (et non comme un titre). Cf. audit UX vue Équipe. */
+  .section-action-btn {
+    background: var(--bg-2); border: 1px solid var(--border);
+    color: var(--orange);
+    font-size: 11px; font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    cursor: pointer; padding: 7px 11px; border-radius: 8px;
+    display: inline-flex; align-items: center; gap: 5px;
+    min-height: 34px;
+  }
+  .section-action-btn:active { opacity: 0.6; background: var(--bg-3); }
 
   /* ========== CARDS ========== */
   .card {
@@ -1203,7 +1245,7 @@
   .lb-medal.silver { background: linear-gradient(135deg, #d4d4d4, #888); color: #000; border-color: #c0c0c0; }
   .lb-medal.bronze { background: linear-gradient(135deg, #cd7f32, #8b4513); color: white; border-color: #cd7f32; }
   .lb-progress {
-    height: 3px; background: var(--bg-3); border-radius: 2px;
+    height: 5px; background: var(--bg-3); border-radius: 3px;
     overflow: hidden; margin-top: 6px;
   }
   .lb-progress-fill {
@@ -1257,15 +1299,16 @@
 
   /* ========== DETAIL ========== */
   .detail-back {
-    display: inline-flex; align-items: center; gap: 4px;
-    background: none; border: none; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 5px;
+    background: var(--bg-2); border: 1px solid var(--border-soft); cursor: pointer;
     color: var(--ink-2);
     font-family: 'JetBrains Mono', monospace;
     font-size: 10px; font-weight: 600;
     text-transform: uppercase; letter-spacing: 0.08em;
-    padding: 14px 18px 0;
+    padding: 7px 12px; border-radius: 999px;
+    margin: 12px 0 0 18px;
   }
-  .detail-back:active { color: var(--orange); }
+  .detail-back:active { color: var(--orange); border-color: var(--orange); }
   .detail-title {
     font-family: 'Anton', sans-serif;
     font-size: 38px; line-height: 0.95;
@@ -2925,6 +2968,38 @@ window.PbStore = {
   }
 };
 
+// Multi-PDF stats FFBB (migration 20260607_009). matches.stats_pdfs jsonb [].
+// Item client = {id,url,filename,shared,uploadedAt}. Rétro-compat : si la liste
+// est vide mais l'ancien champ singulier stats_pdf_url est rempli (cas migration
+// partielle / edge case), on construit un array d'1 élément pour ne rien perdre.
+function _matchPdfsFromDb(r) {
+  let arr = Array.isArray(r.stats_pdfs) ? r.stats_pdfs : [];
+  if (!arr.length && r.stats_pdf_url) {
+    arr = [{ id: r.id + '-legacy', url: r.stats_pdf_url, filename: r.stats_pdf_filename, shared: r.stats_pdf_shared, uploaded_at: r.stats_pdf_uploaded_at }];
+  }
+  return arr
+    .filter(p => p && p.url)
+    .map(p => ({
+      id: p.id || (typeof uid === 'function' ? uid() : 'p' + Date.now()),
+      url: p.url,
+      filename: p.filename || 'Document.pdf',
+      shared: !!p.shared,
+      uploadedAt: p.uploaded_at ? Date.parse(p.uploaded_at) : (p.uploadedAt || null)
+    }));
+}
+function _matchPdfsToDb(m) {
+  const arr = Array.isArray(m.statsPdfs) ? m.statsPdfs : [];
+  return arr
+    .filter(p => p && typeof p.url === 'string' && /^https?:\/\//i.test(p.url))
+    .map(p => ({
+      id: p.id || null,
+      url: p.url,
+      filename: p.filename || 'Document.pdf',
+      shared: !!p.shared,
+      uploaded_at: p.uploadedAt ? new Date(p.uploadedAt).toISOString() : null
+    }));
+}
+
 function _dbMatchToClient(r) {
   return {
     id: r.id, date: r.date, opponent: r.opponent, home: r.home,
@@ -2946,6 +3021,11 @@ function _dbMatchToClient(r) {
     prepComment: r.prep_comment || '',
     place: r.location || '',
     time: r.time || '',
+    statsPdfUrl: r.stats_pdf_url || '',
+    statsPdfFilename: r.stats_pdf_filename || '',
+    statsPdfShared: !!r.stats_pdf_shared,
+    statsPdfUploadedAt: r.stats_pdf_uploaded_at ? Date.parse(r.stats_pdf_uploaded_at) : null,
+    statsPdfs: _matchPdfsFromDb(r),
     positives: [], negatives: [], playerStats: {}
   };
 }
@@ -3079,7 +3159,16 @@ const ENTITIES = [
         prep_comment: m.prepComment || null,
         location: m.place || null,
         time: m.time || null,
-        team_tag: (m.teamTag === 'e2') ? 'e2' : 'e1'  // multi-effectif : e1 | e2 (jamais both pour un match)
+        team_tag: (m.teamTag === 'e2') ? 'e2' : 'e1',  // multi-effectif : e1 | e2 (jamais both pour un match)
+        // Feature : PDF stats FFBB (cf. migration 20260607_007). On ne pousse que
+        // les URLs Storage (http/https) ; null sinon.
+        stats_pdf_url: (typeof m.statsPdfUrl === 'string' && /^https?:\/\//i.test(m.statsPdfUrl)) ? m.statsPdfUrl : null,
+        stats_pdf_filename: m.statsPdfFilename || null,
+        stats_pdf_shared: !!m.statsPdfShared,
+        stats_pdf_uploaded_at: m.statsPdfUploadedAt ? new Date(m.statsPdfUploadedAt).toISOString() : null,
+        // Multi-PDF (migration 009) : liste source de vérité ; les champs
+        // singuliers ci-dessus restent écrits pour la rétro-compat front.
+        stats_pdfs: _matchPdfsToDb(m)
       }];
     })),
     apply: (state, rows) => {
@@ -3124,7 +3213,14 @@ const ENTITIES = [
           positives: local.positives || [], negatives: local.negatives || [],
           playerStats: local.playerStats || {},
           seasonId: r.season_id || local.seasonId || null,
-          teamTag: (r.team_tag === 'e2') ? 'e2' : 'e1'  // rétrocompat : colonne absente → 'e1'
+          teamTag: (r.team_tag === 'e2') ? 'e2' : 'e1',  // rétrocompat : colonne absente → 'e1'
+          // Feature : PDF stats FFBB. Remote = source de vérité (URL Storage).
+          statsPdfUrl: r.stats_pdf_url || '',
+          statsPdfFilename: r.stats_pdf_filename || '',
+          statsPdfShared: !!r.stats_pdf_shared,
+          statsPdfUploadedAt: r.stats_pdf_uploaded_at ? Date.parse(r.stats_pdf_uploaded_at) : null,
+          // Multi-PDF (migration 009). Remote = source de vérité (array Storage).
+          statsPdfs: _matchPdfsFromDb(r)
         };
       });
       // Préserve les matches locaux non encore push (id format uid() = 'x...')
@@ -4651,6 +4747,106 @@ function currentSeasonConvocations() { return _filterEventsByTeam(_convocsSeason
 function currentSeasonChallenges()   { return _filterEventsByTeam(_challengesSeasonId(state.currentSeasonId)); }
 function currentSeasonPlays(opts)    { return getSeasonPlays(state.currentSeasonId, opts); }
 
+// DIFFUSIONS (broadcasts + sondages) — même logique saison que matchs/convocs/
+// défis. Empêche le cumul cross-saison : une diffusion de la saison N ne doit
+// plus apparaître (popup joueuse, dashboard coach, badge) en saison N+1.
+// Rétrocompat : un broadcast legacy sans seasonId est rattaché à la saison
+// ACTIVE (tes ~10 diffusions actuelles restent visibles tant qu'on est dessus).
+// Le backfill SQL (migration 011) assigne ces legacy à '2025-2026' en DB ; le
+// fallback ici couvre la fenêtre avant sync / tout broadcast non rattaché.
+function _broadcastInSeason(b, seasonId) {
+  if (!_seasonsLoaded()) return true;
+  const activeId = getActiveSeasonId();
+  if (b.seasonId) return b.seasonId === seasonId;
+  return seasonId === activeId; // legacy : rattaché à active par défaut
+}
+function currentSeasonBroadcasts() {
+  return (state.broadcasts || []).filter(b => _broadcastInSeason(b, state.currentSeasonId));
+}
+
+// ============================================================
+// DÉFIS AUTO PAR SAISON — anti-cumul cross-saison
+// ------------------------------------------------------------
+// Les 3 défis auto (présence entraînement / présence match / ponctualité) ont
+// un compteur `scores` par joueuse. S'ils étaient des singletons globaux, leurs
+// compteurs s'accumuleraient saison après saison. La règle : UN jeu de défis
+// auto PAR saison (chacun avec son `seasonId` et ses `scores` propres).
+//
+// La colonne challenges.season_id existe en BD (migration 20260524_002) et le
+// dump/apply de l'entité `challenges` la transporte déjà (cf. ENTITIES). Tout
+// le travail restant est côté client : créer/cibler le bon défi par saison.
+//
+// id déterministe `${type}-${seasonId}` : anti-doublon multi-device (deux coachs
+// qui créent la même saison ne génèrent pas deux défis du même type).
+
+// Retourne le défi AUTO d'un `type` pour une saison donnée (défaut : saison
+// active), en le créant à la volée s'il manque. Garantit qu'un incrément de
+// présence/ponctualité atterrit TOUJOURS dans le défi de la BONNE saison.
+function getAutoChallenge(type, seasonId) {
+  seasonId = seasonId || getActiveSeasonId();
+  state.challenges = state.challenges || [];
+  if (!seasonId) {
+    // Saisons pas encore chargées : fallback comportement legacy (1er défi du type).
+    return state.challenges.find(c => c.autoCount && c.type === type) || null;
+  }
+  let ch = state.challenges.find(c => c.autoCount && c.type === type && c.seasonId === seasonId);
+  if (ch) return ch;
+  // Migre un défi legacy (autoCount, sans seasonId) vers cette saison (préserve compteurs).
+  const legacy = state.challenges.find(c => c.autoCount && c.type === type && !c.seasonId);
+  if (legacy) { legacy.seasonId = seasonId; return legacy; }
+  // Sinon crée à la volée depuis le template par défaut, compteurs vides.
+  const tpl = DEFAULT_CHALLENGES.find(c => c.autoCount && c.type === type);
+  if (!tpl) return null;
+  ch = { ...tpl, id: `${type}-${seasonId}`, seasonId, scores: {} };
+  state.challenges.push(ch);
+  return ch;
+}
+
+// Clone les défis AUTO d'une saison source vers une nouvelle saison, compteurs
+// remis à zéro. Appelé à la CRÉATION d'une saison. Fallback : si la source n'a
+// pas de défis auto (ou pas de source), on part de DEFAULT_CHALLENGES.
+function _cloneAutoChallengesForSeason(newSeasonId, sourceSeasonId) {
+  if (!newSeasonId) return;
+  state.challenges = state.challenges || [];
+  let templates = sourceSeasonId
+    ? state.challenges.filter(c => c.autoCount && c.seasonId === sourceSeasonId)
+    : [];
+  if (templates.length === 0) templates = DEFAULT_CHALLENGES.filter(c => c.autoCount);
+  templates.forEach(tpl => {
+    // Idempotent : ne recrée pas un défi du même type déjà présent sur la cible.
+    if (state.challenges.find(c => c.autoCount && c.type === tpl.type && c.seasonId === newSeasonId)) return;
+    state.challenges.push({ ...tpl, id: `${tpl.type}-${newSeasonId}`, seasonId: newSeasonId, scores: {} });
+  });
+}
+
+// Boot coach : intégrité des défis auto.
+//  1) BACKFILL legacy : tout défi auto sans seasonId → rattaché à la saison active
+//     (préserve les compteurs en cours). Défensif : la prod est déjà backfillée
+//     côté BD (migration 20260524_002) ; couvre un device avec state local offline.
+//  2) INIT : si la saison active n'a aucun défi auto d'un type, le créer (vide).
+//     Couvre une saison créée avant ce fix.
+// Idempotent. Retourne true si le state a changé.
+function _ensureAutoChallenges() {
+  const seasonId = getActiveSeasonId();
+  if (!seasonId) return false;
+  state.challenges = state.challenges || [];
+  let changed = false;
+  // 1) Backfill legacy (ordre important : avant l'init, pour que les défis
+  //    rattachés soient reconnus et qu'on n'en crée pas de doublons).
+  state.challenges.forEach(c => {
+    if (c.autoCount && !c.seasonId) { c.seasonId = seasonId; changed = true; }
+  });
+  // 2) Init défis auto manquants sur la saison active.
+  DEFAULT_CHALLENGES.filter(c => c.autoCount).forEach(tpl => {
+    const exists = state.challenges.find(c => c.autoCount && c.type === tpl.type && c.seasonId === seasonId);
+    if (!exists) {
+      state.challenges.push({ ...tpl, id: `${tpl.type}-${seasonId}`, seasonId, scores: {} });
+      changed = true;
+    }
+  });
+  return changed;
+}
+
 // Ressentis équipe de la saison courante. teamReviews n'a PAS de season_id en
 // base → on filtre par plage de dates [season.startDate, season.endDate] (option
 // retenue : zéro migration). r.date est une chaîne ISO YYYY-MM-DD (cf.
@@ -5599,12 +5795,11 @@ function renderTopbar() {
             : `<div class="topbar-sub">${state.team && state.team.displayNickname ? esc(state.team.displayNickname) : "BCL · L'Islois"}</div>`}
         </div>
       </div>
-      <div style="display:flex;gap:6px;align-items:center">
-        ${isCoach && activeLive ? `<button class="role-badge" style="background:#ff2222;color:white;border-color:#ff2222;cursor:pointer;animation:pulseGlow 2s infinite" onclick="openMatch('${activeLive.id}')">● LIVE</button>` : ''}
+      <div class="topbar-actions">
+        ${isCoach && activeLive ? `<button class="role-badge tb-act" style="background:#ff2222;color:white;border-color:#ff2222;cursor:pointer;animation:pulseGlow 2s infinite" onclick="openMatch('${activeLive.id}')" aria-label="Live en cours — gérer">🔴 LIVE</button>` : ''}
         ${renderTeamPill()}
         ${isCoach ? renderSeasonSwitcher() : ''}
-        ${isCoach ? `<button class="role-badge" style="cursor:pointer" onclick="openPublicShare()">🔗 Portail</button>` : ''}
-        <button class="role-badge" style="cursor:pointer;padding-left:10px;padding-right:10px" onclick="openSettings()" title="Menu">${player ? '#' + player.num + ' ' + esc(player.name) : esc(role ? role.label : '')} ⚙</button>
+        <button class="role-badge tb-act" style="cursor:pointer" onclick="openSettings()" title="Menu" aria-label="Menu${player ? ' — #' + player.num + ' ' + esc(player.name) : ''}" aria-haspopup="menu">${player ? '<span class="tb-act-label">#' + player.num + ' ' + esc(player.name) + '</span> ' : ''}⚙</button>
       </div>
     </header>
   `;
@@ -5618,34 +5813,81 @@ function renderTopbar() {
 // Pillule multi-effectif [E1 · E2 · Toutes] — visible UNIQUEMENT si le multi
 // est activé ET rôle coach/stat. Côté joueuse : rien (scope auto sur son tag).
 // Mono-équipe (multi off) : rien → topbar strictement identique à aujourd'hui.
+// Bouton compact "filtre équipe" (coach/stat, multi-effectif uniquement). Un seul
+// bouton 👥 affichant l'équipe active ; tap → bottom-sheet openTeamFilterMenu().
+// Remplace l'ancien segmented control 3 chips (E1/E2/Toutes) qui saturait le header
+// sur mobile 375px (cf. fix/header-multi-squad-ux-v1).
 function renderTeamPill() {
   if (!isMultiSquad()) return '';
   const role = state.auth && state.auth.role;
   if (role !== 'coach' && role !== 'stat') return '';
   const cur = state.teamFilter || 'all';
-  const seg = (tag, label) => {
-    const on = cur === tag;
-    return `<button onclick="setTeamFilter('${tag}')" style="border:none;background:${on ? 'var(--orange)' : 'transparent'};color:${on ? '#000' : 'var(--ink-2)'};font-family:'JetBrains Mono';font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;padding:5px 9px;cursor:pointer;border-radius:5px;transition:background .12s">${esc(label)}</button>`;
-  };
-  return `<div class="team-pill" style="display:inline-flex;gap:2px;padding:2px;background:var(--bg-3);border:1px solid var(--border);border-radius:7px" title="Filtrer par équipe">
-    ${seg('e1', teamLabel('e1', true))}
-    ${seg('e2', teamLabel('e2', true))}
-    ${seg('all', 'Toutes')}
-  </div>`;
+  const active = cur === 'e1' || cur === 'e2';
+  const label = active ? teamLabel(cur, true) : 'Toutes';
+  return `<button class="role-badge tb-act tb-team${active ? ' tb-team-on' : ''}" aria-haspopup="menu" aria-label="Filtre équipe : ${esc(label)} — changer" title="Filtrer par équipe" onclick="openTeamFilterMenu()">
+    <span aria-hidden="true">👥</span><span class="tb-team-lbl">${esc(label)}</span><span aria-hidden="true" style="opacity:.6">▾</span>
+  </button>`;
 }
 
+// Bottom-sheet de sélection d'équipe (3 options pleine largeur, touch ≥48px).
+// Réutilise l'infra openModal (escape, back-button, scroll-lock). setTeamFilter
+// re-render l'app ; on ferme la feuille ensuite.
+function openTeamFilterMenu() {
+  const cur = state.teamFilter || 'all';
+  const opts = [['e1', teamLabel('e1', false)], ['e2', teamLabel('e2', false)], ['all', 'Toutes les équipes']];
+  const row = (tag, label) => {
+    const on = cur === tag;
+    return `<button class="btn ${on ? 'btn-primary' : 'btn-secondary'} btn-block mb-2" role="menuitemradio" aria-checked="${on}" style="min-height:50px;display:flex;align-items:center;gap:10px;justify-content:flex-start;text-align:left" onclick="setTeamFilter('${tag}');closeModal()">
+      <span style="width:16px;flex:0 0 16px">${on ? '✓' : ''}</span><span>${esc(label)}</span>
+    </button>`;
+  };
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">👥 Filtre équipe</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body" role="menu" aria-label="Filtrer par équipe">
+      ${opts.map(o => row(o[0], o[1])).join('')}
+    </div>
+  `);
+}
+
+// Libellé court de saison pour le header mobile : "2026-2027" → "26-27".
+// Fallback sur les années de startDate/endDate, puis sur le nom tronqué.
+function seasonShortLabel(s) {
+  const yrs = ((s && s.name) || '').match(/\d{4}/g);
+  let a, b;
+  if (yrs && yrs.length >= 2) { a = yrs[0].slice(2); b = yrs[1].slice(2); }
+  else {
+    const sy = ((s && s.startDate) || '').slice(0, 4);
+    const ey = ((s && s.endDate) || '').slice(0, 4);
+    if (sy && ey) { a = sy.slice(2); b = ey.slice(2); }
+  }
+  if (a && b) return a + '-' + b;
+  return ((s && s.name) || '?').replace(/^saison\s*/i, '').slice(0, 7);
+}
+
+// Pillule saison compacte (coach). "📅 26-27" + pastille de statut (brouillon =
+// point orange, archivée = point gris). Tap → openSeasonsModal (comportement
+// inchangé). Le libellé long reste dans aria-label/title pour l'accessibilité.
 function renderSeasonSwitcher() {
   const seasons = state.seasons || [];
   if (seasons.length === 0) return '';
   const cur = getCurrentSeason();
-  const label = cur ? cur.name : 'Aucune saison';
-  const color = cur && cur.status === 'active' ? 'var(--green, #22c55e)'
-    : cur && cur.status === 'draft' ? 'var(--orange, #ff6b00)'
-    : 'var(--ink-3, #888)';
+  const color = cur && cur.status === 'active' ? '#22c55e'
+    : cur && cur.status === 'draft' ? '#ff6b00'
+    : '#888';
   const tag = cur && cur.status === 'draft' ? ' (brouillon)'
     : cur && cur.status === 'archived' ? ' (archivée)'
     : '';
-  return `<button class="role-badge" style="cursor:pointer;color:${color};border-color:${color}" onclick="openSeasonsModal()" title="Changer / gérer les saisons">📅 ${esc(label)}${tag}</button>`;
+  const short = cur ? seasonShortLabel(cur) : '—';
+  const fullLabel = (cur ? cur.name : 'Aucune saison') + tag;
+  const dot = cur && cur.status === 'draft'
+    ? `<span aria-hidden="true" style="width:6px;height:6px;border-radius:50%;background:#ff6b00;display:inline-block;box-shadow:0 0 6px #ff6b00;flex:0 0 auto"></span>`
+    : cur && cur.status === 'archived'
+    ? `<span aria-hidden="true" style="width:6px;height:6px;border-radius:50%;background:#888;display:inline-block;flex:0 0 auto"></span>`
+    : '';
+  return `<button class="role-badge tb-act" style="cursor:pointer;color:${color};border-color:${color};gap:4px" onclick="openSeasonsModal()" title="${esc(fullLabel)} · changer de saison" aria-label="Saison ${esc(fullLabel)} — changer">📅 ${esc(short)}${dot}</button>`;
 }
 
 // Modal gestion des saisons : liste + bouton "+ Nouvelle" + actions activer /
@@ -5812,6 +6054,10 @@ function createSeasonFromModal() {
       state.seasonPlays.push({ seasonId: id, playId: link.playId, active: true });
     });
   }
+
+  // 4. Clone les défis AUTO (présence/ponctualité) avec compteurs vides → chaque
+  //    saison a ses propres défis, aucun cumul cross-saison.
+  _cloneAutoChallengesForSeason(id, sourceSeasonId);
 
   persist();
   closeModal();
@@ -6257,6 +6503,9 @@ function openSettings() {
       ` : ''}
 
       ${role === 'coach' ? `
+        <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openPublicShare(),50)">
+          🔗 Portail public (partager le lien)
+        </button>
         ${_seasonsLoaded() ? `<button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openSeasonRosterEditor(),50)">
           👥 Effectif de la saison
         </button>` : ''}
@@ -7130,8 +7379,76 @@ function renderHomePlayer() {
         </div>
       ` : '')}
 
+      ${renderHomePlayerFFBB()}
+
     </div>
   `;
+}
+
+// Feature 2 — section FFBB condensée en bas de la home joueuse. Réutilise le
+// dashboard v2 (ffbbDash / ffbbCatMatches / ffbbDashMatchCard). Données fetchées
+// en lecture seule sur le device joueuse (cf. ffbbPlayerEnsureData ci-dessous).
+function renderHomePlayerFFBB() {
+  let fd, ffbbCats;
+  try { fd = ffbbDash(); ffbbCats = ffbbCatsAvailable(); }
+  catch (e) { return ''; }
+  const engs = fd.engagements || [];
+
+  // Pas encore de données sur ce device → on déclenche un fetch auto en
+  // arrière-plan et on affiche un état d'attente discret (ou rien si pas de DB).
+  if (!engs.length) {
+    setTimeout(() => { try { ffbbPlayerEnsureData(); } catch (e) {} }, 60);
+    if (!fd.loading) return '';
+    return `
+      <div class="section-header">
+        <div><div class="eyebrow">🏀 Championnat</div><h2 class="display-md mt-2">FFBB</h2></div>
+      </div>
+      <div class="px" style="padding-bottom:14px"><div style="text-align:center;padding:24px;color:var(--ink-3);font-family:'JetBrains Mono';font-size:12px">⟳ Chargement du championnat…</div></div>`;
+  }
+
+  // Catégorie courante (auto si non définie / invalide).
+  let cat = fd.catTab;
+  if (!ffbbCats.includes(cat)) cat = ffbbCats[0];
+  const catM = ffbbCatMatches(cat).filter(m => m.ours);
+  const up = catM.filter(ffbbIsUpcoming).sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+  const pa = catM.filter(m => !ffbbIsUpcoming(m)).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  // Priorité aux matchs à venir ; complète avec des résultats récents (max 4).
+  const list = [...up.slice(0, 4), ...pa.slice(0, Math.max(0, 4 - up.slice(0, 4).length))].slice(0, 4);
+
+  const catSelector = ffbbCats.length > 1 ? `
+    <div class="px" style="margin-bottom:8px">
+      <div style="display:flex;gap:6px;overflow-x:auto;padding-bottom:2px;-webkit-overflow-scrolling:touch">
+        ${ffbbCats.map(c => `<button onclick="ffbbSelectCat('${esc(c).replace(/'/g, "\\'")}')" style="flex:none;min-height:38px;padding:7px 14px;border-radius:20px;border:1px solid ${c === cat ? 'var(--orange)' : 'var(--border)'};background:${c === cat ? 'var(--orange)' : 'var(--surface)'};color:${c === cat ? '#fff' : 'var(--ink-2)'};font-family:'Anton';font-size:12px;text-transform:uppercase;letter-spacing:.02em;cursor:pointer;white-space:nowrap">${esc(c)}</button>`).join('')}
+      </div>
+    </div>` : '';
+
+  return `
+    <div class="section-header">
+      <div><div class="eyebrow">🏀 Championnat</div><h2 class="display-md mt-2">FFBB</h2></div>
+      <button class="section-action" onclick="openPlayerFFBB()">Voir tout →</button>
+    </div>
+    ${catSelector}
+    ${list.length
+      ? `<div class="list-section">${list.map(ffbbDashMatchCard).join('')}</div>`
+      : `<div class="px" style="padding-bottom:14px"><div style="text-align:center;padding:18px;color:var(--ink-3);font-family:'JetBrains Mono';font-size:11px;text-transform:uppercase">Aucun match dans cette catégorie</div></div>`}
+    <div class="px" style="padding-bottom:18px">
+      <button class="btn btn-secondary btn-block" onclick="openPlayerFFBB()">Voir tout le championnat →</button>
+    </div>`;
+}
+
+// Fetch FFBB côté joueuse, lecture seule. Réutilise la mécanique du coach
+// (syncFFBB) mais en s'appuyant sur ffbbSyncLegacyMatches() qui no-op pour la
+// joueuse → AUCUNE écriture sur la config partagée ffbb_config. Debounce 1h.
+function ffbbPlayerEnsureData() {
+  const d = ffbbDash();
+  if (d.loading || window._ffbbPlayerSyncInflight) return;
+  const last = d.lastAutoSync || (d.lastSync ? Date.parse(d.lastSync) : 0);
+  if (last && (Date.now() - last) < 3600e3) return;  // < 1h → skip
+  window._ffbbPlayerSyncInflight = true;
+  Promise.resolve()
+    .then(() => syncFFBB())
+    .catch(() => {})
+    .finally(() => { window._ffbbPlayerSyncInflight = false; });
 }
 
 // Ressenti équipe : CTA réutilisable (rendu dans l'onglet Forme). Demande
@@ -8719,6 +9036,16 @@ function openMatch(id) {
   render(); _scrollTopApp();
 }
 
+// Feature 2 — ouvre le dashboard FFBB complet en LECTURE SEULE depuis la home
+// joueuse (state.view = {type:'ffbb'} → render() route vers renderFFBB() qui
+// détecte le rôle 'player' et masque Sync / import). Déclenche un rafraîchissement
+// auto des données (debounce 1h, identique au coach).
+function openPlayerFFBB() {
+  state.view = { type: 'ffbb' };
+  render(); _scrollTopApp();
+  try { ffbbMaybeAutoSync(); } catch (e) { console.warn('[ffbb] player autosync', e); }
+}
+
 // ============================================================
 // DASHBOARD SAISON
 // ============================================================
@@ -9218,9 +9545,13 @@ function renderMatchDetail() {
             ${isCoach ? `<button class="btn ${m.isLive?'btn-primary':'btn-secondary'}" onclick="editLiveStream('${m.id}')" style="${m.isLive?'background:#ff2222;color:white':''}">${m.isLive?'● Live ON':'Live public'}</button>` : ''}
             ${isCoach ? `<button class="btn btn-secondary" onclick="openPlayerReviewsList('${m.id}')">📝 Ressentis joueuses</button>` : ''}
             ${isCoach ? `<button class="btn btn-secondary" onclick="openExportMenu('${m.id}')">📤 Exporter</button>` : ''}
-            ${isCoach ? `<button class="btn btn-secondary" onclick="editMatch('${m.id}')">Modifier</button>` : ''}
-            ${isCoach ? `<button class="btn btn-danger" onclick="deleteMatch('${m.id}')">Supprimer</button>` : ''}
+            ${isCoach ? `<button class="btn btn-secondary" onclick="editMatch('${m.id}')">✎ Modifier</button>` : ''}
           </div>
+          ${isCoach ? `
+            <div style="display:flex;justify-content:flex-end;margin-top:10px;padding-top:10px;border-top:1px solid var(--border-soft)">
+              <button class="btn btn-danger" onclick="deleteMatch('${m.id}')" aria-label="Supprimer le match">🗑 Supprimer le match</button>
+            </div>
+          ` : ''}
         ` : ''}
         ${(() => {
           // Joueuse : bouton 'Mon ressenti' (auto-éval post-match) — visible
@@ -9450,10 +9781,10 @@ function renderMatchDetail() {
       ${cancelled ? '' : isToPlay ? renderMatchPrep(m) : `
         ${isCoach ? `
           <div style="padding:0 18px 6px;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
-            <button class="btn btn-ghost" onclick="state._showPrepArchive=${showPrepArchive?'null':`'${m.id}'`};render()" style="font-size:11px">
-              ${showPrepArchive ? '▲ Masquer la prépa' : '▼ Voir la prépa du match'}
+            <button class="btn btn-secondary" onclick="state._showPrepArchive=${showPrepArchive?'null':`'${m.id}'`};render()" style="font-size:11px">
+              ${showPrepArchive ? '📋 Masquer la prépa' : '📋 Voir la prépa du match'}
             </button>
-            <button class="btn btn-ghost" onclick="markMatchAs('${m.id}','to_play')" style="font-size:11px;color:var(--ink-3)">↶ Repasser en "à jouer"</button>
+            <button class="btn btn-secondary" onclick="markMatchAs('${m.id}','to_play')" style="font-size:11px;color:var(--ink-3)" aria-label="Repasser ce match en à jouer">↶ Repasser en « à jouer »</button>
           </div>
           ${showPrepArchive ? `<div style="opacity:0.85">${renderMatchPrep(m)}</div>` : ''}
         ` : ''}
@@ -9611,6 +9942,83 @@ function renderMatchDetail() {
           </div>
         `}
       `}
+
+      ${(() => {
+        // ── Stats FFBB (multi-PDF) ────────────────────────────────────────
+        // La FFBB fournit plusieurs documents par match (feuille de match, stats
+        // équipe, stats individuelles…). Coach : liste + ajout + diffusion PAR
+        // PDF. Joueuse : uniquement les PDF marqués shared. Rétro-compat assurée
+        // par _normalizeMatchPdfs (ancien format singulier → array d'1 élément).
+        const pdfs = _normalizeMatchPdfs(m);
+        const uploading = !!m._pdfUploading;
+        if (isCoach) {
+          return `
+            <div class="section-header">
+              <div>
+                <div class="eyebrow">📄 Stats FFBB</div>
+                <h2 class="display-md mt-2">Documents du match</h2>
+              </div>
+            </div>
+            <div class="px" style="padding-bottom:14px">
+              ${pdfs.length ? `
+                <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px">
+                  ${pdfs.map(p => `
+                    <div style="padding:12px 14px;background:var(--surface);border:1px solid var(--border);border-radius:10px">
+                      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;min-width:0">
+                        <span style="font-size:24px;flex:none">📄</span>
+                        <div style="flex:1;min-width:0;cursor:pointer" onclick="openMatchPdf('${m.id}','${p.id}')">
+                          <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;letter-spacing:.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.filename)}</div>
+                          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${p.uploadedAt ? 'Importé le ' + formatDate(new Date(p.uploadedAt).toISOString().slice(0,10), 'short') : 'PDF importé'} · Toucher pour ouvrir</div>
+                        </div>
+                        <button class="btn btn-ghost" style="color:var(--red);flex:none;min-width:44px;min-height:44px;padding:0" onclick="removeMatchPdf('${m.id}','${p.id}')" aria-label="Supprimer ce PDF">🗑</button>
+                      </div>
+                      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 12px;min-height:44px;background:${p.shared ? 'rgba(34,197,94,0.10)' : 'var(--bg-2)'};border:1.5px solid ${p.shared ? 'var(--green)' : 'var(--border)'};border-radius:8px">
+                        <input type="checkbox" ${p.shared ? 'checked' : ''} onchange="toggleMatchPdfShared('${m.id}','${p.id}', this.checked)" style="width:20px;height:20px;flex:none">
+                        <div style="flex:1;min-width:0">
+                          <div style="font-family:'Anton';font-size:12px;text-transform:uppercase;letter-spacing:.02em;color:${p.shared ? 'var(--green)' : 'var(--ink-2)'}">Diffuser aux joueuses</div>
+                          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${p.shared ? 'Visible dans leur vue match' : 'Visible coach uniquement'}</div>
+                        </div>
+                      </label>
+                    </div>
+                  `).join('')}
+                </div>
+              ` : `
+                <div style="padding:18px 14px;background:var(--surface);border:1px dashed var(--border);border-radius:10px;text-align:center;margin-bottom:12px">
+                  <div style="font-size:30px;margin-bottom:6px">📄</div>
+                  <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;line-height:1.5">Aucun document. Importe les PDF officiels FFBB (feuille de match, stats équipe / individuelles…)</div>
+                </div>
+              `}
+              ${pdfs.length < MATCH_PDF_MAX ? `
+                <label class="btn ${uploading ? 'btn-secondary' : 'btn-primary'} btn-block" style="cursor:${uploading ? 'wait' : 'pointer'};display:block;text-align:center;min-height:44px">
+                  ${uploading ? '⟳ Import en cours…' : '＋ Ajouter un PDF'}
+                  <input type="file" accept="application/pdf,.pdf" style="display:none" ${uploading ? 'disabled' : ''} onchange="addMatchPdf('${m.id}', event)">
+                </label>
+              ` : `
+                <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-align:center;text-transform:uppercase">Maximum ${MATCH_PDF_MAX} PDF par match</div>
+              `}
+            </div>`;
+        }
+        // Joueuse : uniquement les PDF marqués "Diffuser". Section masquée sinon.
+        const shared = pdfs.filter(p => p.shared && p.url);
+        if (shared.length) {
+          return `
+            <div class="section-header">
+              <div>
+                <div class="eyebrow">📄 Stats du match</div>
+                <h2 class="display-md mt-2">Documents FFBB</h2>
+              </div>
+            </div>
+            <div class="px" style="padding-bottom:14px;display:flex;flex-direction:column;gap:8px">
+              ${shared.map(p => `
+                <button class="btn btn-secondary btn-block" style="display:flex;align-items:center;gap:10px;justify-content:space-between;text-align:left;min-height:44px" onclick="openMatchPdf('${m.id}','${p.id}')">
+                  <span style="display:flex;align-items:center;gap:8px;min-width:0"><span style="flex:none">📄</span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.filename)}</span></span>
+                  <span style="flex:none">Ouvrir →</span>
+                </button>
+              `).join('')}
+            </div>`;
+        }
+        return '';
+      })()}
 
       <div style="height:24px"></div>
     </div>
@@ -9856,6 +10264,13 @@ function saveMatch(id, isNew) {
     status: nextStatus,
     prepVideos: existing ? (existing.prepVideos || []) : [],
     prepComment: existing ? (existing.prepComment || '') : '',
+    // Feature : PDF stats FFBB — préservé tel quel sur édition (jamais saisi
+    // dans ce formulaire, géré par la section dédiée de la fiche match).
+    statsPdfUrl: existing ? (existing.statsPdfUrl || '') : '',
+    statsPdfFilename: existing ? (existing.statsPdfFilename || '') : '',
+    statsPdfShared: existing ? !!existing.statsPdfShared : false,
+    statsPdfUploadedAt: existing ? (existing.statsPdfUploadedAt || null) : null,
+    statsPdfs: existing ? (Array.isArray(existing.statsPdfs) ? existing.statsPdfs : []) : [],
     // Multi-effectif : un match appartient à E1 ou E2. Sélecteur absent (multi
     // off) → préserve l'existant / 'e1' par défaut.
     teamTag: (() => {
@@ -10291,6 +10706,144 @@ async function migrateLocalSelfiesToStorage() {
     console.info(`[selfie-migration] ${migrated}/${candidates.length} selfie(s) migré(s)`);
   }
   localStorage.setItem('pb8_selfie_migration_done', '1');
+}
+
+// ------------------------------------------------------------
+// STATS PDF FFBB — multi-PDF par match (migration 20260607_009)
+// La FFBB fournit plusieurs documents par match (feuille de match, stats équipe,
+// stats individuelles…). Le coach importe N PDF dans m.statsPdfs [] ; chaque PDF
+// porte son propre flag `shared` (diffusion individuelle aux joueuses).
+// Bucket Storage 'match-stats' (PDF, public read, anon write).
+// Rétro-compat : un match au format singulier (statsPdfUrl) est normalisé à la
+// volée en array d'1 élément par _normalizeMatchPdfs().
+// ------------------------------------------------------------
+const MATCH_PDF_MAX = 10; // plafond raisonnable par match (anti-abus Storage)
+
+function _matchStatsPdfKey(url) {
+  if (typeof url !== 'string' || !url.includes('/match-stats/')) return null;
+  const m = url.match(/\/match-stats\/(.+?)(?:\?|$)/);
+  return (m && m[1]) ? decodeURIComponent(m[1]) : null;
+}
+function _removeMatchStatsPdfFile(url) {
+  const key = _matchStatsPdfKey(url);
+  if (key && window.sb) sb.storage.from('match-stats').remove([key]).catch(() => {});
+}
+
+// Normalise m.statsPdfs en array de {id,url,filename,shared,uploadedAt}.
+// Rétro-compat : si vide mais singulier rempli (ancien format / edge case),
+// construit un array d'1 élément. Lecture seule (ne mute pas le state).
+function _normalizeMatchPdfs(m) {
+  if (!m) return [];
+  let arr = Array.isArray(m.statsPdfs) ? m.statsPdfs : [];
+  if (!arr.length && m.statsPdfUrl) {
+    arr = [{ id: m.id + '-legacy', url: m.statsPdfUrl, filename: m.statsPdfFilename || 'Feuille de stats FFBB.pdf', shared: !!m.statsPdfShared, uploadedAt: m.statsPdfUploadedAt || null }];
+  }
+  return arr
+    .filter(p => p && p.url)
+    .map(p => ({
+      id: p.id || uid(),
+      url: p.url,
+      filename: p.filename || 'Document.pdf',
+      shared: !!p.shared,
+      uploadedAt: p.uploadedAt || null
+    }));
+}
+
+// Pose l'array sur le match et neutralise les champs singuliers legacy pour
+// qu'ils ne réapparaissent pas via la rétro-compat de _normalizeMatchPdfs.
+function _setMatchPdfs(m, pdfs) {
+  m.statsPdfs = pdfs;
+  m.statsPdfUrl = ''; m.statsPdfFilename = ''; m.statsPdfShared = false; m.statsPdfUploadedAt = null;
+}
+
+async function addMatchPdf(matchId, event) {
+  const file = (event.target.files || [])[0];
+  event.target.value = '';
+  if (!file) return;
+  const m = (state.matches || []).find(x => x.id === matchId);
+  if (!m) return;
+  if (!window.sb || !window.Pb || !window.Pb.online) {
+    alert('⚠ Hors ligne. Reconnecte-toi pour importer un PDF.');
+    return;
+  }
+  const pdfs = _normalizeMatchPdfs(m);
+  if (pdfs.length >= MATCH_PDF_MAX) {
+    alert('⚠ Maximum ' + MATCH_PDF_MAX + ' PDF par match. Supprime-en un avant d\'en ajouter.');
+    return;
+  }
+  const isPdf = /pdf$/i.test(file.type) || /\.pdf$/i.test(file.name || '');
+  if (!isPdf) { alert('⚠ Le fichier doit être un PDF (export FFBB).'); return; }
+  const MAX = 10 * 1024 * 1024; // 10 Mo (= file_size_limit du bucket)
+  if (file.size > MAX) {
+    alert('⚠ PDF trop lourd (' + Math.round(file.size / 1048576) + ' Mo). Maximum 10 Mo.');
+    return;
+  }
+  m._pdfUploading = true;
+  render();
+  try {
+    const fname = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.pdf`;
+    const path = `${matchId}/${fname}`;
+    const { error: upErr } = await sb.storage.from('match-stats').upload(path, file, {
+      contentType: 'application/pdf', cacheControl: '31536000', upsert: false
+    });
+    if (upErr) throw upErr;
+    const { data: pub } = sb.storage.from('match-stats').getPublicUrl(path);
+    if (!pub || !pub.publicUrl) throw new Error('publicUrl manquante');
+    pdfs.push({
+      id: uid(),
+      url: pub.publicUrl,
+      filename: (file.name || 'stats-ffbb.pdf').slice(0, 120),
+      shared: false,
+      uploadedAt: Date.now()
+    });
+    _setMatchPdfs(m, pdfs);
+    m._pdfUploading = false;
+    persist();
+    if (window.PbSync) PbSync.flushNow(state).catch(() => {});
+    render();
+    showToast('📄 PDF importé');
+  } catch (e) {
+    console.error('[match-stats pdf]', e && e.message ? e.message : e);
+    m._pdfUploading = false;
+    render();
+    alert('⚠ Échec de l\'upload du PDF. Vérifie ta connexion puis recommence.');
+  }
+}
+
+function removeMatchPdf(matchId, pdfId) {
+  const m = (state.matches || []).find(x => x.id === matchId);
+  if (!m) return;
+  const pdfs = _normalizeMatchPdfs(m);
+  const target = pdfs.find(p => p.id === pdfId);
+  if (!target) return;
+  if (!confirm('Supprimer « ' + (target.filename || 'ce PDF') + ' » ?')) return;
+  _removeMatchStatsPdfFile(target.url);
+  _setMatchPdfs(m, pdfs.filter(p => p.id !== pdfId));
+  persist();
+  if (window.PbSync) PbSync.flushNow(state).catch(() => {});
+  render();
+  showToast('🗑 PDF supprimé');
+}
+
+function toggleMatchPdfShared(matchId, pdfId, shared) {
+  const m = (state.matches || []).find(x => x.id === matchId);
+  if (!m) return;
+  const pdfs = _normalizeMatchPdfs(m);
+  const target = pdfs.find(p => p.id === pdfId);
+  if (!target) return;
+  target.shared = !!shared;
+  _setMatchPdfs(m, pdfs);
+  persist();
+  if (window.PbSync) PbSync.flushNow(state).catch(() => {});
+  render();
+  showToast(shared ? '✅ PDF diffusé aux joueuses' : '🔒 Diffusion désactivée');
+}
+
+function openMatchPdf(matchId, pdfId) {
+  const m = (state.matches || []).find(x => x.id === matchId);
+  if (!m) return;
+  const p = _normalizeMatchPdfs(m).find(x => x.id === pdfId);
+  if (p && p.url) window.open(p.url, '_blank', 'noopener');
 }
 
 // Visualiseur d'image plein écran pour le selfie
@@ -12258,8 +12811,8 @@ function renderTeam() {
         </div>
         ${isCoach ? `
           <div style="display:flex;gap:6px;flex-wrap:wrap">
-            ${_seasonsLoaded() ? `<button class="section-action" onclick="openSeasonRosterEditor()">Effectif →</button>` : ''}
-            <button class="section-action" onclick="managePlayers()">Gérer →</button>
+            ${_seasonsLoaded() ? `<button class="section-action-btn" onclick="openSeasonRosterEditor()" aria-label="Gérer l'effectif de la saison">👥 Effectif</button>` : ''}
+            <button class="section-action-btn" onclick="managePlayers()" aria-label="Gérer les joueuses">⚙ Gérer</button>
           </div>
         ` : ''}
       </div>
@@ -12267,7 +12820,7 @@ function renderTeam() {
       <div class="segmented">
         <button class="segmented-btn ${state.teamTab === 'convoc' ? 'active' : ''}" onclick="state.teamTab='convoc';render()">Convocations</button>
         <button class="segmented-btn ${state.teamTab === 'challenges' ? 'active' : ''}" onclick="state.teamTab='challenges';render()">Challenges</button>
-        ${isCoach ? `<button class="segmented-btn ${state.teamTab === 'lineups' ? 'active' : ''}" onclick="state.teamTab='lineups';render()">Compos 🔒</button>` : ''}
+        ${isCoach ? `<button class="segmented-btn ${state.teamTab === 'lineups' ? 'active' : ''}" onclick="state.teamTab='lineups';render()" title="Tes compositions tactiques — privées, visibles uniquement par toi (coach)" aria-label="Compos — privées, visibles uniquement par le coach">Compos 🔒</button>` : ''}
       </div>
 
       ${state.teamTab === 'convoc' ? renderConvocs() : ''}
@@ -13017,7 +13570,9 @@ function _applyConvocClosure(c, instanceDate) {
     ? getSeasonPlayers(_seasonId, { team: _convTeam })
     : (state.players || []);
   const targetType = c.type === 'match' ? 'attendance_match' : 'attendance_training';
-  const ch = state.challenges.find(x => x.type === targetType && x.autoCount);
+  // Défi auto de la SAISON de la convoc (pas un singleton global) → fini le cumul
+  // cross-saison. Créé à la volée si la saison n'a pas encore son défi.
+  const ch = getAutoChallenge(targetType, _seasonId);
   const credit = (responses) => {
     if (!ch) return;
     const presentPlayers = _seasonPool.filter(p => !responses[p.id] || responses[p.id].status === 'present');
@@ -13988,6 +14543,7 @@ function getPendingBroadcastsForPlayer(pid) {
     if (r.playerId !== pid || (r.status !== 'pending' && r.status !== 'skipped')) return;
     const b = (state.broadcasts || []).find(x => x.id === r.broadcastId);
     if (!b || b.archived) return;
+    if (!_broadcastInSeason(b, state.currentSeasonId)) return; // saison précédente → plus de popup
     if (snoozed.has(b.id)) return; // « Plus tard » cliqué cette session → pas avant le prochain boot
     if (b.expiresAt && now > b.expiresAt) {
       // Expiré : marqué 'seen' (sans popup) — la joueuse n'a plus à agir.
@@ -14002,7 +14558,7 @@ function getPendingBroadcastsForPlayer(pid) {
 
 // Nb de joueuses pas encore "vu" sur les diffusions actives (badge coach).
 function broadcastsPendingCount() {
-  const activeIds = new Set((state.broadcasts || []).filter(b => !b.archived).map(b => b.id));
+  const activeIds = new Set(currentSeasonBroadcasts().filter(b => !b.archived).map(b => b.id));
   return (state.broadcastReceipts || []).filter(r => activeIds.has(r.broadcastId) && r.status === 'pending').length;
 }
 
@@ -14390,7 +14946,7 @@ function submitBroadcast() {
 
 // Carte d'accès sur la home coach (entrée + badge "N pas vu").
 function renderBroadcastCoachCard() {
-  const active = (state.broadcasts || []).filter(b => !b.archived);
+  const active = currentSeasonBroadcasts().filter(b => !b.archived);
   const pending = broadcastsPendingCount();
   return `
     <div style="padding:0 18px;margin-bottom:18px">
@@ -14414,7 +14970,7 @@ function renderBroadcastCoachCard() {
 function openBroadcastManager() { renderBroadcastManager(); }
 
 function renderBroadcastManager() {
-  const all = (state.broadcasts || []).slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const all = currentSeasonBroadcasts().slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const active = all.filter(b => !b.archived);
   const archived = all.filter(b => b.archived);
   openModal(`
@@ -16668,8 +17224,8 @@ function validateArrival(parentId, dateStr, pid) {
 
   sheet.arrivals[pid] = { at: now, lateMin };
 
-  // Mettre à jour le challenge ponctualité (delta)
-  const ch = state.challenges.find(x => x.type === 'punctuality' && x.autoCount);
+  // Mettre à jour le challenge ponctualité (delta) — défi de la SAISON de la convoc.
+  const ch = getAutoChallenge('punctuality', c.seasonId || state.currentSeasonId);
   if (ch) {
     ch.scores = ch.scores || {};
     ch.scores[pid] = Math.max(0, (ch.scores[pid] || 0) - oldLate + lateMin);
@@ -16688,8 +17244,8 @@ function undoArrival(parentId, dateStr, pid) {
   const entry = sheet.arrivals && sheet.arrivals[pid];
   if (!entry) return;
 
-  // Retirer du challenge
-  const ch = state.challenges.find(x => x.type === 'punctuality' && x.autoCount);
+  // Retirer du challenge — défi de la SAISON de la convoc.
+  const ch = getAutoChallenge('punctuality', c.seasonId || state.currentSeasonId);
   if (ch && ch.scores) {
     ch.scores[pid] = Math.max(0, (ch.scores[pid] || 0) - entry.lateMin);
   }
@@ -17234,9 +17790,9 @@ function challengeCard(c, isCoach) {
             <div style="display:flex;gap:4px;margin-top:12px;justify-content:flex-end;flex-wrap:wrap">
               ${topContributors.length > 0 ? `<button class="btn btn-secondary" onclick="openChallengeStoryModal('${c.id}')" style="font-size:10px;padding:6px 10px">📸 Exporter victoire</button>` : ''}
               ${!c.badgesAwarded ? `<button class="btn btn-secondary" onclick="closeChallengeNow('${c.id}')" style="font-size:10px;padding:6px 10px">🏁 Clôturer & attribuer trophées</button>` : '<span class="chip chip-green">🏆 Trophées attribués</span>'}
-              <button class="btn btn-icon" onclick="editChallenge('${c.id}')" title="Modifier">✎</button>
-              <button class="btn btn-icon" onclick="resetCollective('${c.id}')" title="Réinitialiser le compteur">↺</button>
-              <button class="btn btn-icon" onclick="deleteChallenge('${c.id}')" style="color:var(--red)">🗑</button>
+              <button class="btn btn-icon" onclick="editChallenge('${c.id}')" title="Modifier le défi" aria-label="Modifier le défi">✎</button>
+              <button class="btn btn-icon" onclick="resetCollective('${c.id}')" title="Réinitialiser le compteur" aria-label="Réinitialiser le compteur">↺</button>
+              <button class="btn btn-icon" onclick="deleteChallenge('${c.id}')" style="color:var(--red)" title="Supprimer le défi" aria-label="Supprimer le défi">🗑</button>
             </div>
           ` : ''}
         </div>
@@ -17297,13 +17853,18 @@ function challengeCard(c, isCoach) {
           <div style="display:flex;gap:4px;margin-top:10px;justify-content:flex-end;flex-wrap:wrap">
             ${entries.some(e => e.score > 0) ? `<button class="btn btn-secondary" onclick="openChallengeStoryModal('${c.id}')" style="font-size:10px;padding:6px 10px">📸 Exporter victoire</button>` : ''}
             ${(c.scope === 'individual' && !c.badgesAwarded) ? `<button class="btn btn-secondary" onclick="closeChallengeNow('${c.id}')" style="font-size:10px;padding:6px 10px">🏁 Clôturer & attribuer trophées</button>` : (c.scope === 'individual' && c.badgesAwarded ? '<span class="chip chip-green">🏆 Trophées attribués</span>' : '')}
-            <button class="btn btn-icon" onclick="editChallenge('${c.id}')">✎</button>
-            <button class="btn btn-icon" onclick="deleteChallenge('${c.id}')" style="color:var(--red)">🗑</button>
+            <button class="btn btn-icon" onclick="editChallenge('${c.id}')" title="Modifier le défi" aria-label="Modifier le défi">✎</button>
+            <button class="btn btn-icon" onclick="deleteChallenge('${c.id}')" style="color:var(--red)" title="Supprimer le défi" aria-label="Supprimer le défi">🗑</button>
           </div>
         ` : ''}
       </div>
-      ${entries.map((e, i) => {
-        const medal = i === 0 ? 'gold' : i === 1 ? 'silver' : i === 2 ? 'bronze' : '';
+      ${(() => {
+        // Refonte UX (audit) : ne couronne pas une "leader" à 0. Tant que
+        // personne n'a marqué, le classement reste neutre (pas de médaille
+        // or/argent/bronze sur des scores nuls) → évite le faux podium.
+        const anyScore = entries.some(e => e.score > 0);
+        return entries.map((e, i) => {
+        const medal = (e.score > 0 && anyScore) ? (i === 0 ? 'gold' : i === 1 ? 'silver' : i === 2 ? 'bronze' : '') : '';
         const myPid = state.auth && state.auth.role === 'player' ? state.auth.playerId : null;
         const isMine = myPid && myPid === e.id;
         const canEdit = !isAuto && (isCoach || isMine);
@@ -17324,7 +17885,8 @@ function challengeCard(c, isCoach) {
             </div>
           </div>
         `;
-      }).join('')}
+        }).join('');
+      })()}
     </div>
   `;
 }
@@ -22263,6 +22825,12 @@ function ffbbDateFilter(matches, mode) {
 // Alimente state.ffbb.matches (shape legacy) pour que les vues joueuses
 // (calendrier/agenda) continuent d'afficher NOS matchs sans dépendre du scraper.
 function ffbbSyncLegacyMatches() {
+  // Feature 2 — la joueuse consulte le championnat en LECTURE SEULE. On ne
+  // laisse JAMAIS son device réécrire state.ffbb.matches (champ legacy v1, seul
+  // contenu synchronisé de l'entité ffbb_config partagée) : sinon son fetch
+  // pousserait des données sur la config commune du coach. Le dashboard v2
+  // (state.ffbb.dash) reste 100% local et n'est pas synchronisé.
+  if (state.auth && state.auth.role === 'player') return;
   const d = state.ffbb.dash || {};
   const out = [], seen = new Set();
   Object.values(d.poules || {}).forEach(p => (p.matches || []).forEach(m => {
@@ -22686,6 +23254,10 @@ function renderFFBB() {
   const f = state.ffbb;
   const d = ffbbDash();
   const isCoach = state.auth.role === 'coach';
+  // Feature 2 — variant LECTURE SEULE pour la joueuse (accès via la home →
+  // state.view = {type:'ffbb'}). Pas de Sync manuelle ni d'import convocs :
+  // juste consultation. La donnée est rafraîchie en auto à l'ouverture.
+  const readOnly = state.auth.role === 'player';
   const engs = d.engagements || [];
 
   // Itér.4 — vue CATÉGORIE-d'abord : segments U13/U15/U18/Séniors → liste unifiée
@@ -22705,8 +23277,11 @@ function renderFFBB() {
   shown = ffbbDateFilter(shown, d.dateMode);
   const ourCount = catMatches.filter(m => m.ours).length;
 
-  // Bloc en-tête + bouton sync
-  const header = `
+  // Bloc en-tête + bouton sync (masqué en lecture seule joueuse).
+  const backBtn = readOnly
+    ? `<button class="detail-back" onclick="state.view=null;render()">← Accueil</button>`
+    : '';
+  const header = backBtn + `
     <div class="section-header">
       <div>
         <div class="eyebrow">Championnat</div>
@@ -22714,9 +23289,10 @@ function renderFFBB() {
       </div>
       <div style="display:flex;gap:6px">
         ${isCoach ? `<button class="btn btn-secondary" onclick="editFFBBConfig()">⚙</button>` : ''}
+        ${readOnly ? `<span class="chip">${d.loading ? '⟳ MAJ…' : 'Lecture seule'}</span>` : `
         <button class="btn ${d.loading ? 'btn-secondary' : 'btn-primary'}" onclick="syncFFBB()" ${d.loading ? 'disabled' : ''}>
           ${d.loading ? '⟳…' : '⟳ Sync'}
-        </button>
+        </button>`}
       </div>
     </div>`;
 
@@ -22731,8 +23307,8 @@ function renderFFBB() {
     return `<div class="fade-up">${header}
       <div class="empty">
         <div class="empty-icon">○</div>
-        <div class="empty-title">${d.lastSync ? 'Aucun engagement trouvé' : 'Pas encore synchronisé'}</div>
-        <div class="empty-desc">${d.loading ? 'Chargement des compétitions…' : 'Lance « Sync » pour récupérer tout le championnat (calendrier, résultats, classement).'}</div>
+        <div class="empty-title">${d.lastSync ? 'Aucun engagement trouvé' : (readOnly ? 'Championnat indisponible' : 'Pas encore synchronisé')}</div>
+        <div class="empty-desc">${d.loading ? 'Chargement des compétitions…' : (readOnly ? 'Les données du championnat ne sont pas encore disponibles. Reviens plus tard.' : 'Lance « Sync » pour récupérer tout le championnat (calendrier, résultats, classement).')}</div>
       </div></div>`;
   }
 
@@ -23363,6 +23939,12 @@ function _initPlayersSync() {
         // - coach garde son choix s'il est valide, sinon fallback active
         // - joueuse toujours forcée sur la saison active
         try { ensureCurrentSeasonId(); } catch(e) {}
+        // DÉFIS AUTO PAR SAISON : backfill legacy + init des défis manquants sur
+        // la saison active. COACH UNIQUEMENT (jamais d'écriture défis depuis un
+        // device joueuse — la joueuse lit ce que le coach a synchronisé).
+        try {
+          if (state.auth && state.auth.role === 'coach') _ensureAutoChallenges();
+        } catch(e) { console.warn('[migration] auto challenges:', e.message); }
         // PHASE 2 : migration one-shot des plans d'entraînement legacy
         // (c.trainingPlan convoc-level, localStorage only) → entité per-instance
         // synchronisée. Idempotente (ne recrée pas une entrée existante).
@@ -23621,6 +24203,7 @@ function _renderBody() {
     // par section.
     if (state.view && state.view.type === 'match') content = renderMatchDetail();
     else if (state.view && state.view.type === 'play') content = renderPlayDetail();
+    else if (state.view && state.view.type === 'ffbb') content = renderFFBB();  // Feature 2 : dashboard FFBB lecture seule
     else if (state.section === 'home') content = renderHomePlayer();
     else if (state.section === 'plays') content = renderPlays();
     else if (state.section === 'challenges') content = renderPlayerChallenges();
