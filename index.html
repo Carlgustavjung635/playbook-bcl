@@ -14946,7 +14946,9 @@ function submitBroadcast() {
 
 // Carte d'accès sur la home coach (entrée + badge "N pas vu").
 function renderBroadcastCoachCard() {
-  const active = currentSeasonBroadcasts().filter(b => !b.archived);
+  const allSeason = currentSeasonBroadcasts();
+  const active = allSeason.filter(b => !b.archived);
+  const archivedCount = allSeason.length - active.length;
   const pending = broadcastsPendingCount();
   return `
     <div style="padding:0 18px;margin-bottom:18px">
@@ -14955,7 +14957,7 @@ function renderBroadcastCoachCard() {
         <div style="flex:1;min-width:0">
           <div style="font-family:'Anton';font-size:15px;text-transform:uppercase;letter-spacing:0.04em;color:var(--ink)">Diffuser un message</div>
           <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase;letter-spacing:0.04em">
-            ${active.length === 0 ? 'Message + photo/vidéo · accusés de réception' : `${active.length} diffusion${active.length > 1 ? 's' : ''} active${active.length > 1 ? 's' : ''}`}
+            ${active.length === 0 ? 'Message + photo/vidéo · accusés de réception' : `${active.length} diffusion${active.length > 1 ? 's' : ''} active${active.length > 1 ? 's' : ''}`}${archivedCount > 0 ? ` <span style="opacity:0.55">· +${archivedCount} archivée${archivedCount > 1 ? 's' : ''}</span>` : ''}
           </div>
         </div>
         ${pending > 0 ? `<span style="background:var(--orange);color:#1a0d00;font-family:'JetBrains Mono';font-size:11px;font-weight:700;padding:3px 9px;border-radius:20px">${pending} en attente</span>` : `<span style="color:var(--ink-3);font-size:18px">›</span>`}
@@ -14967,12 +14969,22 @@ function renderBroadcastCoachCard() {
 // ------------------------------------------------------------
 // UI COACH — gestionnaire / suivi
 // ------------------------------------------------------------
-function openBroadcastManager() { renderBroadcastManager(); }
+function openBroadcastManager() { state._broadcastManagerTab = 'active'; renderBroadcastManager(); }
+
+function setBroadcastManagerTab(tab) { state._broadcastManagerTab = tab; renderBroadcastManager(); }
 
 function renderBroadcastManager() {
   const all = currentSeasonBroadcasts().slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const active = all.filter(b => !b.archived);
   const archived = all.filter(b => b.archived);
+  // Onglet courant : 'active' par défaut. On retombe sur 'active' si l'onglet
+  // archives est vide (ex. après avoir rétabli le dernier message archivé).
+  let tab = state._broadcastManagerTab === 'archived' ? 'archived' : 'active';
+  if (tab === 'archived' && archived.length === 0) tab = 'active';
+  const list = tab === 'archived' ? archived : active;
+  const empty = tab === 'archived'
+    ? `<div class="empty" style="padding:24px"><div class="empty-icon">🗄</div><div class="empty-title">Aucun message archivé</div></div>`
+    : `<div class="empty" style="padding:24px"><div class="empty-icon">📭</div><div class="empty-title">Aucune diffusion active</div></div>`;
   openModal(`
     <div class="modal-header">
       <div class="modal-title">📢 Diffusions</div>
@@ -14980,13 +14992,13 @@ function renderBroadcastManager() {
     </div>
     <div class="modal-body">
       <button class="btn btn-primary btn-block mb-3" onclick="openBroadcastComposer()">+ Nouvelle diffusion</button>
-      ${active.length === 0 ? `
-        <div class="empty" style="padding:24px"><div class="empty-icon">📭</div><div class="empty-title">Aucune diffusion active</div></div>
-      ` : active.map(b => broadcastManagerRow(b)).join('')}
       ${archived.length ? `
-        <div class="eyebrow-muted" style="margin:16px 0 8px">Archivées (${archived.length})</div>
-        ${archived.map(b => broadcastManagerRow(b)).join('')}
+        <div class="segmented" style="margin-bottom:12px">
+          <button class="segmented-btn ${tab === 'active' ? 'active' : ''}" onclick="setBroadcastManagerTab('active')">Actives (${active.length})</button>
+          <button class="segmented-btn ${tab === 'archived' ? 'active' : ''}" onclick="setBroadcastManagerTab('archived')">Archivées (${archived.length})</button>
+        </div>
       ` : ''}
+      ${list.length === 0 ? empty : list.map(b => broadcastManagerRow(b)).join('')}
     </div>
   `);
 }
