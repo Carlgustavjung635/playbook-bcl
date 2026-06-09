@@ -23447,6 +23447,13 @@ async function ffbbDoImport() {
   const byId = Object.fromEntries(ffbbCatMatches(d.catTab).map(m => [m.id, m]));
   const ids = Array.from(document.querySelectorAll('.ffbb-imp:checked')).map(c => c.value);
   if (!ids.length) { alert('Sélectionne au moins un match.'); return; }
+  // La vue FFBB s'alimente via le proxy Netlify (pas Supabase) : on peut donc
+  // arriver ici sans client Supabase prêt (module esm.sh non chargé / hors ligne).
+  // Même garde-fou que les autres écritures, pour éviter un crash window.sb.from.
+  if (!window.sb || !window.Pb || !window.Pb.online) {
+    alert('⚠ Hors ligne ou base indisponible. Reconnecte-toi pour créer les convocations.');
+    return;
+  }
   const tag = (document.getElementById('ffbb-imp-tag') || {}).value || defaultEventTag();
   const seasonId = state.currentSeasonId || null;
 
