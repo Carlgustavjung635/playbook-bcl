@@ -3911,7 +3911,11 @@ const ENTITIES = [
       // created_at / expires_at : fixés une fois à la création → hash stable.
       created_at: b.createdAt ? new Date(b.createdAt).toISOString() : null,
       expires_at: b.expiresAt ? new Date(b.expiresAt).toISOString() : null,
-      archived: !!b.archived
+      archived: !!b.archived,
+      // updated_at : = createdAt à la création, = Date.now() à l'édition (audit).
+      // deleted_at : soft-delete (migration 20260610_001). != null = invisible UI.
+      updated_at: b.updatedAt ? new Date(b.updatedAt).toISOString() : (b.createdAt ? new Date(b.createdAt).toISOString() : null),
+      deleted_at: b.deletedAt ? new Date(b.deletedAt).toISOString() : null
     }])),
     apply: (state, rows) => {
       const localList = state.broadcasts || [];
@@ -3926,7 +3930,9 @@ const ENTITIES = [
         pollMulti: !!r.poll_multi,
         createdAt: r.created_at ? Date.parse(r.created_at) : null,
         expiresAt: r.expires_at ? Date.parse(r.expires_at) : null,
-        archived: !!r.archived
+        archived: !!r.archived,
+        updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
+        deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
       }));
       // Anti-wipe : un broadcast local fraîchement créé (id uid() = 'x…') pas
       // encore présent en remote (fenêtre de debounce 400ms) est préservé.
@@ -4760,8 +4766,13 @@ function _broadcastInSeason(b, seasonId) {
   if (b.seasonId) return b.seasonId === seasonId;
   return seasonId === activeId; // legacy : rattaché à active par défaut
 }
+// Soft-delete (migration 20260610_001) : un broadcast deleted_at != null reste
+// en base (audit / RGPD) mais disparaît de TOUTE l'UI. Choke point unique :
+// currentSeasonBroadcasts l'exclut → couvre com en cours, archives, recherche,
+// pending count, popup joueuse (tous passent par ici).
+function _broadcastDeleted(b) { return !!(b && b.deletedAt); }
 function currentSeasonBroadcasts() {
-  return (state.broadcasts || []).filter(b => _broadcastInSeason(b, state.currentSeasonId));
+  return (state.broadcasts || []).filter(b => !_broadcastDeleted(b) && _broadcastInSeason(b, state.currentSeasonId));
 }
 
 // ============================================================
@@ -14542,7 +14553,7 @@ function getPendingBroadcastsForPlayer(pid) {
   (state.broadcastReceipts || []).forEach(r => {
     if (r.playerId !== pid || (r.status !== 'pending' && r.status !== 'skipped')) return;
     const b = (state.broadcasts || []).find(x => x.id === r.broadcastId);
-    if (!b || b.archived) return;
+    if (!b || b.archived || _broadcastDeleted(b)) return;
     if (!_broadcastInSeason(b, state.currentSeasonId)) return; // saison précédente → plus de popup
     if (snoozed.has(b.id)) return; // « Plus tard » cliqué cette session → pas avant le prochain boot
     if (b.expiresAt && now > b.expiresAt) {
@@ -14829,12 +14840,14 @@ function renderBroadcastComposer() {
         Choix multiples autorisés
       </label>`;
 
+  const editing = !!d.editId;
   openModal(`
     <div class="modal-header">
-      <div class="modal-title">📢 Nouvelle diffusion</div>
+      <div class="modal-title">${editing ? '✎ Modifier la diffusion' : '📢 Nouvelle diffusion'}</div>
       <button class="modal-close" onclick="state._composeBroadcast=null;closeModal()">✕</button>
     </div>
     <div class="modal-body">
+      ${editing ? `<div style="padding:9px 12px;border-radius:8px;background:var(--bg-3);border:1px solid var(--border);font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';line-height:1.4;margin-bottom:14px">✎ Modifiable car personne ne l'a encore lu. La date d'envoi est conservée.</div>` : ''}
       <label class="eyebrow-muted" style="display:block;margin-bottom:6px">Type de message</label>
       <div style="display:flex;gap:6px;margin-bottom:16px">
         ${kindBtn('message', '💬 Message')}
@@ -14901,7 +14914,7 @@ function renderBroadcastComposer() {
         <option value="" ${!d.expiresInDays ? 'selected' : ''}>Pas d'expiration</option>
       </select>
 
-      <button class="btn btn-primary btn-block" ${d._uploading ? 'disabled' : ''} onclick="submitBroadcast()">${isPoll ? '📊 Lancer le sondage' : '📢 Envoyer la diffusion'}</button>
+      <button class="btn btn-primary btn-block" ${d._uploading ? 'disabled' : ''} onclick="submitBroadcast()">${editing ? '✓ Enregistrer les modifications' : (isPoll ? '📊 Lancer le sondage' : '📢 Envoyer la diffusion')}</button>
     </div>
   `);
 }
@@ -14932,12 +14945,27 @@ function submitBroadcast() {
   }
   const targets = broadcastTargetPlayerIds({ targetType: d.targetType, targetPlayerIds: d.targetPlayerIds, seasonId: getActiveSeasonId() });
   if (targets.length === 0) { alert('Aucune joueuse ciblée (effectif vide sur la saison active ?).'); return; }
-  const expiresAt = d.expiresInDays ? Date.now() + d.expiresInDays * 86400000 : null;
-  createBroadcast({
+  const payload = {
     id: d.id, message: msg, mediaUrl: d.mediaUrl, mediaType: d.mediaType,
-    targetType: d.targetType, targetPlayerIds: d.targetPlayerIds, expiresAt,
+    targetType: d.targetType, targetPlayerIds: d.targetPlayerIds,
     pollOptions: isPoll ? pollOptions : null, pollMulti: isPoll ? !!d.pollMulti : false
-  });
+  };
+  // MODE ÉDITION : on réancre l'expiration sur la date d'envoi d'origine (pas
+  // Date.now()) pour qu'elle ne glisse pas, et created_at reste intact.
+  if (d.editId) {
+    const orig = (state.broadcasts || []).find(x => x.id === d.editId);
+    const base = (orig && orig.createdAt) ? orig.createdAt : Date.now();
+    payload.expiresAt = d.expiresInDays ? base + d.expiresInDays * 86400000 : null;
+    const updated = updateBroadcast(d.editId, payload);
+    if (!updated) return; // garde-fou anti-course a bloqué (lu entre-temps)
+    state._composeBroadcast = null;
+    closeModal();
+    showToast('✎ Diffusion modifiée');
+    setTimeout(() => { try { openBroadcastManager(); } catch (e) {} }, 200);
+    return;
+  }
+  payload.expiresAt = d.expiresInDays ? Date.now() + d.expiresInDays * 86400000 : null;
+  createBroadcast(payload);
   state._composeBroadcast = null;
   closeModal();
   showToast((isPoll ? '📊 Sondage envoyé à ' : '📢 Diffusion envoyée à ') + targets.length + ' joueuse' + (targets.length > 1 ? 's' : ''));
@@ -14946,7 +14974,9 @@ function submitBroadcast() {
 
 // Carte d'accès sur la home coach (entrée + badge "N pas vu").
 function renderBroadcastCoachCard() {
-  const active = currentSeasonBroadcasts().filter(b => !b.archived);
+  const allSeason = currentSeasonBroadcasts();
+  const active = allSeason.filter(b => !b.archived);
+  const archivedCount = allSeason.length - active.length;
   const pending = broadcastsPendingCount();
   return `
     <div style="padding:0 18px;margin-bottom:18px">
@@ -14955,7 +14985,7 @@ function renderBroadcastCoachCard() {
         <div style="flex:1;min-width:0">
           <div style="font-family:'Anton';font-size:15px;text-transform:uppercase;letter-spacing:0.04em;color:var(--ink)">Diffuser un message</div>
           <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase;letter-spacing:0.04em">
-            ${active.length === 0 ? 'Message + photo/vidéo · accusés de réception' : `${active.length} diffusion${active.length > 1 ? 's' : ''} active${active.length > 1 ? 's' : ''}`}
+            ${active.length === 0 ? 'Message + photo/vidéo · accusés de réception' : `${active.length} diffusion${active.length > 1 ? 's' : ''} active${active.length > 1 ? 's' : ''}`}${archivedCount > 0 ? ` <span style="opacity:0.55">· +${archivedCount} archivée${archivedCount > 1 ? 's' : ''}</span>` : ''}
           </div>
         </div>
         ${pending > 0 ? `<span style="background:var(--orange);color:#1a0d00;font-family:'JetBrains Mono';font-size:11px;font-weight:700;padding:3px 9px;border-radius:20px">${pending} en attente</span>` : `<span style="color:var(--ink-3);font-size:18px">›</span>`}
@@ -14967,12 +14997,22 @@ function renderBroadcastCoachCard() {
 // ------------------------------------------------------------
 // UI COACH — gestionnaire / suivi
 // ------------------------------------------------------------
-function openBroadcastManager() { renderBroadcastManager(); }
+function openBroadcastManager() { state._broadcastManagerTab = 'active'; renderBroadcastManager(); }
+
+function setBroadcastManagerTab(tab) { state._broadcastManagerTab = tab; renderBroadcastManager(); }
 
 function renderBroadcastManager() {
   const all = currentSeasonBroadcasts().slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const active = all.filter(b => !b.archived);
   const archived = all.filter(b => b.archived);
+  // Onglet courant : 'active' par défaut. On retombe sur 'active' si l'onglet
+  // archives est vide (ex. après avoir rétabli le dernier message archivé).
+  let tab = state._broadcastManagerTab === 'archived' ? 'archived' : 'active';
+  if (tab === 'archived' && archived.length === 0) tab = 'active';
+  const list = tab === 'archived' ? archived : active;
+  const empty = tab === 'archived'
+    ? `<div class="empty" style="padding:24px"><div class="empty-icon">📁</div><div class="empty-title">Aucun message archivé</div></div>`
+    : `<div class="empty" style="padding:24px"><div class="empty-icon">📭</div><div class="empty-title">Aucune communication en cours</div></div>`;
   openModal(`
     <div class="modal-header">
       <div class="modal-title">📢 Diffusions</div>
@@ -14980,32 +15020,57 @@ function renderBroadcastManager() {
     </div>
     <div class="modal-body">
       <button class="btn btn-primary btn-block mb-3" onclick="openBroadcastComposer()">+ Nouvelle diffusion</button>
-      ${active.length === 0 ? `
-        <div class="empty" style="padding:24px"><div class="empty-icon">📭</div><div class="empty-title">Aucune diffusion active</div></div>
-      ` : active.map(b => broadcastManagerRow(b)).join('')}
       ${archived.length ? `
-        <div class="eyebrow-muted" style="margin:16px 0 8px">Archivées (${archived.length})</div>
-        ${archived.map(b => broadcastManagerRow(b)).join('')}
+        <div class="segmented" style="margin-bottom:12px">
+          <button class="segmented-btn ${tab === 'active' ? 'active' : ''}" onclick="setBroadcastManagerTab('active')">En cours (${active.length})</button>
+          <button class="segmented-btn ${tab === 'archived' ? 'active' : ''}" onclick="setBroadcastManagerTab('archived')">📁 Archives (${archived.length})</button>
+        </div>
       ` : ''}
+      ${tab === 'active'
+        ? `<div class="eyebrow-muted" style="margin:2px 0 10px">${active.length} communication${active.length > 1 ? 's' : ''} en cours${archived.length ? ` <span style="opacity:0.55">· +${archived.length} archivée${archived.length > 1 ? 's' : ''}</span>` : ''}</div>`
+        : `<div class="eyebrow-muted" style="margin:2px 0 10px">${archived.length} message${archived.length > 1 ? 's' : ''} archivé${archived.length > 1 ? 's' : ''} · masqué${archived.length > 1 ? 's' : ''} des joueuses</div>`}
+      ${list.length === 0 ? empty : list.map(b => broadcastManagerRow(b, tab)).join('')}
     </div>
   `);
 }
 
-function broadcastManagerRow(b) {
+// view : 'active' (com en cours) | 'archived' (archives). Conditionne les actions.
+function broadcastManagerRow(b, view) {
   const s = broadcastStats(b);
   const poll = isPollBroadcast(b);
   const preview = esc((b.message || '').trim().slice(0, 90)) || '<span style="color:var(--ink-3)">(média seul)</span>';
   const icon = poll ? '📊 ' : (b.mediaType === 'video' ? '🎬 ' : (b.mediaType === 'image' ? '🖼 ' : (b.mediaType === 'embed' ? '🔗 ' : '')));
   const expired = b.expiresAt && Date.now() > b.expiresAt;
   const pr = poll ? pollResults(b) : null;
+  // Édition possible UNIQUEMENT tant que personne n'a lu (vu/skippé/compris).
+  const readCount = broadcastReadCount(b);
+  const canEdit = readCount === 0;
+  const edited = b.updatedAt && b.createdAt && b.updatedAt > b.createdAt + 1000;
+  const btn = (label, onclick, color, extra) => `<button class="btn btn-ghost" style="font-size:12px;padding:7px 12px;${color ? 'color:' + color + ';' : ''}${extra || ''}" onclick="${onclick}">${label}</button>`;
+  // Barre d'actions selon la vue.
+  const actions = view === 'archived'
+    ? `
+        <button class="btn btn-secondary" style="font-size:12px;padding:7px 12px;flex:1;min-width:110px" onclick="openBroadcastDetail('${esc(b.id)}')">Voir détails</button>
+        ${btn('↺ Rétablir', `unarchiveBroadcast('${esc(b.id)}')`, 'var(--green)')}
+        ${btn('🗑', `confirmDeleteBroadcastPermanent('${esc(b.id)}')`, 'var(--red)', 'flex:0 0 auto')}
+      `
+    : `
+        <button class="btn btn-secondary" style="font-size:12px;padding:7px 12px;flex:1;min-width:110px" onclick="openBroadcastDetail('${esc(b.id)}')">Voir détails</button>
+        ${canEdit
+          ? btn('✎ Modifier', `openBroadcastEditor('${esc(b.id)}')`, 'var(--ink-2)')
+          : `<button class="btn btn-ghost" disabled title="Lu par ${readCount} destinataire${readCount > 1 ? 's' : ''}, modification non possible" style="font-size:12px;padding:7px 12px;color:var(--ink-3);opacity:0.45;cursor:not-allowed">✎ Modifier</button>`}
+        ${btn('📁 Archiver', `archiveBroadcast('${esc(b.id)}')`, 'var(--ink-3)')}
+        ${btn('🗑', `confirmDeleteBroadcast('${esc(b.id)}')`, 'var(--red)', 'flex:0 0 auto')}
+      `;
   return `
-    <div style="padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:10px;${b.archived ? 'opacity:0.6' : ''}">
+    <div style="padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:10px;${b.archived ? 'opacity:0.7' : ''}">
       <div style="font-size:14px;color:var(--ink);line-height:1.4;margin-bottom:8px">${icon}${preview}</div>
       ${poll ? `
         <div style="margin:8px 0 10px">${renderPollBars(b)}</div>
         <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
           <span style="font-size:11px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--green-soft);color:var(--green)">🗳 ${pr.voters}/${s.total} ont voté</span>
           ${b.pollMulti ? `<span style="font-size:11px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--bg-3);color:var(--ink-3)">choix multiples</span>` : ''}
+          ${edited ? `<span title="Modifié après création" style="font-size:10px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--bg-3);color:var(--ink-3)">✎ modifié</span>` : ''}
           ${expired ? `<span style="font-size:10px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--red-soft);color:var(--red)">clôturé</span>` : ''}
         </div>
       ` : `
@@ -15013,12 +15078,10 @@ function broadcastManagerRow(b) {
         <span style="font-size:11px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--green-soft);color:var(--green)">✓ ${s.acknowledged}/${s.total} compris</span>
         ${s.skipped ? `<span title="Reverront le message à leur prochaine ouverture" style="font-size:11px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--bg-3);color:var(--ink-3)">⏭ ${s.skipped} plus tard</span>` : ''}
         ${s.pending ? `<span style="font-size:11px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--orange-soft);color:var(--orange)">● ${s.pending} pas vu</span>` : ''}
+        ${edited ? `<span title="Modifié après création" style="font-size:10px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--bg-3);color:var(--ink-3)">✎ modifié</span>` : ''}
         ${expired ? `<span style="font-size:10px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:6px;background:var(--red-soft);color:var(--red)">expiré</span>` : ''}
       </div>`}
-      <div style="display:flex;gap:6px">
-        <button class="btn btn-secondary" style="font-size:12px;padding:7px 12px;flex:1" onclick="openBroadcastDetail('${esc(b.id)}')">Voir détails</button>
-        <button class="btn btn-ghost" style="font-size:12px;padding:7px 12px;color:${b.archived ? 'var(--green)' : 'var(--ink-3)'}" onclick="${b.archived ? 'unarchiveBroadcast' : 'archiveBroadcast'}('${esc(b.id)}')">${b.archived ? '↺ Rétablir' : '🗄 Archiver'}</button>
-      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">${actions}</div>
     </div>
   `;
 }
@@ -15085,6 +15148,99 @@ function unarchiveBroadcast(id) {
   persist();
   if (window.PbSync) PbSync.flushNow(state).catch(() => {});
   renderBroadcastManager();
+}
+
+// ------------------------------------------------------------
+// ÉDITION & SUPPRESSION (coach) — migration 20260610_001
+// ------------------------------------------------------------
+// read_count : nb de destinataires ayant "lu" (vu / plus tard / compris).
+// 0 → message encore éditable (personne ne l'a vu).
+function broadcastReadCount(b) {
+  const s = broadcastStats(b);
+  return s.acknowledged + s.skipped + s.seen;
+}
+
+// Ouvre le composer en MODE ÉDITION (préfill depuis le broadcast existant).
+// Refuse si déjà lu (garde-fou ; le bouton est aussi désactivé côté UI).
+function openBroadcastEditor(id) {
+  const b = (state.broadcasts || []).find(x => x.id === id);
+  if (!b || _broadcastDeleted(b)) return;
+  const rc = broadcastReadCount(b);
+  if (rc > 0) { alert('Lu par ' + rc + ' destinataire' + (rc > 1 ? 's' : '') + ' — modification non possible.'); return; }
+  const isPoll = isPollBroadcast(b);
+  const isEmbed = b.mediaType === 'embed';
+  // expiresInDays reconstruit depuis l'écart created→expires (réancré à la
+  // création au submit, pour que l'expiration ne glisse pas à chaque édition).
+  let expiresInDays = 0;
+  if (b.expiresAt && b.createdAt) expiresInDays = Math.max(0, Math.round((b.expiresAt - b.createdAt) / 86400000));
+  state._composeBroadcast = {
+    id: b.id,
+    editId: b.id,
+    kind: isPoll ? 'poll' : 'message',
+    pollOptions: isPoll ? b.pollOptions.slice() : ['', ''],
+    pollMulti: !!b.pollMulti,
+    message: b.message || '',
+    mediaUrl: b.mediaUrl || '', mediaType: b.mediaType || null,
+    mediaMode: isEmbed ? 'url' : 'file',
+    urlDraft: isEmbed ? (b.mediaUrl || '') : '',
+    targetType: b.targetType || 'team',
+    targetPlayerIds: Array.isArray(b.targetPlayerIds) ? b.targetPlayerIds.slice() : [],
+    expiresInDays,
+    _uploading: false
+  };
+  renderBroadcastComposer();
+}
+
+// MAJ d'un broadcast existant (édition). created_at intact, updated_at = now.
+// Re-vérifie read_count (anti-course realtime). Réconcilie les receipts pour
+// matcher la nouvelle cible : tous 'pending' (read_count===0) → aucune perte.
+function updateBroadcast(id, payload) {
+  const b = (state.broadcasts || []).find(x => x.id === id);
+  if (!b) return null;
+  if (broadcastReadCount(b) > 0) {
+    alert('Ce message vient d\'être lu par un destinataire — modification annulée.');
+    return null;
+  }
+  b.message = (payload.message || '').trim();
+  b.mediaUrl = payload.mediaUrl || '';
+  b.mediaType = ['image', 'video', 'embed'].includes(payload.mediaType) ? payload.mediaType : null;
+  b.targetType = ['team', 'players', 'e1', 'e2'].includes(payload.targetType) ? payload.targetType : 'team';
+  b.targetPlayerIds = Array.isArray(payload.targetPlayerIds) ? payload.targetPlayerIds.slice() : [];
+  b.pollOptions = (Array.isArray(payload.pollOptions) && payload.pollOptions.length >= 2) ? payload.pollOptions.slice(0, 6).map(o => String(o)) : null;
+  b.pollMulti = !!payload.pollMulti;
+  b.expiresAt = payload.expiresAt || null;
+  b.updatedAt = Date.now();
+  // Receipts : on repart d'un set propre aligné sur la cible. Si la cible n'a
+  // pas changé, les clés (broadcast_id|player_id) sont identiques → dump stable
+  // → 0 op sync. Si une joueuse est retirée, son receipt 'pending' est supprimé.
+  state.broadcastReceipts = (state.broadcastReceipts || []).filter(r => r.broadcastId !== id);
+  broadcastTargetPlayerIds(b).forEach(pid => {
+    state.broadcastReceipts.push({ broadcastId: id, playerId: pid, status: 'pending', seenAt: null, actedAt: null, pollChoice: null });
+  });
+  persist();
+  if (window.PbSync) PbSync.flushNow(state).catch(() => {});
+  return b;
+}
+
+// SOFT-DELETE : pose deleted_at. Le message reste en base (audit / RGPD) mais
+// disparaît de TOUTE l'UI (com en cours, archives, recherche, popup joueuse).
+function deleteBroadcast(id) {
+  const b = (state.broadcasts || []).find(x => x.id === id);
+  if (!b) return;
+  const now = Date.now();
+  b.deletedAt = now;
+  b.updatedAt = now;
+  persist();
+  if (window.PbSync) PbSync.flushNow(state).catch(() => {});
+  renderBroadcastManager();
+}
+function confirmDeleteBroadcast(id) {
+  if (!confirm('Supprimer ce message ?\n\nIl disparaîtra de l\'app (com en cours, archives, popup joueuse). Conservé en base pour l\'audit, mais non récupérable depuis l\'app.\n\nContinuer ?')) return;
+  deleteBroadcast(id);
+}
+function confirmDeleteBroadcastPermanent(id) {
+  if (!confirm('Supprimer définitivement ce message archivé ?\n\nCette action est irréversible côté app : il ne sera plus visible nulle part.\n\nVoulez-vous continuer ?')) return;
+  deleteBroadcast(id);
 }
 
 // ------------------------------------------------------------
