@@ -6927,7 +6927,7 @@ function renderHomeCoach() {
         </div>
       ` : `
         <div class="list-section">
-          ${upcomingEvents.slice(1, 8).map(e => eventInstanceRow(e, true)).join('')}
+          ${upcomingEvents.slice(1, 8).map(e => eventInstanceRow(e, true, { hideGuestBtn: true })).join('')}
         </div>
       `}
 
@@ -7144,7 +7144,8 @@ function renderHomeCoach() {
 }
 
 // Row pour une instance d'événement (utilisée Home + Team)
-function eventInstanceRow(ev, isCoach) {
+function eventInstanceRow(ev, isCoach, opts) {
+  opts = opts || {};
   const d = new Date(ev.date + 'T00:00:00');
   const dayName = DAY_NAMES_FR_FULL[d.getDay()];
   const day = d.getDate();
@@ -7158,6 +7159,10 @@ function eventInstanceRow(ev, isCoach) {
   const parentConvoc = state.convocations.find(x => x.id === parentId);
   const isCancelled = parentConvoc && (parentConvoc.cancelledInstances || []).includes(instanceDate);
   const showGuestUI = isCoach && !isMatch && !isCancelled;
+  // Bouton « + joueuse temporaire » masqué dans la Home agenda (opts.hideGuestBtn) :
+  // l'effectif d'une séance se gère depuis le détail / les convocations, pas ici.
+  // Le chip « +N 👤 » (info) reste affiché.
+  const showGuestBtn = showGuestUI && !opts.hideGuestBtn;
   const guestCount = showGuestUI ? getTrainingGuests(parentId, instanceDate).length : 0;
   // CHANTIER B : badge « À clôturer » sur un entraînement passé non clôturé
   // (coach + saison active, cohérent avec le bandeau home).
@@ -7180,7 +7185,7 @@ function eventInstanceRow(ev, isCoach) {
         </div>
         <div class="list-row-subtitle">${dayName}${ev.time ? ' · ' + ev.time : ''}${ev.location ? ' · ' + esc(ev.location) : ''}</div>
       </div>
-      ${showGuestUI ? `<button class="btn btn-icon" onclick="event.stopPropagation();openAddGuestModal('${parentId}','${instanceDate}')" title="Ajouter une joueuse temporaire" style="color:var(--orange);font-size:16px;margin-right:2px">+👤</button>` : ''}
+      ${showGuestBtn ? `<button class="btn btn-icon" onclick="event.stopPropagation();openAddGuestModal('${parentId}','${instanceDate}')" title="Ajouter une joueuse temporaire" style="color:var(--orange);font-size:16px;margin-right:2px">+👤</button>` : ''}
       <span class="list-row-trail">›</span>
     </div>
   `;
