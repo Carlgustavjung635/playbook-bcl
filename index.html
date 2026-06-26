@@ -5001,6 +5001,193 @@ function _ensureAutoChallenges() {
   return changed;
 }
 
+// ============================================================
+// CLOISONNEMENT SAISON PAR DATE — anti-contamination cross-saison
+// ------------------------------------------------------------
+// BUG corrigé : la clôture d'un entraînement (ou la validation d'un retard)
+// créditait le défi auto de `c.seasonId || state.currentSeasonId`, c.-à-d. la
+// saison de la CONVOCATION (ou la saison ACTIVE pour une convoc legacy sans
+// seasonId), JAMAIS la saison de la DATE réelle de l'instance. Conséquence :
+// clôturer rétroactivement un entraînement de juin (saison N) alors qu'on est
+// en septembre (saison N+1) comptait la présence dans la saison N+1.
+//
+// Règle : la saison d'une présence/d'un retard = saison de la DATE de l'instance.
+// `getSeasonIdForDate` mappe une date ISO vers la saison dont la plage
+// [startDate, endDate] la contient. Fallback non régressif : si aucune saison ne
+// couvre la date (ou saisons pas encore chargées), on retombe sur l'ancien
+// comportement (c.seasonId puis currentSeasonId) → jamais pire qu'avant.
+
+// Saison (id) couvrant une date ISO 'YYYY-MM-DD'. null si aucune / non chargées.
+function getSeasonIdForDate(dateStr) {
+  if (!dateStr || !_seasonsLoaded()) return null;
+  const hit = (state.seasons || []).find(s =>
+    s.startDate && dateStr >= s.startDate && (!s.endDate || dateStr <= s.endDate));
+  return hit ? hit.id : null;
+}
+
+// Saison à créditer pour une instance de convoc (clôture / appel) : priorité à
+// la saison de la DATE, puis la saison de la convoc, puis la saison courante.
+function seasonIdForConvocInstance(c, instanceDate) {
+  const d = instanceDate || (c && c.date) || null;
+  return getSeasonIdForDate(d) || (c && c.seasonId) || state.currentSeasonId || null;
+}
+
+// ============================================================
+// COMPTEURS AUTO DÉRIVÉS DES SOURCES (filtre période + recompute migration)
+// ------------------------------------------------------------
+// Reconstruit les compteurs des 3 défis auto à partir des ÉVÉNEMENTS SOURCES
+// (instances de convoc clôturées + feuilles d'appel) sur une fenêtre de dates,
+// en attribuant chaque événement à la saison de sa DATE. Présomption favorable
+// identique à la clôture : toute joueuse de l'effectif non explicitement absente
+// est comptée présente (donc « à l'heure » si aucun retard saisi).
+// Retour : { attendance_training:{seasonId:{pid:n}}, attendance_match:{...}, punctuality:{...} }.
+function computeAutoScoresFromSource(fromISO, toISO) {
+  const out = { attendance_training: {}, attendance_match: {}, punctuality: {} };
+  const bump = (type, sid, pid, delta) => {
+    if (!sid) return;
+    out[type][sid] = out[type][sid] || {};
+    out[type][sid][pid] = (out[type][sid][pid] || 0) + delta;
+  };
+  (state.convocations || []).forEach(c => {
+    const team = c.teamTag === 'both' ? 'all' : (c.teamTag === 'e2' ? 'e2' : 'e1');
+    getConvocInstances(c, fromISO, toISO).forEach(inst => {
+      const date = inst.date;
+      const sid = getSeasonIdForDate(date);
+      const pool = (_seasonsLoaded() && sid) ? getSeasonPlayers(sid, { team }) : (state.players || []);
+      // Présences : seules les instances CLÔTURÉES comptent (miroir du modèle live).
+      if (inst.closed) {
+        const responses = inst.responses || {};
+        const type = c.type === 'match' ? 'attendance_match' : 'attendance_training';
+        pool.forEach(p => {
+          const r = responses[p.id];
+          if (!r || r.status === 'present') bump(type, sid, p.id, 1);
+        });
+      }
+      // Ponctualité : depuis les arrivées saisies (indépendant du flag clôturé).
+      const sheet = (c.recurrence
+        ? ((c.instanceOverrides || {})[date] || {}).callSheet
+        : c.callSheet) || null;
+      const arrivals = sheet && sheet.arrivals;
+      if (arrivals) {
+        Object.keys(arrivals).forEach(pid => {
+          const late = (arrivals[pid] && arrivals[pid].lateMin) || 0;
+          if (late > 0) bump('punctuality', sid, pid, late);
+        });
+      }
+    });
+  });
+  return out;
+}
+
+// Journal d'audit minimal (localStorage, hors moteur de sync) : qui/quand/quoi
+// pour reset, édition et recompute des compteurs. Garde les 100 dernières entrées.
+const CHALLENGE_AUDIT_KEY = 'pb8_challenge_audit';
+function _logChallengeAudit(action, details) {
+  try {
+    const a = state.auth || {};
+    const who = a.role === 'coach' ? 'coach' : (a.role === 'player' ? ('player:' + (a.playerId || '?')) : 'unknown');
+    const log = JSON.parse(localStorage.getItem(CHALLENGE_AUDIT_KEY) || '[]');
+    log.unshift(Object.assign({ ts: new Date().toISOString(), who, action }, details || {}));
+    localStorage.setItem(CHALLENGE_AUDIT_KEY, JSON.stringify(log.slice(0, 100)));
+  } catch (e) { /* audit best-effort */ }
+}
+function getChallengeAudit() {
+  try { return JSON.parse(localStorage.getItem(CHALLENGE_AUDIT_KEY) || '[]'); } catch (e) { return []; }
+}
+
+// Routine de MIGRATION ponctuelle (idempotente, loggée, non destructive) : re-clé
+// les compteurs auto vers la BONNE saison à partir des sources (dates). Recalcule
+// TOUTES les saisons depuis le premier startDate connu jusqu'à aujourd'hui.
+// dryRun=true → retourne seulement le diff sans rien écrire. À l'application, on
+// snapshote les scores actuels dans le journal d'audit (réversible).
+function recomputeAutoChallengeScores(opts) {
+  opts = opts || {};
+  const dryRun = !!opts.dryRun;
+  const todayISO = isoDate(new Date());
+  const starts = (state.seasons || []).map(s => s.startDate).filter(Boolean).sort();
+  const fromISO = starts[0] || '2000-01-01';
+  const computed = computeAutoScoresFromSource(fromISO, todayISO);
+  const report = [];
+  const backup = [];
+  ['attendance_training', 'attendance_match', 'punctuality'].forEach(type => {
+    const bySeason = computed[type] || {};
+    const seasonIds = new Set([
+      ...Object.keys(bySeason),
+      ...(state.challenges || []).filter(c => c.autoCount && c.type === type && c.seasonId).map(c => c.seasonId),
+    ]);
+    seasonIds.forEach(sid => {
+      const ch = getAutoChallenge(type, sid); // crée le défi si absent
+      if (!ch) return;
+      const before = ch.scores || {};
+      const after = bySeason[sid] || {};
+      const pids = new Set([...Object.keys(before), ...Object.keys(after)]);
+      let changedPlayers = 0, beforeTotal = 0, afterTotal = 0;
+      pids.forEach(pid => {
+        const b = before[pid] || 0, a = after[pid] || 0;
+        beforeTotal += b; afterTotal += a;
+        if (b !== a) changedPlayers++;
+      });
+      if (changedPlayers > 0 || beforeTotal !== afterTotal) {
+        report.push({ type, seasonId: sid, beforeTotal, afterTotal, changedPlayers });
+      }
+      if (!dryRun) {
+        backup.push({ challengeId: ch.id, type, seasonId: sid, scores: { ...before } });
+        ch.scores = { ...after };
+      }
+    });
+  });
+  if (!dryRun) {
+    _logChallengeAudit('recompute', { report, backup });
+    persist();
+  }
+  return report;
+}
+
+// ============================================================
+// FILTRE PÉRIODE DES DÉFIS AUTO (pb8_challenge_period) — coach + joueuse
+// ------------------------------------------------------------
+// 'season' (défaut) : affiche les compteurs canoniques persistés (éditables).
+// 'month' / 'trimester' : recalcule l'affichage depuis les sources sur la
+// fenêtre (lecture seule). Trimestre = bloc SPORTIF de 3 mois aligné sur le mois
+// de début de la saison courante (sept→nov / déc→fév / mars→mai / juin→août),
+// plus pertinent qu'un trimestre civil pour une saison sept→juin.
+const CHALLENGE_PERIOD_KEY = 'pb8_challenge_period';
+function getChallengePeriod() {
+  const v = (typeof localStorage !== 'undefined') ? localStorage.getItem(CHALLENGE_PERIOD_KEY) : null;
+  return (v === 'month' || v === 'trimester') ? v : 'season';
+}
+function setChallengePeriod(p) {
+  try { localStorage.setItem(CHALLENGE_PERIOD_KEY, p); } catch (e) {}
+  if (typeof render === 'function') render();
+}
+function challengePeriodWindow(period) {
+  period = period || getChallengePeriod();
+  const now = new Date();
+  if (period === 'month') {
+    const from = new Date(now.getFullYear(), now.getMonth(), 1);
+    const to = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    return { from: isoDate(from), to: isoDate(to) };
+  }
+  if (period === 'trimester') {
+    const season = getCurrentSeason();
+    let startMonth = 8; // septembre par défaut (saison sportive)
+    if (season && season.startDate) startMonth = new Date(season.startDate + 'T00:00:00').getMonth();
+    const since = ((now.getMonth() - startMonth) + 12) % 12;
+    const back = since % 3;
+    const from = new Date(now.getFullYear(), now.getMonth() - back, 1);
+    const to = new Date(from.getFullYear(), from.getMonth() + 3, 0);
+    return { from: isoDate(from), to: isoDate(to) };
+  }
+  const season = getCurrentSeason();
+  return { from: (season && season.startDate) || '0000-01-01', to: (season && season.endDate) || '9999-12-31' };
+}
+function challengePeriodShortLabel(period) {
+  period = period || getChallengePeriod();
+  if (period === 'month') return 'Mois';
+  if (period === 'trimester') return 'Trimestre';
+  return 'Saison';
+}
+
 // Ressentis équipe de la saison courante. teamReviews n'a PAS de season_id en
 // base → on filtre par plage de dates [season.startDate, season.endDate] (option
 // retenue : zéro migration). r.date est une chaîne ISO YYYY-MM-DD (cf.
@@ -13725,9 +13912,12 @@ function deleteConvoc(id) {
 // signalé d'absence est comptée présente (cohérent avec l'appel / l'UI).
 function _applyConvocClosure(c, instanceDate) {
   if (!c) return false;
-  // SAISON : comptabilise uniquement les joueuses de la saison de la convoc.
+  // SAISON : comptabilise dans la saison de la DATE de l'instance (et non la
+  // saison de la convoc / la saison active) → fini la contamination cross-saison
+  // sur clôture rétroactive. L'effectif crédité est celui de cette même saison.
   // MULTI-EFFECTIF : scopé sur l'équipe de la convoc ('both' → tout l'effectif).
-  const _seasonId = c.seasonId || state.currentSeasonId;
+  const _instDate = instanceDate || c.date || null;
+  const _seasonId = seasonIdForConvocInstance(c, _instDate);
   const _convTeam = c.teamTag === 'both' ? 'all' : (c.teamTag === 'e2' ? 'e2' : 'e1');
   const _seasonPool = _seasonsLoaded() && _seasonId
     ? getSeasonPlayers(_seasonId, { team: _convTeam })
@@ -17532,8 +17722,8 @@ function validateArrival(parentId, dateStr, pid) {
 
   sheet.arrivals[pid] = { at: now, lateMin };
 
-  // Mettre à jour le challenge ponctualité (delta) — défi de la SAISON de la convoc.
-  const ch = getAutoChallenge('punctuality', c.seasonId || state.currentSeasonId);
+  // Mettre à jour le challenge ponctualité (delta) — défi de la SAISON de la DATE.
+  const ch = getAutoChallenge('punctuality', seasonIdForConvocInstance(c, dateStr));
   if (ch) {
     ch.scores = ch.scores || {};
     ch.scores[pid] = Math.max(0, (ch.scores[pid] || 0) - oldLate + lateMin);
@@ -17552,8 +17742,8 @@ function undoArrival(parentId, dateStr, pid) {
   const entry = sheet.arrivals && sheet.arrivals[pid];
   if (!entry) return;
 
-  // Retirer du challenge — défi de la SAISON de la convoc.
-  const ch = getAutoChallenge('punctuality', c.seasonId || state.currentSeasonId);
+  // Retirer du challenge — défi de la SAISON de la DATE.
+  const ch = getAutoChallenge('punctuality', seasonIdForConvocInstance(c, dateStr));
   if (ch && ch.scores) {
     ch.scores[pid] = Math.max(0, (ch.scores[pid] || 0) - entry.lateMin);
   }
@@ -17975,6 +18165,7 @@ function renderChallenges() {
       <div class="section-header" style="margin-top:8px">
         <div><div class="eyebrow" style="color:var(--ink-3)">⚙ Auto</div><h2 class="display-md mt-2" style="color:var(--ink-2)">Compteurs auto</h2></div>
       </div>
+      ${renderChallengePeriodToggle(isCoach)}
       ${autoChallenges.map(c => challengeCard(c, isCoach)).join('')}
     ` : ''}
 
@@ -18021,7 +18212,7 @@ function createChallengeFromIdea(idea) {
 }
 
 function challengeCard(c, isCoach) {
-  const scores = c.scores || {};
+  let scores = c.scores || {};
   const isCollective = c.scope === 'collective';
   const isAuto = c.autoCount;
   const scopeBadge = isCollective ? '🤝 Collectif' : (c.scope === 'season' ? '📅 Saison' : '🎯 Individuel');
@@ -18134,6 +18325,16 @@ function challengeCard(c, isCoach) {
   // SAISON : leaderboard restreint à l'effectif de la saison du challenge.
   // MULTI-EFFECTIF : scopé sur l'équipe du défi ('both' → tout l'effectif).
   const _seasonId2 = c.seasonId || state.currentSeasonId;
+  // FILTRE PÉRIODE (défis auto uniquement) : hors 'season', on remplace les
+  // compteurs persistés par un recalcul depuis les sources sur la fenêtre
+  // (lecture seule). 'season' garde les compteurs canoniques éditables.
+  const _period = getChallengePeriod();
+  const _derived = isAuto && _period !== 'season';
+  if (_derived) {
+    const _w = challengePeriodWindow(_period);
+    const _comp = computeAutoScoresFromSource(_w.from, _w.to);
+    scores = (_comp[c.type] && _comp[c.type][_seasonId2]) || {};
+  }
   const _chTeam = c.teamTag === 'both' ? 'all' : (c.teamTag === 'e2' ? 'e2' : 'e1');
   const _seasonPool2 = _seasonsLoaded() && _seasonId2
     ? getSeasonPlayers(_seasonId2, { team: _chTeam })
@@ -18152,6 +18353,7 @@ function challengeCard(c, isCoach) {
         <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap">
           <span class="chip ${scopeColor}">${scopeBadge}</span>
           ${isAuto ? `<span class="chip chip-purple">AUTO</span>` : ''}
+          ${_derived ? `<span class="chip chip-blue">📅 ${esc(challengePeriodShortLabel(_period))} · lecture seule</span>` : ''}
           ${c.endDate ? `<span class="chip">Fin ${formatDate(c.endDate)}</span>` : ''}
         </div>
         <div style="font-family:'Anton';font-size:18px;text-transform:uppercase;letter-spacing:0.02em;margin-bottom:4px">${esc(c.title)}</div>
@@ -18161,6 +18363,8 @@ function challengeCard(c, isCoach) {
           <div style="display:flex;gap:4px;margin-top:10px;justify-content:flex-end;flex-wrap:wrap">
             ${entries.some(e => e.score > 0) ? `<button class="btn btn-secondary" onclick="openChallengeStoryModal('${c.id}')" style="font-size:10px;padding:6px 10px">📸 Exporter victoire</button>` : ''}
             ${(c.scope === 'individual' && !c.badgesAwarded) ? `<button class="btn btn-secondary" onclick="closeChallengeNow('${c.id}')" style="font-size:10px;padding:6px 10px">🏁 Clôturer & attribuer trophées</button>` : (c.scope === 'individual' && c.badgesAwarded ? '<span class="chip chip-green">🏆 Trophées attribués</span>' : '')}
+            ${isAuto && !_derived ? `<button class="btn btn-icon" onclick="openEditAutoChallenge('${c.id}')" title="Éditer les compteurs (par joueuse)" aria-label="Éditer les compteurs">🔢</button><button class="btn btn-icon" onclick="resetAutoChallenge('${c.id}')" style="color:var(--red)" title="Réinitialiser les compteurs à 0" aria-label="Réinitialiser les compteurs">↺</button>` : ''}
+            ${isAuto && _derived ? `<span style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';align-self:center">↺/🔢 sur vue Saison</span>` : ''}
             <button class="btn btn-icon" onclick="editChallenge('${c.id}')" title="Modifier le défi" aria-label="Modifier le défi">✎</button>
             <button class="btn btn-icon" onclick="deleteChallenge('${c.id}')" style="color:var(--red)" title="Supprimer le défi" aria-label="Supprimer le défi">🗑</button>
           </div>
@@ -18197,6 +18401,144 @@ function challengeCard(c, isCoach) {
       })()}
     </div>
   `;
+}
+
+// Toggle de période (mois / trimestre / saison) au-dessus des compteurs auto.
+// Visible coach ET joueuse (chacun voit ses propres stats filtrées). Le bouton
+// « Recalculer » (migration depuis les présences) est réservé au coach.
+function renderChallengePeriodToggle(isCoach) {
+  const cur = getChallengePeriod();
+  const w = challengePeriodWindow(cur);
+  const opts = [
+    { key: 'month', label: 'Mois' },
+    { key: 'trimester', label: 'Trimestre' },
+    { key: 'season', label: 'Saison' },
+  ];
+  return `
+    <div style="margin:0 18px 10px">
+      <div style="display:flex;gap:4px;background:var(--bg-2);border:1px solid var(--border-soft);border-radius:10px;padding:4px">
+        ${opts.map(o => `
+          <button onclick="setChallengePeriod('${o.key}')" style="flex:1;padding:8px 4px;border:0;border-radius:7px;cursor:pointer;font-family:'Anton';font-size:11px;text-transform:uppercase;letter-spacing:0.03em;background:${cur===o.key?'var(--orange)':'transparent'};color:${cur===o.key?'#fff':'var(--ink-2)'}">${o.label}</button>
+        `).join('')}
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;gap:8px">
+        <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.04em">
+          ${cur === 'season' ? 'Compteurs cumulés de la saison' : `Fenêtre ${formatDate(w.from,'short')} → ${formatDate(w.to,'short')} · lecture seule`}
+        </div>
+        ${isCoach ? `<button class="btn btn-ghost" onclick="openRecomputeChallengesModal()" style="font-size:9px;padding:4px 8px;white-space:nowrap" title="Recalculer les compteurs depuis les présences (corrige une contamination cross-saison)">🔧 Recalculer</button>` : ''}
+      </div>
+    </div>
+  `;
+}
+
+// Réinitialise un compteur auto à 0 pour toutes les joueuses de la saison (avec
+// confirm + trace audit). Snapshot des scores avant effacement (réversible).
+function resetAutoChallenge(cid) {
+  const c = state.challenges.find(x => x.id === cid);
+  if (!c || !c.autoCount) return;
+  if (!confirm(`Réinitialiser « ${c.title} » à 0 pour toutes les joueuses (saison en cours) ?\n\nLes compteurs actuels seront effacés.\nAction tracée dans le journal d'audit.`)) return;
+  const before = { ...(c.scores || {}) };
+  c.scores = {};
+  _logChallengeAudit('reset', { challengeId: c.id, type: c.type, seasonId: c.seasonId, before });
+  persist(); render();
+  if (typeof showToast === 'function') showToast('↺ Compteur réinitialisé');
+}
+
+// Édition manuelle d'un compteur auto : input number par joueuse de la saison.
+function _autoChallengePool(c) {
+  const team = c.teamTag === 'both' ? 'all' : (c.teamTag === 'e2' ? 'e2' : 'e1');
+  const sid = c.seasonId || state.currentSeasonId;
+  return (_seasonsLoaded() && sid) ? getSeasonPlayers(sid, { team }) : (state.players || []);
+}
+function openEditAutoChallenge(cid) {
+  const c = state.challenges.find(x => x.id === cid);
+  if (!c || !c.autoCount) return;
+  const pool = _autoChallengePool(c).slice().sort((a, b) => (a.num || 0) - (b.num || 0));
+  const scores = c.scores || {};
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">${esc(c.title)}</div>
+        <div class="modal-title">Éditer les compteurs</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:11px;color:var(--ink-2);margin-bottom:12px;line-height:1.5">Ajuste manuellement le compteur de chaque joueuse (${esc(c.metric)}). Saison en cours uniquement.</div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        ${pool.length === 0 ? '<div style="color:var(--ink-3);font-size:12px;font-style:italic">Aucune joueuse dans l\'effectif de cette saison.</div>' : pool.map(p => `
+          <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--bg-2);border-radius:8px">
+            <div style="flex:1;min-width:0;font-family:'Anton';font-size:13px;text-transform:uppercase">#${p.num} ${esc(p.name)}</div>
+            <input id="ed-${p.id}" type="number" min="0" value="${scores[p.id] || 0}" style="width:84px;text-align:center;font-family:'Anton';font-size:18px;padding:6px;background:var(--bg-1);border:1px solid var(--border);border-radius:6px;color:var(--ink)">
+          </div>
+        `).join('')}
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Annuler</button>
+      <button class="btn btn-primary" onclick="saveEditAutoChallenge('${cid}')">Enregistrer</button>
+    </div>
+  `);
+}
+function saveEditAutoChallenge(cid) {
+  const c = state.challenges.find(x => x.id === cid);
+  if (!c || !c.autoCount) return;
+  const pool = _autoChallengePool(c);
+  const before = { ...(c.scores || {}) };
+  c.scores = c.scores || {};
+  pool.forEach(p => {
+    const el = document.getElementById('ed-' + p.id);
+    if (el) c.scores[p.id] = Math.max(0, parseInt(el.value) || 0);
+  });
+  _logChallengeAudit('edit', { challengeId: c.id, type: c.type, seasonId: c.seasonId, before, after: { ...c.scores } });
+  persist(); closeModal(); render();
+  if (typeof showToast === 'function') showToast('✓ Compteurs enregistrés');
+}
+
+// Modale de recompute (migration ponctuelle) : dry-run d'abord (diff), puis apply.
+function openRecomputeChallengesModal() {
+  const report = recomputeAutoChallengeScores({ dryRun: true });
+  const typeLabel = { attendance_training: 'Présences entraînements', attendance_match: 'Présences matchs', punctuality: 'Ponctualité (min)' };
+  const body = report.length === 0
+    ? `<div style="padding:14px;text-align:center;color:var(--green);font-size:13px;font-family:'JetBrains Mono'">✓ Aucun écart détecté.<br>Les compteurs sont déjà cohérents avec les présences.</div>`
+    : `
+      <div style="font-size:11px;color:var(--ink-2);line-height:1.5;margin-bottom:12px">
+        Recalcul des compteurs auto depuis les présences/appels, attribués à la saison de la <strong>date</strong> de chaque séance. ${report.length} écart${report.length > 1 ? 's' : ''} :
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        ${report.map(r => `
+          <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--bg-2);border-radius:8px">
+            <div style="flex:1;min-width:0">
+              <div style="font-family:'Anton';font-size:12px;text-transform:uppercase">${esc(typeLabel[r.type] || r.type)}</div>
+              <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;margin-top:2px">Saison ${esc(r.seasonId)} · ${r.changedPlayers} joueuse${r.changedPlayers > 1 ? 's' : ''}</div>
+            </div>
+            <div style="text-align:right;font-family:'Anton';font-size:14px">
+              <span style="color:var(--ink-3)">${r.beforeTotal}</span>
+              <span style="color:var(--ink-4)"> → </span>
+              <span style="color:var(--orange)">${r.afterTotal}</span>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+      <div style="margin-top:12px;padding:10px;background:rgba(var(--accent-rgb),0.08);border-left:3px solid var(--orange);border-radius:6px;font-size:10px;color:var(--ink-2);line-height:1.5">
+        ⚠ Remplace les compteurs auto par les valeurs recalculées (les éditions manuelles seront écrasées). Les valeurs actuelles sont sauvegardées dans le journal d'audit (réversible).
+      </div>`;
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">🔧 Recalculer les compteurs</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">${body}</div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Fermer</button>
+      ${report.length > 0 ? `<button class="btn btn-primary" onclick="applyRecomputeChallenges()">Appliquer le recalcul</button>` : ''}
+    </div>
+  `);
+}
+function applyRecomputeChallenges() {
+  const report = recomputeAutoChallengeScores({ dryRun: false });
+  closeModal(); render();
+  if (typeof showToast === 'function') showToast(`✓ ${report.length} compteur${report.length > 1 ? 's' : ''} recalculé${report.length > 1 ? 's' : ''} depuis les présences`);
 }
 
 // Ajouter une contribution d'une joueuse à un challenge collectif
