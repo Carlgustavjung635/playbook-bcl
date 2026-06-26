@@ -4459,6 +4459,7 @@ const K = {
   broadcasts: 'pb8_broadcasts',
   broadcastReceipts: 'pb8_broadcast_receipts',
   theme: 'pb8_theme', // map { "<role>:<playerId|->": themeId } — préférence couleur par identité
+  guideSeen: 'pb8_guide_seen', // map { "<role>:<playerId|->": true } — mini-guide joueuse vu
 };
 function load(k, d) { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : d; } catch { return d; } }
 // save() : sync localStorage avec gestion explicite du QuotaExceededError.
@@ -4567,6 +4568,84 @@ function openThemePicker() {
   `);
   const grid = document.getElementById('theme-picker-grid');
   if (grid) renderThemePickerGrid(grid, current);
+}
+
+// ============================================================
+// MINI-GUIDE JOUEUSE — bloc système épinglé en haut de la home joueuse
+// ------------------------------------------------------------
+// Onboarding repliable, NON éditable (pas une vraie diffusion coach). État « lu »
+// persisté par identité (localStorage pb8_guide_seen, même schéma que pb8_theme)
+// → marqué lu à la 1re ouverture : déplié + badge « Nouveau » la 1re fois, replié
+// ensuite. Bouton « ↻ Revoir le guide » dans ⚙ pour le rouvrir. Thème-safe
+// (variables CSS uniquement, aucun hex en dur).
+function isGuideSeen() {
+  const map = load(K.guideSeen, {}) || {};
+  return map[themeIdentityKey()] === true;
+}
+function markGuideSeen() {
+  const map = load(K.guideSeen, {}) || {};
+  map[themeIdentityKey()] = true;
+  save(K.guideSeen, map);
+}
+function toggleGuide() {
+  state._guideCollapsed = !state._guideCollapsed;
+  render();
+}
+// Depuis ⚙ : rouvre le guide sur la home, déplié.
+function reopenPlayerGuide() {
+  state._guideCollapsed = false;
+  state._guideWasNew = false;
+  if (state.section !== 'home') state.section = 'home';
+  state.view = null;
+  if (typeof closeModal === 'function') closeModal();
+  render();
+}
+
+function renderPlayerGuide() {
+  // Initialise l'état d'affichage UNE fois par chargement : non-lu → déplié + neuf.
+  if (state._guideCollapsed === undefined) {
+    const seen = isGuideSeen();
+    state._guideCollapsed = seen;     // déjà lu → replié
+    state._guideWasNew = !seen;       // badge « Nouveau » pour la session
+    if (!seen) markGuideSeen();       // lu automatiquement à la 1re ouverture
+  }
+  const collapsed = state._guideCollapsed;
+  const isNew = !!state._guideWasNew;
+  const section = (icon, title, text) => `
+    <div style="display:flex;gap:10px;padding:10px 0;border-top:1px solid var(--border-soft)">
+      <span style="font-size:18px;flex:0 0 auto;line-height:1.3">${icon}</span>
+      <div style="min-width:0">
+        <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;letter-spacing:0.02em;color:var(--ink)">${title}</div>
+        <div style="font-size:12px;color:var(--ink-2);line-height:1.5;margin-top:2px">${text}</div>
+      </div>
+    </div>`;
+  const body = collapsed ? '' : `
+    <div style="padding:4px 16px 14px">
+      ${section('👤', 'Ton profil', "Tes stats persos : présences entraînement, présences match, retards, défis débloqués. Filtre <strong>Mois / Trimestre / Saison</strong> au-dessus des compteurs.")}
+      ${section('🏆', 'Tes défis', "Deux types : les <strong>Auto</strong> (qui se remplissent tout seuls grâce à la coach) et les <strong>Manuels</strong> (à valider toi-même quand tu accomplis l'objectif).")}
+      ${section('📨', 'Messages', "Les annonces de la coach atterrissent ici. Tu peux réagir.")}
+      ${section('⚙', 'Personnaliser', "Onglet <strong>🎨 Couleur de l'interface</strong> : choisis ton thème (Court / Ocean / Forest / <strong>Pink Court</strong> / Mono). Ça reste actif jusqu'à ce que tu en changes.")}
+      ${section('🔒', 'Tes données restent sur ton téléphone', "Personne ne voit ton activité tant que tu ne partages rien.")}
+      <div style="margin-top:10px;font-size:12px;color:var(--ink-3);font-style:italic">Une question ? Demande à la coach 👋</div>
+    </div>`;
+  return `
+    <div style="padding:0 18px;margin-bottom:14px">
+      <div style="background:linear-gradient(135deg,rgba(var(--accent-rgb),0.10),var(--surface));border:1.5px solid rgba(var(--accent-rgb),0.35);border-radius:var(--radius);overflow:hidden">
+        <button onclick="toggleGuide()" aria-expanded="${collapsed ? 'false' : 'true'}" aria-controls="player-guide-body"
+          style="width:100%;display:flex;align-items:center;gap:10px;padding:13px 16px;background:transparent;border:0;cursor:pointer;text-align:left;color:var(--ink)">
+          <span style="font-size:22px;flex:0 0 auto">🏀</span>
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <span style="font-family:'Anton';font-size:15px;text-transform:uppercase;letter-spacing:0.02em">Bienvenue sur Playbook BCL</span>
+              ${isNew ? `<span style="font-size:9px;font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em;padding:2px 7px;border-radius:20px;background:var(--orange);color:#fff">👋 Nouveau</span>` : ''}
+            </div>
+            <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${collapsed ? 'Tap pour ouvrir le guide' : 'Quelques secondes pour t&rsquo;y retrouver'}</div>
+          </div>
+          <span aria-hidden="true" style="font-size:16px;color:var(--ink-3);transition:transform 0.2s;transform:rotate(${collapsed ? '0' : '180'}deg)">▾</span>
+        </button>
+        <div id="player-guide-body">${body}</div>
+      </div>
+    </div>`;
 }
 
 // Listener global : 1 alerte max par minute pour éviter le spam
@@ -6845,6 +6924,9 @@ function openSettings() {
         <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>editMyPhoto(),50)">
           📷 ${player && player.photo ? 'Changer ma photo de profil' : 'Ajouter une photo de profil'}
         </button>
+        <button class="btn btn-secondary btn-block mb-2" onclick="reopenPlayerGuide()">
+          ↻ Revoir le guide
+        </button>
       ` : ''}
 
       ${role === 'coach' ? `
@@ -7641,8 +7723,9 @@ function renderHomePlayer() {
     .sort((a,b) => b.date.localeCompare(a.date));
   const lastStats = myMatches.length > 0 ? myMatches[0].playerStats[p.id] : null;
 
-  // Challenges actifs (non clôturés)
-  const myActiveChallenges = (state.challenges || []).filter(c => !c.badgesAwarded).slice(0, 3);
+  // Challenges actifs (non clôturés) — saison COURANTE uniquement (sinon la home
+  // remonte les anciens scores de la saison passée). Filtre !badgesAwarded conservé.
+  const myActiveChallenges = currentSeasonChallenges().filter(c => !c.badgesAwarded).slice(0, 3);
   const myBadgesCount = (p.badges || []).length;
 
   // Carrousel plays récents
@@ -7650,6 +7733,7 @@ function renderHomePlayer() {
 
   return `
     <div class="fade-up">
+      ${renderPlayerGuide()}
       <div class="section-header">
         <div>
           <div class="eyebrow">Salut #${p.num}</div>
