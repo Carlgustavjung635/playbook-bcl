@@ -8,6 +8,18 @@
 <meta name="theme-color" content="#000000">
 <meta name="background-color" content="#000000">
 <meta name="color-scheme" content="dark">
+<!-- Thème couleur : appliqué AVANT le 1er paint pour éviter le flash.
+     Lit l'identité (pb8_auth) + la map de préférences (pb8_theme) en
+     localStorage. Source de vérité = localStorage (anti-flicker garanti). -->
+<script>
+(function(){try{
+  var auth=JSON.parse(localStorage.getItem('pb8_auth')||'null');
+  var map=JSON.parse(localStorage.getItem('pb8_theme')||'{}');
+  var key=auth?(auth.role+':'+(auth.playerId||'-')):'_guest';
+  var t=(map&&map[key])||'court';
+  document.documentElement.setAttribute('data-theme',t);
+}catch(e){}})();
+</script>
 <!-- PWA manifest -->
 <link rel="manifest" href="/manifest.json">
 <!-- iOS / Safari standalone -->
@@ -41,10 +53,17 @@
     --ink-3: #707070;
     --ink-4: #4a4a4a;
 
-    --orange: #ff6b00;
+    /* === Accent thématisable — défaut : "Court" (orange BCL) ===
+       Toute l'app dérive sa couleur d'accent de --accent-rgb (triplet RGB,
+       source de vérité) + --orange-2 (variante claire). Un thème ne redéfinit
+       QUE ces deux tokens (voir blocs :root[data-theme=...] plus bas) ; les
+       375+ usages var(--orange*) et les rgba(var(--accent-rgb),α) suivent
+       automatiquement. Les exports canvas gardent volontairement l'orange. */
+    --accent-rgb: 255, 107, 0;
+    --orange: rgb(var(--accent-rgb));
     --orange-2: #ff8533;
-    --orange-soft: rgba(255, 107, 0, 0.12);
-    --orange-glow: rgba(255, 107, 0, 0.3);
+    --orange-soft: rgba(var(--accent-rgb), 0.12);
+    --orange-glow: rgba(var(--accent-rgb), 0.3);
 
     --green: #22c55e;
     --green-soft: rgba(34, 197, 94, 0.12);
@@ -61,6 +80,47 @@
     --radius-sm: 6px;
     --radius-lg: 16px;
   }
+
+  /* ========== THÈMES COULEUR (personnalisation joueuse + coach) ==========
+     5 palettes harmonieuses sur la base sombre BCL. Chaque accent passe
+     WCAG AA/AAA sur fond noir (#000) et surface (#181818). On ne touche
+     QUE l'accent : les couleurs sémantiques (vert succès / rouge erreur /
+     bleu / jaune) restent constantes pour ne pas casser leur sens.
+     "court" = défaut (orange, défini dans :root) → aucun override.
+     Pour ajouter un 6e thème : dupliquer un bloc ci-dessous + l'ajouter à
+     la constante THEMES côté JS. */
+  :root[data-theme="ocean"]  { --accent-rgb: 14, 165, 233;  --orange-2: #38bdf8; }
+  :root[data-theme="forest"] { --accent-rgb: 16, 185, 129;  --orange-2: #34d399; }
+  :root[data-theme="rose"]   { --accent-rgb: 244, 114, 182; --orange-2: #f9a8d4; }
+  :root[data-theme="mono"]   { --accent-rgb: 148, 163, 184; --orange-2: #cbd5e1; }
+
+  /* ----- ThemePicker (modale 🎨 Couleur de l'interface) ----- */
+  .theme-grid { display: flex; flex-direction: column; gap: 8px; }
+  .theme-card {
+    display: flex; align-items: center; gap: 12px; width: 100%;
+    padding: 10px 12px; border-radius: var(--radius);
+    background: var(--bg-3); border: 1.5px solid var(--border);
+    color: var(--ink); text-align: left; cursor: pointer;
+    transition: border-color .15s, background .15s, transform .08s;
+  }
+  .theme-card:hover { background: var(--surface-2); }
+  .theme-card:active { transform: scale(0.99); }
+  .theme-card.is-active { border-color: var(--orange); background: var(--orange-soft); }
+  .theme-card:focus-visible { outline: 2px solid var(--orange); outline-offset: 2px; }
+  .theme-swatch {
+    position: relative; flex: 0 0 auto;
+    width: 40px; height: 40px; border-radius: 50%;
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.08) inset;
+  }
+  .theme-swatch-dot {
+    position: absolute; right: -1px; bottom: -1px;
+    width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid var(--bg-3);
+  }
+  .theme-card-meta { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .theme-card-name { font-weight: 700; font-size: 14px; }
+  .theme-card-desc { font-size: 11px; color: var(--ink-3); font-family: 'JetBrains Mono', monospace; }
+  .theme-card-check { flex: 0 0 auto; width: 18px; text-align: center; color: var(--orange); font-weight: 800; }
 
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body {
@@ -128,7 +188,7 @@
   }
   .topbar-orb {
     width: 32px; height: 32px; border-radius: 50%;
-    background: radial-gradient(circle at 30% 30%, #ff8533, var(--orange));
+    background: radial-gradient(circle at 30% 30%, var(--orange-2), var(--orange));
     display: flex; align-items: center; justify-content: center;
     font-size: 18px;
     box-shadow: 0 0 16px var(--orange-glow);
@@ -149,7 +209,7 @@
     font-family: 'JetBrains Mono', monospace;
     font-size: 9px; text-transform: uppercase; letter-spacing: 0.1em;
     font-weight: 700;
-    border: 1px solid rgba(255, 107, 0, 0.3);
+    border: 1px solid rgba(var(--accent-rgb), 0.3);
   }
   /* Conteneur des actions header (droite) : ne wrappe jamais, reste compact. */
   .topbar-actions {
@@ -725,7 +785,7 @@
     padding: 18px 12px;
     width: 100%;
     height: 100%;
-    background: linear-gradient(135deg, rgba(255,107,0,0.06), var(--bg-2));
+    background: linear-gradient(135deg, rgba(var(--accent-rgb),0.06), var(--bg-2));
     text-align: center;
   }
   .v-tile-placeholder-icon {
@@ -813,7 +873,7 @@
   .player-chip:hover { border-color: var(--orange); color: var(--orange); }
   /* Chip joueuse assignée à un groupe */
   .player-chip-assigned {
-    background: rgba(255,107,0,0.15);
+    background: rgba(var(--accent-rgb),0.15);
     border: 1px solid var(--orange);
     color: var(--orange);
     border-radius: 12px;
@@ -1017,7 +1077,7 @@
     white-space: nowrap;
     border: 1px solid var(--border);
   }
-  .chip-orange { background: var(--orange-soft); color: var(--orange); border-color: rgba(255, 107, 0, 0.3); }
+  .chip-orange { background: var(--orange-soft); color: var(--orange); border-color: rgba(var(--accent-rgb), 0.3); }
   .chip-green { background: var(--green-soft); color: var(--green); border-color: rgba(34, 197, 94, 0.3); }
   .chip-red { background: var(--red-soft); color: var(--red); border-color: rgba(239, 68, 68, 0.3); }
   .chip-blue { background: var(--blue-soft); color: var(--blue); border-color: rgba(59, 130, 246, 0.3); }
@@ -1037,7 +1097,7 @@
   .btn:active { transform: scale(0.96); }
   .btn-primary {
     background: var(--orange); color: black;
-    box-shadow: 0 4px 16px rgba(255, 107, 0, 0.3);
+    box-shadow: 0 4px 16px rgba(var(--accent-rgb), 0.3);
   }
   .btn-primary:hover { background: var(--orange-2); }
   .btn-secondary {
@@ -1081,7 +1141,7 @@
   input::placeholder, textarea::placeholder { color: var(--ink-4); }
   input:not([type="checkbox"]):not([type="radio"]):focus, textarea:focus, select:focus {
     outline: none; border-color: var(--orange);
-    box-shadow: 0 0 0 3px rgba(255, 107, 0, 0.15);
+    box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.15);
   }
   textarea { min-height: 80px; resize: vertical; }
   .fld { margin-bottom: 12px; }
@@ -1294,7 +1354,7 @@
   }
   .segmented-btn.active {
     background: var(--orange); color: black;
-    box-shadow: 0 2px 6px rgba(255, 107, 0, 0.3);
+    box-shadow: 0 2px 6px rgba(var(--accent-rgb), 0.3);
   }
 
   /* ========== DETAIL ========== */
@@ -1332,7 +1392,7 @@
     border: none; cursor: pointer;
     display: flex; align-items: center; justify-content: center;
     font-size: 28px; font-weight: 300;
-    box-shadow: 0 8px 24px rgba(255, 107, 0, 0.4);
+    box-shadow: 0 8px 24px rgba(var(--accent-rgb), 0.4);
     transition: all 0.2s;
   }
   .fab:active { transform: scale(0.92); }
@@ -1361,7 +1421,7 @@
   }
   .auth-logo {
     width: 80px; height: 80px; border-radius: 50%;
-    background: radial-gradient(circle at 30% 30%, #ff8533, var(--orange));
+    background: radial-gradient(circle at 30% 30%, var(--orange-2), var(--orange));
     display: flex; align-items: center; justify-content: center;
     font-size: 44px;
     box-shadow: 0 0 60px var(--orange-glow), inset 0 0 30px rgba(0,0,0,0.3);
@@ -1370,7 +1430,7 @@
   }
   @keyframes pulseGlow {
     0%, 100% { box-shadow: 0 0 60px var(--orange-glow), inset 0 0 30px rgba(0,0,0,0.3); }
-    50% { box-shadow: 0 0 100px rgba(255, 107, 0, 0.5), inset 0 0 30px rgba(0,0,0,0.3); }
+    50% { box-shadow: 0 0 100px rgba(var(--accent-rgb), 0.5), inset 0 0 30px rgba(0,0,0,0.3); }
   }
   /* Toast non-bloquant (CHANTIER B : notice clôture entraînement) */
   #toast-host {
@@ -1540,7 +1600,7 @@
     border-radius: var(--radius-lg);
     overflow: hidden;
     border: 3px solid var(--orange);
-    box-shadow: 0 12px 40px rgba(255,107,0,0.25), 0 0 80px rgba(255,107,0,0.1) inset;
+    box-shadow: 0 12px 40px rgba(var(--accent-rgb),0.25), 0 0 80px rgba(var(--accent-rgb),0.1) inset;
     cursor: pointer;
     transition: transform 0.15s;
     background: black;
@@ -1606,7 +1666,7 @@
   }
 
   .lb-row-me {
-    background: linear-gradient(90deg, rgba(255,107,0,0.12), transparent) !important;
+    background: linear-gradient(90deg, rgba(var(--accent-rgb),0.12), transparent) !important;
     border-left: 3px solid var(--orange) !important;
   }
   .lb-quick-btn {
@@ -1620,7 +1680,7 @@
     font-weight: 700;
     cursor: pointer;
     transition: transform 0.1s;
-    box-shadow: 0 4px 12px rgba(255,107,0,0.3);
+    box-shadow: 0 4px 12px rgba(var(--accent-rgb),0.3);
   }
   .lb-quick-btn:active { transform: scale(0.92); }
   .scope-btn {
@@ -1723,7 +1783,7 @@
     transition: transform 0.1s, border-color 0.15s;
   }
   .player-challenge-row:active { transform: scale(0.99); }
-  .player-challenge-row:hover { border-color: rgba(255,107,0,0.3); }
+  .player-challenge-row:hover { border-color: rgba(var(--accent-rgb),0.3); }
   .feedback-list-row {
     display: flex;
     align-items: center;
@@ -1783,8 +1843,8 @@
   .feedback-suggest-chip.suggest-neg:hover { border-color: var(--red); color: var(--red); }
   .my-feedback-card {
     padding: 14px;
-    background: linear-gradient(135deg, rgba(255,107,0,0.08), var(--surface));
-    border: 1px solid rgba(255,107,0,0.25);
+    background: linear-gradient(135deg, rgba(var(--accent-rgb),0.08), var(--surface));
+    border: 1px solid rgba(var(--accent-rgb),0.25);
     border-radius: var(--radius);
     box-shadow: 0 4px 14px rgba(0,0,0,0.2);
   }
@@ -1811,7 +1871,7 @@
   .star-btn:active { transform: scale(1.2); }
   .star-btn.filled {
     color: var(--orange);
-    text-shadow: 0 0 12px rgba(255,107,0,0.4);
+    text-shadow: 0 0 12px rgba(var(--accent-rgb),0.4);
   }
   .star-display {
     display: inline-flex;
@@ -1829,7 +1889,7 @@
   /* Ressenti général équipe */
   /* Panneau 5 sur le terrain (live tracker) */
   .on-court-panel {
-    background: linear-gradient(135deg, rgba(255,107,0,0.06), var(--surface));
+    background: linear-gradient(135deg, rgba(var(--accent-rgb),0.06), var(--surface));
     border: 1.5px solid var(--orange);
     border-radius: var(--radius);
     padding: 10px;
@@ -1952,7 +2012,7 @@
     align-items: center;
     gap: 10px;
     padding: 10px 14px;
-    background: linear-gradient(90deg, rgba(255,107,0,0.15), rgba(255,107,0,0.04));
+    background: linear-gradient(90deg, rgba(var(--accent-rgb),0.15), rgba(var(--accent-rgb),0.04));
     border: 1px solid var(--orange);
     border-radius: 10px;
     margin-bottom: 12px;
@@ -1978,7 +2038,7 @@
   .rotation-tile:active { transform: scale(0.97); }
   .rotation-tile.court {
     border-color: var(--orange);
-    background: rgba(255,107,0,0.06);
+    background: rgba(var(--accent-rgb),0.06);
   }
   .rotation-tile.court.selected-out {
     background: rgba(239,68,68,0.15);
@@ -2044,7 +2104,7 @@
   }
     .team-review-cta {
     padding: 14px;
-    background: linear-gradient(135deg, rgba(255,107,0,0.08), var(--surface));
+    background: linear-gradient(135deg, rgba(var(--accent-rgb),0.08), var(--surface));
     border: 1.5px solid var(--orange);
     border-radius: var(--radius);
     cursor: pointer;
@@ -2076,12 +2136,12 @@
   .tr-dot.filled {
     background: linear-gradient(135deg, var(--orange), #cc5400);
     border-color: var(--orange);
-    box-shadow: 0 2px 8px rgba(255,107,0,0.3);
+    box-shadow: 0 2px 8px rgba(var(--accent-rgb),0.3);
   }
   .convoc-chip-at-risk {
     border-color: var(--orange) !important;
     color: var(--orange) !important;
-    background: rgba(255,107,0,0.06) !important;
+    background: rgba(var(--accent-rgb),0.06) !important;
   }
 
   /* ========== LIVE STATS TRACKER ========== */
@@ -2214,7 +2274,7 @@
     border: 2px solid var(--orange);
     border-radius: var(--radius-lg);
     padding: 22px 18px;
-    box-shadow: 0 12px 48px rgba(255,107,0,0.25), inset 0 0 80px rgba(255,107,0,0.06);
+    box-shadow: 0 12px 48px rgba(var(--accent-rgb),0.25), inset 0 0 80px rgba(var(--accent-rgb),0.06);
     position: relative;
     overflow: hidden;
   }
@@ -2276,7 +2336,7 @@
   }
   .public-live-team-score.leading {
     color: var(--orange);
-    text-shadow: 0 0 24px rgba(255,107,0,0.5);
+    text-shadow: 0 0 24px rgba(var(--accent-rgb),0.5);
   }
   .public-live-vs {
     font-family: 'Anton', sans-serif;
@@ -2329,8 +2389,8 @@
     grid-template-columns: repeat(5, 1fr);
     gap: 6px;
     padding: 14px 10px;
-    background: linear-gradient(135deg, rgba(255,107,0,0.06), rgba(255,107,0,0.02));
-    border: 1px solid rgba(255,107,0,0.15);
+    background: linear-gradient(135deg, rgba(var(--accent-rgb),0.06), rgba(var(--accent-rgb),0.02));
+    border: 1px solid rgba(var(--accent-rgb),0.15);
     border-radius: 8px;
   }
   .lineup-slot {
@@ -4398,6 +4458,7 @@ const K = {
   teamFilter: 'pb8_team_filter',
   broadcasts: 'pb8_broadcasts',
   broadcastReceipts: 'pb8_broadcast_receipts',
+  theme: 'pb8_theme', // map { "<role>:<playerId|->": themeId } — préférence couleur par identité
 };
 function load(k, d) { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : d; } catch { return d; } }
 // save() : sync localStorage avec gestion explicite du QuotaExceededError.
@@ -4424,6 +4485,88 @@ function save(k, v) {
     }
     return false;
   }
+}
+
+// ============================================================
+// THÈMES COULEUR — personnalisation interface (joueuse + coach)
+// ============================================================
+// 5 palettes harmonieuses sur la base sombre BCL. Le rendu visuel vit côté
+// CSS (blocs :root[data-theme=...]) ; ici on gère la préférence par identité,
+// sa persistance localStorage (source de vérité, anti-flicker au boot via le
+// petit <script> du <head>) et l'application live (set d'un attribut → les
+// variables CSS cascadent instantanément, AUCUN re-render).
+const THEMES = [
+  { id: 'court',  name: 'Court',  emoji: '🏀', desc: 'Orange BCL',  accent: '#ff6b00', accent2: '#ff8533' },
+  { id: 'ocean',  name: 'Ocean',  emoji: '🌊', desc: 'Bleu azur',   accent: '#0ea5e9', accent2: '#38bdf8' },
+  { id: 'forest', name: 'Forest', emoji: '🌲', desc: 'Vert émeraude',accent: '#10b981', accent2: '#34d399' },
+  { id: 'rose',   name: 'Pink Court', emoji: '💗', desc: 'Rose fuchsia', accent: '#f472b6', accent2: '#f9a8d4' },
+  { id: 'mono',   name: 'Mono',   emoji: '🪨', desc: 'Ardoise',      accent: '#94a3b8', accent2: '#cbd5e1' },
+];
+const DEFAULT_THEME = 'court';
+
+// Clé d'identité : un thème par rôle/joueuse → coach et chaque joueuse gardent
+// leur propre couleur même sur un appareil partagé. Doit matcher la logique du
+// <script> anti-flicker du <head>.
+function themeIdentityKey() {
+  const a = state && state.auth;
+  return a ? (a.role + ':' + (a.playerId || '-')) : '_guest';
+}
+function getThemeId() {
+  const map = load(K.theme, {}) || {};
+  const id = map[themeIdentityKey()];
+  return THEMES.some(t => t.id === id) ? id : DEFAULT_THEME;
+}
+// Applique sans persister (utilisé au boot/render + en preview live au survol).
+function applyTheme(id) {
+  const valid = THEMES.some(t => t.id === id) ? id : DEFAULT_THEME;
+  document.documentElement.setAttribute('data-theme', valid);
+}
+// Persiste pour l'identité courante + applique. Re-render léger pour rafraîchir
+// les pastilles ✓ du picker s'il est ouvert.
+function setThemeId(id) {
+  if (!THEMES.some(t => t.id === id)) return;
+  const map = load(K.theme, {}) || {};
+  map[themeIdentityKey()] = id;
+  save(K.theme, map);
+  applyTheme(id);
+  const open = document.getElementById('theme-picker-grid');
+  if (open) renderThemePickerGrid(open, id);
+}
+
+function renderThemePickerGrid(container, current) {
+  container.innerHTML = THEMES.map(t => {
+    const on = t.id === current;
+    return `
+      <button type="button" role="radio" aria-checked="${on}" aria-label="Thème ${t.name} — ${t.desc}"
+        class="theme-card${on ? ' is-active' : ''}" onclick="setThemeId('${t.id}')">
+        <span class="theme-swatch" style="background:linear-gradient(135deg, ${t.accent} 0%, ${t.accent} 55%, ${t.accent2} 100%)">
+          <span class="theme-swatch-dot" style="background:${t.accent2}"></span>
+        </span>
+        <span class="theme-card-meta">
+          <span class="theme-card-name">${t.emoji} ${t.name}</span>
+          <span class="theme-card-desc">${esc(t.desc)}</span>
+        </span>
+        <span class="theme-card-check" aria-hidden="true">${on ? '✓' : ''}</span>
+      </button>`;
+  }).join('');
+}
+
+function openThemePicker() {
+  const current = getThemeId();
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">🎨 Couleur de l'interface</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:12px;color:var(--ink-3);line-height:1.5;margin-bottom:14px">
+        Choisis ta palette. Le changement est instantané et ne concerne que ton affichage sur cet appareil.
+      </div>
+      <div id="theme-picker-grid" class="theme-grid" role="radiogroup" aria-label="Thème couleur"></div>
+    </div>
+  `);
+  const grid = document.getElementById('theme-picker-grid');
+  if (grid) renderThemePickerGrid(grid, current);
 }
 
 // Listener global : 1 alerte max par minute pour éviter le spam
@@ -5464,7 +5607,7 @@ function renderNoActiveSeasonScreen() {
       <div class="auth-subtitle" style="margin-top:8px;max-width:320px;line-height:1.5">
         ${name ? 'Salut ' + name + ' — ' : ''}reviens bientôt ! Ton coach activera la prochaine saison dès qu'elle sera prête.
       </div>
-      <div style="margin-top:24px;padding:12px 16px;background:rgba(255,107,0,0.08);border:1px dashed var(--orange);border-radius:8px;font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em;max-width:340px;line-height:1.5">
+      <div style="margin-top:24px;padding:12px 16px;background:rgba(var(--accent-rgb),0.08);border:1px dashed var(--orange);border-radius:8px;font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em;max-width:340px;line-height:1.5">
         BCL · IE-Basket Club l'Islois
       </div>
       <button class="btn btn-ghost mt-3" style="margin-top:20px" onclick="confirmLogout()">← Changer d'utilisateur</button>
@@ -5894,7 +6037,7 @@ function renderSeasonSwitcher() {
   const short = cur ? seasonShortLabel(cur) : '—';
   const fullLabel = (cur ? cur.name : 'Aucune saison') + tag;
   const dot = cur && cur.status === 'draft'
-    ? `<span aria-hidden="true" style="width:6px;height:6px;border-radius:50%;background:#ff6b00;display:inline-block;box-shadow:0 0 6px #ff6b00;flex:0 0 auto"></span>`
+    ? `<span aria-hidden="true" style="width:6px;height:6px;border-radius:50%;background:var(--orange);display:inline-block;box-shadow:0 0 6px var(--orange);flex:0 0 auto"></span>`
     : cur && cur.status === 'archived'
     ? `<span aria-hidden="true" style="width:6px;height:6px;border-radius:50%;background:#888;display:inline-block;flex:0 0 auto"></span>`
     : '';
@@ -5907,7 +6050,7 @@ function openSeasonsModal() {
   const seasons = [...(state.seasons || [])].sort((a, b) => (b.startDate || '').localeCompare(a.startDate || ''));
   const statusBadge = s => {
     if (s.status === 'active') return `<span style="font-size:9px;font-family:'JetBrains Mono';color:#22c55e;background:rgba(34,197,94,0.10);padding:2px 6px;border-radius:4px;text-transform:uppercase;letter-spacing:0.06em">● Active</span>`;
-    if (s.status === 'draft') return `<span style="font-size:9px;font-family:'JetBrains Mono';color:#ff6b00;background:rgba(255,107,0,0.10);padding:2px 6px;border-radius:4px;text-transform:uppercase;letter-spacing:0.06em;font-style:italic">Brouillon</span>`;
+    if (s.status === 'draft') return `<span style="font-size:9px;font-family:'JetBrains Mono';color:var(--orange);background:rgba(var(--accent-rgb),0.10);padding:2px 6px;border-radius:4px;text-transform:uppercase;letter-spacing:0.06em;font-style:italic">Brouillon</span>`;
     return `<span style="font-size:9px;font-family:'JetBrains Mono';color:#888;background:rgba(128,128,128,0.10);padding:2px 6px;border-radius:4px;text-transform:uppercase;letter-spacing:0.06em">Archivée</span>`;
   };
   openModal(`
@@ -6193,7 +6336,7 @@ function openSeasonRosterEditor() {
 
   const seasonLabel = cur ? cur.name : seasonId;
   const statusTag = cur && cur.status === 'draft'
-    ? '<span style="font-size:9px;font-family:\'JetBrains Mono\';color:#ff6b00;background:rgba(255,107,0,0.10);padding:2px 6px;border-radius:4px;text-transform:uppercase;letter-spacing:0.06em">Brouillon</span>'
+    ? '<span style="font-size:9px;font-family:\'JetBrains Mono\';color:var(--orange);background:rgba(var(--accent-rgb),0.10);padding:2px 6px;border-radius:4px;text-transform:uppercase;letter-spacing:0.06em">Brouillon</span>'
     : cur && cur.status === 'archived'
       ? '<span style="font-size:9px;font-family:\'JetBrains Mono\';color:#888;background:rgba(128,128,128,0.10);padding:2px 6px;border-radius:4px;text-transform:uppercase;letter-spacing:0.06em">Archivée</span>'
       : '<span style="font-size:9px;font-family:\'JetBrains Mono\';color:#22c55e;background:rgba(34,197,94,0.10);padding:2px 6px;border-radius:4px;text-transform:uppercase;letter-spacing:0.06em">● Active</span>';
@@ -6505,6 +6648,10 @@ function openSettings() {
 
       <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openChangeMyPin(),50)">
         🔒 Changer mon code PIN
+      </button>
+
+      <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openThemePicker(),50)">
+        🎨 Couleur de l'interface
       </button>
 
       ${role === 'player' ? `
@@ -7191,8 +7338,8 @@ function eventInstanceRow(ev, isCoach, opts) {
           <div class="list-row-title">${esc(ev.title)}</div>
           ${isMatch ? '<span class="chip chip-orange" style="font-size:9px;padding:2px 6px">MATCH</span>' : ''}
           ${isToday ? '<span class="chip chip-red" style="font-size:9px;padding:2px 6px">AUJOURD\'HUI</span>' : ''}
-          ${isOverdueTraining ? '<span class="chip" style="font-size:9px;padding:2px 6px;background:rgba(255,107,0,0.18);border-color:var(--orange);color:var(--orange)">À CLÔTURER</span>' : ''}
-          ${guestCount > 0 ? `<span class="chip" style="font-size:9px;padding:2px 6px;background:rgba(255,107,0,0.15);border-color:var(--orange);color:var(--orange)" title="${guestCount} invitée${guestCount>1?'s':''}">+${guestCount} 👤</span>` : ''}
+          ${isOverdueTraining ? '<span class="chip" style="font-size:9px;padding:2px 6px;background:rgba(var(--accent-rgb),0.18);border-color:var(--orange);color:var(--orange)">À CLÔTURER</span>' : ''}
+          ${guestCount > 0 ? `<span class="chip" style="font-size:9px;padding:2px 6px;background:rgba(var(--accent-rgb),0.15);border-color:var(--orange);color:var(--orange)" title="${guestCount} invitée${guestCount>1?'s':''}">+${guestCount} 👤</span>` : ''}
         </div>
         <div class="list-row-subtitle">${dayName}${ev.time ? ' · ' + ev.time : ''}${ev.location ? ' · ' + esc(ev.location) : ''}</div>
       </div>
@@ -7248,7 +7395,7 @@ function playTile(p, opts) {
     ? '<div class="v-tile-badge" style="background:rgba(128,128,128,0.85);color:white">⚪ Inactif</div>'
     : '';
   const orphanBadge = opts.seasonOrphan
-    ? '<div class="v-tile-badge" style="background:rgba(255,107,0,0.85);color:black">+ saison</div>'
+    ? '<div class="v-tile-badge" style="background:rgba(var(--accent-rgb),0.85);color:black">+ saison</div>'
     : '';
 
   return `
@@ -7265,7 +7412,7 @@ function playTile(p, opts) {
                   : `<div class="v-tile-placeholder-tags">${esc((p.desc || '').slice(0, 40))}${(p.desc || '').length > 40 ? '…' : ''}</div>`)}
             </div>`}
         <div style="position:absolute;top:6px;left:6px;display:flex;gap:4px;flex-wrap:wrap">
-          ${hasGallery ? `<div class="v-tile-badge" style="background:rgba(255,107,0,0.9);color:black">📷 ${images.length}</div>` : ''}
+          ${hasGallery ? `<div class="v-tile-badge" style="background:rgba(var(--accent-rgb),0.9);color:black">📷 ${images.length}</div>` : ''}
           ${hasVideo ? `<div class="v-tile-badge">▶</div>` : ''}
           ${inactiveBadge}
           ${orphanBadge}
@@ -8443,7 +8590,7 @@ function renderPlayDetail() {
       <button class="detail-back" onclick="state.view=null;render()">← Retour</button>
       <div style="padding:0 18px 8px;display:flex;gap:6px;flex-wrap:wrap">
         <span class="chip chip-${PLAY_CATEGORIES.find(c=>c.id===p.cat).color}">${getCatLabel(p.cat)}</span>
-        ${hasGallery ? `<span class="chip" style="background:rgba(255,107,0,0.15);border-color:var(--orange);color:var(--orange)">📷 ${images.length}</span>` : ''}
+        ${hasGallery ? `<span class="chip" style="background:rgba(var(--accent-rgb),0.15);border-color:var(--orange);color:var(--orange)">📷 ${images.length}</span>` : ''}
         ${(p.tags || []).map(t => `<span class="chip">${esc(t)}</span>`).join('')}
       </div>
       <div class="detail-title">${esc(p.title)}</div>
@@ -9409,7 +9556,7 @@ function renderMatchStateBanner(m, phase, isCoach, isStat) {
 
   if (phase === 'upcoming-unprepared') {
     return `
-      <div style="margin-top:16px;padding:16px;background:linear-gradient(135deg,rgba(255,107,0,0.12),var(--surface));border:1.5px solid var(--orange);border-radius:var(--radius)">
+      <div style="margin-top:16px;padding:16px;background:linear-gradient(135deg,rgba(var(--accent-rgb),0.12),var(--surface));border:1.5px solid var(--orange);border-radius:var(--radius)">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px">
           <div>
             <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em">Compte à rebours</div>
@@ -9528,8 +9675,8 @@ function renderMatchDetail() {
             : phase === 'today'
             ? `<span class="chip" style="background:rgba(255,34,34,0.16);border-color:#ff2222;color:#ff2222;font-weight:700;letter-spacing:0.04em">🔥 AUJOURD'HUI</span>`
             : phase === 'past-unscored'
-            ? `<span class="chip" style="background:rgba(255,107,0,0.14);border-color:var(--orange);color:var(--orange);font-weight:700;letter-spacing:0.04em">📋 À SAISIR</span>`
-            : `<span class="chip" style="background:rgba(255,107,0,0.14);border-color:var(--orange);color:var(--orange);font-weight:700;letter-spacing:0.04em">⏳ ${matchCountdownLabel(m.date).toUpperCase()}</span>`}
+            ? `<span class="chip" style="background:rgba(var(--accent-rgb),0.14);border-color:var(--orange);color:var(--orange);font-weight:700;letter-spacing:0.04em">📋 À SAISIR</span>`
+            : `<span class="chip" style="background:rgba(var(--accent-rgb),0.14);border-color:var(--orange);color:var(--orange);font-weight:700;letter-spacing:0.04em">⏳ ${matchCountdownLabel(m.date).toUpperCase()}</span>`}
           ${phase === 'upcoming-prepared' ? '<span class="chip chip-green" style="font-weight:700">PRÊT ✓</span>' : ''}
           <span class="chip">${m.home ? 'Domicile' : 'Extérieur'}</span>
           <span class="chip">${formatDate(m.date, 'long')}</span>
@@ -9578,7 +9725,7 @@ function renderMatchDetail() {
           const myReview = (m.playerReviews || {})[myPid];
           const filled = !!myReview;
           return `
-            <div style="margin-top:14px;padding:14px;background:linear-gradient(135deg,rgba(255,107,0,0.10),var(--surface));border:1.5px solid var(--orange);border-radius:var(--radius)">
+            <div style="margin-top:14px;padding:14px;background:linear-gradient(135deg,rgba(var(--accent-rgb),0.10),var(--surface));border:1.5px solid var(--orange);border-radius:var(--radius)">
               <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
                 <span style="font-size:24px">📝</span>
                 <div>
@@ -9695,7 +9842,7 @@ function renderMatchDetail() {
                     <button class="btn btn-icon" onclick="clearMyTransport('${m.id}')" title="Annuler">✕</button>
                   </div>
                 ` : myStatus === 'direct' ? `
-                  <div style="display:flex;align-items:center;gap:10px;padding:10px;background:rgba(255,107,0,0.12);border-radius:8px;margin-bottom:8px">
+                  <div style="display:flex;align-items:center;gap:10px;padding:10px;background:rgba(var(--accent-rgb),0.12);border-radius:8px;margin-bottom:8px">
                     <span style="font-size:24px">🎯</span>
                     <div style="flex:1">
                       <div style="font-family:'Anton';font-size:13px;color:var(--orange);text-transform:uppercase">Je vais direct</div>
@@ -9718,7 +9865,7 @@ function renderMatchDetail() {
               <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px">
                 ${coachDriving ? `
                   <div class="transport-row" style="border-left:3px solid var(--orange)">
-                    <div style="width:36px;height:36px;border-radius:50%;background:rgba(255,107,0,0.15);display:flex;align-items:center;justify-content:center;font-size:18px;border:2px solid var(--orange)">🎽</div>
+                    <div style="width:36px;height:36px;border-radius:50%;background:rgba(var(--accent-rgb),0.15);display:flex;align-items:center;justify-content:center;font-size:18px;border:2px solid var(--orange)">🎽</div>
                     <div style="flex:1;min-width:0">
                       <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;color:var(--orange)">COACH</div>
                       <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">+ ${coachDriving.seats} place${coachDriving.seats>1?'s':''}</div>
@@ -9731,7 +9878,7 @@ function renderMatchDetail() {
                   const droveCount = countDrove(dp.id);
                   const isMine = myPid === dp.id;
                   return `
-                    <div class="transport-row" style="border-left:3px solid var(--green)${isMine ? ';background:rgba(255,107,0,0.06)' : ''}">
+                    <div class="transport-row" style="border-left:3px solid var(--green)${isMine ? ';background:rgba(var(--accent-rgb),0.06)' : ''}">
                       ${dp.photo ? `<img src="${dp.photo}" style="width:36px;height:36px;border-radius:50%;object-fit:cover;border:2px solid var(--green)">` : `<div style="width:36px;height:36px;border-radius:50%;background:var(--bg-3);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:14px;color:var(--green);border:2px solid var(--green)">${esc(dp.name.charAt(0).toUpperCase())}</div>`}
                       <div style="flex:1;min-width:0">
                         <div style="font-family:'Anton';font-size:13px;text-transform:uppercase">${isMine?'⭐ ':''}#${dp.num} ${esc(dp.name)}</div>
@@ -9753,7 +9900,7 @@ function renderMatchDetail() {
                   if (!dp) return '';
                   const isMine = myPid === did;
                   return `
-                    <span class="chip" style="background:rgba(255,107,0,0.10);border-color:var(--orange);color:var(--orange)${isMine?';font-weight:700':''}">${isMine?'⭐ ':''}#${dp.num} ${esc(dp.name)}</span>
+                    <span class="chip" style="background:rgba(var(--accent-rgb),0.10);border-color:var(--orange);color:var(--orange)${isMine?';font-weight:700':''}">${isMine?'⭐ ':''}#${dp.num} ${esc(dp.name)}</span>
                   `;
                 }).join('')}
               </div>
@@ -10133,7 +10280,7 @@ function renderStatsTable(m, stats, canEdit) {
           const myPid = state.auth && state.auth.role === 'player' ? state.auth.playerId : null;
           const isMe = myPid && pid === myPid;
           const hasReview = state.auth.role === 'coach' && m.playerReviews && m.playerReviews[pid];
-          return `<tr ${clickHandler} style="${canEdit ? 'cursor:pointer;' : ''}${isMe ? 'background:rgba(255,107,0,0.10);border-left:3px solid var(--orange)' : ''}">
+          return `<tr ${clickHandler} style="${canEdit ? 'cursor:pointer;' : ''}${isMe ? 'background:rgba(var(--accent-rgb),0.10);border-left:3px solid var(--orange)' : ''}">
             <td style="font-family:'Anton';font-size:14px;text-transform:uppercase">${isMVP ? '👑 ' : ''}${isMe ? '⭐ ' : ''}${esc(player.name)}${isMe ? ' · TOI' : ''}${hasReview ? ' <span title="A donné son ressenti" style="font-size:11px;opacity:0.8">📝</span>' : ''}</td>
             <td>${s.min||0}'</td>
             <td class="num">${s.pts||0}</td>
@@ -11524,7 +11671,7 @@ function renderMatchPrep(m) {
               <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;line-height:1.2;cursor:pointer" onclick="state.view={type:'play',id:'${p.id}'};render()">${esc(p.title || '')}</div>
               <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${getCatLabel(p.cat)}</div>
               ${lk.coachNote ? `
-                <div style="margin-top:8px;padding:8px 10px;background:rgba(255,107,0,0.08);border-left:2px solid var(--orange);border-radius:0 6px 6px 0;font-size:12px;color:var(--ink-2);line-height:1.4;white-space:pre-wrap">${esc(lk.coachNote)}</div>
+                <div style="margin-top:8px;padding:8px 10px;background:rgba(var(--accent-rgb),0.08);border-left:2px solid var(--orange);border-radius:0 6px 6px 0;font-size:12px;color:var(--ink-2);line-height:1.4;white-space:pre-wrap">${esc(lk.coachNote)}</div>
               ` : ''}
             </div>
             <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
@@ -12329,7 +12476,7 @@ function renderLiveTap(m, players, selectedPid) {
           <button class="action-btn score" onclick="liveAction('p2i')"><span class="action-btn-icon">2I</span><span class="action-btn-label">2pts INT</span></button>
           <button class="action-btn score" onclick="liveAction('p2e')"><span class="action-btn-icon">2E</span><span class="action-btn-label">2pts MID</span></button>
           <button class="action-btn score" onclick="liveAction('p3')"><span class="action-btn-icon">3</span><span class="action-btn-label">3 PTS</span></button>
-          <button class="action-btn score" onclick="liveAction('ca')" style="background:rgba(255,107,0,0.15);border-color:var(--orange)"><span class="action-btn-icon" style="color:var(--orange)">CA</span><span class="action-btn-label" style="color:var(--orange)">+2 C.ATTAQUE</span></button>
+          <button class="action-btn score" onclick="liveAction('ca')" style="background:rgba(var(--accent-rgb),0.15);border-color:var(--orange)"><span class="action-btn-icon" style="color:var(--orange)">CA</span><span class="action-btn-label" style="color:var(--orange)">+2 C.ATTAQUE</span></button>
           <button class="action-btn miss" onclick="liveAction('p2iA')"><span class="action-btn-icon">2I</span><span class="action-btn-label">RATÉ INT</span></button>
           <button class="action-btn miss" onclick="liveAction('p2eA')"><span class="action-btn-icon">2E</span><span class="action-btn-label">RATÉ MID</span></button>
           <button class="action-btn miss" onclick="liveAction('p3A')"><span class="action-btn-icon">3</span><span class="action-btn-label">RATÉ 3</span></button>
@@ -12666,7 +12813,7 @@ function renderMyStats() {
 
       ${hasWarmup ? `
         <div style="padding:0 18px 14px">
-          <div onclick="openMyWarmupRoutine()" style="padding:12px 14px;background:linear-gradient(135deg,rgba(255,107,0,0.10),var(--surface));border:1.5px solid var(--orange);border-radius:var(--radius);cursor:pointer;display:flex;align-items:center;gap:12px">
+          <div onclick="openMyWarmupRoutine()" style="padding:12px 14px;background:linear-gradient(135deg,rgba(var(--accent-rgb),0.10),var(--surface));border:1.5px solid var(--orange);border-radius:var(--radius);cursor:pointer;display:flex;align-items:center;gap:12px">
             <span style="font-size:32px">🏃</span>
             <div style="flex:1">
               <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;letter-spacing:0.04em">Ma routine d'échauffement</div>
@@ -13369,7 +13516,7 @@ function renderEditConvocModal(id, isNew, c) {
       <div class="fld">
         <label class="fld-label">Type</label>
         ${c.matchId ? `
-          <div style="padding:10px 12px;background:rgba(255,107,0,0.10);border:1px solid var(--orange);border-radius:8px;font-family:'JetBrains Mono';font-size:11px;color:var(--orange);text-transform:uppercase;letter-spacing:0.04em">
+          <div style="padding:10px 12px;background:rgba(var(--accent-rgb),0.10);border:1px solid var(--orange);border-radius:8px;font-family:'JetBrains Mono';font-size:11px;color:var(--orange);text-transform:uppercase;letter-spacing:0.04em">
             🏀 Match (lié) · modifie via la section Matchs
           </div>
           <input type="hidden" id="cv-type" value="match">
@@ -13729,7 +13876,7 @@ function renderOverdueTrainingsBanner() {
   if (!overdue.length) return '';
   const n = overdue.length;
   return `
-    <div style="margin:0 18px 14px;padding:14px 16px;background:linear-gradient(135deg,rgba(255,107,0,0.12),var(--surface));border:1.5px solid var(--orange);border-radius:var(--radius)">
+    <div style="margin:0 18px 14px;padding:14px 16px;background:linear-gradient(135deg,rgba(var(--accent-rgb),0.12),var(--surface));border:1.5px solid var(--orange);border-radius:var(--radius)">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
         <span style="font-size:20px">⏱</span>
         <div style="flex:1;min-width:0">
@@ -15540,7 +15687,7 @@ function renderTrainingPlanEditor() {
           ✓ <strong style="color:var(--green)">Plan validé</strong> — visible par les joueuses. Tu peux toujours le modifier, elles verront les changements.
         </div>
       ` : `
-        <div style="padding:10px 12px;background:rgba(255,107,0,0.08);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:14px;font-size:11px;color:var(--ink-2);line-height:1.5">
+        <div style="padding:10px 12px;background:rgba(var(--accent-rgb),0.08);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:14px;font-size:11px;color:var(--ink-2);line-height:1.5">
           🔒 <strong style="color:var(--orange)">Brouillon</strong> — pas encore visible par les joueuses. Valide en bas quand c'est prêt.
         </div>
       `}
@@ -15689,7 +15836,7 @@ function trainingExerciseRow(ex, idx, totalCount, startTime, endTime) {
     <div class="training-exo-row" data-idx="${idx}" draggable="true" style="flex-direction:column;align-items:stretch;padding:0;overflow:hidden">
       <!-- HEADER avec horaire de switch -->
       ${startTime ? `
-        <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;background:rgba(255,107,0,0.08);border-bottom:1px solid var(--border-soft);font-family:'JetBrains Mono';font-size:10px;letter-spacing:0.06em;text-transform:uppercase">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;background:rgba(var(--accent-rgb),0.08);border-bottom:1px solid var(--border-soft);font-family:'JetBrains Mono';font-size:10px;letter-spacing:0.06em;text-transform:uppercase">
           <span style="color:var(--orange)">▶ ${startTime}${endTime ? ' → ' + endTime : ''}</span>
           <span style="color:var(--ink-3)">⏱ ${ex.duration || '?'}min</span>
         </div>
@@ -16299,7 +16446,7 @@ function renderExerciseDetail() {
               ${linkedPlay.images.map((img, idx) => `
                 <div style="position:relative;width:72px;height:72px;border-radius:6px;overflow:hidden;border:1px solid var(--border);cursor:zoom-in" onclick="viewLinkedPlayImage('${linkedPlay.id}',${idx})">
                   <img src="${img}" style="width:100%;height:100%;object-fit:cover">
-                  <div style="position:absolute;bottom:2px;left:2px;background:rgba(255,107,0,0.9);color:black;font-family:'JetBrains Mono';font-size:8px;padding:1px 4px;border-radius:3px">📚</div>
+                  <div style="position:absolute;bottom:2px;left:2px;background:rgba(var(--accent-rgb),0.9);color:black;font-family:'JetBrains Mono';font-size:8px;padding:1px 4px;border-radius:3px">📚</div>
                 </div>
               `).join('')}
             </div>
@@ -16344,7 +16491,7 @@ function renderExerciseDetail() {
         ${linkedPlay && linkedPlay.attachments && linkedPlay.attachments.length > 0 ? `
           <div style="display:flex;flex-direction:column;gap:4px;margin-bottom:8px">
             ${linkedPlay.attachments.map(f => `
-              <a href="${f.data || f.url || '#'}" target="_blank" rel="noopener" download="${esc(f.name || 'document')}" style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:rgba(255,107,0,0.06);border:1px solid var(--border-soft);border-radius:6px;text-decoration:none;color:inherit">
+              <a href="${f.data || f.url || '#'}" target="_blank" rel="noopener" download="${esc(f.name || 'document')}" style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:rgba(var(--accent-rgb),0.06);border:1px solid var(--border-soft);border-radius:6px;text-decoration:none;color:inherit">
                 <span style="font-size:18px">📄</span>
                 <div style="flex:1;min-width:0;overflow:hidden">
                   <div style="font-size:11px;color:var(--orange);font-family:'JetBrains Mono';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(f.name || 'document')}</div>
@@ -16751,7 +16898,7 @@ function openLineupImporter() {
           const benchCount = Object.values(l.bench || {}).filter(Boolean).length;
           return `
             <button class="picker-row" onclick="applyLineupToGroups('${l.id}')" style="text-align:left;width:100%">
-              <div style="width:42px;height:42px;border-radius:6px;background:rgba(255,107,0,0.15);border:1.5px solid var(--orange);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:14px;color:var(--orange);flex-shrink:0">5</div>
+              <div style="width:42px;height:42px;border-radius:6px;background:rgba(var(--accent-rgb),0.15);border:1.5px solid var(--orange);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:14px;color:var(--orange);flex-shrink:0">5</div>
               <div style="flex:1;min-width:0">
                 <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;line-height:1.2">${esc(l.name)}</div>
                 <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${esc(l.tag || '')} · ${startersCount} titulaires · ${benchCount} banc</div>
@@ -16911,7 +17058,7 @@ function openMyTrainingPlan(convocId, dateStr) {
                       ${allImages.map((imgObj, imgIdx) => `
                         <div style="position:relative;width:64px;height:64px;border-radius:5px;overflow:hidden;border:1px solid var(--border);cursor:zoom-in" onclick="viewPlayerExerciseImage('${convocId}','${ex.id}',${imgIdx})">
                           <img src="${imgObj.src}" style="width:100%;height:100%;object-fit:cover">
-                          ${imgObj.source === 'play' ? '<div style="position:absolute;bottom:2px;left:2px;background:rgba(255,107,0,0.9);color:black;font-family:\'JetBrains Mono\';font-size:7px;padding:1px 3px;border-radius:2px">📚</div>' : ''}
+                          ${imgObj.source === 'play' ? '<div style="position:absolute;bottom:2px;left:2px;background:rgba(var(--accent-rgb),0.9);color:black;font-family:\'JetBrains Mono\';font-size:7px;padding:1px 3px;border-radius:2px">📚</div>' : ''}
                         </div>
                       `).join('')}
                     </div>
@@ -17067,7 +17214,7 @@ function openEventInstance(parentId, dateStr) {
         const totalMin = plan.exercises.reduce((acc, ex) => acc + (ex.duration || 0), 0);
         if (isCoach) {
           return `
-            <div style="margin:14px 0;padding:14px;background:linear-gradient(135deg,rgba(255,107,0,0.08),var(--surface));border:1.5px solid var(--orange);border-radius:var(--radius);cursor:pointer" onclick="closeModal();setTimeout(()=>openTrainingPlanEditor('${parentId}','${dateStr}'),80)">
+            <div style="margin:14px 0;padding:14px;background:linear-gradient(135deg,rgba(var(--accent-rgb),0.08),var(--surface));border:1.5px solid var(--orange);border-radius:var(--radius);cursor:pointer" onclick="closeModal();setTimeout(()=>openTrainingPlanEditor('${parentId}','${dateStr}'),80)">
               <div style="display:flex;align-items:center;justify-content:space-between">
                 <div style="flex:1">
                   <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;letter-spacing:0.04em">📋 Plan d'entraînement</div>
@@ -17086,7 +17233,7 @@ function openEventInstance(parentId, dateStr) {
           const completed = plan.completedExercises || {};
           const doneCount = plan.exercises.filter(ex => completed[ex.id]).length;
           return `
-            <div style="margin:14px 0;padding:14px;background:linear-gradient(135deg,rgba(255,107,0,0.08),var(--surface));border:1.5px solid var(--orange);border-radius:var(--radius);cursor:pointer" onclick="closeModal();setTimeout(()=>openMyTrainingPlan('${parentId}','${dateStr}'),80)">
+            <div style="margin:14px 0;padding:14px;background:linear-gradient(135deg,rgba(var(--accent-rgb),0.08),var(--surface));border:1.5px solid var(--orange);border-radius:var(--radius);cursor:pointer" onclick="closeModal();setTimeout(()=>openMyTrainingPlan('${parentId}','${dateStr}'),80)">
               <div style="display:flex;align-items:center;justify-content:space-between">
                 <div style="flex:1">
                   <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;letter-spacing:0.04em">📋 Programme du jour</div>
@@ -17783,7 +17930,7 @@ function renderChallenges() {
     </div>
 
     ${isCoach && !hasActive ? `
-      <div style="margin:0 18px 18px;padding:14px;background:linear-gradient(135deg,rgba(255,107,0,0.10),var(--surface));border:1.5px dashed var(--orange);border-radius:var(--radius)">
+      <div style="margin:0 18px 18px;padding:14px;background:linear-gradient(135deg,rgba(var(--accent-rgb),0.10),var(--surface));border:1.5px dashed var(--orange);border-radius:var(--radius)">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
           <span style="font-size:24px">💡</span>
           <div style="flex:1">
@@ -17923,7 +18070,7 @@ function challengeCard(c, isCoach) {
           </div>
 
           ${isPlayer && myPid ? `
-            <div style="text-align:center;margin-bottom:10px;padding:10px;background:rgba(255,107,0,0.06);border-radius:8px">
+            <div style="text-align:center;margin-bottom:10px;padding:10px;background:rgba(var(--accent-rgb),0.06);border-radius:8px">
               <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em">Ma contribution</div>
               <div style="font-family:'Anton';font-size:24px;color:var(--orange);margin-top:2px">${myContrib} <span style="font-size:14px;color:var(--ink-3)">${esc(c.metric)}</span></div>
             </div>
@@ -18251,7 +18398,7 @@ function updateChallengeScore(cid, pid) {
         <button class="btn btn-primary" onclick="document.getElementById('sc-val').value = (parseInt(document.getElementById('sc-val').value)||0)+1" style="width:48px;height:48px;font-size:24px;padding:0">+</button>
       </div>
       <div style="text-align:center;font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em">${esc(c.metric)}</div>
-      ${isMine ? `<div style="margin-top:14px;padding:10px;background:rgba(255,107,0,0.08);border-left:3px solid var(--orange);border-radius:6px;font-size:11px;color:var(--ink-2);line-height:1.5">💪 Sois honnête ! C'est ton défi. Ton score est public dans le classement.</div>` : ''}
+      ${isMine ? `<div style="margin-top:14px;padding:10px;background:rgba(var(--accent-rgb),0.08);border-left:3px solid var(--orange);border-radius:6px;font-size:11px;color:var(--ink-2);line-height:1.5">💪 Sois honnête ! C'est ton défi. Ton score est public dans le classement.</div>` : ''}
     </div>
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="closeModal()">Annuler</button>
@@ -20044,7 +20191,7 @@ async function exportStory(matchId, style, customMessage) {
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <div class="modal-body" style="text-align:center">
-      <img src="${dataUrl}" style="max-width:100%;max-height:60vh;border-radius:12px;border:2px solid var(--orange);box-shadow:0 8px 32px rgba(255,107,0,0.25)">
+      <img src="${dataUrl}" style="max-width:100%;max-height:60vh;border-radius:12px;border:2px solid var(--orange);box-shadow:0 8px 32px rgba(var(--accent-rgb),0.25)">
       <div style="margin-top:14px;display:flex;flex-direction:column;gap:6px">
         ${shareSupported ? `<button class="btn btn-primary btn-block" onclick="shareStory('${matchId}', this)">📤 Partager (WhatsApp / Insta...)</button>` : ''}
         <a href="${dataUrl}" download="playbook-vs-${(m.opponent||'match').replace(/[^a-z0-9]/gi,'-')}.png" class="btn btn-secondary btn-block" style="text-decoration:none;text-align:center">⬇ Télécharger l'image</a>
@@ -20145,7 +20292,7 @@ function exportMatchSheet(matchId) {
         * { box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; color: #111; margin: 0; padding: 0; font-size: 11px; line-height: 1.4; }
         h1, h2, h3 { font-family: 'Impact', 'Anton', sans-serif; text-transform: uppercase; letter-spacing: 0.02em; margin: 0; }
-        .header { display: flex; justify-content: space-between; align-items: flex-start; padding-bottom: 14px; border-bottom: 3px solid #ff6b00; margin-bottom: 18px; }
+        .header { display: flex; justify-content: space-between; align-items: flex-start; padding-bottom: 14px; border-bottom: 3px solid var(--orange); margin-bottom: 18px; }
         .club { font-size: 18px; }
         .club-sub { font-size: 10px; color: #666; margin-top: 2px; }
         .meta { text-align: right; font-size: 10px; color: #444; }
@@ -20154,22 +20301,22 @@ function exportMatchSheet(matchId) {
         .score { font-size: 48px; font-weight: bold; margin: 6px 0; font-family: 'Impact', sans-serif; }
         .vs-name { font-size: 13px; opacity: 0.9; }
         table { width: 100%; border-collapse: collapse; font-size: 10px; }
-        th { background: #111; color: #ff6b00; padding: 6px 4px; text-align: center; font-weight: bold; font-size: 9px; letter-spacing: 0.04em; }
+        th { background: #111; color: var(--orange); padding: 6px 4px; text-align: center; font-weight: bold; font-size: 9px; letter-spacing: 0.04em; }
         td { padding: 5px 4px; text-align: center; border-bottom: 1px solid #eee; }
         td.name { text-align: left; font-weight: bold; }
-        td.num { color: #ff6b00; font-weight: bold; }
+        td.num { color: var(--orange); font-weight: bold; }
         tr.total { background: #f5f5f5; font-weight: bold; border-top: 2px solid #111; }
         .gs-good { color: #16a34a; font-weight: bold; }
         .gs-bad { color: #dc2626; font-weight: bold; }
-        .gs-mid { color: #ff6b00; font-weight: bold; }
+        .gs-mid { color: var(--orange); font-weight: bold; }
         .notes-section { margin-top: 18px; }
-        .notes-section h3 { font-size: 13px; color: #ff6b00; margin-bottom: 6px; }
-        .notes-block { background: #fafafa; padding: 10px; border-left: 3px solid #ff6b00; font-size: 11px; line-height: 1.5; white-space: pre-wrap; border-radius: 4px; }
+        .notes-section h3 { font-size: 13px; color: var(--orange); margin-bottom: 6px; }
+        .notes-block { background: #fafafa; padding: 10px; border-left: 3px solid var(--orange); font-size: 11px; line-height: 1.5; white-space: pre-wrap; border-radius: 4px; }
         .footer { margin-top: 30px; padding-top: 14px; border-top: 1px solid #ccc; display: flex; justify-content: space-between; font-size: 9px; color: #888; }
         .sig { width: 40%; padding-top: 30px; border-top: 1px solid #999; text-align: center; font-size: 10px; color: #666; }
         @media print { .no-print { display: none; } }
         .actions { text-align: center; padding: 20px; }
-        .btn-print { background: #ff6b00; color: black; border: 0; padding: 12px 24px; border-radius: 8px; font-weight: bold; cursor: pointer; font-size: 14px; }
+        .btn-print { background: var(--orange); color: black; border: 0; padding: 12px 24px; border-radius: 8px; font-weight: bold; cursor: pointer; font-size: 14px; }
       </style>
     </head>
     <body>
@@ -20195,7 +20342,7 @@ function exportMatchSheet(matchId) {
         <div class="vs-name">vs ${esc(m.opponent)}</div>
       </div>
 
-      <h3 style="font-size:13px;color:#ff6b00;margin-bottom:6px">Statistiques individuelles</h3>
+      <h3 style="font-size:13px;color:var(--orange);margin-bottom:6px">Statistiques individuelles</h3>
       <table>
         <thead>
           <tr>
@@ -21897,7 +22044,7 @@ function editPlayer(pid) {
             return `<div style="padding:10px 12px;background:var(--bg-2);border:1px dashed var(--border);border-radius:6px;font-size:12px;color:var(--ink-3);font-style:italic;text-align:center">Aucune routine définie</div>`;
           }
           return `
-            <div style="padding:10px 12px;background:rgba(255,107,0,0.06);border-left:3px solid var(--orange);border-radius:6px;font-size:11px;color:var(--ink-2);font-family:'JetBrains Mono';text-transform:uppercase">
+            <div style="padding:10px 12px;background:rgba(var(--accent-rgb),0.06);border-left:3px solid var(--orange);border-radius:6px;font-size:11px;color:var(--ink-2);font-family:'JetBrains Mono';text-transform:uppercase">
               <strong style="color:var(--orange)">⚡ ${steps.length} étape${steps.length>1?'s':''}</strong> · ${esc(steps[0].label.slice(0,40))}${steps[0].label.length>40?'…':''}
             </div>
           `;
@@ -24256,6 +24403,10 @@ function _doRender() {
 }
 
 function render() {
+  // Thème couleur : render() étant le passage unique après login/logout/switch
+  // d'identité, on resynchronise l'accent ici (idempotent, set d'attribut, pas
+  // de re-render). Au boot le <script> du <head> a déjà posé data-theme.
+  try { applyTheme(getThemeId()); } catch (e) {}
   // BACK BUTTON : render() est le point de passage unique des vues détail
   // (state.view). On synchronise ici l'historique : push à l'ouverture d'une
   // vue, history.back à sa fermeture programmatique (bouton « ← Retour »).
