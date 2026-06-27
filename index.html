@@ -281,6 +281,25 @@
     .nav-btn-label { font-size: 8px; letter-spacing: 0.02em; }
   }
 
+  /* ========== PULL-TO-REFRESH (PWA standalone) ========== */
+  /* Indicateur de tirage. Posé en position fixe sous la status bar (safe-area),
+     hors du .app (survit aux re-render). Masqué par défaut (opacity 0). */
+  #ptr-indicator {
+    position: fixed; top: calc(env(safe-area-inset-top) + 4px); left: 50%;
+    transform: translateX(-50%);
+    z-index: 9000; width: 40px; height: 40px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--surface); border: 1.5px solid var(--orange);
+    color: var(--orange); font-size: 18px; line-height: 1;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.3);
+    opacity: 0; pointer-events: none; will-change: transform, opacity;
+  }
+  #ptr-indicator.ptr-visible { opacity: 1; }
+  #ptr-indicator.ptr-armed { background: var(--orange); color: #000; }
+  #ptr-indicator.ptr-spinning .ptr-glyph { animation: ptr-spin 0.7s linear infinite; }
+  #ptr-indicator .ptr-glyph { display: inline-block; }
+  @keyframes ptr-spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }
+
   /* ========== CHRONOMÈTRE (FAB + overlay) ========== */
   /* Bouton flottant accessible coach + joueuse, posé AU-DESSUS de la nav. */
   .chrono-fab {
@@ -10013,6 +10032,9 @@ function renderMatchDetail() {
   const cancelled = phase === 'cancelled';
   // Toggle UI : "Voir la prépa" pour les matchs déjà joués (historique).
   const showPrepArchive = isCoach && played && state._showPrepArchive === m.id;
+  // Composition (qui a joué) : info d'équipe, visible par TOUS (dont la joueuse),
+  // affichée pour les matchs qui ont eu lieu (joué / passé / jour J).
+  const showCompo = !cancelled && (played || phase === 'past-unscored' || phase === 'today');
 
   return `
     <div class="fade-up">
@@ -10434,6 +10456,8 @@ function renderMatchDetail() {
             </div>
           `;
         })()}
+
+        ${showCompo ? renderMatchComposition(m) : ''}
 
         <div class="section-header">
           <div>
@@ -12317,6 +12341,43 @@ function getMatchRoster(m) {
   }
   // Fallback : tout l'effectif de la saison
   return _seasonPool;
+}
+
+// Composition du match (qui était dans l'effectif / a joué) — info d'ÉQUIPE,
+// visible par TOUS les rôles (dont la joueuse). Source : roster figé
+// (m.roster.included) sinon convocation du jour sinon effectif saison (via
+// getMatchRoster). Chaque entrée est annotée : a-t-elle des stats saisies
+// (= a joué), points, et est-ce la joueuse connectée (viewerId). AUCUNE donnée
+// privée coach n'est exposée (ni ressentis, ni prépa, ni commentaires).
+function getMatchComposition(m, viewerId) {
+  if (!m) return [];
+  const roster = getMatchRoster(m) || [];
+  const stats = m.playerStats || {};
+  return roster.map(p => {
+    const s = stats[p.id];
+    return { id: p.id, num: p.num || 0, name: p.name || '',
+      hasStats: !!s, pts: (s && s.pts) || 0, isMe: !!viewerId && p.id === viewerId };
+  }).sort((a, b) => (a.num || 0) - (b.num || 0));
+}
+
+// Rendu de la section Composition (pastilles joueuses). Joueuse connectée mise
+// en avant (« TOI »), joueuses avec stats marquées (points). Lecture seule.
+function renderMatchComposition(m) {
+  const viewerId = (state.auth && state.auth.role === 'player') ? state.auth.playerId : null;
+  const comp = getMatchComposition(m, viewerId);
+  if (!comp.length) return '';
+  const anyStats = comp.some(c => c.hasStats);
+  return `
+    <div class="section-header"><div><div class="eyebrow">Effectif · ${comp.length} joueuses</div><h2 class="display-md mt-2">Composition</h2></div></div>
+    <div class="list-section" style="margin-top:0">
+      <div style="display:flex;flex-wrap:wrap;gap:6px;padding:12px">
+        ${comp.map(c => `
+          <span class="chip" style="${c.isMe ? 'background:var(--orange);color:#000;border-color:var(--orange);font-weight:700' : (c.hasStats ? 'border-color:var(--orange);color:var(--orange)' : '')}">#${c.num} ${esc(c.name)}${c.isMe ? ' · TOI' : ''}${anyStats && c.hasStats ? ` · ${c.pts}pts` : ''}</span>
+        `).join('')}
+      </div>
+      ${anyStats ? '' : `<div style="padding:0 12px 12px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.04em">Effectif convoqué · stats détaillées non saisies</div>`}
+    </div>
+  `;
 }
 
 // Initialise le roster du match si pas encore défini
@@ -25193,7 +25254,99 @@ function _pbBoot() {
   render();
 }
 
+// ============================================================
+// PULL-TO-REFRESH (PWA standalone uniquement)
+// ------------------------------------------------------------
+// En navigateur, le pull-to-refresh natif existe déjà → on n'active notre geste
+// QUE en mode standalone (app installée « sur l'écran d'accueil »), où aucun
+// rechargement natif n'est possible et les données restent figées. Vanilla,
+// sans lib. Le geste tire sur le container .app à scrollTop 0 ; au-delà du
+// seuil → refreshFromCloud() (resync cloud via PbSync.fetchAll). Coach + joueuse.
+const PTR_THRESHOLD = 80; // px de tirage (brut) pour armer le rafraîchissement
+
+// true si l'app tourne en mode autonome (PWA installée) — display-mode standalone
+// (Android/desktop) ou navigator.standalone (iOS Safari ajouté à l'accueil).
+function ptrShouldActivate(env) {
+  env = env || {};
+  return !!(env.standaloneMedia || env.iosStandalone);
+}
+function ptrArmed(dy, threshold) { return dy >= (threshold || PTR_THRESHOLD); }
+function _isStandalonePWA() {
+  let standaloneMedia = false;
+  try { standaloneMedia = !!(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches); } catch (e) {}
+  const iosStandalone = window.navigator && window.navigator.standalone === true;
+  return ptrShouldActivate({ standaloneMedia, iosStandalone });
+}
+
+// Resync cloud à la demande (geste pull-to-refresh). Réutilise le moteur PbSync
+// existant (mêmes entités que le boot). Optimiste : ne casse rien hors-ligne.
+async function refreshFromCloud() {
+  if (window.Pb && Pb.online === false) return false;
+  try {
+    if (window.PbSync && PbSync.fetchAll) await PbSync.fetchAll(state);
+    try { ensureCurrentSeasonId(); } catch (e) {}
+    persist();
+    render();
+    if (typeof showToast === 'function') showToast('✓ Données à jour');
+    return true;
+  } catch (e) { console.warn('[refresh] pull-to-refresh:', e && e.message); return false; }
+}
+
+function _ptrEnsureIndicator() {
+  let el = document.getElementById('ptr-indicator');
+  if (el) return el;
+  el = document.createElement('div');
+  el.id = 'ptr-indicator';
+  el.setAttribute('aria-hidden', 'true');
+  el.innerHTML = '<span class="ptr-glyph">↻</span>';
+  document.body.appendChild(el);
+  return el;
+}
+
+function initPullToRefresh() {
+  if (window._ptrInit) return;
+  if (!_isStandalonePWA()) return; // navigateur classique → pull natif, on s'abstient
+  window._ptrInit = true;
+  const ind = _ptrEnsureIndicator();
+  let startY = 0, pulling = false, dy = 0, refreshing = false;
+  const getApp = () => document.querySelector('.app');
+  const reset = () => { pulling = false; dy = 0; ind.className = ''; ind.style.transform = ''; };
+
+  document.addEventListener('touchstart', (e) => {
+    if (refreshing || !e.touches || e.touches.length !== 1) { pulling = false; return; }
+    const app = getApp();
+    if (!app || app.scrollTop > 2) { pulling = false; return; } // pas tout en haut
+    startY = e.touches[0].clientY; pulling = true; dy = 0;
+  }, { passive: true });
+
+  document.addEventListener('touchmove', (e) => {
+    if (!pulling || refreshing) return;
+    const app = getApp();
+    if (!app || app.scrollTop > 2) { reset(); return; }
+    dy = e.touches[0].clientY - startY;
+    if (dy <= 0) { reset(); return; } // tirage vers le haut → ignore
+    const damped = Math.min(PTR_THRESHOLD + 40, dy * 0.5); // résistance élastique
+    ind.classList.add('ptr-visible');
+    ind.classList.toggle('ptr-armed', ptrArmed(dy));
+    ind.style.transform = `translateX(-50%) translateY(${damped}px) rotate(${Math.min(360, dy * 2)}deg)`;
+    if (e.cancelable) e.preventDefault(); // bloque le bounce natif pendant le tirage
+  }, { passive: false });
+
+  const onEnd = async () => {
+    if (!pulling || refreshing) { reset(); return; }
+    if (!ptrArmed(dy)) { reset(); return; } // sous le seuil → annule
+    refreshing = true;
+    ind.className = 'ptr-visible ptr-spinning';
+    ind.style.transform = 'translateX(-50%) translateY(56px)';
+    try { await refreshFromCloud(); } catch (e) {}
+    refreshing = false; reset();
+  };
+  document.addEventListener('touchend', onEnd, { passive: true });
+  document.addEventListener('touchcancel', () => { if (!refreshing) reset(); }, { passive: true });
+}
+
 _pbBoot();
+try { initPullToRefresh(); } catch (e) { console.warn('[ptr] init', e && e.message); }
 </script>
 </body>
 </html>
