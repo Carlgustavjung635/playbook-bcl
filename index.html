@@ -411,6 +411,35 @@
     font-size: 16px; cursor: pointer; padding: 4px 6px; line-height: 1;
   }
 
+  /* ========== BOÎTE À GAGES — écran tirage bloquant ========== */
+  #gage-overlay:empty { display: none; }
+  .gage-screen {
+    position: fixed; inset: 0; z-index: 10000;
+    background: radial-gradient(circle at 50% 35%, rgba(var(--accent-rgb),0.18), var(--bg) 70%);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: calc(env(safe-area-inset-top) + 24px) 24px calc(env(safe-area-inset-bottom) + 24px);
+    text-align: center; gap: 14px; animation: gageIn 0.25s ease-out;
+  }
+  @keyframes gageIn { from { opacity: 0; } to { opacity: 1; } }
+  .gage-eyebrow {
+    font-family: 'JetBrains Mono', monospace; font-size: 12px; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--orange);
+  }
+  .gage-title { font-family: 'Anton', sans-serif; font-size: 24px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--ink); }
+  .gage-count {
+    font-family: 'Anton', sans-serif; font-size: 96px; line-height: 1; color: var(--orange);
+    animation: gagePop 0.85s ease-out; text-shadow: 0 0 40px rgba(var(--accent-rgb),0.5);
+  }
+  @keyframes gagePop { 0% { transform: scale(0.4); opacity: 0; } 40% { transform: scale(1.15); opacity: 1; } 100% { transform: scale(1); } }
+  .gage-ball { font-size: 40px; animation: gageSpin 0.9s linear infinite; }
+  @keyframes gageSpin { to { transform: rotate(360deg); } }
+  .gage-reveal .gage-card {
+    font-family: 'Anton', sans-serif; font-size: 22px; line-height: 1.3; color: var(--ink);
+    background: var(--surface); border: 2px solid var(--orange); border-radius: var(--radius-lg);
+    padding: 22px 18px; max-width: 360px; width: 100%;
+    box-shadow: 0 12px 48px rgba(var(--accent-rgb),0.3); animation: gagePop 0.5s ease-out;
+  }
+
   /* ========== PULL-TO-REFRESH (PWA standalone) ========== */
   /* Indicateur de tirage. Posé en position fixe sous la status bar (safe-area),
      hors du .app (survit aux re-render). Masqué par défaut (opacity 0). */
@@ -4203,6 +4232,46 @@ const ENTITIES = [
       const pendingLocal = (state.broadcastReceipts || []).filter(r => !remoteKeys.has(`${r.broadcastId}|${r.playerId}`));
       state.broadcastReceipts = [...pendingLocal, ...next];
     }
+  },
+  // ==========================================================================
+  // BOÎTE À GAGES (cf. migration 20260628_001_gages.sql).
+  // Joueuses + coach proposent → coach modère/assigne → joueuse tire au sort.
+  // ANONYMAT : author_id est synchronisé (intégrité + audit) mais l'UI ne
+  // l'affiche JAMAIS ; un device joueuse ne l'utilise que pour reconnaître SES
+  // propres propositions (comparaison à son propre playerId → aucune fuite).
+  // ==========================================================================
+  {
+    key: 'gages', table: 'gages', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.gages || []).map(g => [g.id, {
+      id: g.id, text: g.text || '', author_id: g.authorId || null,
+      status: ['pending', 'approved', 'assigned', 'accepted', 'skipped', 'rejected'].includes(g.status) ? g.status : 'pending',
+      assigned_to: g.assignedTo || null,
+      assigned_at: g.assignedAt ? new Date(g.assignedAt).toISOString() : null,
+      revealed_at: g.revealedAt ? new Date(g.revealedAt).toISOString() : null,
+      completed_at: g.completedAt ? new Date(g.completedAt).toISOString() : null,
+      rejected_reason: g.rejectedReason || null,
+      season_id: g.seasonId || null,
+      updated_at: g.updatedAt ? new Date(g.updatedAt).toISOString() : (g.createdAt ? new Date(g.createdAt).toISOString() : null)
+    }])),
+    apply: (state, rows) => {
+      const local = state.gages || [];
+      const remoteIds = new Set(rows.map(r => r.id));
+      const fromRemote = rows.map(r => ({
+        id: r.id, text: r.text || '', authorId: r.author_id || null,
+        status: r.status || 'pending',
+        assignedTo: r.assigned_to || null,
+        assignedAt: r.assigned_at ? Date.parse(r.assigned_at) : null,
+        revealedAt: r.revealed_at ? Date.parse(r.revealed_at) : null,
+        completedAt: r.completed_at ? Date.parse(r.completed_at) : null,
+        rejectedReason: r.rejected_reason || null,
+        seasonId: r.season_id || null,
+        createdAt: r.created_at ? Date.parse(r.created_at) : null,
+        updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null)
+      }));
+      // Anti-wipe : un gage local fraîchement créé (id 'x…') pas encore en remote.
+      const pendingLocal = local.filter(g => !remoteIds.has(g.id) && typeof g.id === 'string' && g.id.startsWith('x'));
+      state.gages = [...pendingLocal, ...fromRemote];
+    }
   }
 ];
 
@@ -4615,6 +4684,7 @@ const K = {
   teamFilter: 'pb8_team_filter',
   broadcasts: 'pb8_broadcasts',
   broadcastReceipts: 'pb8_broadcast_receipts',
+  gages: 'pb8_gages',
   theme: 'pb8_theme', // map { "<role>:<playerId|->": themeId } — préférence couleur par identité
   chronoSound: 'pb8_chrono_sound', // map { "<role>:<playerId|->": soundId } — ambiance sonore chrono
   chronoTension: 'pb8_chrono_tension', // map { "<role>:<playerId|->": bool } — mode tension 3-2-1
@@ -5009,6 +5079,11 @@ let state = {
   broadcasts: load(K.broadcasts, []),
   broadcastReceipts: load(K.broadcastReceipts, []),
 
+  // === BOÎTE À GAGES (cf. migration 20260628_001_gages) ===
+  // [{ id, text, authorId, status, assignedTo, assignedAt, revealedAt,
+  //    completedAt, rejectedReason, seasonId, createdAt, updatedAt }]
+  gages: load(K.gages, []),
+
   // === JOUEUSES GUESTS (Phase 5 — cf. migration 20260524_009_guest_players) ===
   // guestPlayers : humains temporaires identifiés par leur nom (copine d'une
   //   joueuse, essayeuse). [{ id, name, note, promotedToPlayerId, firstSeenAt,
@@ -5107,6 +5182,7 @@ function persist() {
   save(K.trainingGuests, state.trainingGuests);
   save(K.broadcasts, state.broadcasts);
   save(K.broadcastReceipts, state.broadcastReceipts);
+  save(K.gages, state.gages);
   // FIX Option B : pendant l'édition d'un plan, bumper updatedAt de l'entrée
   // courante AVANT le save → la garde anti-écho de l'apply() trainingPlans peut
   // distinguer une édition locale fraîche d'un écho realtime obsolète (qui
@@ -7290,6 +7366,9 @@ function openSettings() {
         <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>editMyPhoto(),50)">
           📷 ${player && player.photo ? 'Changer ma photo de profil' : 'Ajouter une photo de profil'}
         </button>
+        <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openProposeGage(),50)">
+          🎁 Proposer un gage
+        </button>
         <button class="btn btn-secondary btn-block mb-2" onclick="reopenPlayerGuide()">
           ↻ Revoir le guide
         </button>
@@ -7446,6 +7525,10 @@ function doLogout() {
   // de session pour cette identité → on repart d'une évaluation fraîche (statut DB).
   window._broadcastSnoozed = null;
   window._broadcastBootChecked = false;
+  // Boîte à gages : reset des garde-fous de SESSION + ferme un éventuel overlay
+  // de tirage, pour que la prochaine identité réévalue ses propres gages.
+  window._gageBootChecked = false;
+  try { _closeGageOverlay(); } catch (e) {}
   // Mini-guide joueuse : reset des états de SESSION (force-show manuel + replié/neuf)
   // pour que la prochaine identité réévalue la visibilité depuis son propre PIN.
   state._guideForceShow = false;
@@ -13456,8 +13539,307 @@ function undoLastAction() {
 // ============================================================
 // TEAM (Convoc + Challenges)
 // ============================================================
+// ============================================================
+// BOÎTE À GAGES — proposition / modération / assignation / tirage
+// ------------------------------------------------------------
+// Flux : joueuses+coach proposent (pending) → coach approuve (approved) /
+// rejette (rejected) → coach assigne à une joueuse (assigned) → à sa prochaine
+// ouverture, écran bloquant tirage → accepte (accepted) / passe (skipped).
+// "Passer" autorisé ssi crédit (gages acceptés depuis le dernier skip) >= 2.
+// ANONYMAT : authorId synchronisé mais JAMAIS affiché ; sert seulement à la
+// joueuse pour reconnaître SES propres propositions (comparaison à son id).
+// ============================================================
+const GAGE_TEXT_MAX = 140;
+const GAGE_SKIP_CREDIT = 2;
+
+function _gageById(id) { return (state.gages || []).find(g => g.id === id); }
+function _gageTouch(g) { g.updatedAt = Date.now(); }
+function _gageFlush() { if (window.PbSync && PbSync.flushNow) PbSync.flushNow(state).catch(() => {}); }
+// Cloisonnement saison : g.seasonId fixé à la proposition (= active) puis re-calé
+// à l'assignation (saison de la date). Legacy/null → rattaché à l'active.
+function _gageInSeason(g, seasonId) {
+  if (!_seasonsLoaded()) return true;
+  if (g.seasonId) return g.seasonId === seasonId;
+  return seasonId === getActiveSeasonId();
+}
+function currentSeasonGages() {
+  const active = getActiveSeasonId();
+  if (!_seasonsLoaded() || !active) return state.gages || [];
+  return (state.gages || []).filter(g => _gageInSeason(g, active));
+}
+function gagesPendingCount() {
+  if (!state.auth || state.auth.role !== 'coach') return 0;
+  return currentSeasonGages().filter(g => g.status === 'pending').length;
+}
+// Crédit (recompute-on-read) : nb de gages 'accepted' consécutifs depuis le
+// dernier 'skipped', saison courante, pour cette joueuse.
+function gageCredit(pid) {
+  const active = getActiveSeasonId();
+  const done = (state.gages || [])
+    .filter(g => g.assignedTo === pid && _gageInSeason(g, active) && g.completedAt
+      && (g.status === 'accepted' || g.status === 'skipped'))
+    .sort((a, b) => (a.completedAt || 0) - (b.completedAt || 0));
+  let credit = 0;
+  done.forEach(g => { credit = g.status === 'skipped' ? 0 : credit + 1; });
+  return credit;
+}
+function canSkipGage(pid) { return gageCredit(pid) >= GAGE_SKIP_CREDIT; }
+
+// --- Proposition (joueuse OU coach) ---
+function submitGageProposal(text) {
+  text = (text || '').trim().slice(0, GAGE_TEXT_MAX);
+  if (!text) return false;
+  const a = state.auth || {};
+  const now = Date.now();
+  state.gages = state.gages || [];
+  state.gages.unshift({
+    id: uid(), text, authorId: a.role === 'player' ? a.playerId : 'coach',
+    status: 'pending', assignedTo: null, assignedAt: null, revealedAt: null,
+    completedAt: null, rejectedReason: null, seasonId: getActiveSeasonId() || null,
+    createdAt: now, updatedAt: now
+  });
+  persist(); _gageFlush();
+  return true;
+}
+function openProposeGage() {
+  const pid = state.auth && state.auth.playerId;
+  const mine = (state.gages || []).filter(g => g.authorId && pid && g.authorId === pid)
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 8);
+  const statusLabel = s => s === 'pending' ? '⏳ En attente de validation'
+    : s === 'approved' ? '✅ Validé (dans le pool)'
+    : s === 'rejected' ? '❌ Refusé'
+    : s === 'assigned' ? '🎁 Assigné à une joueuse'
+    : s === 'accepted' ? '💪 Accepté' : s === 'skipped' ? '🙈 Passé' : s;
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">🎁 Proposer un gage</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:12px;color:var(--ink-3);line-height:1.5;margin-bottom:10px">
+        Propose une idée de gage rigolo. La coach la validera avant qu'elle entre dans la boîte. <strong>C'est anonyme</strong> : personne ne saura que ça vient de toi.
+      </div>
+      <textarea id="gage-text" maxlength="${GAGE_TEXT_MAX}" rows="3" placeholder="Ex : chanter l'hymne du club à l'échauffement…" style="width:100%"></textarea>
+      <div style="display:flex;justify-content:flex-end;margin-top:10px">
+        <button class="btn btn-primary" onclick="submitGageFromModal()">Envoyer</button>
+      </div>
+      ${mine.length ? `
+        <div style="margin-top:16px;border-top:1px solid var(--border-soft);padding-top:12px">
+          <div class="eyebrow-muted" style="margin-bottom:8px">Mes propositions</div>
+          ${mine.map(g => `
+            <div style="padding:8px 10px;background:var(--bg-3);border-radius:8px;margin-bottom:6px">
+              <div style="font-size:13px;color:var(--ink);line-height:1.4">${esc(g.text)}</div>
+              <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;text-transform:uppercase">${statusLabel(g.status)}${g.rejectedReason ? ' · ' + esc(g.rejectedReason) : ''}</div>
+            </div>`).join('')}
+        </div>` : ''}
+    </div>
+  `);
+  setTimeout(() => { const el = document.getElementById('gage-text'); if (el) el.focus(); }, 80);
+}
+function submitGageFromModal() {
+  const el = document.getElementById('gage-text');
+  if (!el || !el.value.trim()) return;
+  submitGageProposal(el.value);
+  closeModal();
+  if (typeof showToast === 'function') showToast('🎁 Proposition envoyée à la coach');
+}
+
+// --- Modération + assignation (coach) ---
+function approveGage(id) {
+  const g = _gageById(id); if (!g || g.status !== 'pending') return;
+  g.status = 'approved'; _gageTouch(g); persist(); _gageFlush(); render();
+}
+function rejectGage(id) {
+  const g = _gageById(id); if (!g || g.status !== 'pending') return;
+  let reason = ''; try { reason = prompt('Raison du refus (optionnel) :') || ''; } catch (e) {}
+  g.status = 'rejected'; g.rejectedReason = reason.trim() || null; g.completedAt = Date.now();
+  _gageTouch(g); persist(); _gageFlush(); render();
+}
+function unassignGage(id) {
+  const g = _gageById(id); if (!g || g.status !== 'assigned' || g.revealedAt) return;
+  g.status = 'approved'; g.assignedTo = null; g.assignedAt = null;
+  _gageTouch(g); persist(); _gageFlush(); render();
+}
+function openGageAssign(id) {
+  const g = _gageById(id); if (!g || g.status !== 'approved') return;
+  const pool = (_seasonsLoaded() && getActiveSeasonId())
+    ? getSeasonPlayers(getActiveSeasonId(), { team: 'all' }) : (state.players || []);
+  const sorted = pool.slice().sort((a, b) => (a.num || 0) - (b.num || 0));
+  openModal(`
+    <div class="modal-header">
+      <div><div class="eyebrow-muted">Assigner ce gage à…</div><div class="modal-title" style="font-size:15px">${esc(g.text)}</div></div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      ${sorted.length ? sorted.map(p => `
+        <button class="btn btn-secondary btn-block mb-2" style="text-align:left" onclick="assignGage('${g.id}','${p.id}')">
+          #${p.num} ${esc(p.name)}
+        </button>`).join('') : '<div style="color:var(--ink-3);font-size:13px">Aucune joueuse dans la saison.</div>'}
+    </div>
+  `);
+}
+function assignGage(id, pid) {
+  const g = _gageById(id); if (!g || g.status !== 'approved') return;
+  const now = Date.now();
+  g.status = 'assigned'; g.assignedTo = pid; g.assignedAt = now;
+  // saison de la date d'assignation (cloisonnement), repli sur l'active.
+  g.seasonId = (getSeasonIdForDate(isoDate(new Date(now))) || getActiveSeasonId() || g.seasonId) || null;
+  _gageTouch(g); persist(); _gageFlush();
+  try { closeModal(); } catch (e) {}
+  render();
+  if (typeof showToast === 'function') showToast('🎁 Gage assigné');
+}
+
+function openGagesCoach() { state.section = 'team'; state.view = { type: 'gages' }; render(); _scrollTopApp(); }
+function renderGagesCoach() {
+  const all = currentSeasonGages();
+  const pending = all.filter(g => g.status === 'pending').sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  const pool = all.filter(g => g.status === 'approved').sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  const assigned = all.filter(g => g.status === 'assigned').sort((a, b) => (a.assignedAt || 0) - (b.assignedAt || 0));
+  const history = all.filter(g => g.status === 'accepted' || g.status === 'skipped' || g.status === 'rejected')
+    .sort((a, b) => (b.completedAt || 0) - (a.completedAt || 0));
+  const pName = pid => { const p = (state.players || []).find(x => x.id === pid); return p ? ('#' + p.num + ' ' + p.name) : '—'; };
+  const card = (inner) => `<div style="padding:10px 12px;background:var(--surface);border:1px solid var(--border-soft);border-radius:10px;margin-bottom:8px">${inner}</div>`;
+  const histIcon = s => s === 'accepted' ? '💪' : s === 'skipped' ? '🙈' : '❌';
+  return `
+    <div class="fade-up">
+      <button class="detail-back" onclick="state.view=null;render()">← Équipe</button>
+      <div class="px" style="padding-top:6px">
+        <div class="display-lg" style="margin-bottom:2px">🎁 Boîte à gages</div>
+        <div style="font-size:12px;color:var(--ink-3);margin-bottom:16px">Modère les propositions, garnis le pool, puis assigne un gage à une joueuse.</div>
+      </div>
+
+      <div class="section-header"><div><div class="eyebrow" style="color:var(--orange)">À modérer</div><h2 class="display-md mt-2">En attente (${pending.length})</h2></div></div>
+      <div class="px">
+        ${pending.length ? pending.map(g => card(`
+          <div style="font-size:14px;color:var(--ink);line-height:1.45;margin-bottom:8px">${esc(g.text)}</div>
+          <div style="display:flex;gap:6px">
+            <button class="btn btn-primary" style="flex:1" onclick="approveGage('${g.id}')">✅ Approuver</button>
+            <button class="btn btn-secondary" style="flex:1" onclick="rejectGage('${g.id}')">❌ Rejeter</button>
+          </div>`)).join('') : '<div style="color:var(--ink-3);font-size:13px;font-style:italic;padding-bottom:8px">Rien à modérer.</div>'}
+      </div>
+
+      <div class="section-header"><div><div class="eyebrow">Pool disponible</div><h2 class="display-md mt-2">Approuvés (${pool.length})</h2></div></div>
+      <div class="px">
+        ${pool.length ? pool.map(g => card(`
+          <div style="display:flex;align-items:center;gap:10px">
+            <div style="flex:1;font-size:14px;color:var(--ink);line-height:1.45">${esc(g.text)}</div>
+            <button class="btn btn-primary" onclick="openGageAssign('${g.id}')">Assigner →</button>
+          </div>`)).join('') : '<div style="color:var(--ink-3);font-size:13px;font-style:italic;padding-bottom:8px">Pool vide. Approuve des propositions.</div>'}
+      </div>
+
+      <div class="section-header"><div><div class="eyebrow">En cours</div><h2 class="display-md mt-2">Assignés (${assigned.length})</h2></div></div>
+      <div class="px">
+        ${assigned.length ? assigned.map(g => card(`
+          <div style="font-size:14px;color:var(--ink);line-height:1.45">${esc(g.text)}</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:6px">
+            <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">→ ${esc(pName(g.assignedTo))} · en attente du tirage</div>
+            <button class="btn btn-ghost" style="font-size:11px" onclick="unassignGage('${g.id}')">Désassigner</button>
+          </div>`)).join('') : '<div style="color:var(--ink-3);font-size:13px;font-style:italic;padding-bottom:8px">Aucun gage en cours.</div>'}
+      </div>
+
+      ${history.length ? `
+        <div class="section-header"><div><div class="eyebrow">Historique</div><h2 class="display-md mt-2">Terminés (${history.length})</h2></div></div>
+        <div class="px" style="padding-bottom:24px">
+          ${history.map(g => card(`
+            <div style="display:flex;align-items:flex-start;gap:8px">
+              <span style="font-size:16px">${histIcon(g.status)}</span>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:13px;color:var(--ink-2);line-height:1.4">${esc(g.text)}</div>
+                <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${g.status === 'rejected' ? 'Rejeté' + (g.rejectedReason ? ' · ' + esc(g.rejectedReason) : '') : (g.status === 'accepted' ? 'Accepté' : 'Passé') + ' · ' + esc(pName(g.assignedTo))}</div>
+              </div>
+            </div>`)).join('')}
+        </div>` : ''}
+    </div>
+  `;
+}
+
+// --- Tirage au sort (joueuse) : écran bloquant ---
+function pendingGageReveals(pid) {
+  if (!pid) return [];
+  return (state.gages || [])
+    .filter(g => g.assignedTo === pid && g.status === 'assigned' && _gageInSeason(g, getActiveSeasonId()))
+    .sort((a, b) => (a.assignedAt || 0) - (b.assignedAt || 0));
+}
+function maybeShowGageReveal() {
+  if (!state.auth || state.auth.role !== 'player' || !state.auth.playerId) return;
+  if (window._gageOverlayOpen || window._broadcastPopupOpen) return;
+  if (typeof _pbModalOpen === 'function' && _pbModalOpen()) return;
+  const list = pendingGageReveals(state.auth.playerId);
+  if (list.length) showGageReveal(list[0]);
+}
+function showGageReveal(g) {
+  window._gageOverlayOpen = true;
+  let host = document.getElementById('gage-overlay');
+  if (!host) { host = document.createElement('div'); host.id = 'gage-overlay'; document.body.appendChild(host); }
+  document.body.style.overflow = 'hidden';
+  _gageCountdown(g, 3);
+}
+function _closeGageOverlay() {
+  if (window._gageTo) { clearTimeout(window._gageTo); window._gageTo = null; }
+  const host = document.getElementById('gage-overlay');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+  window._gageOverlayOpen = false;
+}
+function _gageCountdown(g, n) {
+  const host = document.getElementById('gage-overlay'); if (!host) return;
+  if (n > 0) {
+    host.innerHTML = `
+      <div class="gage-screen">
+        <div class="gage-eyebrow">🎁 Boîte à gages</div>
+        <div class="gage-title">Tirage au sort…</div>
+        <div class="gage-count">${n}</div>
+        <div class="gage-ball">🏀</div>
+      </div>`;
+    window._gageTo = setTimeout(() => _gageCountdown(g, n - 1), 850);
+  } else {
+    const pid = state.auth && state.auth.playerId;
+    const canSkip = canSkipGage(pid);
+    const credit = gageCredit(pid);
+    host.innerHTML = `
+      <div class="gage-screen gage-reveal">
+        <div class="gage-eyebrow">🎁 Ton gage</div>
+        <div class="gage-card">${esc(g.text)}</div>
+        <div style="display:flex;flex-direction:column;gap:10px;width:100%;max-width:340px;margin-top:8px">
+          <button class="btn btn-primary btn-block" style="font-size:15px;padding:14px" onclick="acceptGage('${g.id}')">✓ J'accepte le défi</button>
+          <button class="btn btn-secondary btn-block" style="font-size:14px;padding:12px;${canSkip ? '' : 'opacity:0.45;cursor:not-allowed'}" ${canSkip ? `onclick="skipGage('${g.id}')"` : 'disabled'}>🙈 Je passe</button>
+          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-align:center;text-transform:uppercase;letter-spacing:0.04em">
+            ${canSkip ? 'Passer dépense ton crédit (−' + GAGE_SKIP_CREDIT + ')' : 'Passer dispo après ' + GAGE_SKIP_CREDIT + ' gages acceptés · crédit ' + credit + '/' + GAGE_SKIP_CREDIT}
+          </div>
+        </div>
+      </div>`;
+  }
+}
+function _gageAdvance() {
+  // enchaîne le gage suivant (s'il y en a) après une courte pause.
+  setTimeout(() => { try { maybeShowGageReveal(); } catch (e) {} }, 350);
+}
+function acceptGage(id) {
+  const g = _gageById(id); const pid = state.auth && state.auth.playerId;
+  if (!g || g.assignedTo !== pid || g.status !== 'assigned') return;
+  const now = Date.now();
+  g.status = 'accepted'; g.revealedAt = g.revealedAt || now; g.completedAt = now;
+  _gageTouch(g); persist(); _gageFlush(); _closeGageOverlay();
+  if (typeof showToast === 'function') showToast('💪 Défi accepté !');
+  _gageAdvance();
+}
+function skipGage(id) {
+  const g = _gageById(id); const pid = state.auth && state.auth.playerId;
+  if (!g || g.assignedTo !== pid || g.status !== 'assigned') return;
+  if (!canSkipGage(pid)) { if (typeof showToast === 'function') showToast('Crédit insuffisant (' + GAGE_SKIP_CREDIT + ' gages acceptés requis)'); return; }
+  let ok = false; try { ok = confirm('Tu vas utiliser ton crédit (−' + GAGE_SKIP_CREDIT + '). Continuer ?'); } catch (e) { ok = true; }
+  if (!ok) return;
+  const now = Date.now();
+  g.status = 'skipped'; g.revealedAt = g.revealedAt || now; g.completedAt = now;
+  _gageTouch(g); persist(); _gageFlush(); _closeGageOverlay();
+  if (typeof showToast === 'function') showToast('🙈 Gage passé · crédit remis à 0');
+  _gageAdvance();
+}
+
 function renderTeam() {
   const isCoach = state.auth.role === 'coach';
+  if (state.view && state.view.type === 'gages') return renderGagesCoach();
   // SAISON : nombre de joueuses de la saison courante (et non du roster
   // global). Si seasons pas encore loadés (avant migration), fallback sur
   // state.players via getSeasonPlayers qui renvoie tout dans ce cas.
@@ -13474,6 +13856,7 @@ function renderTeam() {
         ${isCoach ? `
           <div style="display:flex;gap:6px;flex-wrap:wrap">
             ${_seasonsLoaded() ? `<button class="section-action-btn" onclick="openSeasonRosterEditor()" aria-label="Gérer l'effectif de la saison">👥 Effectif</button>` : ''}
+            <button class="section-action-btn" onclick="openGagesCoach()" aria-label="Boîte à gages">🎁 Gages${(() => { const n = gagesPendingCount(); return n ? ` <span style="background:var(--orange);color:#fff;border-radius:10px;padding:0 5px;font-size:10px">${n}</span>` : ''; })()}</button>
             <button class="section-action-btn" onclick="managePlayers()" aria-label="Gérer les joueuses">⚙ Gérer</button>
           </div>
         ` : ''}
@@ -16102,6 +16485,7 @@ function _resolveBroadcast(id, status) {
   if (status === 'acknowledged') showToast('Message confirmé ✓');
   const next = getPendingBroadcastsForPlayer(pid);
   if (next.length) setTimeout(() => showBroadcastPopup(next[0]), 250);
+  else setTimeout(() => { try { maybeShowGageReveal(); } catch (e) {} }, 300); // file broadcasts vide → enchaîne un éventuel tirage de gage
 }
 
 // --- SONDAGE côté joueuse : sélection + vote ---
@@ -16137,6 +16521,7 @@ function closePollResults(id) {
   closeBroadcastPopup();
   const next = getPendingBroadcastsForPlayer(pid);
   if (next.length) setTimeout(() => showBroadcastPopup(next[0]), 250);
+  else setTimeout(() => { try { maybeShowGageReveal(); } catch (e) {} }, 300); // file broadcasts vide → enchaîne un éventuel tirage de gage
 }
 
 function renderBroadcastPopup(b) {
@@ -25012,6 +25397,15 @@ function _initPlayersSync() {
             setTimeout(() => { try { maybeShowBroadcastPopup(); } catch (e) {} }, 600);
           }
         } catch (e) { console.warn('[broadcast] boot popup:', e.message); }
+        // BOÎTE À GAGES : après les broadcasts, tirage bloquant si un gage est
+        // assigné à la joueuse (one-shot par session ; maybeShowGageReveal se
+        // tait si une popup broadcast est encore ouverte → reprise via chaînage).
+        try {
+          if (state.auth && state.auth.role === 'player' && !window._gageBootChecked) {
+            window._gageBootChecked = true;
+            setTimeout(() => { try { maybeShowGageReveal(); } catch (e) {} }, 1400);
+          }
+        } catch (e) { console.warn('[gage] boot reveal:', e.message); }
         // Subscribe Realtime sur toutes les entités configurées. On utilise
         // scheduleRender (debouncé 100ms) au lieu de render() direct pour
         // collapser plusieurs events Realtime en un seul re-render.
@@ -25413,7 +25807,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.5';
+const APP_VERSION = '2026-06-28.6';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
@@ -25530,7 +25924,11 @@ try { initPullToRefresh(); } catch (e) { console.warn('[ptr] init', e && e.messa
 // (PWA rouverte sans être tuée → détecte un déploiement survenu entre-temps).
 setTimeout(() => { try { checkForUpdate({ force: true }); } catch (e) {} }, 4000);
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) { try { checkForUpdate(); } catch (e) {} }
+  if (!document.hidden) {
+    try { checkForUpdate(); } catch (e) {}
+    // Retour au 1er plan : un gage a pu être assigné entre-temps → tirage.
+    try { maybeShowGageReveal(); } catch (e) {}
+  }
 });
 </script>
 </body>
