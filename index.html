@@ -7848,6 +7848,9 @@ function renderHomePlayer() {
         </div>
       `}
 
+      <!-- 1bis. Inbox messages (diffusions/sondages reçus) — audit #4 -->
+      ${renderPlayerInbox()}
+
       <!-- 2. Challenges actifs (preview 2-3, lien Tout → onglet) -->
       ${myActiveChallenges.length > 0 ? `
         <div class="section-header">
@@ -8050,6 +8053,7 @@ function renderPlayerChallenges() {
 
       ${auto.length > 0 ? `
         <div class="section-header"><div><div class="eyebrow" style="color:var(--ink-3)">⚙ Auto</div><h2 class="display-md mt-2" style="color:var(--ink-2)">Compteurs</h2></div></div>
+        ${renderChallengePeriodToggle(false)}
         <div style="padding:0 18px;display:flex;flex-direction:column;gap:8px;margin-bottom:18px">
           ${auto.map(c => playerChallengeRow(c, p.id)).join('')}
         </div>
@@ -8102,14 +8106,38 @@ function renderPlayerMatches() {
     .filter(m => (m.scoreUs || 0) > 0 || (m.scoreOpp || 0) > 0)
     .sort((a, b) => b.date.localeCompare(a.date));
 
-  // FFBB read-only : prochains + résultats (filtrés sur notre équipe)
-  const f = state.ffbb || {};
-  const ffbbMatches = f.matches || [];
-  const isPlayed = m => m.played && m.scoreHome != null && m.scoreAway != null && !isNaN(m.scoreHome) && !isNaN(m.scoreAway);
-  const teamLower = (f.teamName || '').toLowerCase();
-  const isMyTeam = m => (m.home || '').toLowerCase().includes(teamLower) || (m.away || '').toLowerCase().includes(teamLower);
-  const ffbbUpcoming = ffbbMatches.filter(m => !isPlayed(m) && isMyTeam(m)).slice(0, 6);
-  const ffbbRecent = ffbbMatches.filter(m => isPlayed(m) && isMyTeam(m)).reverse().slice(0, 6);
+  // FFBB read-only : aligné sur le dashboard v2 (ffbbDash) — NOS matchs de la
+  // catégorie courante, comme renderHomePlayerFFBB. Le legacy state.ffbb.matches
+  // (scraper v1) n'est plus lu ici. Déclenche un fetch auto si pas de données.
+  let ffbbBlock = '';
+  try {
+    const fd = ffbbDash();
+    const ffbbCats = ffbbCatsAvailable();
+    if (!(fd.engagements || []).length) {
+      setTimeout(() => { try { ffbbPlayerEnsureData(); } catch (e) {} }, 60);
+    } else {
+      let cat = fd.catTab;
+      if (!ffbbCats.includes(cat)) cat = ffbbCats[0];
+      const catM = ffbbCatMatches(cat).filter(m => m.ours);
+      const ffUp = catM.filter(ffbbIsUpcoming).sort((a, b) => (a.date || '').localeCompare(b.date || '')).slice(0, 6);
+      const ffPa = catM.filter(m => !ffbbIsUpcoming(m)).sort((a, b) => (b.date || '').localeCompare(a.date || '')).slice(0, 6);
+      if (ffUp.length || ffPa.length) {
+        ffbbBlock = `
+          <div class="section-header" style="margin-top:8px">
+            <div><div class="eyebrow">Championnat</div><h2 class="display-md mt-2">FFBB</h2></div>
+            <button class="section-action" onclick="openPlayerFFBB()">Voir tout →</button>
+          </div>
+          ${ffUp.length ? `
+            <div class="section-header"><div><div class="eyebrow-muted">Calendrier FFBB</div><h2 class="display-md mt-2" style="font-size:16px;color:var(--ink-2)">Prochains</h2></div></div>
+            <div class="list-section">${ffUp.map(ffbbDashMatchCard).join('')}</div>
+          ` : ''}
+          ${ffPa.length ? `
+            <div class="section-header"><div><div class="eyebrow-muted">Résultats FFBB</div><h2 class="display-md mt-2" style="font-size:16px;color:var(--ink-2)">Derniers</h2></div></div>
+            <div class="list-section">${ffPa.map(ffbbDashMatchCard).join('')}</div>
+          ` : ''}`;
+      }
+    }
+  } catch (e) { ffbbBlock = ''; }
 
   const pastMatchRow = m => {
     const win = m.scoreUs > m.scoreOpp;
@@ -8163,26 +8191,7 @@ function renderPlayerMatches() {
         </div>
       ` : ''}
 
-      ${(ffbbUpcoming.length > 0 || ffbbRecent.length > 0) ? `
-        <div class="section-header" style="margin-top:8px">
-          <div>
-            <div class="eyebrow">Championnat</div>
-            <h2 class="display-md mt-2">FFBB</h2>
-          </div>
-        </div>
-        ${ffbbUpcoming.length > 0 ? `
-          <div class="section-header"><div><div class="eyebrow-muted">Calendrier FFBB</div><h2 class="display-md mt-2" style="font-size:16px;color:var(--ink-2)">Prochains</h2></div></div>
-          <div class="list-section">
-            ${ffbbUpcoming.map(m => ffbbMatchRow(m, f.teamName)).join('')}
-          </div>
-        ` : ''}
-        ${ffbbRecent.length > 0 ? `
-          <div class="section-header"><div><div class="eyebrow-muted">Résultats FFBB</div><h2 class="display-md mt-2" style="font-size:16px;color:var(--ink-2)">Derniers</h2></div></div>
-          <div class="list-section">
-            ${ffbbRecent.map(m => ffbbMatchRow(m, f.teamName)).join('')}
-          </div>
-        ` : ''}
-      ` : ''}
+      ${ffbbBlock}
     </div>
   `;
 }
@@ -15148,6 +15157,77 @@ function getPendingBroadcastsForPlayer(pid) {
 function broadcastsPendingCount() {
   const activeIds = new Set(currentSeasonBroadcasts().filter(b => !b.archived).map(b => b.id));
   return (state.broadcastReceipts || []).filter(r => activeIds.has(r.broadcastId) && r.status === 'pending').length;
+}
+
+// ------------------------------------------------------------
+// INBOX MESSAGES JOUEUSE (audit #4) — liste des diffusions reçues
+// ------------------------------------------------------------
+// Source de vérité lu/non-lu = broadcastReceipts (DÉJÀ synchronisé) : pas de set
+// localStorage parallèle qui divergerait. « non lu » = receipt absent ou status
+// 'pending'. Tap → showBroadcastPopup (vue interactive existante : sondage
+// votable, annonce Compris/Plus tard). V1 : pas de réponse texte.
+function playerInboxBroadcasts(pid) {
+  if (!pid) return [];
+  return (state.broadcasts || [])
+    .filter(b => !b.archived && !_broadcastDeleted(b)
+      && _broadcastInSeason(b, state.currentSeasonId)
+      && broadcastTargetPlayerIds(b).includes(pid))
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)); // plus récent en haut
+}
+function _inboxIsUnread(b, pid) {
+  const r = getBroadcastReceipt(b.id, pid);
+  return !r || r.status === 'pending';
+}
+function playerInboxUnreadCount(pid) {
+  return playerInboxBroadcasts(pid).filter(b => _inboxIsUnread(b, pid)).length;
+}
+function openInboxBroadcast(id) {
+  const b = (state.broadcasts || []).find(x => x.id === id);
+  if (!b) return;
+  const pid = state.auth && state.auth.playerId;
+  // Annonce simple consultée via l'inbox = lue ('seen') sans forcer un ack.
+  // SONDAGE : on ne marque PAS 'seen' ici → la popup garde sa logique de vote
+  // (statut 'acknowledged' au vote), pour ne pas tuer la participation.
+  if (pid && !isPollBroadcast(b)) {
+    const r = getBroadcastReceipt(id, pid);
+    if (!r || r.status === 'pending') markReceiptStatus(id, pid, 'seen');
+  }
+  showBroadcastPopup(b);
+}
+function renderPlayerInbox() {
+  const pid = state.auth && state.auth.playerId;
+  if (!pid) return '';
+  const list = playerInboxBroadcasts(pid);
+  if (!list.length) return '';
+  const unread = list.filter(b => _inboxIsUnread(b, pid)).length;
+  const rows = list.slice(0, 8).map(b => {
+    const poll = isPollBroadcast(b);
+    const unr = _inboxIsUnread(b, pid);
+    const dateLbl = b.createdAt ? formatDate(isoDate(new Date(b.createdAt)), 'short') : '';
+    const snippet = (b.message || (poll ? 'Sondage' : '')).replace(/\s+/g, ' ').trim();
+    const short = snippet.length > 70 ? snippet.slice(0, 68) + '…' : snippet;
+    const media = b.mediaType ? ' · ' + (b.mediaType === 'image' ? '📷' : b.mediaType === 'video' ? '🎬' : '▶') : '';
+    return `
+      <div class="list-row" onclick="openInboxBroadcast('${b.id}')">
+        <div style="font-size:20px;flex:0 0 auto;width:30px;text-align:center">${poll ? '🗳' : '📢'}</div>
+        <div class="list-row-content">
+          <div class="list-row-title" style="${unr ? 'font-weight:700' : ''}">${poll ? 'Sondage' : 'Annonce'}${media}</div>
+          <div class="list-row-subtitle" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(short) || '—'}${dateLbl ? ' · ' + dateLbl : ''}</div>
+        </div>
+        ${unr
+          ? '<span aria-label="non lu" style="flex:0 0 auto;width:9px;height:9px;border-radius:50%;background:var(--orange)"></span>'
+          : '<span class="list-row-trail">›</span>'}
+      </div>`;
+  }).join('');
+  return `
+    <div class="section-header">
+      <div>
+        <div class="eyebrow">📨 Messages${unread ? ' · ' + unread + ' non lu' + (unread > 1 ? 's' : '') : ''}</div>
+        <h2 class="display-md mt-2">Boîte de réception</h2>
+      </div>
+    </div>
+    <div class="list-section" style="margin-bottom:18px">${rows}</div>
+  `;
 }
 
 // ------------------------------------------------------------
