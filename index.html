@@ -53,6 +53,12 @@
     --ink-3: #707070;
     --ink-4: #4a4a4a;
 
+    /* Chrome translucide (topbar + bottom-nav) : tokenisé pour que les thèmes
+       CLAIRS puissent passer en chrome clair (sinon barre sombre + texte
+       var(--ink) sombre = illisible). Défaut sombre. */
+    --topbar-bg: rgba(0, 0, 0, 0.85);
+    --nav-bg: rgba(0, 0, 0, 0.92);
+
     /* === Accent thématisable — défaut : "Court" (orange BCL) ===
        Toute l'app dérive sa couleur d'accent de --accent-rgb (triplet RGB,
        source de vérité) + --orange-2 (variante claire). Un thème ne redéfinit
@@ -82,17 +88,67 @@
   }
 
   /* ========== THÈMES COULEUR (personnalisation joueuse + coach) ==========
-     5 palettes harmonieuses sur la base sombre BCL. Chaque accent passe
-     WCAG AA/AAA sur fond noir (#000) et surface (#181818). On ne touche
-     QUE l'accent : les couleurs sémantiques (vert succès / rouge erreur /
-     bleu / jaune) restent constantes pour ne pas casser leur sens.
-     "court" = défaut (orange, défini dans :root) → aucun override.
-     Pour ajouter un 6e thème : dupliquer un bloc ci-dessous + l'ajouter à
-     la constante THEMES côté JS. */
+     10 thèmes : 5 "accent-only" sombres (override accent seul) + 3 sombres
+     multi-nuances + 2 clairs (palette complète). "court" = défaut (dans :root,
+     aucun override). Contrastes texte/fond vérifiés WCAG AA pour les 10
+     (scripts/test-theme-contrast.mjs). Couleurs sémantiques (vert/rouge/bleu)
+     constantes. Pour ajouter un thème : bloc :root[data-theme=...] ci-dessous
+     + entrée dans la constante THEMES côté JS. */
+  /* --- 5 thèmes "accent-only" sur la base sombre BCL (override accent seul) --- */
   :root[data-theme="ocean"]  { --accent-rgb: 14, 165, 233;  --orange-2: #38bdf8; }
   :root[data-theme="forest"] { --accent-rgb: 16, 185, 129;  --orange-2: #34d399; }
   :root[data-theme="rose"]   { --accent-rgb: 244, 114, 182; --orange-2: #f9a8d4; }
   :root[data-theme="mono"]   { --accent-rgb: 148, 163, 184; --orange-2: #cbd5e1; }
+
+  /* ========== THÈMES MULTI-NUANCES (palette complète) ==========
+     Ces thèmes redéfinissent TOUTE la base (fonds, surfaces, bordures, encres,
+     chrome topbar/nav) + l'accent — pas juste un swap d'accent. Contrastes
+     texte/fond vérifiés WCAG AA (cf. scripts/test-theme-contrast.mjs). Les
+     couleurs sémantiques (vert/rouge/bleu) restent constantes. */
+
+  /* --- 3 sombres multi-nuances --- */
+  /* 🌇 Sunset — charbon prune chaud + corail/ambre */
+  :root[data-theme="sunset"] {
+    --bg: #160d10; --bg-1: #0f090b; --bg-2: #231519; --bg-3: #2e1c21;
+    --surface: #241619; --surface-2: #33232a; --border: #3f2c33; --border-soft: #2a1d22;
+    --ink: #fff4ef; --ink-2: #e0bcb3; --ink-3: #a07c78; --ink-4: #6e544f;
+    --accent-rgb: 251, 113, 90; --orange-2: #fda4af;
+    --topbar-bg: rgba(22, 13, 16, 0.85); --nav-bg: rgba(15, 9, 11, 0.92);
+  }
+  /* 🌌 Midnight — bleu nuit indigo + violet électrique */
+  :root[data-theme="midnight"] {
+    --bg: #0a0f1e; --bg-1: #070a16; --bg-2: #121a2e; --bg-3: #1b2440;
+    --surface: #131a2e; --surface-2: #1f2a47; --border: #2c3a5c; --border-soft: #1c2540;
+    --ink: #eef2ff; --ink-2: #bac6e6; --ink-3: #7c89ad; --ink-4: #525e7f;
+    --accent-rgb: 129, 140, 248; --orange-2: #a5b4fc;
+    --topbar-bg: rgba(10, 15, 30, 0.85); --nav-bg: rgba(7, 10, 22, 0.92);
+  }
+  /* 🏀 Hardwood — parquet espresso + ambre tan */
+  :root[data-theme="hardwood"] {
+    --bg: #1b130b; --bg-1: #130d07; --bg-2: #281d12; --bg-3: #33261a;
+    --surface: #281d12; --surface-2: #392a1c; --border: #483725; --border-soft: #2f2216;
+    --ink: #fdf6ec; --ink-2: #ddc8aa; --ink-3: #a08a64; --ink-4: #6e5d46;
+    --accent-rgb: 245, 158, 66; --orange-2: #fbbf24;
+    --topbar-bg: rgba(27, 19, 11, 0.85); --nav-bg: rgba(19, 13, 7, 0.92);
+  }
+
+  /* --- 2 clairs (light mode) --- */
+  /* ☀️ Daylight — blanc cassé + orange BCL */
+  :root[data-theme="daylight"] {
+    --bg: #f7f7f5; --bg-1: #ffffff; --bg-2: #f0f0ec; --bg-3: #e7e7e1;
+    --surface: #ffffff; --surface-2: #f2f2ee; --border: #dcdcd5; --border-soft: #ecece6;
+    --ink: #1a1a1a; --ink-2: #4a4a4a; --ink-3: #767670; --ink-4: #a6a6a0;
+    --accent-rgb: 234, 88, 12; --orange-2: #fb923c;
+    --topbar-bg: rgba(255, 255, 255, 0.85); --nav-bg: rgba(255, 255, 255, 0.92);
+  }
+  /* 📋 Chalk — gris-bleu clair + bleu tactique (tableau du coach) */
+  :root[data-theme="chalk"] {
+    --bg: #eef2f7; --bg-1: #ffffff; --bg-2: #e4ebf3; --bg-3: #d8e2ee;
+    --surface: #ffffff; --surface-2: #eef2f8; --border: #cbd5e1; --border-soft: #e2e8f0;
+    --ink: #0f172a; --ink-2: #475569; --ink-3: #64748b; --ink-4: #94a3b8;
+    --accent-rgb: 37, 99, 235; --orange-2: #60a5fa;
+    --topbar-bg: rgba(255, 255, 255, 0.85); --nav-bg: rgba(255, 255, 255, 0.92);
+  }
 
   /* ----- ThemePicker (modale 🎨 Couleur de l'interface) ----- */
   .theme-grid { display: flex; flex-direction: column; gap: 8px; }
@@ -204,7 +260,7 @@
   /* ========== TOP BAR ========== */
   .topbar {
     position: sticky; top: 0; z-index: 30;
-    background: rgba(0, 0, 0, 0.85);
+    background: var(--topbar-bg);
     backdrop-filter: saturate(180%) blur(20px);
     -webkit-backdrop-filter: saturate(180%) blur(20px);
     /* PWA iOS standalone : la status bar / Dynamic Island se superpose au header
@@ -275,7 +331,7 @@
   /* ========== BOTTOM NAV ========== */
   .bottom-nav {
     position: fixed; bottom: 0; left: 0; right: 0; z-index: 40;
-    background: rgba(0, 0, 0, 0.92);
+    background: var(--nav-bg);
     backdrop-filter: saturate(180%) blur(20px);
     -webkit-backdrop-filter: saturate(180%) blur(20px);
     border-top: 1px solid var(--border);
@@ -4600,11 +4656,19 @@ function save(k, v) {
 // petit <script> du <head>) et l'application live (set d'un attribut → les
 // variables CSS cascadent instantanément, AUCUN re-render).
 const THEMES = [
-  { id: 'court',  name: 'Court',  emoji: '🏀', desc: 'Orange BCL',  accent: '#ff6b00', accent2: '#ff8533' },
-  { id: 'ocean',  name: 'Ocean',  emoji: '🌊', desc: 'Bleu azur',   accent: '#0ea5e9', accent2: '#38bdf8' },
-  { id: 'forest', name: 'Forest', emoji: '🌲', desc: 'Vert émeraude',accent: '#10b981', accent2: '#34d399' },
-  { id: 'rose',   name: 'Pink Court', emoji: '💗', desc: 'Rose fuchsia', accent: '#f472b6', accent2: '#f9a8d4' },
-  { id: 'mono',   name: 'Mono',   emoji: '🪨', desc: 'Ardoise',      accent: '#94a3b8', accent2: '#cbd5e1' },
+  // Sombres accent-only (base BCL)
+  { id: 'court',  name: 'Court',  emoji: '🏀', desc: 'Orange BCL · sombre',  accent: '#ff6b00', accent2: '#ff8533', bg: '#000000' },
+  { id: 'ocean',  name: 'Ocean',  emoji: '🌊', desc: 'Bleu azur · sombre',   accent: '#0ea5e9', accent2: '#38bdf8', bg: '#000000' },
+  { id: 'forest', name: 'Forest', emoji: '🌲', desc: 'Vert émeraude · sombre',accent: '#10b981', accent2: '#34d399', bg: '#000000' },
+  { id: 'rose',   name: 'Pink Court', emoji: '💗', desc: 'Rose fuchsia · sombre', accent: '#f472b6', accent2: '#f9a8d4', bg: '#000000' },
+  { id: 'mono',   name: 'Mono',   emoji: '🪨', desc: 'Ardoise · sombre',      accent: '#94a3b8', accent2: '#cbd5e1', bg: '#000000' },
+  // Sombres multi-nuances (palette complète)
+  { id: 'sunset',   name: 'Sunset',   emoji: '🌇', desc: 'Prune + corail · sombre',  accent: '#fb715a', accent2: '#fda4af', bg: '#160d10' },
+  { id: 'midnight', name: 'Midnight', emoji: '🌌', desc: 'Bleu nuit + violet · sombre', accent: '#818cf8', accent2: '#a5b4fc', bg: '#0a0f1e' },
+  { id: 'hardwood', name: 'Hardwood', emoji: '🏟️', desc: 'Parquet + ambre · sombre', accent: '#f59e42', accent2: '#fbbf24', bg: '#1b130b' },
+  // Clairs (light mode)
+  { id: 'daylight', name: 'Daylight', emoji: '☀️', desc: 'Blanc + orange · clair', accent: '#ea580c', accent2: '#fb923c', bg: '#ffffff', light: true },
+  { id: 'chalk',    name: 'Chalk',    emoji: '📋', desc: 'Gris-bleu + bleu · clair', accent: '#2563eb', accent2: '#60a5fa', bg: '#ffffff', light: true },
 ];
 const DEFAULT_THEME = 'court';
 
@@ -25349,7 +25413,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.3';
+const APP_VERSION = '2026-06-28.4';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
