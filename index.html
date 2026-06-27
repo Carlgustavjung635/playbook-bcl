@@ -25289,7 +25289,16 @@ function _pbBoot() {
 // rechargement natif n'est possible et les données restent figées. Vanilla,
 // sans lib. Le geste tire sur le container .app à scrollTop 0 ; au-delà du
 // seuil → refreshFromCloud() (resync cloud via PbSync.fetchAll). Coach + joueuse.
-const PTR_THRESHOLD = 80; // px de tirage (brut) pour armer le rafraîchissement
+// Garde-fous anti-déclenchement accidentel (un petit scroll exploratoire en haut
+// de page NE doit PAS rafraîchir) :
+//   - SHOW : l'indicateur n'apparaît qu'après cette distance (zone morte).
+//   - THRESHOLD : tirage franc requis pour COMMIT le refresh.
+//   - quasi-vertical : si le geste part trop en diagonale (|dx| > dy/2) → c'est
+//     un scroll/swipe, pas un pull → abort.
+//   - COOLDOWN : pas de refresh si un précédent date de moins de 3 s.
+const PTR_SHOW = 45;        // px avant d'afficher l'indicateur
+const PTR_THRESHOLD = 120;  // px de tirage franc pour armer le rafraîchissement
+const PTR_COOLDOWN_MS = 3000;
 
 // true si l'app tourne en mode autonome (PWA installée) — display-mode standalone
 // (Android/desktop) ou navigator.standalone (iOS Safari ajouté à l'accueil).
@@ -25298,6 +25307,13 @@ function ptrShouldActivate(env) {
   return !!(env.standaloneMedia || env.iosStandalone);
 }
 function ptrArmed(dy, threshold) { return dy >= (threshold || PTR_THRESHOLD); }
+// Geste quasi-vertical : dy positif ET la dérive horizontale reste sous la moitié
+// du tirage vertical (sinon = swipe latéral / scroll diagonal).
+function ptrVertical(dx, dy) { return dy > 0 && Math.abs(dx) <= dy * 0.5; }
+// COMMIT du refresh : tirage franc + vertical + hors cooldown.
+function ptrShouldCommit(dy, dx, sinceLastMs) {
+  return ptrArmed(dy) && ptrVertical(dx, dy) && sinceLastMs >= PTR_COOLDOWN_MS;
+}
 function _isStandalonePWA() {
   let standaloneMedia = false;
   try { standaloneMedia = !!(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches); } catch (e) {}
@@ -25333,7 +25349,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.2';
+const APP_VERSION = '2026-06-28.3';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
@@ -25377,15 +25393,17 @@ function initPullToRefresh() {
   if (!_isStandalonePWA()) return; // navigateur classique → pull natif, on s'abstient
   window._ptrInit = true;
   const ind = _ptrEnsureIndicator();
-  let startY = 0, pulling = false, dy = 0, refreshing = false;
+  let startX = 0, startY = 0, pulling = false, engaged = false, dx = 0, dy = 0, refreshing = false;
+  let lastRefresh = 0;
   const getApp = () => document.querySelector('.app');
-  const reset = () => { pulling = false; dy = 0; ind.className = ''; ind.style.transform = ''; };
+  const reset = () => { pulling = false; engaged = false; dx = 0; dy = 0; ind.className = ''; ind.style.transform = ''; };
 
   document.addEventListener('touchstart', (e) => {
     if (refreshing || !e.touches || e.touches.length !== 1) { pulling = false; return; }
     const app = getApp();
     if (!app || app.scrollTop > 2) { pulling = false; return; } // pas tout en haut
-    startY = e.touches[0].clientY; pulling = true; dy = 0;
+    startX = e.touches[0].clientX; startY = e.touches[0].clientY;
+    pulling = true; engaged = false; dx = 0; dy = 0;
   }, { passive: true });
 
   document.addEventListener('touchmove', (e) => {
@@ -25393,17 +25411,25 @@ function initPullToRefresh() {
     const app = getApp();
     if (!app || app.scrollTop > 2) { reset(); return; }
     dy = e.touches[0].clientY - startY;
-    if (dy <= 0) { reset(); return; } // tirage vers le haut → ignore
-    const damped = Math.min(PTR_THRESHOLD + 40, dy * 0.5); // résistance élastique
+    dx = e.touches[0].clientX - startX;
+    // Geste pas (encore) un pull vertical franc → on laisse le scroll natif vivre.
+    if (!ptrVertical(dx, dy) || dy < PTR_SHOW) {
+      if (engaged) { ind.className = ''; ind.style.transform = ''; engaged = false; } // repassé sous la zone morte
+      return;
+    }
+    engaged = true;
+    const damped = Math.min(PTR_THRESHOLD + 30, PTR_SHOW + (dy - PTR_SHOW) * 0.4); // résistance élastique
     ind.classList.add('ptr-visible');
     ind.classList.toggle('ptr-armed', ptrArmed(dy));
     ind.style.transform = `translateX(-50%) translateY(${damped}px) rotate(${Math.min(360, dy * 2)}deg)`;
-    if (e.cancelable) e.preventDefault(); // bloque le bounce natif pendant le tirage
+    if (e.cancelable) e.preventDefault(); // bloque le bounce natif UNIQUEMENT en pull engagé
   }, { passive: false });
 
   const onEnd = async () => {
     if (!pulling || refreshing) { reset(); return; }
-    if (!ptrArmed(dy)) { reset(); return; } // sous le seuil → annule
+    // COMMIT seulement si tirage franc + vertical + hors cooldown (anti double / accidentel).
+    if (!ptrShouldCommit(dy, dx, Date.now() - lastRefresh)) { reset(); return; }
+    lastRefresh = Date.now();
     refreshing = true;
     ind.className = 'ptr-visible ptr-spinning';
     ind.style.transform = 'translateX(-50%) translateY(56px)';
