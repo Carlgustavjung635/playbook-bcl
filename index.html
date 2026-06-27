@@ -7528,6 +7528,7 @@ function doLogout() {
   // Boîte à gages : reset des garde-fous de SESSION + ferme un éventuel overlay
   // de tirage, pour que la prochaine identité réévalue ses propres gages.
   window._gageBootChecked = false;
+  window._gageSessionTotal = 0;
   try { _closeGageOverlay(); } catch (e) {}
   // Mini-guide joueuse : reset des états de SESSION (force-show manuel + replié/neuf)
   // pour que la prochaine identité réévalue la visibilité depuis son propre PIN.
@@ -13545,12 +13546,15 @@ function undoLastAction() {
 // Flux : joueuses+coach proposent (pending) → coach approuve (approved) /
 // rejette (rejected) → coach assigne à une joueuse (assigned) → à sa prochaine
 // ouverture, écran bloquant tirage → accepte (accepted) / passe (skipped).
-// "Passer" autorisé ssi crédit (gages acceptés depuis le dernier skip) >= 2.
+// MÉCANIQUE DETTE (Option A — dette virtuelle) : "Passer" est TOUJOURS dispo,
+// mais chaque skip ajoute +1 gage à faire. À l'assignation, le coach choisit 1
+// gage ; le système y ajoute automatiquement `dette` gages du pool (même batch
+// = même assignedAt). La dette se RESET à 0 quand un batch est entièrement
+// accepté sans skip. La dette est recomputée-on-read (pas de scalaire stocké).
 // ANONYMAT : authorId synchronisé mais JAMAIS affiché ; sert seulement à la
 // joueuse pour reconnaître SES propres propositions (comparaison à son id).
 // ============================================================
 const GAGE_TEXT_MAX = 140;
-const GAGE_SKIP_CREDIT = 2;
 
 function _gageById(id) { return (state.gages || []).find(g => g.id === id); }
 function _gageTouch(g) { g.updatedAt = Date.now(); }
@@ -13571,19 +13575,26 @@ function gagesPendingCount() {
   if (!state.auth || state.auth.role !== 'coach') return 0;
   return currentSeasonGages().filter(g => g.status === 'pending').length;
 }
-// Crédit (recompute-on-read) : nb de gages 'accepted' consécutifs depuis le
-// dernier 'skipped', saison courante, pour cette joueuse.
-function gageCredit(pid) {
+// DETTE (recompute-on-read) : nb de gages skippés (saison) SINCE le dernier batch
+// d'assignation entièrement accepté sans skip. Les gages assignés ensemble
+// partagent leur assignedAt (= clé de batch). Un batch "propre" (tous acceptés)
+// remet la dette à 0 ; sinon la dette = nb de skips depuis ce reset.
+// Exemple : skip A → dette 1 ; assign B(+1 extra)=2 ; accepter les 2 → reset 0 ;
+// skip l'un des 2 → dette 2 → prochain assign = 3 gages.
+function gageDebt(pid) {
   const active = getActiveSeasonId();
-  const done = (state.gages || [])
-    .filter(g => g.assignedTo === pid && _gageInSeason(g, active) && g.completedAt
-      && (g.status === 'accepted' || g.status === 'skipped'))
-    .sort((a, b) => (a.completedAt || 0) - (b.completedAt || 0));
-  let credit = 0;
-  done.forEach(g => { credit = g.status === 'skipped' ? 0 : credit + 1; });
-  return credit;
+  const mine = (state.gages || []).filter(g => g.assignedTo === pid && g.assignedAt && _gageInSeason(g, active));
+  // Regroupe par batch (assignedAt). resetTime = complétion du batch propre le + récent.
+  const batches = {};
+  mine.forEach(g => { (batches[g.assignedAt] = batches[g.assignedAt] || []).push(g); });
+  let resetTime = 0;
+  Object.values(batches).forEach(arr => {
+    const allDone = arr.every(g => g.completedAt);
+    const clean = allDone && arr.every(g => g.status === 'accepted'); // aucun skip dans le batch
+    if (clean) { const c = Math.max(...arr.map(g => g.completedAt || 0)); if (c > resetTime) resetTime = c; }
+  });
+  return mine.filter(g => g.status === 'skipped' && (g.completedAt || 0) > resetTime).length;
 }
-function canSkipGage(pid) { return gageCredit(pid) >= GAGE_SKIP_CREDIT; }
 
 // --- Proposition (joueuse OU coach) ---
 function submitGageProposal(text) {
@@ -13671,23 +13682,42 @@ function openGageAssign(id) {
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <div class="modal-body">
-      ${sorted.length ? sorted.map(p => `
-        <button class="btn btn-secondary btn-block mb-2" style="text-align:left" onclick="assignGage('${g.id}','${p.id}')">
-          #${p.num} ${esc(p.name)}
-        </button>`).join('') : '<div style="color:var(--ink-3);font-size:13px">Aucune joueuse dans la saison.</div>'}
+      <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-bottom:10px;text-transform:uppercase;letter-spacing:0.04em">Une dette ajoute des gages du pool en plus.</div>
+      ${sorted.length ? sorted.map(p => {
+        const d = gageDebt(p.id);
+        return `
+        <button class="btn btn-secondary btn-block mb-2" style="text-align:left;display:flex;justify-content:space-between;align-items:center;gap:8px" onclick="assignGage('${g.id}','${p.id}')">
+          <span>#${p.num} ${esc(p.name)}</span>
+          <span style="font-size:10px;font-family:'JetBrains Mono';color:${d > 0 ? 'var(--orange)' : 'var(--ink-3)'}">${d > 0 ? '+' + d + ' dette → ' + (1 + d) + ' gages' : '1 gage'}</span>
+        </button>`;
+      }).join('') : '<div style="color:var(--ink-3);font-size:13px">Aucune joueuse dans la saison.</div>'}
     </div>
   `);
+}
+function _gageAssignOne(g, pid, now, sid) {
+  g.status = 'assigned'; g.assignedTo = pid; g.assignedAt = now; g.seasonId = sid; _gageTouch(g);
 }
 function assignGage(id, pid) {
   const g = _gageById(id); if (!g || g.status !== 'approved') return;
   const now = Date.now();
-  g.status = 'assigned'; g.assignedTo = pid; g.assignedAt = now;
-  // saison de la date d'assignation (cloisonnement), repli sur l'active.
-  g.seasonId = (getSeasonIdForDate(isoDate(new Date(now))) || getActiveSeasonId() || g.seasonId) || null;
-  _gageTouch(g); persist(); _gageFlush();
+  const sid = (getSeasonIdForDate(isoDate(new Date(now))) || getActiveSeasonId() || g.seasonId) || null;
+  const debt = gageDebt(pid);
+  // gage choisi par le coach
+  _gageAssignOne(g, pid, now, sid);
+  // + DETTE : on tire `debt` gages supplémentaires du pool (même saison, plus
+  // anciens d'abord), avec le MÊME assignedAt → même batch. Si le pool est
+  // insuffisant, on assigne ce qui est dispo (la dette restante reste due et
+  // sera re-matérialisée au prochain assign).
+  let extras = 0;
+  if (debt > 0) {
+    const pool = currentSeasonGages().filter(x => x.status === 'approved' && x.id !== g.id)
+      .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)).slice(0, debt);
+    pool.forEach(x => { _gageAssignOne(x, pid, now, sid); extras++; });
+  }
+  persist(); _gageFlush();
   try { closeModal(); } catch (e) {}
   render();
-  if (typeof showToast === 'function') showToast('🎁 Gage assigné');
+  if (typeof showToast === 'function') showToast(extras > 0 ? `🎁 ${1 + extras} gages assignés (dont +${extras} dette)` : '🎁 Gage assigné');
 }
 
 function openGagesCoach() { state.section = 'team'; state.view = { type: 'gages' }; render(); _scrollTopApp(); }
@@ -13766,7 +13796,10 @@ function maybeShowGageReveal() {
   if (window._gageOverlayOpen || window._broadcastPopupOpen) return;
   if (typeof _pbModalOpen === 'function' && _pbModalOpen()) return;
   const list = pendingGageReveals(state.auth.playerId);
-  if (list.length) showGageReveal(list[0]);
+  if (!list.length) { window._gageSessionTotal = 0; return; } // file vidée → reset compteur X/Y
+  // Snapshot du total de la session pour le compteur "Gage X / Y".
+  if (!window._gageSessionTotal || window._gageSessionTotal < list.length) window._gageSessionTotal = list.length;
+  showGageReveal(list[0]);
 }
 function showGageReveal(g) {
   window._gageOverlayOpen = true;
@@ -13795,17 +13828,19 @@ function _gageCountdown(g, n) {
     window._gageTo = setTimeout(() => _gageCountdown(g, n - 1), 850);
   } else {
     const pid = state.auth && state.auth.playerId;
-    const canSkip = canSkipGage(pid);
-    const credit = gageCredit(pid);
+    const debt = gageDebt(pid);
+    const remaining = pendingGageReveals(pid).length;            // dont le gage courant
+    const total = Math.max(window._gageSessionTotal || remaining, remaining);
+    const idx = total - remaining + 1;                            // position courante
     host.innerHTML = `
       <div class="gage-screen gage-reveal">
-        <div class="gage-eyebrow">🎁 Ton gage</div>
+        ${total > 1 ? `<div class="gage-eyebrow">Gage ${idx} / ${total}</div>` : `<div class="gage-eyebrow">🎁 Ton gage</div>`}
         <div class="gage-card">${esc(g.text)}</div>
         <div style="display:flex;flex-direction:column;gap:10px;width:100%;max-width:340px;margin-top:8px">
           <button class="btn btn-primary btn-block" style="font-size:15px;padding:14px" onclick="acceptGage('${g.id}')">✓ J'accepte le défi</button>
-          <button class="btn btn-secondary btn-block" style="font-size:14px;padding:12px;${canSkip ? '' : 'opacity:0.45;cursor:not-allowed'}" ${canSkip ? `onclick="skipGage('${g.id}')"` : 'disabled'}>🙈 Je passe</button>
-          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-align:center;text-transform:uppercase;letter-spacing:0.04em">
-            ${canSkip ? 'Passer dépense ton crédit (−' + GAGE_SKIP_CREDIT + ')' : 'Passer dispo après ' + GAGE_SKIP_CREDIT + ' gages acceptés · crédit ' + credit + '/' + GAGE_SKIP_CREDIT}
+          <button class="btn btn-secondary btn-block" style="font-size:14px;padding:12px" onclick="skipGage('${g.id}')">🙈 Je passe</button>
+          <div style="font-size:10px;color:var(--orange);font-family:'JetBrains Mono';text-align:center;text-transform:uppercase;letter-spacing:0.04em;line-height:1.5">
+            ⚠️ Passer = +1 gage à la prochaine assignation${debt > 0 ? ' · dette actuelle : ' + debt : ''}
           </div>
         </div>
       </div>`;
@@ -13827,13 +13862,13 @@ function acceptGage(id) {
 function skipGage(id) {
   const g = _gageById(id); const pid = state.auth && state.auth.playerId;
   if (!g || g.assignedTo !== pid || g.status !== 'assigned') return;
-  if (!canSkipGage(pid)) { if (typeof showToast === 'function') showToast('Crédit insuffisant (' + GAGE_SKIP_CREDIT + ' gages acceptés requis)'); return; }
-  let ok = false; try { ok = confirm('Tu vas utiliser ton crédit (−' + GAGE_SKIP_CREDIT + '). Continuer ?'); } catch (e) { ok = true; }
+  // Skip TOUJOURS autorisé. Coût = +1 gage à la prochaine assignation (dette).
+  let ok = false; try { ok = confirm('Skipper ce gage te coûtera 1 gage supplémentaire à la prochaine assignation. Continuer ?'); } catch (e) { ok = true; }
   if (!ok) return;
   const now = Date.now();
   g.status = 'skipped'; g.revealedAt = g.revealedAt || now; g.completedAt = now;
   _gageTouch(g); persist(); _gageFlush(); _closeGageOverlay();
-  if (typeof showToast === 'function') showToast('🙈 Gage passé · crédit remis à 0');
+  if (typeof showToast === 'function') showToast('🙈 Gage passé · +1 à faire plus tard');
   _gageAdvance();
 }
 
@@ -25807,7 +25842,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.6';
+const APP_VERSION = '2026-06-28.7';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {

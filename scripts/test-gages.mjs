@@ -1,6 +1,7 @@
 // Test de la BOÎTE À GAGES — reproduit fidèlement la logique de index.html :
-// proposer → modérer → assigner → tirage → accepter/passer, crédit/skip,
-// cloisonnement saison, et invariant d'anonymat.
+// proposer → modérer → assigner (1 + dette) → tirage → accepter/passer.
+// Mécanique DETTE (Option A) : skip TOUJOURS autorisé, +1 gage à la prochaine
+// assignation ; reset à 0 quand un batch est entièrement accepté sans skip.
 import assert from 'node:assert';
 
 let state;
@@ -13,9 +14,9 @@ function getSeasonIdForDate(dateStr) {
   return hit ? hit.id : null;
 }
 let _uid = 0; function uid() { return 'x' + (++_uid); }
+let CLOCK = 1000; function now() { return ++CLOCK; }
 
 // --- SUJET (extrait fidèle) ---
-const GAGE_SKIP_CREDIT = 2;
 function _gageById(id) { return (state.gages || []).find(g => g.id === id); }
 function _gageInSeason(g, seasonId) {
   if (!_seasonsLoaded()) return true;
@@ -27,37 +28,52 @@ function currentSeasonGages() {
   if (!_seasonsLoaded() || !active) return state.gages || [];
   return (state.gages || []).filter(g => _gageInSeason(g, active));
 }
-function submitGageProposal(text, role, pid, now) {
+function submitGageProposal(text, role, pid) {
   text = (text || '').trim().slice(0, 140); if (!text) return false;
-  state.gages = state.gages || [];
   state.gages.unshift({ id: uid(), text, authorId: role === 'player' ? pid : 'coach',
     status: 'pending', assignedTo: null, assignedAt: null, revealedAt: null, completedAt: null,
-    rejectedReason: null, seasonId: getActiveSeasonId() || null, createdAt: now, updatedAt: now });
+    rejectedReason: null, seasonId: getActiveSeasonId() || null, createdAt: now(), updatedAt: now() });
   return true;
 }
 function approveGage(id) { const g = _gageById(id); if (!g || g.status !== 'pending') return; g.status = 'approved'; }
-function rejectGage(id, reason, now) { const g = _gageById(id); if (!g || g.status !== 'pending') return; g.status = 'rejected'; g.rejectedReason = reason || null; g.completedAt = now; }
-function assignGage(id, pid, now) {
-  const g = _gageById(id); if (!g || g.status !== 'approved') return;
-  g.status = 'assigned'; g.assignedTo = pid; g.assignedAt = now;
-  g.seasonId = getSeasonIdForDate(isoDate(new Date(now))) || getActiveSeasonId() || g.seasonId || null;
-}
+function rejectGage(id, reason) { const g = _gageById(id); if (!g || g.status !== 'pending') return; g.status = 'rejected'; g.rejectedReason = reason || null; g.completedAt = now(); }
 function unassignGage(id) { const g = _gageById(id); if (!g || g.status !== 'assigned' || g.revealedAt) return; g.status = 'approved'; g.assignedTo = null; g.assignedAt = null; }
+function gageDebt(pid) {
+  const active = getActiveSeasonId();
+  const mine = (state.gages || []).filter(g => g.assignedTo === pid && g.assignedAt && _gageInSeason(g, active));
+  const batches = {};
+  mine.forEach(g => { (batches[g.assignedAt] = batches[g.assignedAt] || []).push(g); });
+  let resetTime = 0;
+  Object.values(batches).forEach(arr => {
+    const allDone = arr.every(g => g.completedAt);
+    const clean = allDone && arr.every(g => g.status === 'accepted');
+    if (clean) { const c = Math.max(...arr.map(g => g.completedAt || 0)); if (c > resetTime) resetTime = c; }
+  });
+  return mine.filter(g => g.status === 'skipped' && (g.completedAt || 0) > resetTime).length;
+}
+function _assignOne(g, pid, t, sid) { g.status = 'assigned'; g.assignedTo = pid; g.assignedAt = t; g.seasonId = sid; }
+function assignGage(id, pid) {
+  const g = _gageById(id); if (!g || g.status !== 'approved') return 0;
+  const t = now();
+  const sid = getSeasonIdForDate(isoDate(new Date(2026, 10, 10))) || getActiveSeasonId() || g.seasonId || null;
+  const debt = gageDebt(pid);
+  _assignOne(g, pid, t, sid);
+  let extras = 0;
+  if (debt > 0) {
+    currentSeasonGages().filter(x => x.status === 'approved' && x.id !== g.id)
+      .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)).slice(0, debt)
+      .forEach(x => { _assignOne(x, pid, t, sid); extras++; });
+  }
+  return 1 + extras; // nb de gages assignés ce batch
+}
 function pendingGageReveals(pid) {
   return (state.gages || []).filter(g => g.assignedTo === pid && g.status === 'assigned' && _gageInSeason(g, getActiveSeasonId()))
     .sort((a, b) => (a.assignedAt || 0) - (b.assignedAt || 0));
 }
-function gageCredit(pid) {
-  const active = getActiveSeasonId();
-  const done = (state.gages || []).filter(g => g.assignedTo === pid && _gageInSeason(g, active) && g.completedAt && (g.status === 'accepted' || g.status === 'skipped'))
-    .sort((a, b) => (a.completedAt || 0) - (b.completedAt || 0));
-  let c = 0; done.forEach(g => { c = g.status === 'skipped' ? 0 : c + 1; }); return c;
-}
-function canSkipGage(pid) { return gageCredit(pid) >= GAGE_SKIP_CREDIT; }
-function acceptGage(id, pid, now) { const g = _gageById(id); if (!g || g.assignedTo !== pid || g.status !== 'assigned') return false; g.status = 'accepted'; g.revealedAt = now; g.completedAt = now; return true; }
-function skipGage(id, pid, now) { const g = _gageById(id); if (!g || g.assignedTo !== pid || g.status !== 'assigned') return false; if (!canSkipGage(pid)) return false; g.status = 'skipped'; g.revealedAt = now; g.completedAt = now; return true; }
+function acceptGage(id, pid) { const g = _gageById(id); if (!g || g.assignedTo !== pid || g.status !== 'assigned') return false; const t = now(); g.status = 'accepted'; g.revealedAt = t; g.completedAt = t; return true; }
+function skipGage(id, pid) { const g = _gageById(id); if (!g || g.assignedTo !== pid || g.status !== 'assigned') return false; const t = now(); g.status = 'skipped'; g.revealedAt = t; g.completedAt = t; return true; } // toujours autorisé
 
-let pass = 0, T = 1000;
+let pass = 0;
 function t(name, fn) { fn(); pass++; console.log('  ✓', name); }
 function fresh() {
   state = {
@@ -70,107 +86,89 @@ function fresh() {
     players: [{ id: 'p1', num: 4, name: 'Alice' }, { id: 'p2', num: 7, name: 'Bea' }],
     gages: [],
   };
-  _uid = 0;
+  _uid = 0; CLOCK = 1000;
 }
+function seedApproved(n) { const ids = []; for (let i = 0; i < n; i++) { const id = uid(); state.gages.push({ id, text: 'g' + i, authorId: 'coach', status: 'approved', assignedTo: null, assignedAt: null, revealedAt: null, completedAt: null, seasonId: '2026-2027', createdAt: now() }); ids.push(id); } return ids; }
 
 console.log('SCÉNARIO 1 — flux complet : propose → modère → assigne → accepte');
 fresh();
-t('joueuse propose → status pending + author = elle', () => {
-  submitGageProposal('Chanter l\'hymne', 'player', 'p1', T++);
-  const g = state.gages[0];
-  assert.strictEqual(g.status, 'pending');
-  assert.strictEqual(g.authorId, 'p1');
+t('joueuse propose → pending + author = elle', () => { submitGageProposal('Chanter', 'player', 'p1'); assert.strictEqual(state.gages[0].status, 'pending'); assert.strictEqual(state.gages[0].authorId, 'p1'); });
+t('approuve → approved ; assigne → assigned (dette 0 = 1 gage)', () => {
+  const id = state.gages[0].id; approveGage(id);
+  assert.strictEqual(assignGage(id, 'p2'), 1);
+  assert.strictEqual(state.gages[0].status, 'assigned');
+  assert.strictEqual(pendingGageReveals('p2').length, 1);
 });
-t('coach approuve → approved', () => { approveGage(state.gages[0].id); assert.strictEqual(state.gages[0].status, 'approved'); });
-t('coach assigne à p2 → assigned + assignedTo + saison de la date', () => {
-  assignGage(state.gages[0].id, 'p2', Date.parse('2026-11-10T12:00:00'));
-  const g = state.gages[0];
-  assert.strictEqual(g.status, 'assigned');
-  assert.strictEqual(g.assignedTo, 'p2');
-  assert.strictEqual(g.seasonId, '2026-2027');
-});
-t('p2 voit le gage dans son tirage en attente', () => {
-  assert.deepStrictEqual(pendingGageReveals('p2').map(g => g.id), state.gages.map(g => g.id));
-});
-t('p2 accepte → accepted, plus dans le tirage', () => {
-  acceptGage(state.gages[0].id, 'p2', T++);
-  assert.strictEqual(state.gages[0].status, 'accepted');
+t('p2 accepte → accepted, file vide, dette 0', () => {
+  acceptGage(state.gages[0].id, 'p2');
   assert.strictEqual(pendingGageReveals('p2').length, 0);
+  assert.strictEqual(gageDebt('p2'), 0);
 });
 
-console.log('SCÉNARIO 2 — skip refusé sans crédit, autorisé après 2 acceptés');
+console.log('SCÉNARIO 2 — DETTE : skip toujours possible, +1 gage au prochain assign');
 fresh();
-function quickCycle(pid, accept) {
-  const g = { id: uid(), text: 'g', authorId: 'coach', status: 'approved', assignedTo: null, assignedAt: null, revealedAt: null, completedAt: null, seasonId: '2026-2027' };
-  state.gages.push(g); assignGage(g.id, pid, T++);
-  if (accept) acceptGage(g.id, pid, T++); return g.id;
-}
-t('crédit 0 → skip refusé', () => {
-  const id = quickCycle('p1', false);
-  assert.strictEqual(canSkipGage('p1'), false);
-  assert.strictEqual(skipGage(id, 'p1', T++), false);
-  assert.strictEqual(_gageById(id).status, 'assigned'); // inchangé
+const ids = seedApproved(6); // pool de 6 gages approuvés
+t('assign A → 1 gage (dette 0)', () => { assert.strictEqual(assignGage(ids[0], 'p1'), 1); });
+t('skip A → dette 1', () => { assert.strictEqual(skipGage(ids[0], 'p1'), true); assert.strictEqual(gageDebt('p1'), 1); });
+t('assign B → 2 gages (B + 1 extra dette, même batch)', () => {
+  const n = assignGage(ids[1], 'p1');
+  assert.strictEqual(n, 2);
+  assert.strictEqual(pendingGageReveals('p1').length, 2);
 });
-t('après 2 acceptés → crédit 2 → skip autorisé', () => {
-  // d'abord traiter le gage en cours (accepter) puis 1 de plus
-  acceptGage(state.gages[state.gages.length - 1].id, 'p1', T++); // accepte le précédent → crédit 1
-  quickCycle('p1', true); // crédit 2
-  assert.strictEqual(gageCredit('p1'), 2);
-  assert.strictEqual(canSkipGage('p1'), true);
+t('accepter les 2 du batch → dette reset à 0', () => {
+  pendingGageReveals('p1').slice().forEach(g => acceptGage(g.id, 'p1'));
+  assert.strictEqual(gageDebt('p1'), 0);
 });
-t('skip → status skipped + crédit remis à 0', () => {
-  const id = quickCycle('p1', false); // nouveau gage assigné, crédit encore 2
-  assert.strictEqual(skipGage(id, 'p1', T++), true);
-  assert.strictEqual(_gageById(id).status, 'skipped');
-  assert.strictEqual(gageCredit('p1'), 0); // reset après skip
+t('re-skip plus tard : assign C → skip → dette 1 ; assign D(+1)=2 ; skip 1 accepte 1 → dette 2', () => {
+  assignGage(ids[3], 'p1'); skipGage(ids[3], 'p1');          // dette 1
+  assert.strictEqual(gageDebt('p1'), 1);
+  assignGage(ids[4], 'p1');                                   // D + 1 extra = 2
+  const q = pendingGageReveals('p1');
+  assert.strictEqual(q.length, 2);
+  skipGage(q[0].id, 'p1'); acceptGage(q[1].id, 'p1');        // 1 skip + 1 accept
+  assert.strictEqual(gageDebt('p1'), 2, 'dette cumulée = 2 skips depuis le dernier reset');
+});
+t('prochain assign matérialise 1 + dette(2) = 3 gages', () => {
+  // il reste assez d'approuvés ? on en rajoute pour être sûr
+  seedApproved(3);
+  const next = state.gages.find(g => g.status === 'approved');
+  assert.strictEqual(assignGage(next.id, 'p1'), 3);
 });
 
 console.log('SCÉNARIO 3 — désassignation avant tirage');
-fresh();
-t('coach désassigne un gage assigné non révélé → retour approved', () => {
-  const g = { id: uid(), text: 'g', status: 'approved', assignedTo: null, seasonId: '2026-2027' };
-  state.gages.push(g); assignGage(g.id, 'p1', T++);
-  unassignGage(g.id);
-  assert.strictEqual(g.status, 'approved');
-  assert.strictEqual(g.assignedTo, null);
+fresh(); seedApproved(1);
+t('désassigne un gage assigné non révélé → retour approved', () => {
+  const id = state.gages[0].id; assignGage(id, 'p1'); unassignGage(id);
+  assert.strictEqual(_gageById(id).status, 'approved');
   assert.strictEqual(pendingGageReveals('p1').length, 0);
 });
 
 console.log('SCÉNARIO 4 — cloisonnement saison');
 fresh();
 t('gage assigné en 2026-2027 invisible quand l\'active devient 2025-2026', () => {
-  const g = { id: uid(), text: 'g', status: 'assigned', assignedTo: 'p1', assignedAt: T++, seasonId: '2026-2027' };
-  state.gages.push(g);
+  state.gages.push({ id: uid(), text: 'g', status: 'assigned', assignedTo: 'p1', assignedAt: now(), seasonId: '2026-2027' });
   assert.strictEqual(pendingGageReveals('p1').length, 1);
-  // bascule saison active
   state.seasons = state.seasons.map(s => ({ ...s, status: s.id === '2025-2026' ? 'active' : 'archived' }));
   state.currentSeasonId = '2025-2026';
-  assert.strictEqual(pendingGageReveals('p1').length, 0, 'gage d\'une autre saison non tiré');
-  assert.strictEqual(gageCredit('p1'), 0);
+  assert.strictEqual(pendingGageReveals('p1').length, 0);
+  assert.strictEqual(gageDebt('p1'), 0);
 });
 
-console.log('SCÉNARIO 5 — anonymat : aucune autre joueuse n\'apprend l\'auteur');
+console.log('SCÉNARIO 5 — anonymat : une autre joueuse n\'apprend pas l\'auteur');
 fresh();
-t('rendu joueuse ne référence jamais authorId d\'autrui (invariant)', () => {
-  // p1 propose ; p2 (autre) ne doit pouvoir reconstruire que via SON propre id
-  submitGageProposal('secret', 'player', 'p1', T++);
-  const g = state.gages[0];
-  // "mes propositions" pour p2 : filtre authorId === p2 → vide (n'apprend rien sur p1)
-  const minePourP2 = state.gages.filter(x => x.authorId && x.authorId === 'p2');
-  assert.strictEqual(minePourP2.length, 0);
-  // pour p1 : retrouve la sienne (via son propre id, pas de fuite)
-  const minePourP1 = state.gages.filter(x => x.authorId && x.authorId === 'p1');
-  assert.strictEqual(minePourP1.length, 1);
+t('filtrer "mes propositions" par son propre id seulement', () => {
+  submitGageProposal('secret', 'player', 'p1');
+  assert.strictEqual(state.gages.filter(x => x.authorId === 'p2').length, 0);
+  assert.strictEqual(state.gages.filter(x => x.authorId === 'p1').length, 1);
 });
 
-console.log('SCÉNARIO 6 — modération : rejet');
+console.log('SCÉNARIO 6 — rejet');
 fresh();
-t('coach rejette → rejected + raison', () => {
-  submitGageProposal('nope', 'player', 'p1', T++);
-  rejectGage(state.gages[0].id, 'pas adapté', T++);
+t('coach rejette → rejected + raison, pas dans le tirage', () => {
+  submitGageProposal('nope', 'player', 'p1'); rejectGage(state.gages[0].id, 'pas adapté');
   assert.strictEqual(state.gages[0].status, 'rejected');
   assert.strictEqual(state.gages[0].rejectedReason, 'pas adapté');
   assert.strictEqual(pendingGageReveals('p1').length, 0);
 });
 
-console.log(`\n✅ ${pass} assertions OK — boîte à gages (flux, crédit/skip, désassignation, saison, anonymat, rejet).`);
+console.log(`\n✅ ${pass} assertions OK — boîte à gages (flux, DETTE +1/skip, reset, désassign, saison, anonymat, rejet).`);
