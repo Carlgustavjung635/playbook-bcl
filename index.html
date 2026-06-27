@@ -25413,7 +25413,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.4';
+const APP_VERSION = '2026-06-28.5';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
@@ -25452,6 +25452,25 @@ function _ptrEnsureIndicator() {
   return el;
 }
 
+// Le PTR écoute au niveau document → il NE doit PAS capter un geste qui démarre
+// dans une MODALE/overlay ou tout conteneur scrollable (sinon le scroll interne
+// — ex. picker couleurs/sons de ⚙ Personnalisation — est volé, surtout à
+// scrollTop=0). On bloque si le touchstart part d'une zone overlay explicite ou
+// d'un ancêtre réellement scrollable verticalement (hors .app, container du PTR).
+const PTR_OVERLAY_SELECTOR = '#modal-root, #broadcast-overlay, .modal, .modal-bg, [role="dialog"], .chrono-overlay';
+function _ptrTouchBlocked(target) {
+  if (!target || !target.closest) return false;
+  if (target.closest(PTR_OVERLAY_SELECTOR)) return true;
+  for (let el = target; el && el !== document.body; el = el.parentElement) {
+    if (el.classList && el.classList.contains('app')) break; // container du PTR → autorisé
+    try {
+      const s = getComputedStyle(el);
+      if ((s.overflowY === 'auto' || s.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 2) return true;
+    } catch (e) { /* ignore */ }
+  }
+  return false;
+}
+
 function initPullToRefresh() {
   if (window._ptrInit) return;
   if (!_isStandalonePWA()) return; // navigateur classique → pull natif, on s'abstient
@@ -25464,6 +25483,7 @@ function initPullToRefresh() {
 
   document.addEventListener('touchstart', (e) => {
     if (refreshing || !e.touches || e.touches.length !== 1) { pulling = false; return; }
+    if (_ptrTouchBlocked(e.target)) { pulling = false; return; } // modale/overlay/zone scrollable → laisse le scroll natif
     const app = getApp();
     if (!app || app.scrollTop > 2) { pulling = false; return; } // pas tout en haut
     startX = e.touches[0].clientX; startY = e.touches[0].clientY;
