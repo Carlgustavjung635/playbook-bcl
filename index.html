@@ -14180,6 +14180,7 @@ function getOverdueTrainings() {
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const fromISO = isoDate(new Date(today.getTime() - TRAINING_AUTOCLOSE_LOOKBACK_DAYS * 86400000));
   const todayISO = isoDate(today);
+  const activeId = getActiveSeasonId();
   const out = [];
   currentSeasonConvocations()
     .filter(c => c.type === 'training')
@@ -14187,6 +14188,14 @@ function getOverdueTrainings() {
       // getConvocInstances exclut déjà les instances annulées (cancelledInstances).
       getConvocInstances(c, fromISO, todayISO).forEach(inst => {
         if (inst.closed) return;
+        // GARDE-FOU SAISON (par DATE de l'instance) : on ne propose à la clôture
+        // QUE les instances dont la date appartient réellement à la saison ACTIVE.
+        // Sinon une convoc au seasonId contaminé/legacy (ou la saison active
+        // pré-activée avant son démarrage calendaire) fait remonter un entraînement
+        // d'une saison passée — ex. le « fantôme du 24 mai » (∈ 2025-2026) surgissant
+        // dans la saison 2026-2027 et revenant à chaque boot. getSeasonIdForDate est
+        // l'autorité (même règle que la comptabilisation des présences).
+        if (getSeasonIdForDate(inst.date) !== activeId) return;
         if (!_isTrainingOverdue(inst.date, inst.time, now)) return;
         out.push({ convocId: c.id, instanceDate: inst.date, instance: inst, startMs: _instanceStartMs(inst.date, inst.time) });
       });
