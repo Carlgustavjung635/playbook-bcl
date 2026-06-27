@@ -3410,6 +3410,7 @@ const ENTITIES = [
       instance_overrides: c.instanceOverrides || {},
       attachments: c.attachments || [],
       season_id: c.seasonId || null,
+      closed: c.closed === true,  // #2 : persiste la clôture des convocs NON récurrentes (récurrentes = instance_overrides)
       team_tag: c.teamTag || 'e1'  // multi-effectif : e1 | e2 | both (both = entraînement commun)
     }])),
     apply: (state, rows) => {
@@ -3424,6 +3425,9 @@ const ENTITIES = [
         attachments: r.attachments || [],
         responses: (byId[r.id] || {}).responses || {},
         seasonId: r.season_id || (byId[r.id] || {}).seasonId || null,
+        // #2 : clôture persistée. Colonne absente (rétrocompat avant migration) →
+        // r.closed undefined → on conserve le flag local existant.
+        closed: (r.closed !== undefined) ? (r.closed === true) : ((byId[r.id] || {}).closed === true),
         teamTag: r.team_tag || 'e1'  // rétrocompat : colonne absente → 'e1'
       }));
     }
@@ -13175,206 +13179,6 @@ function undoLastAction() {
   render();
 }
 
-// ============================================================
-// MY STATS (Player view)
-// ============================================================
-function renderMyStats() {
-  const p = currentPlayer();
-  if (!p) return '<div class="empty"><div class="empty-icon">○</div><div class="empty-title">Erreur</div></div>';
-
-  const myMatches = state.matches
-    .filter(m => m.playerStats && m.playerStats[p.id])
-    .sort((a,b) => b.date.localeCompare(a.date));
-
-  // Moyennes
-  let totals = { min: 0, pts: 0, ca: 0, reb: 0, ast: 0, stl: 0, def: 0, to: 0, fouls: 0, p2i: 0, p2iA: 0, p2e: 0, p2eA: 0, p3: 0, p3A: 0, ft: 0, ftA: 0 };
-  let totalGS = 0;
-  myMatches.forEach(m => {
-    const s = m.playerStats[p.id];
-    Object.keys(totals).forEach(k => totals[k] += (s[k] || 0));
-    totalGS += gameScore(s);
-  });
-  const n = myMatches.length || 1;
-  const avg = {};
-  ['min', 'pts', 'ca', 'reb', 'ast', 'stl', 'def', 'to', 'fouls'].forEach(k => avg[k] = (totals[k] / n).toFixed(1));
-  const avgGS = (totalGS / n).toFixed(1);
-  const pct = (a, b) => b > 0 ? Math.round(100*a/b) : 0;
-  const fgPct = pct(totals.p2i + totals.p2e + totals.p3, totals.p2iA + totals.p2eA + totals.p3A);
-  const ftPct = pct(totals.ft, totals.ftA);
-  const p3Pct = pct(totals.p3, totals.p3A);
-
-  const myFb = getFeedback(p);
-  const hasFb = (myFb.positives||[]).length > 0 || (myFb.negatives||[]).length > 0;
-
-  const hasWarmup = p.warmupRoutine && p.warmupRoutine.steps && p.warmupRoutine.steps.length > 0;
-  const myBadges = (p.badges || []).slice().sort((a,b) => b.date.localeCompare(a.date));
-
-  return `
-    <div class="fade-up">
-      <div class="section-header">
-        <div>
-          <div class="eyebrow">Joueuse #${p.num}</div>
-          <h2 class="display-lg mt-2">Mes Stats</h2>
-        </div>
-      </div>
-
-      ${myBadges.length > 0 ? `
-        <div style="padding:0 18px 14px">
-          <div class="section-header" style="padding:0;margin-bottom:8px">
-            <div>
-              <div class="eyebrow" style="color:var(--orange)">🏆 Trophées · ${myBadges.length}</div>
-              <h2 class="display-md mt-2">Mon palmarès</h2>
-            </div>
-          </div>
-          <div style="display:flex;flex-direction:column;gap:6px">
-            ${myBadges.slice(0, 5).map(b => renderBadge(b)).join('')}
-            ${myBadges.length > 5 ? `<button class="btn btn-ghost btn-block" onclick="openAllBadges()" style="font-size:11px;margin-top:4px">Voir tous mes trophées (${myBadges.length}) →</button>` : ''}
-          </div>
-        </div>
-      ` : ''}
-
-      ${hasWarmup ? `
-        <div style="padding:0 18px 14px">
-          <div onclick="openMyWarmupRoutine()" style="padding:12px 14px;background:linear-gradient(135deg,rgba(var(--accent-rgb),0.10),var(--surface));border:1.5px solid var(--orange);border-radius:var(--radius);cursor:pointer;display:flex;align-items:center;gap:12px">
-            <span style="font-size:32px">🏃</span>
-            <div style="flex:1">
-              <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;letter-spacing:0.04em">Ma routine d'échauffement</div>
-              <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase;letter-spacing:0.04em">${p.warmupRoutine.steps.length} étape${p.warmupRoutine.steps.length>1?'s':''} · prêt à suivre</div>
-            </div>
-            <span style="color:var(--orange);font-size:24px;font-family:'Anton'">›</span>
-          </div>
-        </div>
-      ` : ''}
-
-      ${hasFb ? `
-        <div style="padding:0 18px 14px">
-          <div class="my-feedback-card">
-            <div style="display:flex;align-items:center;gap:6px;margin-bottom:10px">
-              <span style="font-size:14px">💬</span>
-              <span style="font-family:'Anton';font-size:13px;text-transform:uppercase;letter-spacing:0.04em">Mon feedback coach</span>
-            </div>
-            ${(myFb.positives||[]).length > 0 ? `
-              <div style="margin-bottom:${(myFb.negatives||[]).length > 0 ? '10px' : '0'}">
-                <div style="font-family:'JetBrains Mono';font-size:9px;color:var(--green);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px">✓ Mes points forts</div>
-                <div style="display:flex;flex-direction:column;gap:4px">
-                  ${myFb.positives.map(t => `<div style="padding:8px 10px;background:rgba(34,197,94,0.08);border-left:3px solid var(--green);border-radius:6px;font-size:12px;line-height:1.4">${esc(t)}</div>`).join('')}
-                </div>
-              </div>
-            ` : ''}
-            ${(myFb.negatives||[]).length > 0 ? `
-              <div>
-                <div style="font-family:'JetBrains Mono';font-size:9px;color:var(--red);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px">↗ Axes de progression</div>
-                <div style="display:flex;flex-direction:column;gap:4px">
-                  ${myFb.negatives.map(t => `<div style="padding:8px 10px;background:rgba(239,68,68,0.08);border-left:3px solid var(--red);border-radius:6px;font-size:12px;line-height:1.4">${esc(t)}</div>`).join('')}
-                </div>
-              </div>
-            ` : ''}
-            ${myFb.updatedAt ? `<div style="margin-top:10px;font-size:9px;color:var(--ink-4);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em;text-align:right">MAJ ${new Date(myFb.updatedAt).toLocaleDateString('fr-FR')}</div>` : ''}
-          </div>
-        </div>
-      ` : ''}
-
-      <div class="stat-grid mb-3">
-        <div class="stat-tile">
-          <div class="stat-tile-label">Matchs joués</div>
-          <div class="stat-tile-value">${myMatches.length}</div>
-          <div class="stat-tile-sub">${totals.min} minutes</div>
-        </div>
-        <div class="stat-tile">
-          <div class="stat-tile-label">Points / match</div>
-          <div class="stat-tile-value">${avg.pts}</div>
-          <div class="stat-tile-sub">${totals.pts} total</div>
-        </div>
-        <div class="stat-tile">
-          <div class="stat-tile-label">REB · PD</div>
-          <div class="stat-tile-value">${avg.reb}<span style="color:var(--ink-4)"> · ${avg.ast}</span></div>
-          <div class="stat-tile-sub">par match</div>
-        </div>
-        <div class="stat-tile">
-          <div class="stat-tile-label">INT · DEF</div>
-          <div class="stat-tile-value">${avg.stl}<span style="color:var(--ink-4)"> · ${avg.def}</span></div>
-          <div class="stat-tile-sub">par match</div>
-        </div>
-      </div>
-
-      <div class="section-header">
-        <h2 class="display-md">Pourcentages</h2>
-      </div>
-      <div class="stat-grid mb-3">
-        <div class="stat-tile">
-          <div class="stat-tile-label">Adresse</div>
-          <div class="stat-tile-value">${fgPct}<span style="font-size:22px;color:var(--ink-4)">%</span></div>
-          <div class="stat-tile-sub">${totals.p2i + totals.p2e + totals.p3} / ${totals.p2iA + totals.p2eA + totals.p3A}</div>
-        </div>
-        <div class="stat-tile">
-          <div class="stat-tile-label">3 points</div>
-          <div class="stat-tile-value">${p3Pct}<span style="font-size:22px;color:var(--ink-4)">%</span></div>
-          <div class="stat-tile-sub">${totals.p3} / ${totals.p3A}</div>
-        </div>
-        <div class="stat-tile">
-          <div class="stat-tile-label">Lancers francs</div>
-          <div class="stat-tile-value">${ftPct}<span style="font-size:22px;color:var(--ink-4)">%</span></div>
-          <div class="stat-tile-sub">${totals.ft} / ${totals.ftA}</div>
-        </div>
-        <div class="stat-tile">
-          <div class="stat-tile-label">+/− Moyen</div>
-          <div class="stat-tile-value" style="color:${avgGS>=15?'var(--green)':avgGS<5?'var(--red)':'var(--orange)'}">${avgGS>=0?'+':''}${avgGS}</div>
-          <div class="stat-tile-sub">contribution / match</div>
-        </div>
-      </div>
-
-      <div class="stat-grid mb-3">
-        <div class="stat-tile">
-          <div class="stat-tile-label">Contre-attaque</div>
-          <div class="stat-tile-value" style="color:var(--orange)">${totals.ca}</div>
-          <div class="stat-tile-sub">pts en transition · ${avg.ca}/match</div>
-        </div>
-        <div class="stat-tile">
-          <div class="stat-tile-label">PB · F</div>
-          <div class="stat-tile-value">${avg.to}<span style="color:var(--ink-4)"> · ${avg.fouls}</span></div>
-          <div class="stat-tile-sub">par match</div>
-        </div>
-      </div>
-
-      <div class="section-header">
-        <h2 class="display-md">Match par match</h2>
-      </div>
-
-      ${myMatches.length === 0 ? `
-        <div class="empty">
-          <div class="empty-icon">○</div>
-          <div class="empty-title">Aucune stat enregistrée</div>
-          <div class="empty-desc">Tes stats apparaîtront ici après les matchs</div>
-        </div>
-      ` : `
-        <div class="list-section">
-          ${myMatches.map(m => {
-            const s = m.playerStats[p.id];
-            const win = m.scoreUs > m.scoreOpp;
-            return `
-              <div class="list-row" style="display:grid;grid-template-columns:38px 1fr auto;gap:12px;cursor:default">
-                <div class="match-result-badge ${win ? 'match-result-w' : 'match-result-l'}">${win ? 'V' : 'D'}</div>
-                <div style="min-width:0">
-                  <div style="font-family:'Anton';font-size:14px;text-transform:uppercase">${esc(m.opponent)}</div>
-                  <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">
-                    ${formatDate(m.date)} · ${s.min || 0}min · ${s.reb || 0}reb · ${s.ast || 0}pd${s.ca ? ' · ' + s.ca + 'CA' : ''}
-                  </div>
-                </div>
-                <div style="text-align:right;display:flex;flex-direction:column;align-items:flex-end;gap:2px">
-                  <div style="display:flex;align-items:baseline;gap:6px">
-                    <div style="font-family:'Anton';font-size:22px">${s.pts || 0}</div>
-                    <div style="font-family:'JetBrains Mono';font-size:11px;color:${gameScore(s)>=15?'var(--green)':gameScore(s)<5?'var(--red)':'var(--orange)'};font-weight:700">${gameScore(s)>=0?'+':''}${gameScore(s).toFixed(1)}</div>
-                  </div>
-                  <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono'">PTS · +/−</div>
-                </div>
-              </div>
-            `;
-          }).join('')}
-        </div>
-      `}
-    </div>
-  `;
-}
 
 // ============================================================
 // TEAM (Convoc + Challenges)
@@ -20022,50 +19826,6 @@ const TEAM_REVIEW_FIELDS = [
   { key: 'physique',    label: 'État physique',      icon: '💪', desc: 'Forme, énergie, récupération' },
 ];
 
-function openMyTeamReviewHistory() {
-  if (state.auth.role !== 'player') return;
-  const pid = state.auth.playerId;
-  const reviews = (state.teamReviews || []).filter(r => r.pid === pid).sort((a,b) => b.updatedAt - a.updatedAt);
-
-  openModal(`
-    <div class="modal-header">
-      <div>
-        <div class="eyebrow">${reviews.length} entrée${reviews.length>1?'s':''}</div>
-        <div class="modal-title">Mon historique</div>
-      </div>
-      <button class="modal-close" onclick="closeModal()">✕</button>
-    </div>
-    <div class="modal-body">
-      ${reviews.length === 0 ? `<div class="empty" style="padding:24px"><div class="empty-title">Aucune entrée</div></div>` : `
-        <div style="display:flex;flex-direction:column;gap:10px">
-          ${reviews.map(r => `
-            <div class="review-card">
-              <div style="font-family:'JetBrains Mono';font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:var(--ink-3);margin-bottom:8px">${formatDate(r.date, 'long')}</div>
-              <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:${r.comment?'10px':'0'}">
-                ${TEAM_REVIEW_FIELDS.map(f => {
-                  const v = r[f.key];
-                  const c = v >= 4 ? 'var(--green)' : v <= 2 ? 'var(--red)' : 'var(--orange)';
-                  return `
-                    <div style="text-align:center;padding:8px 4px;background:var(--bg-1);border-radius:6px">
-                      <div style="font-size:16px;margin-bottom:2px">${f.icon}</div>
-                      <div style="font-family:'Anton';font-size:18px;color:${c};line-height:1">${v}</div>
-                      <div style="font-size:8px;color:var(--ink-4);font-family:'JetBrains Mono';text-transform:uppercase;margin-top:2px">${f.label.slice(0,8)}</div>
-                    </div>
-                  `;
-                }).join('')}
-              </div>
-              ${r.comment ? `
-                <div style="padding:8px 10px;background:var(--bg-1);border-left:2px solid var(--orange);border-radius:4px;font-size:11px;line-height:1.5;font-style:italic;color:var(--ink-2)">
-                  💬 « ${esc(r.comment)} »
-                </div>
-              ` : ''}
-            </div>
-          `).join('')}
-        </div>
-      `}
-    </div>
-  `);
-}
 
 function openTeamReview() {
   if (state.auth.role !== 'player') return;
@@ -23339,123 +23099,6 @@ async function syncFFBB_legacyScraper() {
   }
 }
 
-function renderFFBB_legacyScraper() {
-  const f = state.ffbb;
-  const isCoach = state.auth.role === 'coach';
-  const matches = f.matches || [];
-  const standings = f.standings || [];
-  // Un match est "joué" seulement si scores valides existent
-  const isPlayed = m => m.played && m.scoreHome != null && m.scoreAway != null && !isNaN(m.scoreHome) && !isNaN(m.scoreAway);
-  // Pas de cap : on affiche TOUS les matches (calendrier + résultats complets).
-  // Une saison FFBB fait ~22 matches, c'est largement scrollable.
-  const upcoming = matches.filter(m => !isPlayed(m))
-    .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
-  const recent = matches.filter(m => isPlayed(m))
-    .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-  const teamLower = (f.teamName || '').toLowerCase();
-  const myMatches = matches.filter(m =>
-    (m.home || '').toLowerCase().includes(teamLower) ||
-    (m.away || '').toLowerCase().includes(teamLower)
-  );
-
-  return `
-    <div class="fade-up">
-      <div class="section-header">
-        <div>
-          <div class="eyebrow">Championnat</div>
-          <h2 class="display-lg mt-2">FFBB</h2>
-        </div>
-        ${isCoach ? `<button class="btn btn-secondary" onclick="editFFBBConfig()">⚙</button>` : ''}
-      </div>
-
-      <div class="px">
-        <div style="padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:14px">
-          <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
-            <div style="width:36px;height:36px;border-radius:8px;background:var(--orange-soft);display:flex;align-items:center;justify-content:center;font-family:'Anton';color:var(--orange)">F</div>
-            <div style="flex:1;min-width:0">
-              <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;letter-spacing:0.02em">${esc(f.teamName || 'Mon équipe')}</div>
-              <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">${f.lastSync ? 'Sync ' + new Date(f.lastSync).toLocaleString('fr-FR', {dateStyle:'short', timeStyle:'short'}) : 'Jamais synchronisé'}</div>
-            </div>
-          </div>
-          <button class="btn ${f.syncing?'btn-secondary':'btn-primary'} btn-block" onclick="syncFFBB()" ${f.syncing?'disabled':''}>
-            ${f.syncing ? '⟳ Synchronisation...' : '⟳ Synchroniser maintenant'}
-          </button>
-          ${f.syncError ? `
-            <div style="margin-top:10px;padding:10px;background:var(--red-soft);border:1px solid rgba(239,68,68,0.3);border-radius:8px;font-size:11px;color:var(--red);font-family:'JetBrains Mono';line-height:1.5">
-              ⚠ ${esc(f.syncError)}<br>
-              <span style="color:var(--ink-3);font-size:10px">Le proxy public peut être saturé. Réessaie dans 1 min ou change d'URL.</span>
-            </div>
-          ` : ''}
-        </div>
-      </div>
-
-      ${myMatches.length === 0 ? `
-        <div class="empty">
-          <div class="empty-icon">○</div>
-          <div class="empty-title">Aucune donnée</div>
-          <div class="empty-desc">Configure l'URL FFBB et lance la sync</div>
-        </div>
-      ` : `
-        ${upcoming.length > 0 ? `
-          <div class="section-header">
-            <div>
-              <div class="eyebrow">À venir</div>
-              <h2 class="display-md mt-2">Prochains matchs</h2>
-            </div>
-          </div>
-          <div class="list-section">
-            ${upcoming.map(m => ffbbMatchRow(m, f.teamName)).join('')}
-          </div>
-        ` : ''}
-
-        ${recent.length > 0 ? `
-          <div class="section-header">
-            <div>
-              <div class="eyebrow">Résultats</div>
-              <h2 class="display-md mt-2">Derniers matchs</h2>
-            </div>
-          </div>
-          <div class="list-section">
-            ${recent.map(m => ffbbMatchRow(m, f.teamName)).join('')}
-          </div>
-        ` : ''}
-
-        ${standings.length > 0 ? `
-          <div class="section-header">
-            <div>
-              <div class="eyebrow">Classement</div>
-              <h2 class="display-md mt-2">Poule</h2>
-            </div>
-          </div>
-          <div class="list-section">
-            <div class="stats-wrap">
-              <table class="stats-table">
-                <thead><tr><th>#</th><th>Équipe</th><th>MJ</th><th>V</th><th>D</th><th>Pts</th></tr></thead>
-                <tbody>
-                  ${standings.map(s => {
-                    const isMe = (s.team || '').toLowerCase().includes(teamLower);
-                    return `<tr style="${isMe ? 'background:var(--orange-soft)' : ''}">
-                      <td class="num">${s.rank ?? '-'}</td>
-                      <td style="font-family:'Anton';font-size:13px;text-transform:uppercase">${esc(s.team)}</td>
-                      <td>${s.played ?? '-'}</td>
-                      <td>${s.wins ?? '-'}</td>
-                      <td>${s.losses ?? '-'}</td>
-                      <td class="num">${s.points ?? '-'}</td>
-                    </tr>`;
-                  }).join('')}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        ` : ''}
-      `}
-
-      <div style="padding:20px 18px;text-align:center;font-size:10px;color:var(--ink-4);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.1em">
-        Données : competitions.ffbb.com
-      </div>
-    </div>
-  `;
-}
 
 // ============================================================================
 // FFBB DASHBOARD v2 — données via l'API OFFICIELLE FFBB (api.ffbb.app)
@@ -24758,7 +24401,13 @@ function renderPublic() {
   const pubMatches = publicPortalSeasonMatches(pubSeasonId);
   const pubPlayed = pubMatches.filter(m => (m.scoreUs || 0) > 0 || (m.scoreOpp || 0) > 0);
   const recent = [...pubPlayed].sort((a,b) => b.date.localeCompare(a.date)).slice(0, 5);
-  const upcoming = [...state.convocations].filter(c => c.date >= todayStr && c.type === 'match').sort((a,b) => a.date.localeCompare(b.date))[0];
+  // « Prochain match » scopé à la saison résolue (sinon une convoc d'une autre
+  // saison future remonterait). Legacy sans seasonId → inclus (lenient) ; worst
+  // case pubSeasonId null → pas de filtre saison.
+  const upcoming = [...state.convocations]
+    .filter(c => c.date >= todayStr && c.type === 'match'
+      && (!pubSeasonId || !c.seasonId || c.seasonId === pubSeasonId))
+    .sort((a,b) => a.date.localeCompare(b.date))[0];
   const wins = pubPlayed.filter(m => m.scoreUs > m.scoreOpp).length;
   const losses = pubPlayed.filter(m => m.scoreUs < m.scoreOpp).length;
 

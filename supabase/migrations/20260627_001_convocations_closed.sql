@@ -1,0 +1,13 @@
+-- ============================================================================
+-- Audit vague 3 (#2) — Persistance du flag de clôture des convocations.
+-- ----------------------------------------------------------------------------
+-- Jusqu'ici, la clôture d'une convocation NON récurrente (c.closed = true)
+-- n'était stockée qu'en localStorage : le dump de sync n'incluait pas `closed`
+-- et la table n'avait pas la colonne. Conséquence : clôture perdue au reload
+-- depuis le cloud / sur un autre device (l'entraînement « revenait » à clôturer).
+-- (Les récurrentes étaient déjà persistées via instance_overrides[date].closed.)
+--
+-- Colonne additive, nullable-safe (default false). Idempotente. Aucune policy
+-- modifiée (l'app écrit en rôle anon, comme le reste des colonnes convocations).
+-- ============================================================================
+alter table public.convocations add column if not exists closed boolean not null default false;
