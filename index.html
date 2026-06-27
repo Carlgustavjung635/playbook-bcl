@@ -8212,6 +8212,9 @@ function renderHomePlayer() {
       <!-- 1bis. Inbox messages (diffusions/sondages reçus) — audit #4 -->
       ${renderPlayerInbox()}
 
+      <!-- 1ter. Boîte à gages : point d'entrée visible pour proposer -->
+      ${renderGageHomeCard()}
+
       <!-- 2. Challenges actifs (preview 2-3, lien Tout → onglet) -->
       ${myActiveChallenges.length > 0 ? `
         <div class="section-header">
@@ -13611,6 +13614,25 @@ function submitGageProposal(text) {
   });
   persist(); _gageFlush();
   return true;
+}
+// Carte d'accroche sur la home joueuse : point d'entrée VISIBLE pour proposer un
+// gage (le menu ⚙ restant un accès secondaire). Affiche un compteur de ses
+// propositions en attente s'il y en a.
+function renderGageHomeCard() {
+  if (!state.auth || state.auth.role !== 'player') return '';
+  const pid = state.auth.playerId;
+  const pendingMine = (state.gages || []).filter(g => g.authorId === pid && g.status === 'pending').length;
+  return `
+    <div style="padding:0 18px;margin-bottom:18px">
+      <div onclick="openProposeGage()" style="cursor:pointer;display:flex;align-items:center;gap:12px;padding:14px;border-radius:var(--radius);background:linear-gradient(135deg,rgba(var(--accent-rgb),0.12),var(--surface));border:1.5px solid rgba(var(--accent-rgb),0.35)">
+        <div style="font-size:28px;flex:0 0 auto">🎁</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-family:'Anton';font-size:15px;text-transform:uppercase;letter-spacing:0.02em">Boîte à gages</div>
+          <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${pendingMine ? pendingMine + ' en attente · propose une idée' : 'Propose une idée de gage (anonyme)'}</div>
+        </div>
+        <div style="font-family:'Anton';font-size:18px;color:var(--orange);flex:0 0 auto">+</div>
+      </div>
+    </div>`;
 }
 function openProposeGage() {
   const pid = state.auth && state.auth.playerId;
@@ -25842,7 +25864,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.7';
+const APP_VERSION = '2026-06-28.8';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
