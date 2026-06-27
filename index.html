@@ -4595,8 +4595,11 @@ function toggleGuide() {
   state._guideCollapsed = !state._guideCollapsed;
   render();
 }
-// Depuis ⚙ : rouvre le guide sur la home, déplié.
+// Depuis ⚙ : rouvre le guide sur la home, déplié. _guideForceShow force
+// l'affichage du bloc pour la SESSION même si la joueuse a déjà changé son PIN
+// (rappel manuel ponctuel) ; non persisté, réévalué au prochain boot / logout.
 function reopenPlayerGuide() {
+  state._guideForceShow = true;
   state._guideCollapsed = false;
   state._guideWasNew = false;
   if (state.section !== 'home') state.section = 'home';
@@ -4605,7 +4608,25 @@ function reopenPlayerGuide() {
   render();
 }
 
+// Visibilité du bloc onboarding : tant que la joueuse n'a pas PERSONNALISÉ son
+// PIN (PIN par défaut '0000' = compte pas encore approprié), le guide reste
+// affiché ; dès qu'elle change son PIN il disparaît automatiquement. '0000' est
+// déjà le signal canonique « PIN par défaut » ailleurs (effectif coach) → aucun
+// flag ni migration : les joueuses ayant déjà changé leur PIN avant cette version
+// (pin ≠ '0000') ne reverront pas le guide (moins intrusif rétroactivement).
+function playerPinIsDefault() {
+  if (!state.auth || state.auth.role !== 'player') return false;
+  const p = (typeof currentPlayer === 'function') ? currentPlayer() : null;
+  return !p || p.pin == null || p.pin === '0000';
+}
+function shouldShowPlayerGuide() {
+  return state._guideForceShow === true || playerPinIsDefault();
+}
+
 function renderPlayerGuide() {
+  // Gate PIN : masqué dès que la joueuse a personnalisé son code (sauf rappel
+  // manuel « ↻ Revoir le guide » qui force l'affichage le temps de la session).
+  if (!shouldShowPlayerGuide()) return '';
   // Initialise l'état d'affichage UNE fois par chargement : non-lu → déplié + neuf.
   if (state._guideCollapsed === undefined) {
     const seen = isGuideSeen();
@@ -7129,6 +7150,11 @@ function doLogout() {
   // de session pour cette identité → on repart d'une évaluation fraîche (statut DB).
   window._broadcastSnoozed = null;
   window._broadcastBootChecked = false;
+  // Mini-guide joueuse : reset des états de SESSION (force-show manuel + replié/neuf)
+  // pour que la prochaine identité réévalue la visibilité depuis son propre PIN.
+  state._guideForceShow = false;
+  state._guideCollapsed = undefined;
+  state._guideWasNew = undefined;
   state.auth = null;
   state.authFlow = { stage: 'role', role: null, playerId: null, pinInput: '' };
   state.view = null;
