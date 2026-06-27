@@ -299,6 +299,29 @@
   }
   .md-content a { color: var(--orange); text-decoration: underline; word-break: break-word; }
 
+  /* ========== BANDEAU AUTO-UPDATE ========== */
+  #update-banner {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: calc(78px + env(safe-area-inset-bottom)); z-index: 9500;
+    width: calc(100% - 28px); max-width: 520px;
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 12px 10px 14px; border-radius: 12px;
+    background: var(--surface); border: 1.5px solid var(--orange);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  }
+  #update-banner .ub-text {
+    flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--ink);
+  }
+  #update-banner .ub-reload {
+    flex: 0 0 auto; background: var(--orange); color: #000; border: 0;
+    border-radius: 8px; padding: 8px 14px; font-family: 'Anton', sans-serif;
+    font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; cursor: pointer;
+  }
+  #update-banner .ub-close {
+    flex: 0 0 auto; background: transparent; border: 0; color: var(--ink-3);
+    font-size: 16px; cursor: pointer; padding: 4px 6px; line-height: 1;
+  }
+
   /* ========== PULL-TO-REFRESH (PWA standalone) ========== */
   /* Indicateur de tirage. Posé en position fixe sous la status bar (safe-area),
      hors du .app (survit aux re-render). Masqué par défaut (opacity 0). */
@@ -25085,9 +25108,51 @@ async function refreshFromCloud() {
     try { ensureCurrentSeasonId(); } catch (e) {}
     persist();
     render();
+    // Un pull-to-refresh vérifie AUSSI si une nouvelle version de l'app est
+    // déployée (le refresh data seul ne recharge PAS le code → cf. staleness PWA).
+    try { checkForUpdate({ force: true }); } catch (e) {}
     if (typeof showToast === 'function') showToast('✓ Données à jour');
     return true;
   } catch (e) { console.warn('[refresh] pull-to-refresh:', e && e.message); return false; }
+}
+
+// ============================================================
+// AUTO-UPDATE (anti-staleness PWA standalone)
+// ------------------------------------------------------------
+// En PWA « écran d'accueil », l'app reste chargée en mémoire jusqu'à ce qu'elle
+// soit tuée : un nouveau déploiement n'est PAS pris en compte (et le pull-to-
+// refresh ne recharge que les DONNÉES, pas le code). On compare la version
+// embarquée (APP_VERSION, figée dans CE build) à celle servie par /version.json
+// (mise à jour à chaque déploiement). Si elles diffèrent → bandeau non bloquant
+// « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
+// → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
+// IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
+const APP_VERSION = '2026-06-28.1';
+let _updateBannerShown = false;
+let _lastUpdateCheck = 0;
+async function checkForUpdate(opts) {
+  opts = opts || {};
+  if (_updateBannerShown) return;
+  const now = Date.now();
+  if (!opts.force && now - _lastUpdateCheck < 60000) return; // throttle 1/min hors pull
+  _lastUpdateCheck = now;
+  try {
+    const res = await fetch('version.json?_=' + now, { cache: 'no-store' });
+    if (!res.ok) return;
+    const data = await res.json();
+    const remote = data && (data.v || data.version);
+    if (remote && remote !== APP_VERSION) showUpdateBanner();
+  } catch (e) { /* hors ligne / fichier absent → on ignore */ }
+}
+function showUpdateBanner() {
+  if (_updateBannerShown) return;
+  _updateBannerShown = true;
+  let el = document.getElementById('update-banner');
+  if (!el) { el = document.createElement('div'); el.id = 'update-banner'; document.body.appendChild(el); }
+  el.innerHTML =
+    '<span class="ub-text">🔄 Nouvelle version disponible</span>' +
+    '<button class="ub-reload" onclick="location.reload()">Recharger</button>' +
+    '<button class="ub-close" onclick="this.parentElement.remove()" aria-label="Fermer">✕</button>';
 }
 
 function _ptrEnsureIndicator() {
@@ -25145,6 +25210,12 @@ function initPullToRefresh() {
 
 _pbBoot();
 try { initPullToRefresh(); } catch (e) { console.warn('[ptr] init', e && e.message); }
+// Auto-update : check au boot (après stabilisation) + à chaque retour au 1er plan
+// (PWA rouverte sans être tuée → détecte un déploiement survenu entre-temps).
+setTimeout(() => { try { checkForUpdate({ force: true }); } catch (e) {} }, 4000);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) { try { checkForUpdate(); } catch (e) {} }
+});
 </script>
 </body>
 </html>
