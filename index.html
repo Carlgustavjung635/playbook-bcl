@@ -174,7 +174,10 @@
     background: rgba(0, 0, 0, 0.85);
     backdrop-filter: saturate(180%) blur(20px);
     -webkit-backdrop-filter: saturate(180%) blur(20px);
-    padding: 14px 18px;
+    /* PWA iOS standalone : la status bar / Dynamic Island se superpose au header
+       (status-bar-style black-translucent). On réserve l'inset haut + les insets
+       latéraux (landscape / notch) tout en gardant l'espacement portrait. */
+    padding: max(14px, env(safe-area-inset-top)) max(18px, env(safe-area-inset-right)) 14px max(18px, env(safe-area-inset-left));
     display: flex; align-items: center; justify-content: space-between;
     border-bottom: 1px solid var(--border-soft);
   }
@@ -243,7 +246,8 @@
     backdrop-filter: saturate(180%) blur(20px);
     -webkit-backdrop-filter: saturate(180%) blur(20px);
     border-top: 1px solid var(--border);
-    padding: 8px 4px calc(8px + env(safe-area-inset-bottom));
+    /* home-bar iPhone (bottom) + insets latéraux en landscape. */
+    padding: 8px max(4px, env(safe-area-inset-right)) calc(8px + env(safe-area-inset-bottom)) max(4px, env(safe-area-inset-left));
     display: flex; justify-content: space-around;
   }
   @media (min-width: 768px) {
@@ -4808,6 +4812,7 @@ Object.defineProperty(state, 'offseason', {
 })();
 
 function persist() {
+  invalidateAutoScoreCache(); // compteurs auto recomputés à la lecture : cache à jour
   save(K.auth, state.auth);
   save(K.section, state.section);
   save(K.plays, state.plays);
@@ -5220,6 +5225,50 @@ function recomputeAutoChallengeScores(opts) {
     persist();
   }
   return report;
+}
+
+// ============================================================
+// LECTURE-RECOMPUTE DES COMPTEURS AUTO (source de vérité = events bruts)
+// ------------------------------------------------------------
+// Le scalaire c.scores d'un défi AUTO peut rester contaminé par des clôtures
+// cross-saison écrites AVANT le cloisonnement (PR #69) : il n'est donc PLUS la
+// source d'affichage. À chaque lecture on RECALCULE depuis les events sources
+// (computeAutoScoresFromSource) filtrés sur la fenêtre voulue. Le scalaire reste
+// persisté pour la rétrocompat et les badges déjà attribués (jamais retirés).
+// Défis MANUELS / COLLECTIFS → on garde c.scores (saisie coach inchangée).
+// Mémoïsé par fenêtre de dates (1 seul calcul partagé par tous les défis d'un
+// même render), invalidé à chaque persist() (clôture entraînement, saisie match,
+// édition de compteurs…), donc jamais périmé sur aucun device.
+let _autoScoreMemo = { key: null, data: null };
+function invalidateAutoScoreCache() { _autoScoreMemo = { key: null, data: null }; }
+function _autoScoresForWindow(fromISO, toISO) {
+  const key = (fromISO || '') + '|' + (toISO || '');
+  if (_autoScoreMemo.key === key && _autoScoreMemo.data) return _autoScoreMemo.data;
+  const data = computeAutoScoresFromSource(fromISO, toISO);
+  _autoScoreMemo = { key, data };
+  return data;
+}
+// Map { playerId: score } d'un défi. AUTO → recompute ; sinon c.scores.
+// period : 'season' (bornes de la saison DU DÉFI) | 'month' | 'trimester'.
+//          défaut = filtre période courant (getChallengePeriod).
+function autoChallengeScores(c, period) {
+  if (!c || !c.autoCount) return (c && c.scores) || {};
+  period = period || getChallengePeriod();
+  const sid = c.seasonId || state.currentSeasonId;
+  let w;
+  if (period === 'season') {
+    const season = (state.seasons || []).find(s => s.id === sid);
+    w = (season && season.startDate)
+      ? { from: season.startDate, to: season.endDate || '9999-12-31' }
+      : challengePeriodWindow('season');
+  } else {
+    w = challengePeriodWindow(period);
+  }
+  const comp = _autoScoresForWindow(w.from, w.to);
+  return (comp[c.type] && comp[c.type][sid]) || {};
+}
+function getAutoScoreFor(c, playerId, period) {
+  return autoChallengeScores(c, period)[playerId] || 0;
 }
 
 // ============================================================
@@ -7384,7 +7433,7 @@ function renderHomeCoach() {
         <div class="stat-tile">
           <div class="stat-tile-label">Win Rate</div>
           <div class="stat-tile-value">${playedMatches.length ? Math.round(100*wins/playedMatches.length) : 0}<span style="font-size:22px;color:var(--ink-4)">%</span></div>
-          <div class="stat-tile-sub">Saison 25-26</div>
+          <div class="stat-tile-sub">${esc(getCurrentSeason() ? 'Saison ' + seasonShortLabel(getCurrentSeason()) : 'Saison')}</div>
         </div>
       </div>
 
@@ -8470,7 +8519,9 @@ function togglePlayerProgrammeExercise(exId) {
 }
 
 function playerChallengeRow(c, playerId) {
-  const scores = c.scores || {};
+  // AUTO → recompute depuis les events (source de vérité), filtre période inclus ;
+  // manuel → c.scores. Corrige les compteurs contaminés cross-saison sans action user.
+  const scores = autoChallengeScores(c);
   const myScore = scores[playerId] || 0;
   // Mon rang (selon lowerIsBetter)
   // SAISON : ranking parmi l'effectif courant uniquement (sinon une joueuse
@@ -18413,16 +18464,14 @@ function challengeCard(c, isCoach) {
   // SAISON : leaderboard restreint à l'effectif de la saison du challenge.
   // MULTI-EFFECTIF : scopé sur l'équipe du défi ('both' → tout l'effectif).
   const _seasonId2 = c.seasonId || state.currentSeasonId;
-  // FILTRE PÉRIODE (défis auto uniquement) : hors 'season', on remplace les
-  // compteurs persistés par un recalcul depuis les sources sur la fenêtre
-  // (lecture seule). 'season' garde les compteurs canoniques éditables.
+  // Défis AUTO : compteurs TOUJOURS recomputés depuis les events sources (source
+  // de vérité), jamais le scalaire c.scores qui peut rester contaminé par des
+  // clôtures cross-saison antérieures au cloisonnement. Le filtre période
+  // s'applique par-dessus : 'season' = bornes de la saison du défi (compteurs
+  // éditables) ; Mois/Trimestre = fenêtre glissante (bandeau lecture seule).
   const _period = getChallengePeriod();
   const _derived = isAuto && _period !== 'season';
-  if (_derived) {
-    const _w = challengePeriodWindow(_period);
-    const _comp = computeAutoScoresFromSource(_w.from, _w.to);
-    scores = (_comp[c.type] && _comp[c.type][_seasonId2]) || {};
-  }
+  if (isAuto) scores = autoChallengeScores(c, _period);
   const _chTeam = c.teamTag === 'both' ? 'all' : (c.teamTag === 'e2' ? 'e2' : 'e1');
   const _seasonPool2 = _seasonsLoaded() && _seasonId2
     ? getSeasonPlayers(_seasonId2, { team: _chTeam })
@@ -18749,8 +18798,9 @@ function closeChallengeNow(cid) {
   const c = state.challenges.find(x => x.id === cid);
   if (!c) return;
   // Calculer le podium actuel
-  // SAISON : podium parmi l'effectif de la saison du challenge
-  const scores = c.scores || {};
+  // SAISON : podium parmi l'effectif de la saison du challenge.
+  // AUTO → scores recomputés sur la saison (indépendant du filtre période UI).
+  const scores = autoChallengeScores(c, 'season');
   const _seasonId = c.seasonId || state.currentSeasonId;
   const _seasonPool = _seasonsLoaded() && _seasonId
     ? getSeasonPlayers(_seasonId)
@@ -19244,7 +19294,7 @@ function drawWrappedText(ctx, text, x, y, maxWidth, lineHeight, maxLines) {
 // individual/season/collective. Pour collectif, le "winner" = top
 // contributrice (joueuse avec score max, peu importe l'objectif).
 function getChallengeWinner(c) {
-  const scores = c.scores || {};
+  const scores = autoChallengeScores(c, 'season');
   const _seasonId = c.seasonId || state.currentSeasonId;
   const pool = _seasonsLoaded() && _seasonId
     ? getSeasonPlayers(_seasonId)
@@ -19260,7 +19310,7 @@ function getChallengeWinner(c) {
 
 function getChallengeRunnerUp(c, excludeId, n) {
   n = n || 2;
-  const scores = c.scores || {};
+  const scores = autoChallengeScores(c, 'season');
   const _seasonId = c.seasonId || state.currentSeasonId;
   const pool = _seasonsLoaded() && _seasonId
     ? getSeasonPlayers(_seasonId)
