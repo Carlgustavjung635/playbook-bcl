@@ -9490,7 +9490,11 @@ function openDashboard() {
 }
 
 function renderDashboard() {
-  const matches = [...state.matches].sort((a,b) => a.date.localeCompare(b.date));
+  // SAISON : le dashboard est libellé « Dashboard saison » → il doit agréger la
+  // SEULE saison courante (et l'effectif/équipe filtré), pas tout l'historique.
+  // currentSeasonMatches() applique le filtre saison + pillule équipe, cohérent
+  // avec currentSeasonPlayers() utilisé pour le pool de l'onglet Joueuses.
+  const matches = [...currentSeasonMatches()].sort((a,b) => a.date.localeCompare(b.date));
   const played = matches.filter(m => (m.scoreUs || 0) > 0 || (m.scoreOpp || 0) > 0);
   const tab = state.dashTab || 'team';
 
