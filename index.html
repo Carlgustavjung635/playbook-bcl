@@ -122,6 +122,39 @@
   .theme-card-desc { font-size: 11px; color: var(--ink-3); font-family: 'JetBrains Mono', monospace; }
   .theme-card-check { flex: 0 0 auto; width: 18px; text-align: center; color: var(--orange); font-weight: 800; }
 
+  /* ----- ChronoSoundPicker (même modale Personnalisation) ----- */
+  .chrono-sound-emoji {
+    flex: 0 0 auto; width: 40px; height: 40px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center; font-size: 22px;
+    background: var(--bg-2); box-shadow: 0 0 0 1px rgba(255,255,255,0.08) inset;
+  }
+  .chrono-sound-play {
+    flex: 0 0 auto; width: 34px; height: 34px; border-radius: 50%;
+    background: var(--surface-2); border: 1.5px solid var(--border); color: var(--ink);
+    font-size: 13px; cursor: pointer; display: flex; align-items: center; justify-content: center;
+  }
+  .chrono-sound-play:active { transform: scale(0.9); }
+  .chrono-sound-card.is-active .chrono-sound-play { border-color: var(--orange); color: var(--orange); }
+  /* Toggle "Mode tension 3-2-1" */
+  .chrono-tension {
+    display: flex; align-items: center; gap: 12px; padding: 12px;
+    border-radius: var(--radius); background: var(--bg-3);
+    border: 1.5px solid var(--border); cursor: pointer; transition: border-color .15s, background .15s;
+  }
+  .chrono-tension.is-on { border-color: var(--orange); background: var(--orange-soft); }
+  .chrono-switch {
+    flex: 0 0 auto; position: relative; width: 44px; height: 26px;
+    border-radius: 13px; background: var(--bg-1); border: 1px solid var(--border);
+    transition: background .18s;
+  }
+  .chrono-switch::after {
+    content: ''; position: absolute; top: 2px; left: 2px;
+    width: 20px; height: 20px; border-radius: 50%; background: var(--ink-3);
+    transition: transform .18s, background .18s;
+  }
+  .chrono-tension.is-on .chrono-switch { background: var(--orange); }
+  .chrono-tension.is-on .chrono-switch::after { transform: translateX(18px); background: #fff; }
+
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body {
     margin: 0; padding: 0;
@@ -4527,6 +4560,8 @@ const K = {
   broadcasts: 'pb8_broadcasts',
   broadcastReceipts: 'pb8_broadcast_receipts',
   theme: 'pb8_theme', // map { "<role>:<playerId|->": themeId } — préférence couleur par identité
+  chronoSound: 'pb8_chrono_sound', // map { "<role>:<playerId|->": soundId } — ambiance sonore chrono
+  chronoTension: 'pb8_chrono_tension', // map { "<role>:<playerId|->": bool } — mode tension 3-2-1
   guideSeen: 'pb8_guide_seen', // map { "<role>:<playerId|->": true } — mini-guide joueuse vu
 };
 function load(k, d) { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : d; } catch { return d; } }
@@ -4624,18 +4659,100 @@ function openThemePicker() {
   const current = getThemeId();
   openModal(`
     <div class="modal-header">
-      <div class="modal-title">🎨 Couleur de l'interface</div>
+      <div class="modal-title">🎨 Personnalisation</div>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <div class="modal-body">
+      <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px">Couleur de l'interface</div>
       <div style="font-size:12px;color:var(--ink-3);line-height:1.5;margin-bottom:14px">
         Choisis ta palette. Le changement est instantané et ne concerne que ton affichage sur cet appareil.
       </div>
       <div id="theme-picker-grid" class="theme-grid" role="radiogroup" aria-label="Thème couleur"></div>
+
+      <div style="height:1px;background:var(--border-soft);margin:20px 0 16px"></div>
+
+      <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px">🔊 Son du chronomètre</div>
+      <div style="font-size:12px;color:var(--ink-3);line-height:1.5;margin-bottom:14px">
+        L'ambiance jouée à la fin d'un décompte. Touche <strong>▶</strong> pour écouter.
+      </div>
+      <div id="chrono-sound-grid" class="theme-grid" role="radiogroup" aria-label="Son du chronomètre"></div>
+
+      <div id="chrono-tension-wrap" class="chrono-tension${getChronoTension() ? ' is-on' : ''}" onclick="toggleChronoTension()" style="margin-top:14px">
+        <div style="flex:1;min-width:0">
+          <div class="theme-card-name">⏱️ Mode tension 3-2-1</div>
+          <div class="theme-card-desc">Tic-tac montant sur les 3 dernières secondes, avant le son final.</div>
+        </div>
+        <span id="chrono-tension-toggle" class="chrono-switch" role="switch" aria-checked="${getChronoTension() ? 'true' : 'false'}" aria-label="Mode tension 3-2-1"></span>
+      </div>
     </div>
   `);
   const grid = document.getElementById('theme-picker-grid');
   if (grid) renderThemePickerGrid(grid, current);
+  const sgrid = document.getElementById('chrono-sound-grid');
+  if (sgrid) renderChronoSoundGrid(sgrid, getChronoSound());
+}
+
+// ============================================================
+// SON DU CHRONO — ambiances sonores au choix (même pattern que ThemePicker)
+// ------------------------------------------------------------
+// 4 ambiances synthétisées en Web Audio (zéro asset, offline) + un toggle bonus
+// « Tension 3-2-1 » (ticks montants sur les 3 dernières secondes). Préférence
+// persistée PAR IDENTITÉ (localStorage pb8_chrono_sound / pb8_chrono_tension),
+// comme le thème couleur. Recettes audio : cf. playChronoSound() près du chrono.
+const CHRONO_SOUNDS = [
+  { id: 'buzzer-arene', name: 'Buzzer Arène', emoji: '🏟️', desc: 'Klaxon de fin de quart' },
+  { id: 'cloche-zen',   name: 'Cloche Zen',   emoji: '🔔', desc: 'Carillon doux' },
+  { id: 'triple-pop',   name: 'Triple Pop',   emoji: '✨', desc: 'Pops montants modernes' },
+  { id: 'sifflet-coach',name: 'Sifflet Coach',emoji: '🦒', desc: "Coup de sifflet d'arbitre" },
+];
+const DEFAULT_CHRONO_SOUND = 'buzzer-arene';
+function getChronoSound() {
+  const map = load(K.chronoSound, {}) || {};
+  const id = map[themeIdentityKey()];
+  return CHRONO_SOUNDS.some(s => s.id === id) ? id : DEFAULT_CHRONO_SOUND;
+}
+function setChronoSound(id) {
+  if (!CHRONO_SOUNDS.some(s => s.id === id)) return;
+  const map = load(K.chronoSound, {}) || {};
+  map[themeIdentityKey()] = id;
+  save(K.chronoSound, map);
+  try { _chronoUnlockAudio(); previewChronoSound(id); } catch (e) {} // feedback + déblocage iOS
+  const grid = document.getElementById('chrono-sound-grid');
+  if (grid) renderChronoSoundGrid(grid, id);
+}
+function getChronoTension() {
+  const map = load(K.chronoTension, {}) || {};
+  return map[themeIdentityKey()] === true;
+}
+function setChronoTension(on) {
+  const map = load(K.chronoTension, {}) || {};
+  map[themeIdentityKey()] = !!on;
+  save(K.chronoTension, map);
+  const t = document.getElementById('chrono-tension-toggle');
+  if (t) t.setAttribute('aria-checked', on ? 'true' : 'false');
+  const tw = document.getElementById('chrono-tension-wrap');
+  if (tw) tw.className = 'chrono-tension' + (on ? ' is-on' : '');
+}
+function toggleChronoTension() { setChronoTension(!getChronoTension()); }
+// Fréquence du tick de tension pour la seconde restante (3→2→1), sinon null.
+function tensionTickFreq(sec) { return sec === 3 ? 600 : sec === 2 ? 800 : sec === 1 ? 1100 : null; }
+// Bouton « ▶ Écouter » du picker : geste utilisateur → débloque iOS + joue.
+function previewChronoSound(id) { try { _chronoUnlockAudio(); playChronoSound(id); } catch (e) {} }
+
+function renderChronoSoundGrid(container, current) {
+  container.innerHTML = CHRONO_SOUNDS.map(s => {
+    const on = s.id === current;
+    return `
+      <div class="theme-card chrono-sound-card${on ? ' is-active' : ''}" role="radio" aria-checked="${on}" aria-label="Son ${s.name} — ${s.desc}" onclick="setChronoSound('${s.id}')">
+        <span class="chrono-sound-emoji">${s.emoji}</span>
+        <span class="theme-card-meta">
+          <span class="theme-card-name">${s.name}</span>
+          <span class="theme-card-desc">${esc(s.desc)}</span>
+        </span>
+        <button type="button" class="chrono-sound-play" aria-label="Écouter ${s.name}" onclick="event.stopPropagation();previewChronoSound('${s.id}')">▶</button>
+        <span class="theme-card-check" aria-hidden="true">${on ? '✓' : ''}</span>
+      </div>`;
+  }).join('');
 }
 
 // ============================================================
@@ -4713,7 +4830,7 @@ function renderPlayerGuide() {
       ${section('👤', 'Ton profil', "Tes stats persos : présences entraînement, présences match, retards, défis débloqués. Filtre <strong>Mois / Trimestre / Saison</strong> au-dessus des compteurs.")}
       ${section('🏆', 'Tes défis', "Deux types : les <strong>Auto</strong> (qui se remplissent tout seuls grâce à la coach) et les <strong>Manuels</strong> (à valider toi-même quand tu accomplis l'objectif).")}
       ${section('📨', 'Messages', "Les annonces de la coach atterrissent ici. Tu peux réagir.")}
-      ${section('⚙', 'Personnaliser', "Onglet <strong>🎨 Couleur de l'interface</strong> : choisis ton thème (Court / Ocean / Forest / <strong>Pink Court</strong> / Mono). Ça reste actif jusqu'à ce que tu en changes.")}
+      ${section('⚙', 'Personnaliser', "Onglet <strong>🎨 Personnalisation</strong> : choisis ton thème couleur ET le son du chronomètre. Ça reste actif jusqu'à ce que tu en changes.")}
       ${section('🔒', 'Tes données restent sur ton téléphone', "Personne ne voit ton activité tant que tu ne partages rien.")}
       <div style="margin-top:10px;font-size:12px;color:var(--ink-3);font-style:italic">Une question ? Demande à la coach 👋</div>
     </div>`;
@@ -7102,7 +7219,7 @@ function openSettings() {
       </button>
 
       <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openThemePicker(),50)">
-        🎨 Couleur de l'interface
+        🎨 Personnalisation (couleur + son)
       </button>
 
       ${role === 'player' ? `
@@ -14394,28 +14511,107 @@ function _chronoUnlockAudio() {
     src.buffer = buf; src.connect(ac.destination); src.start(0);
   } catch (e) { /* audio non dispo : silencieux */ }
 }
-// Bip de fin : 3 salves carrées de 0,2 s espacées de 0,15 s, gain élevé (0,5)
-// pour percer le bruit d'un gymnase. La dernière salve monte en fréquence.
-function _chronoBeep() {
-  try {
-    const ac = window._chronoAudio;
-    if (!ac) return;
-    if (ac.state === 'suspended') ac.resume();
-    const t0 = ac.currentTime;
-    [0, 0.35, 0.70].forEach((dt, i) => {
-      const osc = ac.createOscillator();
-      const g = ac.createGain();
-      osc.type = 'square';
-      osc.frequency.value = i === 2 ? 1320 : 988; // dernier bip plus aigu
-      g.gain.setValueAtTime(0.0001, t0 + dt);
-      g.gain.exponentialRampToValueAtTime(0.5, t0 + dt + 0.015);
-      g.gain.setValueAtTime(0.5, t0 + dt + 0.18);
-      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dt + 0.22);
-      osc.connect(g); g.connect(ac.destination);
-      osc.start(t0 + dt); osc.stop(t0 + dt + 0.24);
+// Récupère (ou crée) + réveille le contexte audio partagé du chrono.
+function _chronoAc() {
+  let ac = window._chronoAudio;
+  if (!ac) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return null;
+    ac = window._chronoAudio = new Ctx();
+  }
+  if (ac.state === 'suspended') ac.resume();
+  return ac;
+}
+
+// --- Recettes Web Audio des 4 ambiances (zéro asset). Toutes prennent (ac, t0). ---
+// 🏟️ Buzzer Arène : klaxon grave et gras (sawtooth désaccordés + lowpass), ~0,85 s.
+function _sndBuzzerArene(ac, t0) {
+  const dur = 0.85;
+  const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1500; lp.Q.value = 0.7;
+  const g = ac.createGain();
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.exponentialRampToValueAtTime(0.45, t0 + 0.02);
+  g.gain.setValueAtTime(0.45, t0 + dur - 0.14);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  lp.connect(g); g.connect(ac.destination);
+  [[196, 0], [233, 9], [117, -7]].forEach(([f, det]) => {
+    const o = ac.createOscillator(); o.type = 'sawtooth';
+    o.frequency.value = f; o.detune.value = det;
+    o.connect(lp); o.start(t0); o.stop(t0 + dur);
+  });
+}
+// 🔔 Cloche Zen : carillon (sine + partiels inharmoniques), longue décroissance.
+function _sndClocheZen(ac, t0) {
+  const base = 660;
+  [[1, 0.4], [2.76, 0.22], [5.4, 0.08]].forEach(([mult, amp]) => {
+    const o = ac.createOscillator(); o.type = 'sine'; o.frequency.value = base * mult;
+    const g = ac.createGain();
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(amp, t0 + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + 1.4);
+    o.connect(g); g.connect(ac.destination);
+    o.start(t0); o.stop(t0 + 1.5);
+  });
+}
+// ✨ Triple Pop : 3 pops sine qui montent (660→880→1175 Hz), arrondis.
+function _sndTriplePop(ac, t0) {
+  [660, 880, 1175].forEach((f, i) => {
+    const dt = i * 0.14;
+    const o = ac.createOscillator(); o.type = 'sine'; o.frequency.value = f;
+    const g = ac.createGain();
+    g.gain.setValueAtTime(0.0001, t0 + dt);
+    g.gain.exponentialRampToValueAtTime(0.4, t0 + dt + 0.012);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dt + 0.16);
+    o.connect(g); g.connect(ac.destination);
+    o.start(t0 + dt); o.stop(t0 + dt + 0.18);
+  });
+}
+// 🦒 Sifflet Coach : 2 sines proches (battement) + tremolo LFO (« pois »), 2 coups.
+function _sndSiffletCoach(ac, t0) {
+  [[0, 0.22], [0.30, 0.32]].forEach(([dt, dur]) => {
+    const g = ac.createGain();
+    g.gain.setValueAtTime(0.0001, t0 + dt);
+    g.gain.exponentialRampToValueAtTime(0.3, t0 + dt + 0.02);
+    g.gain.setValueAtTime(0.3, t0 + dt + dur - 0.05);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dt + dur);
+    const lfo = ac.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = 23;
+    const lfoG = ac.createGain(); lfoG.gain.value = 0.1;
+    lfo.connect(lfoG); lfoG.connect(g.gain);
+    lfo.start(t0 + dt); lfo.stop(t0 + dt + dur);
+    [2100, 2108].forEach(f => {
+      const o = ac.createOscillator(); o.type = 'sine'; o.frequency.value = f;
+      o.connect(g); o.start(t0 + dt); o.stop(t0 + dt + dur);
     });
+    g.connect(ac.destination);
+  });
+}
+// Joue l'ambiance demandée (id ∈ CHRONO_SOUNDS). Fallback buzzer.
+function playChronoSound(id) {
+  try {
+    const ac = _chronoAc(); if (!ac) return;
+    const t0 = ac.currentTime;
+    if (id === 'cloche-zen') _sndClocheZen(ac, t0);
+    else if (id === 'triple-pop') _sndTriplePop(ac, t0);
+    else if (id === 'sifflet-coach') _sndSiffletCoach(ac, t0);
+    else _sndBuzzerArene(ac, t0);
   } catch (e) { /* silencieux */ }
 }
+// Tick court (mode tension 3-2-1) : sine brève montante selon la seconde.
+function _chronoTickSound(freq) {
+  try {
+    const ac = _chronoAc(); if (!ac) return;
+    const t0 = ac.currentTime;
+    const o = ac.createOscillator(); o.type = 'sine'; o.frequency.value = freq;
+    const g = ac.createGain();
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(0.3, t0 + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.09);
+    o.connect(g); g.connect(ac.destination);
+    o.start(t0); o.stop(t0 + 0.1);
+  } catch (e) { /* silencieux */ }
+}
+// Son de fin : l'ambiance choisie par l'utilisateur courant (par identité).
+function _chronoBeep() { playChronoSound(getChronoSound()); }
 // Android Chrome : vibre. iOS Safari : navigator.vibrate est absent → no-op
 // (limitation OS, non contournable depuis le web) ; le flash visuel prend le
 // relais comme alerte principale sur iOS.
@@ -14493,11 +14689,21 @@ function _chronoStartTicker() {
   window._chronoTimer = setInterval(_chronoTick, 100);
 }
 function _chronoTick() {
+  const tension = getChronoTension(); // mode 3-2-1 (par identité), lu une fois par tick
   (window._chronos || []).forEach(c => {
     if (!c.running) return;
     c.remainingMs = c.endAt - Date.now();
     if (c.remainingMs <= 0) { c.remainingMs = 0; _chronoDone(c); }
-    else _chronoUpdateDisplay(c);
+    else {
+      const secLeft = Math.ceil(c.remainingMs / 1000);
+      if (tension) {
+        const f = tensionTickFreq(secLeft);
+        // 1 tick par seconde franchie (3→2→1), sans répéter à chaque tick de 100 ms.
+        if (f && c._lastTickSec !== secLeft) { c._lastTickSec = secLeft; _chronoTickSound(f); }
+      }
+      if (secLeft > 3) c._lastTickSec = null; // hors fenêtre → reset (gère le ré-armement)
+      _chronoUpdateDisplay(c);
+    }
   });
   if (!_chronoAnyRunning()) _chronoStopTicker();
 }
@@ -25127,7 +25333,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.1';
+const APP_VERSION = '2026-06-28.2';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
