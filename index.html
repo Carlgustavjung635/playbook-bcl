@@ -7794,6 +7794,7 @@ function renderHomeCoach() {
     <div class="fade-up">
       ${renderOverdueTrainingsBanner()}
       ${renderBroadcastCoachCard()}
+      ${renderGageCoachHomeCard()}
       ${nextEvent ? heroCard(nextEvent) : ''}
 
       <div class="section-header">
@@ -13743,6 +13744,32 @@ function assignGage(id, pid) {
 }
 
 function openGagesCoach() { state.section = 'team'; state.view = { type: 'gages' }; render(); _scrollTopApp(); }
+// Carte home coach : point d'entrée VISIBLE vers la boîte à gages. S'affiche dès
+// qu'il y a quelque chose à faire (propositions à modérer OU pool à assigner),
+// sinon discrète invitation. Compteurs pour guider l'action.
+function renderGageCoachHomeCard() {
+  if (!state.auth || state.auth.role !== 'coach') return '';
+  const all = currentSeasonGages();
+  const pending = all.filter(g => g.status === 'pending').length;
+  const pool = all.filter(g => g.status === 'approved').length;
+  const sub = pending
+    ? `${pending} proposition${pending > 1 ? 's' : ''} à modérer${pool ? ` · ${pool} dans le pool` : ''}`
+    : pool
+      ? `${pool} gage${pool > 1 ? 's' : ''} dans le pool · assigne à une joueuse`
+      : 'Modère les propositions et assigne des gages';
+  const accent = pending > 0;
+  return `
+    <div style="margin:0 18px 14px">
+      <div onclick="openGagesCoach()" style="cursor:pointer;display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:var(--radius);background:linear-gradient(135deg,rgba(var(--accent-rgb),${accent ? '0.14' : '0.08'}),var(--surface));border:1.5px solid ${accent ? 'var(--orange)' : 'var(--border-soft)'}">
+        <div style="font-size:26px;flex:0 0 auto">🎁</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-family:'Anton';font-size:15px;text-transform:uppercase;letter-spacing:0.02em">Boîte à gages</div>
+          <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${sub}</div>
+        </div>
+        ${pending ? `<div style="flex:0 0 auto;background:var(--orange);color:#fff;border-radius:12px;padding:2px 9px;font-family:'Anton';font-size:13px">${pending}</div>` : `<div style="flex:0 0 auto;color:var(--orange);font-family:'Anton';font-size:18px">→</div>`}
+      </div>
+    </div>`;
+}
 function renderGagesCoach() {
   const all = currentSeasonGages();
   const pending = all.filter(g => g.status === 'pending').sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
@@ -25864,7 +25891,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.8';
+const APP_VERSION = '2026-06-28.9';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
