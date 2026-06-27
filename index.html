@@ -281,6 +281,24 @@
     .nav-btn-label { font-size: 8px; letter-spacing: 0.02em; }
   }
 
+  /* ========== CONTENU MARKDOWN (mdToHtml) ========== */
+  /* Rendu du texte libre utilisateur (description play, message coach, notes…).
+     Marges réduites pour s'insérer proprement dans les cartes existantes. */
+  .md-content { line-height: 1.6; }
+  .md-content p { margin: 0 0 8px; }
+  .md-content > p:last-child { margin-bottom: 0; }
+  .md-content ul, .md-content ol { margin: 4px 0 8px; padding-left: 20px; }
+  .md-content ul { list-style: disc; }
+  .md-content ol { list-style: decimal; }
+  .md-content li { margin: 3px 0; }
+  .md-content strong { font-weight: 700; color: var(--ink); }
+  .md-content em { font-style: italic; }
+  .md-content code {
+    font-family: 'JetBrains Mono', monospace; font-size: 0.9em;
+    background: var(--bg-3); padding: 1px 5px; border-radius: 4px;
+  }
+  .md-content a { color: var(--orange); text-decoration: underline; word-break: break-word; }
+
   /* ========== PULL-TO-REFRESH (PWA standalone) ========== */
   /* Indicateur de tirage. Posé en position fixe sous la status bar (safe-area),
      hors du .app (survit aux re-render). Masqué par défaut (opacity 0). */
@@ -5482,6 +5500,57 @@ function isCurrentSeasonReadOnly() {
 // HELPERS
 // ============================================================
 function esc(s) { return (s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// ============================================================
+// MINI-RENDERER MARKDOWN (vanilla, sans lib) — pour le CONTENU LIBRE saisi par
+// les utilisateurs (description de play, message coach, notes match, points à
+// retenir…). Sécurité : on ÉCHAPPE TOUJOURS le HTML d'abord (anti-XSS), puis on
+// applique un sous-ensemble sûr : **gras**, *italique*, `code`, listes (* / - /
+// 1.), liens [txt](url) (http(s)/mailto uniquement → anti javascript:), sauts de
+// ligne. Un texte mono-paragraphe sans liste n'est PAS wrappé dans <p> (rendu
+// inline → réutilisable dans des contextes compacts). Édition inchangée : les
+// utilisateurs continuent de taper en markdown brut dans les textarea.
+// ============================================================
+function mdEscape(s) {
+  return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+function mdInline(t) {
+  // Liens [texte](url) — schéma http(s)/mailto uniquement, sinon laissé littéral.
+  t = t.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, txt, url) =>
+    /^(https?:\/\/|mailto:)/i.test(url)
+      ? `<a href="${url}" target="_blank" rel="noopener noreferrer">${txt}</a>` : m);
+  t = t.replace(/\*\*([^*]+?)\*\*/g, '<strong>$1</strong>');   // **gras**
+  t = t.replace(/(^|[^*])\*([^*\n]+?)\*/g, '$1<em>$2</em>');   // *italique*
+  t = t.replace(/`([^`]+?)`/g, '<code>$1</code>');            // `code`
+  return t;
+}
+function mdToHtml(src) {
+  if (src == null) return '';
+  const lines = String(src).replace(/\r\n?/g, '\n').split('\n');
+  const blocks = [];
+  let list = null, para = [];
+  const flushPara = () => { if (para.length) { blocks.push({ p: para.slice() }); para = []; } };
+  const flushList = () => { if (list) { blocks.push(list); list = null; } };
+  lines.forEach(line => {
+    const ul = line.match(/^\s*[*-]\s+(.*)$/);
+    const ol = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    if (ul) { flushPara(); if (list && list.type !== 'ul') flushList(); list = list || { type: 'ul', items: [] }; list.items.push(ul[1]); return; }
+    if (ol) { flushPara(); if (list && list.type !== 'ol') flushList(); list = list || { type: 'ol', items: [] }; list.items.push(ol[1]); return; }
+    flushList();
+    if (line.trim() === '') { flushPara(); return; }
+    para.push(line);
+  });
+  flushList(); flushPara();
+  // Cas simple : un seul paragraphe, aucune liste → inline sans <p> (compact).
+  if (blocks.length === 1 && blocks[0].p) {
+    return blocks[0].p.map(l => mdInline(mdEscape(l))).join('<br>');
+  }
+  return blocks.map(b => b.p
+    ? '<p>' + b.p.map(l => mdInline(mdEscape(l))).join('<br>') + '</p>'
+    : `<${b.type}>` + b.items.map(it => '<li>' + mdInline(mdEscape(it)) + '</li>').join('') + `</${b.type}>`
+  ).join('');
+}
+
 function uid() { return 'x' + Date.now() + Math.random().toString(36).slice(2,6); }
 
 function parseVideo(url) {
@@ -8995,7 +9064,7 @@ function renderPlayDetail() {
         <div class="list-section">
           <div style="padding:16px">
             <div class="eyebrow-muted mb-2">Description</div>
-            <div style="line-height:1.6;color:var(--ink-2);white-space:pre-wrap">${esc(p.desc)}</div>
+            <div class="md-content" style="color:var(--ink-2)">${mdToHtml(p.desc)}</div>
           </div>
         </div>
       ` : ''}
@@ -9166,7 +9235,7 @@ function renderPlayEditor(isNew) {
         </select>
       </div>
       <div class="fld"><label class="fld-label">Titre</label><input id="p-title" value="${esc(p.title)}" placeholder="Ex : Horns Flare"></div>
-      <div class="fld"><label class="fld-label">Description / déroulé</label><textarea id="p-desc" rows="5" placeholder="Décris l'exercice ou la combinaison : objectif, positionnement, étapes, options...">${esc(p.desc)}</textarea></div>
+      <div class="fld"><label class="fld-label">Description / déroulé</label><textarea id="p-desc" rows="5" placeholder="Décris l'exercice ou la combinaison : objectif, positionnement, étapes, options...">${esc(p.desc)}</textarea><div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px">Mise en forme : <strong>**gras**</strong> · <em>*italique*</em> · listes (* ou 1.) · [lien](https://…)</div></div>
 
       <!-- GALERIE PHOTOS -->
       <div class="fld" style="padding-top:14px;border-top:1px solid var(--border-soft);margin-top:14px">
@@ -10400,7 +10469,7 @@ function renderMatchDetail() {
             <h2 class="display-md">Notes</h2>
           </div>
           <div class="list-section">
-            <div style="padding:16px;line-height:1.6;color:var(--ink-2);white-space:pre-wrap">${esc(m.notes)}</div>
+            <div class="md-content" style="padding:16px;color:var(--ink-2)">${mdToHtml(m.notes)}</div>
           </div>
         ` : ''}
 
@@ -10583,7 +10652,7 @@ function focusItem(matchId, type, p, color, canEdit) {
       <div style="width:3px;background:var(--${color});border-radius:2px;flex-shrink:0"></div>
       <div style="flex:1;min-width:0">
         ${p.minute ? `<div class="chip chip-${color}" style="margin-bottom:6px">Min ${esc(p.minute)}'</div>` : ''}
-        <div style="font-size:14px;color:var(--ink);line-height:1.5">${esc(p.text)}</div>
+        <div class="md-content" style="font-size:14px;color:var(--ink)">${mdToHtml(p.text)}</div>
         ${p.images && p.images.length ? `
           <div class="focus-images">
             ${p.images.map((img, i) => `
@@ -15839,7 +15908,7 @@ function renderBroadcastPopup(b) {
           </div>
         </div>
         ${mediaHtml}
-        ${b.message ? `<div style="font-size:${poll ? '18px' : '16px'};font-weight:${poll ? '600' : '400'};line-height:1.5;color:var(--ink);white-space:pre-wrap;margin-top:${poll ? '14px' : '10px'}">${esc(b.message)}</div>` : ''}
+        ${b.message ? `<div class="md-content" style="font-size:${poll ? '18px' : '16px'};font-weight:${poll ? '600' : '400'};color:var(--ink);margin-top:${poll ? '14px' : '10px'}">${mdToHtml(b.message)}</div>` : ''}
         ${bodyExtra}
         <div style="flex:1;min-height:20px"></div>
       </div>
@@ -17351,7 +17420,7 @@ function openMyTrainingPlan(convocId, dateStr) {
                   <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;text-transform:uppercase">
                     ⏱ ${ex.duration || '?'}min${myGroup ? ' · 👥 ' + esc(myGroup.name) : ''}${allImages.length ? ' · 📷 ' + allImages.length : ''}${hasVideo ? ' · 🎬' : ''}${allAttachments.length ? ' · 📎 ' + allAttachments.length : ''}
                   </div>
-                  ${ex.description ? `<div style="font-size:12px;color:var(--ink-2);margin-top:6px;line-height:1.5;white-space:pre-wrap">${esc(ex.description)}</div>` : ''}
+                  ${ex.description ? `<div class="md-content" style="font-size:12px;color:var(--ink-2);margin-top:6px">${mdToHtml(ex.description)}</div>` : ''}
 
                   ${linkedPlay && linkedPlay.concepts && linkedPlay.concepts.length > 0 ? `
                     <div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:8px" onclick="event.stopPropagation()">
