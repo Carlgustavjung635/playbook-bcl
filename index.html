@@ -426,6 +426,22 @@
     font-size: 16px; cursor: pointer; padding: 4px 6px; line-height: 1;
   }
 
+  /* Alerte ambiante de déroulé d'entraînement (coach) — bannière HAUT, non
+     bloquante, auto-dismiss. Cachée par défaut (pas de classe .ambient-on). */
+  #ambient-alert {
+    position: fixed; left: 50%; top: calc(env(safe-area-inset-top) + 10px);
+    transform: translateX(-50%) translateY(-140%);
+    width: calc(100% - 28px); max-width: 520px; z-index: 9600;
+    padding: 12px 16px; border-radius: 12px;
+    background: var(--surface); border: 1.5px solid var(--orange);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    font-size: 13px; font-weight: 600; color: var(--ink); line-height: 1.35;
+    opacity: 0; pointer-events: none; transition: transform 0.3s cubic-bezier(0.16,1,0.3,1), opacity 0.3s;
+  }
+  #ambient-alert.ambient-on {
+    transform: translateX(-50%) translateY(0); opacity: 1; pointer-events: auto; cursor: pointer;
+  }
+
   /* ========== BOÎTE À GAGES — écran tirage bloquant ========== */
   #gage-overlay:empty { display: none; }
   .gage-screen {
@@ -15053,6 +15069,92 @@ function getOverdueTrainings() {
   return out.sort((a, b) => a.startMs - b.startMs);
 }
 
+// ============================================================
+// ALERTES AMBIANTES DE DÉROULÉ (coach) — sans overlay, basées sur l'heure
+// ------------------------------------------------------------
+// Sans rien lancer : pour chaque entraînement convoqué AUJOURD'HUI avec une
+// heure de début + un plan (≥1 exo avec durée), non clôturé, démarré depuis
+// moins de 3h, on calcule les heures de transition (début + durées cumulées).
+// Quand l'horloge franchit une transition → petite alerte non bloquante :
+// bannière HAUT (auto-dismiss 10s) + son chrono choisi + notification locale si
+// la permission est accordée. Filigrane window._ambientWatermark (init = boot)
+// → ne rejoue pas les transitions déjà passées avant l'ouverture. Check / minute.
+// La « session live » plein écran (startLiveSession) reste dispo en option avancée.
+// ============================================================
+const AMBIENT_WINDOW_MS = 3 * 3600000;
+function _ambientTrainingsToday() {
+  if (!(state.auth && state.auth.role === 'coach')) return [];
+  const todayISO = isoDate(new Date());
+  const now = Date.now();
+  const out = [];
+  try {
+    currentSeasonConvocations().filter(c => c.type === 'training').forEach(c => {
+      getConvocInstances(c, todayISO, todayISO).forEach(inst => {
+        if (inst.closed || !inst.time) return;
+        const startMs = _instanceStartMs(inst.date, inst.time);
+        if (!startMs || startMs > now || now - startMs > AMBIENT_WINDOW_MS) return;
+        const plan = getTrainingPlan(c.id, inst.date);
+        const exos = plan ? _liveExtractExos(plan) : [];
+        if (!exos.length) return;
+        out.push({ convocId: c.id, date: inst.date, title: inst.title, startMs, exos });
+      });
+    });
+  } catch (e) { /* défensif : un souci de données ne doit pas tuer le timer */ }
+  return out;
+}
+// Calcule les transitions franchies dans (watermark, now] et lève les alertes.
+function _ambientCheck() {
+  // Pas d'alertes ambiantes si une session live plein écran tourne (anti-doublon).
+  if (window._liveSession) { window._ambientWatermark = Date.now(); return; }
+  const now = Date.now();
+  const wm = window._ambientWatermark || now;
+  _ambientTrainingsToday().forEach(tr => {
+    let t = tr.startMs;
+    for (let i = 0; i < tr.exos.length; i++) {
+      t += tr.exos[i].plannedMs; // heure de fin (mur) de l'exo i
+      if (t > wm && t <= now) {
+        const next = tr.exos[i + 1];
+        _ambientFireAlert(tr.exos[i].title, next ? next.title : null);
+      }
+    }
+  });
+  window._ambientWatermark = now;
+}
+function _ambientFireAlert(currentTitle, nextTitle) {
+  try { _chronoUnlockAudio(); playChronoSound(getChronoSound()); } catch (e) {}
+  try { _chronoVibrate([200, 100, 200]); } catch (e) {}
+  const msg = nextTitle
+    ? `⏱ Termine « ${currentTitle} » · Passe à : ${nextTitle}`
+    : `⏱ Fin de la séance (${currentTitle})`;
+  _ambientShowBanner(msg);
+  // Notification locale (opt-in = permission accordée) — écran verrouillé / app en fond.
+  try {
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted' && navigator.serviceWorker) {
+      navigator.serviceWorker.ready.then(reg => {
+        reg.showNotification('Entraînement', { body: msg, tag: 'ambient-training', renotify: true, icon: 'icon-192.png', badge: 'icon-192.png' });
+      }).catch(() => {});
+    }
+  } catch (e) {}
+}
+function _ambientShowBanner(msg) {
+  let el = document.getElementById('ambient-alert');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'ambient-alert';
+    el.onclick = () => { el.className = ''; };
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.className = 'ambient-on';
+  if (window._ambientBannerTo) clearTimeout(window._ambientBannerTo);
+  window._ambientBannerTo = setTimeout(() => { const n = document.getElementById('ambient-alert'); if (n) n.className = ''; }, 10000);
+}
+function _ambientStart() {
+  if (window._ambientTimer) return;
+  window._ambientWatermark = Date.now(); // n'alerte que sur les transitions À VENIR
+  window._ambientTimer = setInterval(() => { try { _ambientCheck(); } catch (e) {} }, 60000);
+}
+
 // Clôture auto d'une instance d'entraînement (mêmes règles de comptabilisation
 // que la clôture manuelle, SANS confirm). Ne persiste/render PAS (l'appelant
 // s'en charge en lot). Retourne true si une clôture effective a eu lieu.
@@ -17111,7 +17213,7 @@ function renderTrainingPlanEditor() {
       </div>
     </div>
     <div class="modal-footer" style="flex-direction:column;gap:6px">
-      ${plan.exercises.some(ex => (parseInt(ex.duration) || 0) > 0) ? `<button class="btn btn-primary btn-block" style="background:var(--green);border-color:var(--green)" onclick="startLiveSession('${convocId}','${dateStr || c.date}')">▶️ Démarrer la session live</button>` : ''}
+      ${plan.exercises.some(ex => (parseInt(ex.duration) || 0) > 0) ? `<button class="btn btn-secondary btn-block" style="font-size:12px" onclick="startLiveSession('${convocId}','${dateStr || c.date}')">▶️ Mode session live plein écran (option)</button><div style="font-size:10px;color:var(--ink-4);text-align:center;margin:-2px 0 2px">Les alertes de transition se déclenchent déjà automatiquement le jour J à l'heure prévue.</div>` : ''}
       ${plan.exercises.length > 0 ? `<button class="btn btn-secondary btn-block" onclick="_saveTrainingPlanNow()">💾 Sauvegarder le plan</button>` : ''}
       ${plan.exercises.length > 0 ? `
         ${!plan.validated ? `
@@ -23746,7 +23848,7 @@ function editMyPhoto() {
 
       <label class="btn btn-primary btn-block" style="cursor:pointer">
         ${p.photo ? '✎ Choisir une nouvelle photo' : '+ Choisir une photo'}
-        <input type="file" accept="image/*" capture="user" style="display:none" onchange="changeMyPhoto(event)">
+        <input type="file" accept="image/*" style="display:none" onchange="changeMyPhoto(event)">
       </label>
       ${p.photo ? `<button class="btn btn-ghost btn-block mt-2" style="color:var(--red)" onclick="removeMyPhoto()">Retirer ma photo</button>` : ''}
       <div style="margin-top:14px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">La photo est compressée automatiquement.</div>
@@ -26849,7 +26951,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.21';
+const APP_VERSION = '2026-06-28.22';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
@@ -26977,9 +27079,11 @@ try { initPullToRefresh(); } catch (e) { console.warn('[ptr] init', e && e.messa
 // Auto-update : check au boot (après stabilisation) + à chaque retour au 1er plan
 // (PWA rouverte sans être tuée → détecte un déploiement survenu entre-temps).
 setTimeout(() => { try { checkForUpdate({ force: true }); } catch (e) {} }, 4000);
+try { _ambientStart(); } catch (e) {} // alertes ambiantes de déroulé (coach)
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) {
     try { checkForUpdate(); } catch (e) {}
+    try { _ambientCheck(); } catch (e) {} // rattrape une transition franchie en arrière-plan
     // Retour au 1er plan : un gage a pu être assigné entre-temps → tirage.
     try { maybeShowGageReveal(); } catch (e) {}
     // Rafraîchit le badge d'icône (un signal a pu changer pendant l'absence).
