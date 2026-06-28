@@ -246,12 +246,18 @@
     background: var(--bg);
     padding-bottom: calc(72px + env(safe-area-inset-bottom));
   }
+  /* TABLETTE — on élargit le conteneur (avant : strip 560px centré = marges
+     énormes sur iPad). Mobile (<768px) STRICTEMENT inchangé. Portrait tablette
+     720px, paysage / grand écran 940px. */
   @media (min-width: 768px) {
     .app {
-      max-width: 560px;
+      max-width: 720px;
       border-left: 1px solid var(--border);
       border-right: 1px solid var(--border);
     }
+  }
+  @media (min-width: 1024px) {
+    .app { max-width: 940px; }
   }
   /* Bottom nav reste fixed : il flotte au-dessus du scroll interne du .app.
      Comme .app a padding-bottom pour réserver la zone, le contenu ne passe
@@ -341,9 +347,12 @@
   }
   @media (min-width: 768px) {
     .bottom-nav {
-      max-width: 560px; left: 50%; transform: translateX(-50%);
+      max-width: 720px; left: 50%; transform: translateX(-50%);
       border-left: 1px solid var(--border); border-right: 1px solid var(--border);
     }
+  }
+  @media (min-width: 1024px) {
+    .bottom-nav { max-width: 940px; }
   }
   .nav-btn {
     flex: 1; min-width: 0; background: none; border: none;
@@ -484,8 +493,25 @@
   }
   .chrono-fab:active { transform: scale(0.92); }
   @media (min-width: 768px) {
-    /* Aligner le FAB sur le bord droit du conteneur centré (max 560px). */
-    .chrono-fab { right: calc(50% - 280px + 16px); }
+    /* Aligner le FAB sur le bord droit du conteneur centré (largeur tablette). */
+    .chrono-fab { right: calc(50% - 360px + 16px); }
+  }
+  @media (min-width: 1024px) {
+    .chrono-fab { right: calc(50% - 470px + 16px); }
+  }
+
+  /* ========== ENRICHISSEMENTS TABLETTE (≥768px, mobile inchangé) ========== */
+  @media (min-width: 768px) {
+    /* Stat tiles : 4 de front (au lieu de 2) → dashboards plus denses. */
+    .stat-grid { grid-template-columns: repeat(4, 1fr); }
+    /* Pickers thème / son chrono : 2 colonnes → moins de scroll. */
+    .theme-grid { display: grid; grid-template-columns: 1fr 1fr; align-items: stretch; }
+    /* Carrousels de plays : un peu plus d'air. */
+    .scroll-row { gap: 12px; }
+  }
+  @media (min-width: 1024px) {
+    /* Modale un peu plus large mais toujours contenue + centrée. */
+    .modal { max-width: 600px; }
   }
 
   #chrono-overlay { position: fixed; inset: 0; z-index: 9000; }
@@ -26401,7 +26427,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.15';
+const APP_VERSION = '2026-06-28.16';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
