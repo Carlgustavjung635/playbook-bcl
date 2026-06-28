@@ -22549,6 +22549,10 @@ function renderDailySchedule(e) {
                   </div>
                   <input type="text" value="${esc(it.notes || '')}" placeholder="Notes (optionnel)" onchange="setOffseasonDayField('${date}',${i},'notes',this.value)" style="width:100%;background:var(--bg-1);border:1px solid var(--border);border-radius:4px;color:var(--ink-2);font-family:'Inter';font-size:11px;padding:4px 6px;margin-top:4px;outline:none">
                 </div>
+                <div style="display:flex;flex-direction:column;gap:2px">
+                  ${i > 0 ? `<button class="btn btn-icon" onclick="moveOffseasonDayExercise('${date}',${i},-1)" style="width:24px;height:20px;font-size:10px;padding:0" title="Monter">▲</button>` : ''}
+                  ${i < items.length - 1 ? `<button class="btn btn-icon" onclick="moveOffseasonDayExercise('${date}',${i},1)" style="width:24px;height:20px;font-size:10px;padding:0" title="Descendre">▼</button>` : ''}
+                </div>
                 <button class="btn btn-icon" onclick="removeOffseasonDayExercise('${date}',${i})" style="color:var(--red);flex-shrink:0">✕</button>
               </div>
             `).join('')}
@@ -22600,6 +22604,18 @@ function removeOffseasonDayExercise(date, idx) {
   const e = state._editingOffseason;
   if (!e.dailySchedule || !e.dailySchedule[date]) return;
   e.dailySchedule[date].splice(idx, 1);
+  renderOffseasonEditor();
+}
+
+// Réordonne un exo dans le planning d'une date (mode journalier). L'ordre du
+// tableau = ordre d'affichage côté joueuse ; persisté à l'enregistrement.
+function moveOffseasonDayExercise(date, idx, delta) {
+  const e = state._editingOffseason;
+  const arr = e.dailySchedule && e.dailySchedule[date];
+  if (!arr) return;
+  const newIdx = idx + delta;
+  if (newIdx < 0 || newIdx >= arr.length) return;
+  const tmp = arr[idx]; arr[idx] = arr[newIdx]; arr[newIdx] = tmp;
   renderOffseasonEditor();
 }
 
@@ -26471,7 +26487,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.17';
+const APP_VERSION = '2026-06-28.18';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
