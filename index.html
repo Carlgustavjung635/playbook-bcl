@@ -139,7 +139,10 @@
     --surface: #ffffff; --surface-2: #f2f2ee; --border: #dcdcd5; --border-soft: #ecece6;
     --ink: #1a1a1a; --ink-2: #4a4a4a; --ink-3: #767670; --ink-4: #a6a6a0;
     --accent-rgb: 234, 88, 12; --orange-2: #fb923c;
-    --topbar-bg: rgba(255, 255, 255, 0.85); --nav-bg: rgba(255, 255, 255, 0.92);
+    /* Chrome OPAQUE en thème clair : le backdrop-filter échantillonne des fonds
+       différents derrière la barre (contenu scrollé vs bg de la safe-area) →
+       bande bi-ton visible en clair. Opaque = barre homogène (cf. fix #2). */
+    --topbar-bg: rgba(255, 255, 255, 1); --nav-bg: rgba(255, 255, 255, 1);
   }
   /* 📋 Chalk — gris-bleu clair + bleu tactique (tableau du coach) */
   :root[data-theme="chalk"] {
@@ -147,7 +150,7 @@
     --surface: #ffffff; --surface-2: #eef2f8; --border: #cbd5e1; --border-soft: #e2e8f0;
     --ink: #0f172a; --ink-2: #475569; --ink-3: #64748b; --ink-4: #94a3b8;
     --accent-rgb: 37, 99, 235; --orange-2: #60a5fa;
-    --topbar-bg: rgba(255, 255, 255, 0.85); --nav-bg: rgba(255, 255, 255, 0.92);
+    --topbar-bg: rgba(255, 255, 255, 1); --nav-bg: rgba(255, 255, 255, 1);
   }
   /* 👟 BCL — aux couleurs du club : rouge Converse + orange ballon, fond clair */
   :root[data-theme="bcl"] {
@@ -155,7 +158,7 @@
     --surface: #ffffff; --surface-2: #f5f3f1; --border: #dcd9d4; --border-soft: #eceae6;
     --ink: #1a1a1a; --ink-2: #525252; --ink-3: #737373; --ink-4: #a3a3a3;
     --accent-rgb: 196, 30, 58; --orange-2: #ea580c;
-    --topbar-bg: rgba(255, 255, 255, 0.85); --nav-bg: rgba(255, 255, 255, 0.92);
+    --topbar-bg: rgba(255, 255, 255, 1); --nav-bg: rgba(255, 255, 255, 1);
   }
 
   /* ----- ThemePicker (modale 🎨 Couleur de l'interface) ----- */
@@ -226,7 +229,10 @@
     font-family: 'Inter', -apple-system, sans-serif;
     -webkit-font-smoothing: antialiased;
   }
-  html { background: #000000; height: 100%; }
+  /* html suit le thème (avant : #000 en dur → bande noire au rebond / safe-area
+     sur les thèmes CLAIRS). data-theme est posé avant le 1er paint (script head)
+     donc var(--bg) est déjà résolu → pas de flash. */
+  html { background: var(--bg); height: 100%; }
   /* CRITIQUE (fix scroll past footer iOS) : on lock le BODY à la hauteur
      du viewport et on désactive son overflow. Le scroll vertical est délégué
      au container .app (interne). Avant : body avait min-height:100dvh, donc
@@ -26968,7 +26974,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.24';
+const APP_VERSION = '2026-06-28.25';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
