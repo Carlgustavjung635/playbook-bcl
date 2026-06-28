@@ -17274,25 +17274,37 @@ function computeExerciseTimes(plan, startHHMM) {
 }
 
 // ============================================================
-// SESSION LIVE D'ENTRAÎNEMENT (coach) — chrono de déroulé du plan
+// SESSION LIVE D'ENTRAÎNEMENT (coach) — chrono de déroulé BASÉ SUR L'HEURE
 // ------------------------------------------------------------
-// Pendant l'entraînement, le coach lance une session qui suit la chronologie
-// du plan : compte à rebours par exo (durée en min), bip à 30 s, alarme à 0
-// (son choisi dans ⚙ Personnalisation, RÉUTILISE le moteur chrono possession),
-// reveal de l'exo suivant, +temps / skip / pause / stop.
+// Le coach lance la session à T0 (heure réelle, ex 19:03). Chaque exo a une
+// HEURE DE FIN PRÉVUE = T0 + somme des durées des exos précédents (15 min →
+// 19:18, +20 → 19:38…). Le décompte = dueTime - now(), recalculé chaque seconde
+// sur l'horloge système ; l'alarme se déclenche quand now() >= dueTime (pas un
+// timer interne). Le backgrounding est donc géré GRATUITEMENT : au retour, le
+// décompte affiche directement le bon reste ou l'alarme rattrapée.
 //
-// State VOLATILE dans window._liveSession (JAMAIS sync ni persisté — éphémère).
-// endAt = horodatage mur (Date.now()+remaining) → le backgrounding est géré
-// nativement : au retour, remaining = endAt - now reflète le temps RÉEL écoulé.
-// Comme on s'arrête en phase 'reveal' (décision coach), un seul exo peut
-// déborder pendant une absence → pas de rattrapage multi-exo à gérer.
-// À la fin : log local (localStorage pb8_session_logs, pas de table/sync car
-// donnée coach-locale de faible valeur partagée) + récap réel vs planifié.
+// curEndAt = heure de fin (mur) de l'exo COURANT. Les exos suivants en dérivent.
+// Pause / +temps / skip = DÉCALAGES de l'horloge : ils déplacent curEndAt (donc
+// toutes les transitions futures). Pause = on décale de la durée de pause ;
+// +2/+5 = on repousse ; skip = on avance (raccourcit la session).
+//
+// State VOLATILE window._liveSession (jamais sync/persisté). Log de fin local
+// (localStorage pb8_session_logs). Réutilise le moteur sonore du chrono possession.
 // ============================================================
 function _liveFmt(ms) {
   ms = Math.max(0, ms);
   const t = Math.ceil(ms / 1000), m = Math.floor(t / 60), s = t % 60;
   return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+}
+// Heure du jour "HH:MM" d'un horodatage.
+function _liveClock(ts) {
+  const d = new Date(ts);
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+// Durée lisible "1h05" / "45 min".
+function _liveDur(ms) {
+  const m = Math.round(Math.max(0, ms) / 60000);
+  return m >= 60 ? Math.floor(m / 60) + 'h' + String(m % 60).padStart(2, '0') : m + ' min';
 }
 function _liveExtractExos(plan) {
   return (plan.exercises || []).map(ex => ({
@@ -17300,6 +17312,29 @@ function _liveExtractExos(plan) {
     plannedMs: Math.max(0, (parseInt(ex.duration) || 0) * 60000),
   })).filter(e => e.plannedMs > 0);
 }
+// Heure de fin EFFECTIVE de l'exo courant : pendant une pause, on intègre la
+// pause en cours (au resume, curEndAt sera décalé d'autant).
+function _liveEffEnd(s, now) {
+  return (s.phase === 'paused' && s.pauseStartedAt) ? s.curEndAt + (now - s.pauseStartedAt) : s.curEndAt;
+}
+// Heure de fin prévue (mur) de l'exo i. Passés : heure réelle enregistrée.
+function _liveDueOf(s, i, now) {
+  if (i < s.idx) return s.results[i] ? s.results[i].endClock : null;
+  let t = _liveEffEnd(s, now);
+  for (let k = s.idx + 1; k <= i; k++) t += s.exos[k].plannedMs;
+  return t;
+}
+// Fin de session projetée (mur) + planifiée (T0-based) + décalage live.
+function _liveProjectedEnd(s, now) {
+  let t = _liveEffEnd(s, now);
+  for (let k = s.idx + 1; k < s.exos.length; k++) t += s.exos[k].plannedMs;
+  return t;
+}
+function _livePlannedEnd(s) {
+  return s.T0 + s.exos.reduce((a, e) => a + e.plannedMs, 0);
+}
+function _liveOffset(s, now) { return _liveProjectedEnd(s, now) - _livePlannedEnd(s); }
+
 function startLiveSession(convocId, dateStr) {
   const c = state.convocations.find(x => x.id === convocId); if (!c) return;
   const plan = resolveTrainingPlan(c, dateStr || c.date);
@@ -17310,8 +17345,8 @@ function startLiveSession(convocId, dateStr) {
   window._liveSession = {
     convocId, dateStr: dateStr || c.date, planTitle: formatDate(dateStr || c.date, 'long'),
     exos, idx: 0, phase: 'running',
-    startedAt: now, exoStartedAt: now, endAt: now + exos[0].plannedMs, endedAt: 0,
-    pausedAccumMs: 0, pauseStartedAt: 0, pausedRemaining: 0,
+    T0: now, exoStartedAt: now, curEndAt: now + exos[0].plannedMs,
+    pauseStartedAt: 0,
     results: [], _warned30: false, _lastTickSec: null,
   };
   try { closeModal(); } catch (e) {}
@@ -17321,12 +17356,14 @@ function startLiveSession(convocId, dateStr) {
   _liveStartTicker();
   renderLiveSession();
 }
-function _liveStartTicker() { if (!window._liveTimer) window._liveTimer = setInterval(_liveTick, 250); }
+// Tic chaque seconde : le décompte est purement dérivé de l'horloge (dueTime-now).
+function _liveStartTicker() { if (!window._liveTimer) window._liveTimer = setInterval(_liveTick, 1000); }
 function _liveStopTicker() { if (window._liveTimer) { clearInterval(window._liveTimer); window._liveTimer = null; } }
 function _liveTick() {
   const s = window._liveSession; if (!s) { _liveStopTicker(); return; }
   if (s.phase !== 'running') return;
-  const remaining = s.endAt - Date.now();
+  const now = Date.now();
+  const remaining = s.curEndAt - now;
   if (remaining <= 0) { _liveExoEnded(); return; }
   const secLeft = Math.ceil(remaining / 1000);
   // Bip d'alerte à 30 s de la fin (double tick aigu), une seule fois.
@@ -17335,74 +17372,93 @@ function _liveTick() {
   const f = tensionTickFreq(secLeft);
   if (f && s._lastTickSec !== secLeft) { s._lastTickSec = secLeft; _chronoTickSound(f); }
   if (secLeft > 3) s._lastTickSec = null;
-  const el = document.getElementById('live-timer'); if (el) el.textContent = _liveFmt(remaining);
-  const sub = document.getElementById('live-timer-sub');
-  if (sub) sub.textContent = '/ ' + _liveFmt(s.exos[s.idx].plannedMs);
-  _liveUpdateGlobals();
+  _liveUpdateDisplay();
 }
-// Fin du compte à rebours de l'exo courant : alarme + flash + vibration.
+// Met à jour les éléments dynamiques sans re-render complet (chaque seconde).
+function _liveUpdateDisplay() {
+  const s = window._liveSession; if (!s) return;
+  const now = Date.now();
+  const remaining = s.phase === 'paused' ? Math.max(0, s.curEndAt - s.pauseStartedAt) : Math.max(0, s.curEndAt - now);
+  const el = document.getElementById('live-timer'); if (el) { el.textContent = _liveFmt(remaining); el.style.color = remaining <= 30000 ? 'var(--red)' : 'var(--orange)'; }
+  const due = document.getElementById('live-due'); if (due) due.textContent = 'Termine à ' + _liveClock(_liveEffEnd(s, now));
+  const end = document.getElementById('live-end'); if (end) end.textContent = _liveClock(_liveProjectedEnd(s, now));
+  const off = document.getElementById('live-offset');
+  if (off) {
+    const o = _liveOffset(s, now);
+    if (Math.abs(o) < 60000) { off.textContent = '🎯 dans les temps'; off.style.color = 'var(--green)'; }
+    else if (o > 0) { off.textContent = '+' + Math.round(o / 60000) + ' min vs planning'; off.style.color = 'var(--orange)'; }
+    else { off.textContent = '−' + Math.round(-o / 60000) + ' min (en avance)'; off.style.color = 'var(--green)'; }
+  }
+}
+// Fin de l'exo courant (now >= dueTime) : alarme + flash + vibration.
 function _liveExoEnded() {
   const s = window._liveSession; if (!s) return;
-  s.endedAt = Date.now();
   _chronoBeep(); _chronoVibrate([300, 120, 300, 120, 400]); _chronoFlash();
   const isLast = s.idx >= s.exos.length - 1;
-  if (isLast) { _liveRecordCurrent(false); _liveFinish(false); return; }
+  if (isLast) { _liveRecordCurrent(false, s.curEndAt); _liveFinish(false); return; }
   s.phase = 'reveal';
   renderLiveSession();
 }
-function _liveRecordCurrent(skipped) {
+// Enregistre l'exo courant. endClock = heure de fin réelle retenue.
+function _liveRecordCurrent(skipped, endClock) {
   const s = window._liveSession; if (!s) return;
   const ex = s.exos[s.idx];
-  const end = s.endedAt || Date.now();
-  s.results.push({ id: ex.id, title: ex.title, plannedMs: ex.plannedMs, actualMs: Math.max(0, end - s.exoStartedAt), skipped: !!skipped });
+  s.results[s.idx] = { id: ex.id, title: ex.title, plannedMs: ex.plannedMs,
+    actualMs: Math.max(0, endClock - s.exoStartedAt), endClock, skipped: !!skipped };
 }
-// Passe à l'exo suivant. autostart=true : lance directement le compte à rebours.
-function _liveStep(autostart) {
+// Passe à l'exo suivant à partir de l'heure `from` (fin de l'exo précédent).
+function _liveStep(from) {
   const s = window._liveSession; if (!s) return;
   s.idx++;
   if (s.idx >= s.exos.length) { _liveFinish(false); return; }
-  s.endedAt = 0; s._warned30 = false; s._lastTickSec = null;
-  if (autostart) {
-    const now = Date.now();
-    s.phase = 'running'; s.exoStartedAt = now; s.endAt = now + s.exos[s.idx].plannedMs;
-    _liveStartTicker();
-  } else { s.phase = 'reveal'; }
+  s._warned30 = false; s._lastTickSec = null;
+  s.phase = 'running'; s.exoStartedAt = from; s.curEndAt = from + s.exos[s.idx].plannedMs;
+  _liveStartTicker();
   renderLiveSession();
 }
-// Bouton « OK, lancer le suivant » (depuis le reveal) : valide l'exo courant.
-function liveAdvance() { _liveRecordCurrent(false); _liveStep(true); }
-// Bouton « Skip » (depuis running) : passe sans terminer, marque skippé.
+// « OK, lancer le suivant » (depuis le reveal) : l'exo courant s'est terminé à
+// son heure prévue (curEndAt) ; le suivant démarre maintenant.
+function liveAdvance() {
+  const s = window._liveSession; if (!s) return;
+  _liveRecordCurrent(false, s.curEndAt);
+  _liveStep(Date.now());
+}
+// « Skip » (depuis running) : termine maintenant (avance la suite du temps gagné).
 function liveSkip() {
   const s = window._liveSession; if (!s) return;
-  s.endedAt = 0; _liveRecordCurrent(true); _liveStep(true);
+  const now = Date.now();
+  _liveRecordCurrent(true, now);
+  _liveStep(now);
 }
-// +2 / +5 min : prolonge l'exo COURANT. Depuis le reveal, reprend l'exo courant.
+// +2 / +5 min : repousse la fin de l'exo COURANT (et donc toutes les suivantes).
+// Depuis le reveal, reprend l'exo courant pour la durée ajoutée.
 function liveAddTime(min) {
   const s = window._liveSession; if (!s) return;
   const add = min * 60000;
-  if (s.phase === 'reveal') { s.phase = 'running'; s.endAt = Date.now() + add; s.endedAt = 0; }
-  else if (s.phase === 'running') { s.endAt += add; if (s.endAt - Date.now() > 30400) s._warned30 = false; }
+  if (s.phase === 'reveal') { s.phase = 'running'; s.curEndAt = Date.now() + add; }
+  else if (s.phase === 'running') { s.curEndAt += add; if (s.curEndAt - Date.now() > 30400) s._warned30 = false; }
   else return;
   _liveStartTicker(); renderLiveSession();
 }
+// Pause = décalage d'horloge : à la reprise on repousse curEndAt (et la suite)
+// de la durée de pause. exoStartedAt décalé d'autant → la pause ne gonfle pas
+// la durée réelle attribuée à l'exo.
 function livePause() {
   const s = window._liveSession; if (!s || s.phase !== 'running') return;
-  s.pausedRemaining = Math.max(0, s.endAt - Date.now());
   s.pauseStartedAt = Date.now(); s.phase = 'paused';
   _liveStopTicker(); renderLiveSession();
 }
 function liveResume() {
   const s = window._liveSession; if (!s || s.phase !== 'paused') return;
-  if (s.pauseStartedAt) { s.pausedAccumMs += Date.now() - s.pauseStartedAt; s.pauseStartedAt = 0; }
-  s.endAt = Date.now() + (s.pausedRemaining || 0); s.phase = 'running';
+  const shift = Date.now() - (s.pauseStartedAt || Date.now());
+  s.curEndAt += shift; s.exoStartedAt += shift; s.pauseStartedAt = 0; s.phase = 'running';
   _liveStartTicker(); renderLiveSession();
 }
 function liveStop() {
   const s = window._liveSession; if (!s) return;
   if (!confirm('Arrêter la session ? Le récap sera enregistré.')) return;
   if (s.phase === 'running' || s.phase === 'paused' || s.phase === 'reveal') {
-    if (!s.endedAt) s.endedAt = Date.now();
-    _liveRecordCurrent(false);
+    _liveRecordCurrent(false, Date.now());
   }
   _liveFinish(true);
 }
@@ -17421,14 +17477,15 @@ function closeLiveSession() {
   const ov = document.getElementById('live-session-overlay'); if (ov) ov.remove();
   _doRender();
 }
-// Au retour au premier plan : si le temps réel a dépassé l'exo courant pendant
-// l'absence, on déclenche l'alarme « rattrapée » maintenant (un seul exo possible
-// car on se fige en reveal). Re-demande le wake lock (relâché par l'OS en arrière-plan).
+// Au retour au 1er plan : le décompte est déjà juste (clock-based). Si l'exo
+// courant a été dépassé pendant l'absence, on déclenche l'alarme rattrapée ;
+// sinon simple re-render. Re-demande le wake lock (relâché par l'OS).
 function _liveOnVisibility() {
   if (document.visibilityState !== 'visible') return;
   const s = window._liveSession; if (!s) return;
   _liveRequestWakeLock();
-  if (s.phase === 'running' && s.endAt - Date.now() <= 0) _liveExoEnded();
+  if (s.phase === 'running' && s.curEndAt - Date.now() <= 0) _liveExoEnded();
+  else renderLiveSession();
 }
 async function _liveRequestWakeLock() {
   try { if ('wakeLock' in navigator) { window._liveWakeLock = await navigator.wakeLock.request('screen'); } } catch (e) { /* refusé / non supporté */ }
@@ -17439,12 +17496,14 @@ function _liveReleaseWakeLock() {
 function _liveSaveLog(s) {
   try {
     const plannedTotal = s.exos.reduce((a, e) => a + e.plannedMs, 0);
-    const actualTotal = s.results.reduce((a, r) => a + r.actualMs, 0);
+    const realTotal = Math.max(0, (s.finishedAt || Date.now()) - s.T0); // durée réelle mur (pauses incluses)
+    const done = s.results.filter(Boolean);
     const log = {
       at: s.finishedAt || Date.now(), convocId: s.convocId, dateStr: s.dateStr,
-      plannedMs: plannedTotal, actualMs: actualTotal,
-      exosTotal: s.exos.length, exosDone: s.results.filter(r => !r.skipped).length,
-      skipped: s.results.filter(r => r.skipped).map(r => r.title),
+      startClock: _liveClock(s.T0), endClock: _liveClock(s.finishedAt || Date.now()),
+      plannedMs: plannedTotal, realMs: realTotal,
+      exosTotal: s.exos.length, exosDone: done.filter(r => !r.skipped).length,
+      skipped: done.filter(r => r.skipped).map(r => r.title),
       stoppedEarly: !!s.stoppedEarly,
     };
     const all = load(K.sessionLogs, []) || [];
@@ -17452,67 +17511,54 @@ function _liveSaveLog(s) {
     save(K.sessionLogs, all.slice(0, 50));
   } catch (e) { /* non bloquant */ }
 }
-// Temps total écoulé (hors pauses) + temps restant prévu (exos non encore passés).
-function _liveGlobals(s) {
-  const now = Date.now();
-  const pausedNow = s.phase === 'paused' && s.pauseStartedAt ? now - s.pauseStartedAt : 0;
-  const elapsed = Math.max(0, now - s.startedAt - s.pausedAccumMs - pausedNow);
-  let remainingPlanned = 0;
-  if (s.phase === 'running') remainingPlanned += Math.max(0, s.endAt - now);
-  else if (s.phase === 'reveal' || s.phase === 'paused') remainingPlanned += (s.phase === 'paused' ? s.pausedRemaining : 0);
-  for (let i = s.idx + 1; i < s.exos.length; i++) remainingPlanned += s.exos[i].plannedMs;
-  return { elapsed, remainingPlanned };
-}
-function _liveUpdateGlobals() {
-  const s = window._liveSession; if (!s) return;
-  const g = _liveGlobals(s);
-  const e = document.getElementById('live-elapsed'); if (e) e.textContent = _liveFmt(g.elapsed);
-  const r = document.getElementById('live-remaining'); if (r) r.textContent = _liveFmt(g.remainingPlanned);
-}
 function renderLiveSession() {
   const s = window._liveSession; if (!s) return;
   let ov = document.getElementById('live-session-overlay');
   if (!ov) { ov = document.createElement('div'); ov.id = 'live-session-overlay'; document.body.appendChild(ov); }
   ov.setAttribute('style', 'position:fixed;inset:0;z-index:9500;background:var(--bg);display:flex;flex-direction:column;padding:calc(env(safe-area-inset-top) + 14px) 16px calc(env(safe-area-inset-bottom) + 14px);overflow-y:auto');
+  const now = Date.now();
   const cur = s.exos[s.idx];
-  const g = _liveGlobals(s);
+  // Liste de progression : chaque exo avec son HEURE DE FIN PRÉVUE (clock-based).
   const progress = s.exos.map((ex, i) => {
     const res = s.results[i];
     const done = i < s.idx;
     const icon = done ? (res && res.skipped ? '⏭' : '✅') : (i === s.idx ? '▶️' : '○');
     const col = done ? (res && res.skipped ? 'var(--ink-4)' : 'var(--green)') : (i === s.idx ? 'var(--orange)' : 'var(--ink-3)');
     const bg = i === s.idx ? 'rgba(var(--accent-rgb),0.10)' : 'transparent';
+    const dueTs = _liveDueOf(s, i, now);
+    const clock = dueTs ? _liveClock(dueTs) : '--:--';
     return `<div style="display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:8px;background:${bg};${i===s.idx?'border:1px solid var(--orange)':''}">
       <span style="font-size:14px">${icon}</span>
-      <span style="flex:1;min-width:0;font-size:12px;color:${col};${done&&res&&res.skipped?'text-decoration:line-through':''};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(ex.title)}</span>
-      <span style="font-family:'JetBrains Mono';font-size:10px;color:var(--ink-4)">${Math.round(ex.plannedMs/60000)}min</span>
+      <span style="flex:1;min-width:0;font-size:12px;color:${col};${done&&res&&res.skipped?'text-decoration:line-through':''};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(ex.title)} <span style="color:var(--ink-4)">(${Math.round(ex.plannedMs/60000)}min)</span></span>
+      <span style="font-family:'JetBrains Mono';font-size:11px;color:${i===s.idx?'var(--orange)':'var(--ink-3)'}">→ ${clock}</span>
     </div>`;
   }).join('');
-  const globalsBar = `<div style="display:flex;gap:8px;margin-top:14px">
-      <div style="flex:1;text-align:center;padding:8px;background:var(--bg-3);border-radius:8px">
-        <div class="eyebrow-muted" style="font-size:9px">Écoulé</div>
-        <div id="live-elapsed" style="font-family:'JetBrains Mono';font-size:15px;color:var(--ink)">${_liveFmt(g.elapsed)}</div>
-      </div>
-      <div style="flex:1;text-align:center;padding:8px;background:var(--bg-3);border-radius:8px">
-        <div class="eyebrow-muted" style="font-size:9px">Restant prévu</div>
-        <div id="live-remaining" style="font-family:'JetBrains Mono';font-size:15px;color:var(--ink)">${_liveFmt(g.remainingPlanned)}</div>
-      </div>
-    </div>`;
+  const offMs = _liveOffset(s, now);
+  const offTxt = Math.abs(offMs) < 60000 ? '🎯 dans les temps' : (offMs > 0 ? '+' + Math.round(offMs / 60000) + ' min vs planning' : '−' + Math.round(-offMs / 60000) + ' min (en avance)');
+  const offCol = offMs > 60000 ? 'var(--orange)' : 'var(--green)';
+  const globalsBar = `
+    <div style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:14px;font-family:'JetBrains Mono';font-size:12px;color:var(--ink-2)">
+      <span>${_liveClock(s.T0)}</span><span style="color:var(--ink-4)">→</span>
+      <span id="live-end" style="color:var(--ink)">${_liveClock(_liveProjectedEnd(s, now))}</span>
+      <span style="color:var(--ink-4)">· ${_liveDur(_livePlannedEnd(s) - s.T0)} prévues</span>
+    </div>
+    <div id="live-offset" style="text-align:center;margin-top:4px;font-size:12px;font-weight:600;color:${offCol}">${offTxt}</div>`;
 
   if (s.phase === 'done') {
     const plannedTotal = s.exos.reduce((a, e) => a + e.plannedMs, 0);
-    const actualTotal = s.results.reduce((a, r) => a + r.actualMs, 0);
-    const diff = actualTotal - plannedTotal;
-    const skipped = s.results.filter(r => r.skipped);
+    const realTotal = Math.max(0, (s.finishedAt || now) - s.T0);
+    const diff = realTotal - plannedTotal;
+    const skipped = s.results.filter(r => r && r.skipped);
     ov.innerHTML = `
       <div style="margin:auto;width:100%;max-width:460px;text-align:center">
         <div style="font-size:46px;margin-bottom:8px">✅</div>
         <div style="font-family:'Anton';font-size:24px;text-transform:uppercase">Session terminée</div>
-        <div style="color:var(--ink-3);font-size:12px;margin-bottom:18px">${esc(s.planTitle)}${s.stoppedEarly ? ' · arrêtée en cours' : ''}</div>
+        <div style="color:var(--ink-3);font-size:12px;margin-bottom:6px">${esc(s.planTitle)}${s.stoppedEarly ? ' · arrêtée en cours' : ''}</div>
+        <div style="font-family:'JetBrains Mono';font-size:13px;color:var(--ink-2);margin-bottom:18px">${_liveClock(s.T0)} → ${_liveClock(s.finishedAt || now)}</div>
         <div style="display:flex;gap:8px;margin-bottom:12px">
           <div style="flex:1;padding:12px;background:var(--bg-3);border-radius:10px">
             <div class="eyebrow-muted">Réel</div>
-            <div style="font-family:'Anton';font-size:26px;color:var(--orange)">${Math.round(actualTotal/60000)}<span style="font-size:13px;color:var(--ink-4)">min</span></div>
+            <div style="font-family:'Anton';font-size:26px;color:var(--orange)">${Math.round(realTotal/60000)}<span style="font-size:13px;color:var(--ink-4)">min</span></div>
           </div>
           <div style="flex:1;padding:12px;background:var(--bg-3);border-radius:10px">
             <div class="eyebrow-muted">Planifié</div>
@@ -17530,12 +17576,14 @@ function renderLiveSession() {
 
   if (s.phase === 'reveal') {
     const next = s.exos[s.idx + 1];
+    const nextDue = now + next.plannedMs; // démarrera maintenant si on lance
     ov.innerHTML = `
       <div style="margin:auto;width:100%;max-width:460px;text-align:center">
         <div class="eyebrow" style="color:var(--orange)">➡️ Au suivant</div>
         <div style="font-size:13px;color:var(--ink-3);margin:6px 0 2px">Fin de : ${esc(cur.title)}</div>
         <div style="font-family:'Anton';font-size:30px;text-transform:uppercase;line-height:1.1;margin:14px 0 4px">${esc(next.title)}</div>
-        <div style="font-family:'JetBrains Mono';color:var(--ink-2);font-size:15px;margin-bottom:20px">${Math.round(next.plannedMs/60000)} min</div>
+        <div style="font-family:'JetBrains Mono';color:var(--ink-2);font-size:15px;margin-bottom:2px">${Math.round(next.plannedMs/60000)} min</div>
+        <div style="font-family:'JetBrains Mono';color:var(--ink-4);font-size:12px;margin-bottom:20px">→ terminerait à ${_liveClock(nextDue)}</div>
         <button class="btn btn-primary btn-block" style="font-size:16px;padding:16px" onclick="liveAdvance()">▶️ OK, lancer</button>
         <div style="display:flex;gap:8px;margin-top:8px">
           <button class="btn btn-secondary btn-block" onclick="liveAddTime(2)">⏱ +2 min (reprendre)</button>
@@ -17548,7 +17596,7 @@ function renderLiveSession() {
   }
 
   // phases 'running' et 'paused'
-  const remaining = s.phase === 'paused' ? (s.pausedRemaining || 0) : Math.max(0, s.endAt - Date.now());
+  const remaining = s.phase === 'paused' ? Math.max(0, s.curEndAt - s.pauseStartedAt) : Math.max(0, s.curEndAt - now);
   ov.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
       <div class="eyebrow" style="color:var(--orange)">Session live · exo ${s.idx + 1}/${s.exos.length}</div>
@@ -17556,9 +17604,10 @@ function renderLiveSession() {
     </div>
     <div style="margin:auto 0;text-align:center;width:100%">
       <div style="font-family:'Anton';font-size:22px;text-transform:uppercase;line-height:1.15;margin-bottom:6px">${esc(cur.title)}</div>
+      <div id="live-due" style="font-family:'JetBrains Mono';font-size:13px;color:var(--ink-3);margin-bottom:6px">Termine à ${_liveClock(_liveEffEnd(s, now))}</div>
       <div style="font-family:'JetBrains Mono';font-weight:700;font-size:84px;line-height:1;color:${remaining<=30000?'var(--red)':'var(--orange)'}" id="live-timer">${_liveFmt(remaining)}</div>
-      <div id="live-timer-sub" style="font-family:'JetBrains Mono';font-size:14px;color:var(--ink-4);margin-top:2px">/ ${_liveFmt(cur.plannedMs)}</div>
-      ${s.phase === 'paused' ? '<div style="color:var(--ink-3);font-size:13px;margin-top:10px">⏸ En pause</div>' : ''}
+      <div style="font-family:'JetBrains Mono';font-size:13px;color:var(--ink-4);margin-top:2px">restant</div>
+      ${s.phase === 'paused' ? '<div style="color:var(--ink-3);font-size:13px;margin-top:10px">⏸ En pause — la suite sera décalée d\'autant</div>' : ''}
       <div style="display:flex;gap:8px;margin-top:22px">
         ${s.phase === 'paused'
           ? `<button class="btn btn-primary btn-block" style="font-size:15px;padding:14px" onclick="liveResume()">⏯ Reprendre</button>`
@@ -17572,7 +17621,7 @@ function renderLiveSession() {
     </div>
     ${globalsBar}
     <div style="margin-top:14px">${progress}</div>`;
-  _liveUpdateGlobals();
+  _liveUpdateDisplay();
 }
 
 // Drag-and-drop entre lignes
@@ -26791,7 +26840,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.19';
+const APP_VERSION = '2026-06-28.20';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
