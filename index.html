@@ -2923,22 +2923,29 @@
 <div id="root"></div>
 
 <!-- ============================================================
-     KILL-SWITCH SERVICE WORKER
-     L'ancien SW bug avait été déployé. On désenregistre tout SW restant
-     et on vide tous les caches. Le sw.js sur le serveur est aussi un
-     kill-switch (no fetch listener, claim + reload + delete caches).
+     NETTOYAGE SW LEGACY (kill-switch) — préserve le push-sw (Phase 2)
+     On désenregistre l'ANCIEN kill-switch /sw.js (et tout SW qui aurait un
+     fetch listener) MAIS on conserve /push-sw.js (push notifications, no fetch).
+     window.__PUSH_KILL__ = true → rollback total : désenregistre AUSSI le
+     push-sw (à bumper dans le bundle en cas d'incident SW en prod).
      ============================================================ -->
 <script>
+window.__PUSH_KILL__ = false; // ROLLBACK : passer à true + redéployer pour tuer le push-sw
 (function () {
   if (!('serviceWorker' in navigator)) return;
-  // 1) Désenregistrer toute registration restante
   navigator.serviceWorker.getRegistrations().then(regs => {
-    regs.forEach(r => r.unregister().catch(() => {}));
-  }).catch(() => {});
-  // 2) Vider tous les caches CacheStorage
+    regs.forEach(r => {
+      var url = (r.active && r.active.scriptURL) || (r.installing && r.installing.scriptURL) || (r.waiting && r.waiting.scriptURL) || '';
+      var isPush = url.indexOf('push-sw.js') !== -1;
+      // On garde le push-sw (sauf rollback). On désenregistre tout le reste
+      // (legacy /sw.js kill-switch, anciens SW avec fetch listener).
+      if (isPush && !window.__PUSH_KILL__) return;
+      r.unregister().catch(function () {});
+    });
+  }).catch(function () {});
+  // Purge caches CacheStorage (le push-sw n'en utilise aucun → sans effet sur lui).
   if ('caches' in window) {
-    caches.keys().then(keys => keys.forEach(k => caches.delete(k).catch(() => {})))
-      .catch(() => {});
+    caches.keys().then(function (keys) { keys.forEach(function (k) { caches.delete(k).catch(function () {}); }); }).catch(function () {});
   }
 })();
 </script>
@@ -2962,6 +2969,9 @@ const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 });
 
 window.sb = sb;
+// Exposé pour le main script (Phase 2 push : appel de l'Edge Function push-send).
+window.__SB_URL__ = SUPABASE_URL;
+window.__SB_ANON__ = SUPABASE_ANON_KEY;
 
 // ---- État connectivité ----
 const Pb = {
@@ -7409,6 +7419,10 @@ function openSettings() {
         🎨 Personnalisation (couleur + son)
       </button>
 
+      <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openPushSettings(),50)">
+        🔔 Notifications push
+      </button>
+
       ${role === 'player' ? `
         <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>editMyPhoto(),50)">
           📷 ${player && player.photo ? 'Changer ma photo de profil' : 'Ajouter une photo de profil'}
@@ -9876,6 +9890,8 @@ function savePlay(id, isNew) {
     persist();
     closeModal();
     render();
+    // PUSH : nouveau play partagé → prévient l'effectif.
+    if (isNew) notifyPush(_pushAllPlayerKeys(), { title: '📋 Nouveau play', body: (obj.title || 'Un nouveau play est dispo'), url: '/', tag: 'play', type: 'play' });
   } catch (err) {
     console.error('[savePlay]', err);
     alert('⚠ Erreur sauvegarde play : ' + (err && err.message ? err.message : err));
@@ -12664,7 +12680,13 @@ function savePlayerStat(matchId, isNew) {
     reb: g('ps-reb'), ast: g('ps-ast'), stl: g('ps-stl'), def: g('ps-def'), to: g('ps-to'),
     ca: formCa,
   };
+  m.updatedAt = Date.now(); // alimente le flux de notifs "stats saisies"
   persist(); closeModal(); render();
+  // PUSH : stats saisies → prévient le coach (no-op si c'est le coach lui-même)
+  // + la joueuse concernée (récap dispo).
+  notifyPush([_pushCoachKey(), ...(_pushPlayerKeys([pid]))], {
+    title: '📊 Stats de match', body: 'Stats saisies pour le match vs ' + (m.opponent || ''), url: '/', tag: 'stats', type: 'stats'
+  });
 }
 function deletePlayerStat(matchId, pid) {
   if (!confirm('Supprimer ces stats ?')) return;
@@ -13675,6 +13697,10 @@ function submitGageProposal(text) {
     createdAt: now, updatedAt: now
   });
   persist(); _gageFlush();
+  // PUSH : prévient le coach qu'une proposition est à modérer (anonyme).
+  if ((state.auth || {}).role === 'player') {
+    notifyPush([_pushCoachKey()], { title: '🎁 Nouvelle proposition de gage', body: 'Une joueuse a proposé un gage à modérer', url: '/', tag: 'gage-propose', type: 'gage_proposal' });
+  }
   return true;
 }
 // Carte d'accroche sur la home joueuse : point d'entrée VISIBLE pour proposer un
@@ -13785,6 +13811,8 @@ function assignDrawsToPlayer(pid) {
       assignedAt: now, drawnAt: null, completedAt: null, seasonId: sid, createdAt: now + i, updatedAt: now });
   }
   persist(); _gageFlush();
+  // PUSH : prévient la joueuse qu'elle a des tirages à faire.
+  notifyPush(_pushPlayerKeys([pid]), { title: '🎁 Tirage de gage', body: count > 1 ? `Tu as ${count} gages à tirer au sort` : 'Tu as un gage à tirer au sort', url: '/', tag: 'gage-draw', type: 'gage_assigned' });
   try { closeModal(); } catch (e) {}
   render();
   if (typeof showToast === 'function') showToast(count > 1 ? `🎁 ${count} tirages à faire (dont +${debt} dette)` : '🎁 1 tirage à faire assigné');
@@ -14003,8 +14031,19 @@ function acceptGage(drawId) {
   const now = Date.now();
   d.status = 'accepted'; d.drawnAt = d.drawnAt || now; d.completedAt = now; d.updatedAt = now;
   persist(); _gageFlush(); _closeGageOverlay();
+  _notifyCoachGageOutcome(pid, true);
   if (typeof showToast === 'function') showToast('💪 Défi accepté !');
   _gageAdvance();
+}
+// PUSH : prévient le coach du résultat d'un tirage (accepté/passé).
+function _notifyCoachGageOutcome(pid, accepted) {
+  const p = (state.players || []).find(x => x.id === pid);
+  const who = p ? ('#' + p.num + ' ' + p.name) : 'Une joueuse';
+  notifyPush([_pushCoachKey()], {
+    title: accepted ? '💪 Gage accepté' : '🙈 Gage passé',
+    body: who + (accepted ? ' a accepté son gage' : ' a passé son gage'),
+    url: '/', tag: 'gage-outcome', type: 'gage_outcome'
+  });
 }
 function skipGage(drawId) {
   const d = (state.gageDraws || []).find(x => x.id === drawId); const pid = state.auth && state.auth.playerId;
@@ -14015,6 +14054,7 @@ function skipGage(drawId) {
   const now = Date.now();
   d.status = 'skipped'; d.drawnAt = d.drawnAt || now; d.completedAt = now; d.updatedAt = now;
   persist(); _gageFlush(); _closeGageOverlay();
+  _notifyCoachGageOutcome(pid, false);
   if (typeof showToast === 'function') showToast('🙈 Gage passé · +1 tirage plus tard');
   _gageAdvance();
 }
@@ -14763,6 +14803,18 @@ function saveConvoc(id, isNew) {
   state._tempAttachments = null;
   state._tempRecurrence = null;
   persist(); closeModal(); render();
+  // PUSH : nouvelle convoc → prévient l'effectif (match vs entraînement).
+  if (isNew) {
+    const isMatch = obj.type === 'match';
+    const team = obj.teamTag === 'e1' || obj.teamTag === 'e2' ? obj.teamTag : 'all';
+    const sid = obj.seasonId || getActiveSeasonId();
+    const pool = (_seasonsLoaded() && sid) ? getSeasonPlayers(sid, { team }) : (state.players || []);
+    notifyPush(_pushPlayerKeys(pool.map(p => p.id)), {
+      title: isMatch ? '🏀 Nouveau match' : '🗓 Nouvel entraînement',
+      body: (obj.title || (isMatch ? 'Match' : 'Entraînement')) + (obj.date ? ' · ' + formatDate(obj.date, 'short') : '') + (obj.location ? ' · ' + obj.location : ''),
+      url: '/', tag: 'convoc', type: 'convoc'
+    });
+  }
 }
 function deleteConvoc(id) {
   const c = state.convocations.find(x => x.id === id);
@@ -15753,6 +15805,13 @@ function createBroadcast(payload) {
   persist();
   // Push immédiat : réduit à ~0 la fenêtre de course realtime (sinon debounce 400ms).
   if (window.PbSync) PbSync.flushNow(state).catch(() => {});
+  // PUSH : prévient les joueuses ciblées (best-effort).
+  const isPoll = !!b.pollOptions;
+  notifyPush(_pushPlayerKeys(broadcastTargetPlayerIds(b)), {
+    title: isPoll ? '🗳 Nouveau sondage' : '📨 Message du coach',
+    body: (b.message || (isPoll ? 'Réponds au sondage' : 'Nouveau message')).slice(0, 120),
+    url: '/', tag: 'msg', type: 'message'
+  });
   return b;
 }
 
@@ -17257,6 +17316,11 @@ function validateTrainingPlan() {
   c.trainingPlan.validatedAt = Date.now();
   persist();
   renderTrainingPlanEditor();
+  // PUSH : plan d'entraînement validé → prévient l'effectif (équipe de la convoc).
+  const team = c.teamTag === 'e1' || c.teamTag === 'e2' ? c.teamTag : 'all';
+  const sid = c.seasonId || getActiveSeasonId();
+  const pool = (_seasonsLoaded() && sid) ? getSeasonPlayers(sid, { team }) : (state.players || []);
+  notifyPush(_pushPlayerKeys(pool.map(p => p.id)), { title: '✅ Plan d\'entraînement prêt', body: (c.title || 'Entraînement') + (c.date ? ' · ' + formatDate(c.date, 'short') : ''), url: '/', tag: 'plan', type: 'plan' });
 }
 
 function unvalidateTrainingPlan() {
@@ -19895,6 +19959,13 @@ function saveChallenge(id, isNew) {
   if (isNew) state.challenges.unshift(obj);
   else { const i = state.challenges.findIndex(x => x.id === id); state.challenges[i] = obj; }
   persist(); closeModal(); render();
+  // PUSH : nouveau défi → prévient l'effectif (équipe du défi).
+  if (isNew) {
+    const team = obj.teamTag === 'e1' || obj.teamTag === 'e2' ? obj.teamTag : 'all';
+    const sid = obj.seasonId || getActiveSeasonId();
+    const pool = (_seasonsLoaded() && sid) ? getSeasonPlayers(sid, { team }) : (state.players || []);
+    notifyPush(_pushPlayerKeys(pool.map(p => p.id)), { title: '🏆 Nouveau défi', body: obj.title || 'Un nouveau défi est lancé', url: '/', tag: 'challenge', type: 'challenge' });
+  }
 }
 function deleteChallenge(id) {
   if (!confirm('Supprimer ?')) return;
@@ -25832,6 +25903,131 @@ function _notifAgo(ts) {
   return 'il y a ' + Math.floor(d / 7) + ' sem';
 }
 
+// ============================================================
+// WEB PUSH (Phase 2) — opt-in, push-sw.js, abonnement, envoi best-effort
+// ------------------------------------------------------------
+// Bannières visibles (iOS exige userVisibleOnly) + maj du badge même app fermée.
+// 100% opt-in. push-sw.js = SANS fetch listener (anti bug load infini). L'envoi
+// passe par l'Edge Function push-send et est TOUJOURS best-effort (jamais
+// bloquant). Rollback : window.__PUSH_KILL__=true (cf. snippet <head>).
+const VAPID_PUBLIC_KEY = 'BMVoXX7h2iTGcH6QUFwL97JMNq48wXeHOOU8agVlCTBjiNvnjVYJsS_T-36HUdrSUX0v-DgXIMjvG5T_A7e9ukk';
+function _urlB64ToUint8(b64) {
+  const pad = '='.repeat((4 - (b64.length % 4)) % 4);
+  const base = (b64 + pad).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base); const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+function pushSupported() {
+  return typeof navigator !== 'undefined' && 'serviceWorker' in navigator
+    && typeof window !== 'undefined' && 'PushManager' in window && typeof Notification !== 'undefined';
+}
+function pushPermission() { return (typeof Notification !== 'undefined') ? Notification.permission : 'unsupported'; }
+function pushOwnerKey() { return themeIdentityKey(); } // "role:playerId"
+async function pushIsSubscribed() {
+  try {
+    if (!pushSupported()) return false;
+    const reg = (await navigator.serviceWorker.getRegistration('/push-sw.js')) || (await navigator.serviceWorker.getRegistration());
+    if (!reg) return false;
+    return !!(await reg.pushManager.getSubscription());
+  } catch (e) { return false; }
+}
+async function enablePush() {
+  try {
+    if (!pushSupported()) { alert("Notifications non supportées ici. Installe l'app sur l'écran d'accueil (iOS 16.4+) puis réessaie."); return false; }
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') { alert(perm === 'denied' ? "Notifications refusées. Réactive-les dans les réglages de l'appareil (Réglages → Playbook → Notifications)." : 'Permission non accordée.'); return false; }
+    const reg = await navigator.serviceWorker.register('/push-sw.js', { scope: '/' });
+    await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: _urlB64ToUint8(VAPID_PUBLIC_KEY) });
+    await _pushStoreSubscription(sub);
+    if (typeof showToast === 'function') showToast('🔔 Notifications activées');
+    return true;
+  } catch (e) { console.warn('[push] enable:', e && e.message); alert("Échec de l'activation des notifications."); return false; }
+}
+async function disablePush() {
+  try {
+    const reg = await navigator.serviceWorker.getRegistration('/push-sw.js');
+    if (reg) {
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) { await _pushDeleteSubscription(sub); await sub.unsubscribe().catch(() => {}); }
+      await reg.unregister().catch(() => {});
+    }
+    if (typeof showToast === 'function') showToast('🔕 Notifications désactivées');
+  } catch (e) { console.warn('[push] disable:', e && e.message); }
+}
+async function _pushStoreSubscription(sub) {
+  if (!window.sb) return;
+  const j = sub.toJSON ? sub.toJSON() : sub; const keys = j.keys || {};
+  try {
+    await sb.from('push_subscriptions').upsert({
+      id: uid(), owner_key: pushOwnerKey(), endpoint: j.endpoint,
+      p256dh_key: keys.p256dh, auth_key: keys.auth,
+      ua: (navigator.userAgent || '').slice(0, 180), last_seen_at: new Date().toISOString()
+    }, { onConflict: 'endpoint' });
+  } catch (e) { console.warn('[push] store:', e && e.message); }
+}
+async function _pushDeleteSubscription(sub) {
+  if (!window.sb) return;
+  const j = sub.toJSON ? sub.toJSON() : sub;
+  try { await sb.from('push_subscriptions').delete().eq('endpoint', j.endpoint); } catch (e) {}
+}
+// Helpers cibles (ownerKey "role:playerId").
+function _pushPlayerKeys(pids) { return (pids || []).filter(Boolean).map(p => 'player:' + p); }
+function _pushCoachKey() { return 'coach:-'; }
+function _pushAllPlayerKeys() {
+  const sid = getActiveSeasonId();
+  const pool = (_seasonsLoaded() && sid) ? getSeasonPlayers(sid, { team: 'all' }) : (state.players || []);
+  return _pushPlayerKeys(pool.map(p => p.id));
+}
+// Envoi best-effort via l'Edge Function. Ne bloque/ne casse JAMAIS l'UI.
+async function openPushSettings() {
+  if (!pushSupported()) {
+    alert("🔔 Notifications non supportées sur cet appareil/navigateur.\n\nSur iPhone : installe d'abord l'app sur l'écran d'accueil (Partager → « Sur l'écran d'accueil »), iOS 16.4 minimum.");
+    return;
+  }
+  let subscribed = false;
+  try { subscribed = await pushIsSubscribed(); } catch (e) {}
+  const perm = pushPermission();
+  if (subscribed) {
+    if (confirm('🔔 Notifications activées sur cet appareil.\n\nLes désactiver ici ?')) await disablePush();
+    return;
+  }
+  if (perm === 'denied') {
+    alert("🔕 Notifications bloquées par l'appareil.\n\nPour les réactiver : Réglages de l'appareil → Playbook BCL → Notifications → autoriser.");
+    return;
+  }
+  await enablePush();
+}
+function notifyPush(ownerKeys, payload) {
+  try {
+    if (!window.sb || (window.Pb && Pb.online === false)) return;
+    const me = pushOwnerKey();
+    ownerKeys = (ownerKeys || []).filter(k => k && k !== me); // pas d'auto-notif
+    if (!ownerKeys.length || !payload || !payload.title) return;
+    const base = window.__SB_URL__; const anon = window.__SB_ANON__;
+    if (!base) return;
+    fetch(base.replace(/\/$/, '') + '/functions/v1/push-send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (anon || ''), 'apikey': anon || '' },
+      body: JSON.stringify({ ownerKeys, payload })
+    }).catch(() => {});
+  } catch (e) { /* best-effort */ }
+}
+// Navigation déclenchée par un clic sur notification (postMessage du push-sw).
+if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    try {
+      const d = e.data || {};
+      if (d.type === 'pb-notif-nav' && typeof openNotifCenter === 'function') {
+        // On ouvre le centre de notifs (point d'atterrissage universel et sûr).
+        setTimeout(() => { try { openNotifCenter(); } catch (err) {} }, 200);
+      }
+    } catch (err) {}
+  });
+}
+
 function _doRender() {
   // Badge d'app : reflète l'état courant à chaque rendu (point de passage après
   // la plupart des mutations + sync). Boot/foreground ont leurs propres appels.
@@ -26158,7 +26354,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.12';
+const APP_VERSION = '2026-06-28.13';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
