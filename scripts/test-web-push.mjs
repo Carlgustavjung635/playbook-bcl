@@ -14,7 +14,7 @@ function urlB64ToUint8(b64) {
   for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
   return out;
 }
-const VAPID_PUBLIC_KEY = 'BMVoXX7h2iTGcH6QUFwL97JMNq48wXeHOOU8agVlCTBjiNvnjVYJsS_T-36HUdrSUX0v-DgXIMjvG5T_A7e9ukk';
+const VAPID_PUBLIC_KEY = 'BG_DR-So_TyITXiJ5-TE7S5k47pjaIu8ETTFQQzubyT890nV-VxwxyV6kLOteViglubHU5ef6R9_pUu7p7OlzGg';
 
 // --- clés destinataires ---
 function _pushPlayerKeys(pids) { return (pids || []).filter(Boolean).map(p => 'player:' + p); }
