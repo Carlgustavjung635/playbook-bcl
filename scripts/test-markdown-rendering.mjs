@@ -16,30 +16,47 @@ function mdInline(t) {
   t = t.replace(/`([^`]+?)`/g, '<code>$1</code>');
   return t;
 }
+// mdToHtml mis à jour (PR #95+ : headings/hr/quote/strip artefacts). Les
+// assertions ci-dessous (patterns historiques) doivent rester VRAIES sous la
+// nouvelle logique → prouve la non-régression des anciens patterns.
+function mdStripArtefacts(s) {
+  return String(s).replace(/\[\/?span(?:_\d+)?\]/gi, '').replace(/\{\/?[a-z]*_?span\}/gi, '').replace(/\{span_\d+\}/gi, '');
+}
 function mdToHtml(src) {
   if (src == null) return '';
-  const lines = String(src).replace(/\r\n?/g, '\n').split('\n');
+  const lines = mdStripArtefacts(String(src)).replace(/\r\n?/g, '\n').split('\n');
   const blocks = [];
-  let list = null, para = [];
+  let list = null, para = [], quote = null;
   const flushPara = () => { if (para.length) { blocks.push({ p: para.slice() }); para = []; } };
   const flushList = () => { if (list) { blocks.push(list); list = null; } };
+  const flushQuote = () => { if (quote) { blocks.push({ q: quote.slice() }); quote = null; } };
+  const flushAll = () => { flushPara(); flushList(); flushQuote(); };
   lines.forEach(line => {
+    const hr = /^\s*([-*_])\1{2,}\s*$/.test(line);
+    const heading = line.match(/^\s*(#{1,6})\s+(.*\S)\s*$/);
     const ul = line.match(/^\s*[*-]\s+(.*)$/);
     const ol = line.match(/^\s*\d+[.)]\s+(.*)$/);
-    if (ul) { flushPara(); if (list && list.type !== 'ul') flushList(); list = list || { type: 'ul', items: [] }; list.items.push(ul[1]); return; }
-    if (ol) { flushPara(); if (list && list.type !== 'ol') flushList(); list = list || { type: 'ol', items: [] }; list.items.push(ol[1]); return; }
-    flushList();
+    const q = line.match(/^\s*>\s?(.*)$/);
+    if (hr) { flushAll(); blocks.push({ hr: true }); return; }
+    if (heading) { flushAll(); blocks.push({ h: Math.min(heading[1].length, 3), text: heading[2] }); return; }
+    if (ul) { flushPara(); flushQuote(); if (list && list.type !== 'ul') flushList(); list = list || { type: 'ul', items: [] }; list.items.push(ul[1]); return; }
+    if (ol) { flushPara(); flushQuote(); if (list && list.type !== 'ol') flushList(); list = list || { type: 'ol', items: [] }; list.items.push(ol[1]); return; }
+    if (q) { flushPara(); flushList(); quote = quote || []; quote.push(q[1]); return; }
+    flushList(); flushQuote();
     if (line.trim() === '') { flushPara(); return; }
     para.push(line);
   });
-  flushList(); flushPara();
+  flushAll();
   if (blocks.length === 1 && blocks[0].p) {
     return blocks[0].p.map(l => mdInline(mdEscape(l))).join('<br>');
   }
-  return blocks.map(b => b.p
-    ? '<p>' + b.p.map(l => mdInline(mdEscape(l))).join('<br>') + '</p>'
-    : `<${b.type}>` + b.items.map(it => '<li>' + mdInline(mdEscape(it)) + '</li>').join('') + `</${b.type}>`
-  ).join('');
+  return blocks.map(b => {
+    if (b.hr) return '<hr>';
+    if (b.h) return `<h${b.h + 1}>` + mdInline(mdEscape(b.text)) + `</h${b.h + 1}>`;
+    if (b.q) return '<blockquote>' + b.q.map(l => mdInline(mdEscape(l))).join('<br>') + '</blockquote>';
+    if (b.p) return '<p>' + b.p.map(l => mdInline(mdEscape(l))).join('<br>') + '</p>';
+    return `<${b.type}>` + b.items.map(it => '<li>' + mdInline(mdEscape(it)) + '</li>').join('') + `</${b.type}>`;
+  }).join('');
 }
 
 let pass = 0;
