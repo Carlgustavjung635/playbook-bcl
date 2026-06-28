@@ -6707,6 +6707,7 @@ function renderTopbar() {
         ${isCoach && activeLive ? `<button class="role-badge tb-act" style="background:#ff2222;color:white;border-color:#ff2222;cursor:pointer;animation:pulseGlow 2s infinite" onclick="openMatch('${activeLive.id}')" aria-label="Live en cours — gérer">🔴 LIVE</button>` : ''}
         ${renderTeamPill()}
         ${isCoach ? renderSeasonSwitcher() : ''}
+        ${renderNotifBell()}
         <button class="role-badge tb-act" style="cursor:pointer" onclick="openSettings()" title="Menu" aria-label="Menu${player ? ' — #' + player.num + ' ' + esc(player.name) : ''}" aria-haspopup="menu">${player ? '<span class="tb-act-label">#' + player.num + ' ' + esc(player.name) + '</span> ' : ''}⚙</button>
       </div>
     </header>
@@ -25666,29 +25667,110 @@ function scheduleRender(immediate) {
 }
 
 // ============================================================
-// APP BADGE (icône d'app) — App Badging API (Phase 1)
+// NOTIFICATIONS APP-WIDE (badge d'icône + centre in-app) — Phase 1
 // ------------------------------------------------------------
-// Badge numérique sur l'icône de l'app installée (PWA standalone iOS 16.4+ /
-// Android Chrome) = nombre d'éléments demandant l'attention de l'identité
-// courante, à l'échelle de TOUTE l'app. Mis à jour quand l'app est ouverte
-// (boot / sync / foreground / render). No-op silencieux si l'API est absente
-// (Safari onglet, vieil OS). Phase 2 (mise à jour app fermée via push) = à part.
-function appBadgeCount() {
+// Approche A+ (dérivée) : on NE crée PAS de table notifications. Le flux est
+// DÉRIVÉ du state synchronisé existant (broadcasts, convocs, plays, plans,
+// défis, gages, matchs…) + un filigrane "vu" par identité (pb8_notif_seen).
+// Justif : PbSync est anon PARTAGÉ et son flush supprime les lignes absentes du
+// dump (+ upsert batché qui nullifie les colonnes omises) → une table notif
+// avec état lu PAR destinataire serait fragile/lourde (jointure type receipts).
+// Or toute la donnée source existe déjà → dérivation = 0 migration, 0 risque
+// sync, rétroactive, offline.
+//   - ACTIONNABLE (doit AGIR) : messages non lus, gages à tirer, propositions à
+//     modérer, entraînements à clôturer → "non lu" = état intrinsèque (reste
+//     tant que pas traité, indépendant du filigrane).
+//   - INFORMATIONNEL (juste à voir) : nouvelle convoc/play/plan/défi/badge/récap
+//     → "non lu" = timestamp > filigrane ; ouvrir le centre = tout marquer vu.
+// Le badge d'icône (App Badging API) = somme des poids non lus. No-op si l'API
+// est absente (Safari onglet, vieil OS). Phase 2 (push app fermée) = séparée.
+const NOTIF_SEEN_KEY = 'pb8_notif_seen';
+function getNotifSeenAt() {
+  try { return (JSON.parse(localStorage.getItem(NOTIF_SEEN_KEY) || '{}'))[themeIdentityKey()] || 0; } catch (e) { return 0; }
+}
+function setNotifSeenAt(ts) {
+  try {
+    const m = JSON.parse(localStorage.getItem(NOTIF_SEEN_KEY) || '{}');
+    m[themeIdentityKey()] = ts || Date.now();
+    localStorage.setItem(NOTIF_SEEN_KEY, JSON.stringify(m));
+  } catch (e) {}
+}
+
+// Construit le flux de notifs de l'identité courante. Chaque item :
+// { id, ts, icon, title, detail, count, unread, action? }. count = poids pour le
+// badge (agrégats : N à faire). Items triés du + récent au + ancien.
+function notifFeed() {
   const a = state && state.auth;
-  if (!a) return 0;
-  let n = 0;
+  if (!a) return [];
+  const seen = getNotifSeenAt();
+  const items = [];
+  const info = (id, ts, icon, title, detail) => { if (ts) items.push({ id, ts, icon, title, detail, count: 1, unread: ts > seen }); };
   try {
     if (a.role === 'player' && a.playerId) {
-      // Messages non lus + tirages de gage en attente.
-      if (typeof playerInboxUnreadCount === 'function') n += playerInboxUnreadCount(a.playerId) || 0;
-      if (typeof pendingDraws === 'function') n += pendingDraws(a.playerId).length;
+      const pid = a.playerId;
+      // Messages (actionnable : non lu = receipt pending)
+      if (typeof playerInboxBroadcasts === 'function') {
+        playerInboxBroadcasts(pid).forEach(b => {
+          const unread = typeof _inboxIsUnread === 'function' ? _inboxIsUnread(b, pid) : false;
+          items.push({ id: 'msg-' + b.id, ts: b.createdAt || 0, icon: (b.pollOptions && b.pollOptions.length >= 2) ? '🗳' : '📨',
+            title: (b.pollOptions && b.pollOptions.length >= 2) ? 'Sondage' : 'Message du coach', detail: (b.message || '').slice(0, 60), count: 1, unread, action: "openInboxBroadcast('" + b.id + "')" });
+        });
+      }
+      // Gages à tirer (actionnable, agrégat)
+      if (typeof pendingDraws === 'function') {
+        const n = pendingDraws(pid).length;
+        if (n > 0) items.push({ id: 'gages', ts: Math.max(0, ...pendingDraws(pid).map(d => d.assignedAt || 0)), icon: '🎁', title: 'Gage à tirer', detail: n + ' tirage' + (n > 1 ? 's' : '') + ' au sort à faire', count: n, unread: true, action: 'maybeShowGageReveal()' });
+      }
+      // Convocs (nouvelle / modifiée) — informationnel
+      if (typeof currentSeasonConvocations === 'function') {
+        currentSeasonConvocations().forEach(c => {
+          const ts = Math.max(c.createdAt || 0, c.updatedAt || 0);
+          const isMatch = c.type === 'match';
+          info('cv-' + c.id, ts, isMatch ? '🏀' : '🗓', isMatch ? 'Convocation match' : 'Convocation entraînement', (c.title || '') + (c.date ? ' · ' + formatDate(c.date, 'short') : ''));
+        });
+      }
+      // Nouveaux plays — informationnel
+      if (typeof currentSeasonPlays === 'function') {
+        currentSeasonPlays().forEach(p => info('play-' + p.id, p.createdAt || 0, '📋', 'Nouveau play', p.title || ''));
+      }
+      // Plans d'entraînement validés/modifiés — informationnel
+      (state.trainingPlans || []).forEach(tp => {
+        const v = tp.plan && tp.plan.validated; const ts = (tp.plan && tp.plan.validatedAt) || tp.updatedAt || 0;
+        if (v) info('plan-' + tp.convocationId + '-' + tp.instanceDate, ts, '✅', "Plan d'entraînement prêt", '');
+      });
+      // Nouveaux défis — informationnel
+      if (typeof currentSeasonChallenges === 'function') {
+        currentSeasonChallenges().filter(c => !c.badgesAwarded).forEach(c => info('ch-' + c.id, c.createdAt || c.updatedAt || 0, '🏆', 'Nouveau défi', c.title || ''));
+      }
+      // Trophées débloqués — informationnel
+      const me = (state.players || []).find(p => p.id === pid);
+      (me && me.badges || []).forEach((b, i) => info('badge-' + i + '-' + (b.date || ''), b.date ? Date.parse(b.date + 'T12:00:00') : 0, '🏅', 'Trophée débloqué', b.challengeTitle || ''));
+      // Récap match (stats perso dispo) — informationnel
+      if (typeof currentSeasonMatches === 'function') {
+        currentSeasonMatches().filter(m => m.playerStats && m.playerStats[pid]).forEach(m => info('recap-' + m.id, m.updatedAt || 0, '📊', 'Récap match dispo', 'vs ' + (m.opponent || '')));
+      }
     } else if (a.role === 'coach') {
-      // Propositions de gage à modérer + entraînements passés à clôturer.
-      if (typeof gagesPendingCount === 'function') n += gagesPendingCount() || 0;
-      if (typeof getOverdueTrainings === 'function') n += getOverdueTrainings().length;
+      // Propositions de gage à modérer (actionnable, agrégat)
+      if (typeof gagesPendingCount === 'function') { const n = gagesPendingCount(); if (n > 0) items.push({ id: 'gage-mod', ts: Date.now(), icon: '🎁', title: 'Gages à modérer', detail: n + ' proposition' + (n > 1 ? 's' : ''), count: n, unread: true, action: 'openGagesCoach()' }); }
+      // Entraînements à clôturer (actionnable, agrégat)
+      if (typeof getOverdueTrainings === 'function') { const n = getOverdueTrainings().length; if (n > 0) items.push({ id: 'overdue', ts: Date.now(), icon: '⏱', title: 'Entraînements à clôturer', detail: n + ' terminé' + (n > 1 ? 's' : '') + ' à valider', count: n, unread: true, action: 'openOverdueTrainingsModal()' }); }
+      // Gages tirés (accepté/passé) par les joueuses — informationnel
+      (state.gageDraws || []).forEach(d => {
+        if ((d.status === 'accepted' || d.status === 'skipped') && d.completedAt) {
+          const p = (state.players || []).find(x => x.id === d.playerId);
+          info('draw-' + d.id, d.completedAt, d.status === 'accepted' ? '💪' : '🙈', d.status === 'accepted' ? 'Gage accepté' : 'Gage passé', (p ? '#' + p.num + ' ' + p.name : ''));
+        }
+      });
+      // Stats de match saisies — informationnel
+      if (typeof currentSeasonMatches === 'function') {
+        currentSeasonMatches().filter(m => m.playerStats && Object.keys(m.playerStats).length).forEach(m => info('stats-' + m.id, m.updatedAt || 0, '📊', 'Stats de match saisies', 'vs ' + (m.opponent || '')));
+      }
     }
-  } catch (e) { /* compteurs best-effort */ }
-  return n;
+  } catch (e) { /* feed best-effort */ }
+  return items.sort((x, y) => (y.ts || 0) - (x.ts || 0));
+}
+function appBadgeCount() {
+  return notifFeed().filter(i => i.unread).reduce((s, i) => s + (i.count || 1), 0);
 }
 function updateAppBadge() {
   try {
@@ -25697,6 +25779,57 @@ function updateAppBadge() {
     if (n > 0) navigator.setAppBadge(n).catch(() => {});
     else if (typeof navigator.clearAppBadge === 'function') navigator.clearAppBadge().catch(() => {});
   } catch (e) { /* silencieux */ }
+}
+
+// Cloche topbar : pastille avec le total non lu. Tap → centre de notifs.
+function renderNotifBell() {
+  if (!state.auth || (state.auth.role !== 'player' && state.auth.role !== 'coach')) return '';
+  const n = appBadgeCount();
+  return `<button class="role-badge tb-act" style="cursor:pointer;position:relative" onclick="openNotifCenter()" title="Notifications" aria-label="Notifications${n ? ' (' + n + ' non lues)' : ''}">🔔${n ? `<span style="position:absolute;top:-4px;right:-4px;background:var(--orange);color:#fff;border-radius:9px;min-width:16px;height:16px;font-size:10px;font-family:'Anton';display:flex;align-items:center;justify-content:center;padding:0 3px">${n > 99 ? '99+' : n}</span>` : ''}</button>`;
+}
+function markAllNotifsRead() {
+  setNotifSeenAt(Date.now());
+  // Messages : marquer aussi les broadcasts vus (sinon ils restent "actionnables").
+  const a = state.auth;
+  if (a && a.role === 'player' && a.playerId && typeof playerInboxBroadcasts === 'function') {
+    playerInboxBroadcasts(a.playerId).forEach(b => {
+      if (_inboxIsUnread(b, a.playerId) && !isPollBroadcast(b)) { try { markReceiptStatus(b.id, a.playerId, 'seen'); } catch (e) {} }
+    });
+  }
+  updateAppBadge();
+  if (document.getElementById('modal-root')) openNotifCenter(); // refresh la modale ouverte
+  else render();
+}
+function openNotifCenter() {
+  const feed = notifFeed();
+  const unreadN = feed.filter(i => i.unread).reduce((s, i) => s + (i.count || 1), 0);
+  const rows = feed.slice(0, 40).map(i => `
+    <div class="list-row" ${i.action ? `onclick="closeModal();setTimeout(()=>{try{${i.action}}catch(e){}},60)"` : ''} style="${i.action ? 'cursor:pointer' : ''}">
+      <div style="font-size:20px;flex:0 0 auto;width:30px;text-align:center">${i.icon}</div>
+      <div class="list-row-content">
+        <div class="list-row-title" style="${i.unread ? 'font-weight:700' : ''}">${esc(i.title)}${i.count > 1 ? ` · ${i.count}` : ''}</div>
+        ${i.detail ? `<div class="list-row-subtitle" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(i.detail)}${i.ts ? ' · ' + _notifAgo(i.ts) : ''}</div>` : (i.ts ? `<div class="list-row-subtitle">${_notifAgo(i.ts)}</div>` : '')}
+      </div>
+      ${i.unread ? '<span aria-label="non lu" style="flex:0 0 auto;width:9px;height:9px;border-radius:50%;background:var(--orange)"></span>' : (i.action ? '<span class="list-row-trail">›</span>' : '')}
+    </div>`).join('');
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">🔔 Notifications${unreadN ? ' · ' + unreadN : ''}</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body" style="padding:0">
+      ${unreadN ? `<div style="padding:10px 16px;border-bottom:1px solid var(--border-soft);text-align:right"><button class="btn btn-ghost" style="font-size:12px" onclick="markAllNotifsRead()">Tout marquer lu</button></div>` : ''}
+      ${feed.length ? `<div class="list-section" style="margin:0">${rows}</div>` : '<div class="empty" style="padding:40px 16px"><div class="empty-icon">🔔</div><div class="empty-title">Rien de neuf</div><div class="empty-desc">Tu es à jour !</div></div>'}
+    </div>
+  `);
+}
+function _notifAgo(ts) {
+  const sec = Math.floor((Date.now() - ts) / 1000);
+  if (sec < 60) return "à l'instant";
+  const min = Math.floor(sec / 60); if (min < 60) return 'il y a ' + min + ' min';
+  const h = Math.floor(min / 60); if (h < 24) return 'il y a ' + h + ' h';
+  const d = Math.floor(h / 24); if (d < 7) return 'il y a ' + d + ' j';
+  return 'il y a ' + Math.floor(d / 7) + ' sem';
 }
 
 function _doRender() {
@@ -26025,7 +26158,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.11';
+const APP_VERSION = '2026-06-28.12';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
