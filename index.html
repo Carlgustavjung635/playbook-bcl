@@ -16,7 +16,7 @@
   var auth=JSON.parse(localStorage.getItem('pb8_auth')||'null');
   var map=JSON.parse(localStorage.getItem('pb8_theme')||'{}');
   var key=auth?(auth.role+':'+(auth.playerId||'-')):'_guest';
-  var t=(map&&map[key])||'court';
+  var t=(map&&map[key])||'chalk'; // défaut Chalk (clair) ; doit matcher DEFAULT_THEME
   document.documentElement.setAttribute('data-theme',t);
 }catch(e){}})();
 </script>
@@ -147,6 +147,14 @@
     --surface: #ffffff; --surface-2: #eef2f8; --border: #cbd5e1; --border-soft: #e2e8f0;
     --ink: #0f172a; --ink-2: #475569; --ink-3: #64748b; --ink-4: #94a3b8;
     --accent-rgb: 37, 99, 235; --orange-2: #60a5fa;
+    --topbar-bg: rgba(255, 255, 255, 0.85); --nav-bg: rgba(255, 255, 255, 0.92);
+  }
+  /* 👟 BCL — aux couleurs du club : rouge Converse + orange ballon, fond clair */
+  :root[data-theme="bcl"] {
+    --bg: #fafafa; --bg-1: #ffffff; --bg-2: #f2f0ee; --bg-3: #e9e6e2;
+    --surface: #ffffff; --surface-2: #f5f3f1; --border: #dcd9d4; --border-soft: #eceae6;
+    --ink: #1a1a1a; --ink-2: #525252; --ink-3: #737373; --ink-4: #a3a3a3;
+    --accent-rgb: 196, 30, 58; --orange-2: #ea580c;
     --topbar-bg: rgba(255, 255, 255, 0.85); --nav-bg: rgba(255, 255, 255, 0.92);
   }
 
@@ -4855,8 +4863,11 @@ const THEMES = [
   // Clairs (light mode)
   { id: 'daylight', name: 'Daylight', emoji: '☀️', desc: 'Blanc + orange · clair', accent: '#ea580c', accent2: '#fb923c', bg: '#ffffff', light: true },
   { id: 'chalk',    name: 'Chalk',    emoji: '📋', desc: 'Gris-bleu + bleu · clair', accent: '#2563eb', accent2: '#60a5fa', bg: '#ffffff', light: true },
+  { id: 'bcl',      name: 'BCL',      emoji: '👟', desc: 'Aux couleurs du club · clair', accent: '#c41e3a', accent2: '#ea580c', bg: '#ffffff', light: true },
 ];
-const DEFAULT_THEME = 'court';
+// Défaut = Chalk (clair). N'affecte QUE les identités sans préférence stockée
+// dans pb8_theme : un choix explicite existant est toujours respecté.
+const DEFAULT_THEME = 'chalk';
 
 // Clé d'identité : un thème par rôle/joueuse → coach et chaque joueuse gardent
 // leur propre couleur même sur un appareil partagé. Doit matcher la logique du
@@ -26957,7 +26968,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.23';
+const APP_VERSION = '2026-06-28.24';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {

@@ -43,13 +43,13 @@ function contrast(a, b) {
   return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
 }
 
-const THEME_IDS = ['court', 'ocean', 'forest', 'rose', 'mono', 'sunset', 'midnight', 'hardwood', 'daylight', 'chalk'];
+const THEME_IDS = ['court', 'ocean', 'forest', 'rose', 'mono', 'sunset', 'midnight', 'hardwood', 'daylight', 'chalk', 'bcl'];
 
 let pass = 0;
 function t(name, fn) { fn(); pass++; console.log('  ✓', name); }
 
-console.log('SCÉNARIO 1 — les 10 thèmes existent (JS THEMES <-> CSS)');
-t('THEMES JS contient les 10 ids', () => {
+console.log('SCÉNARIO 1 — les 11 thèmes existent (JS THEMES <-> CSS)');
+t('THEMES JS contient les 11 ids', () => {
   const arr = (html.match(/const THEMES = \[([\s\S]*?)\];/) || [])[1] || '';
   THEME_IDS.forEach(id => assert.ok(arr.includes(`id: '${id}'`), `THEMES manque ${id}`));
 });
@@ -85,4 +85,4 @@ console.log('SCÉNARIO 4 — thèmes sombres restent sombres');
   t(`${id} : fond sombre`, () => assert.ok(lum(toRgb(themeTokens(id)['bg'])) < 0.1, `${id} bg pas sombre`));
 });
 
-console.log(`\n✅ ${pass} assertions OK — 10 thèmes, contrastes WCAG AA vérifiés (clair + sombre).`);
+console.log(`\n✅ ${pass} assertions OK — 11 thèmes, contrastes WCAG AA vérifiés (clair + sombre).`);
