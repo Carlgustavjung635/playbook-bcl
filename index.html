@@ -4772,6 +4772,7 @@ const K = {
   theme: 'pb8_theme', // map { "<role>:<playerId|->": themeId } — préférence couleur par identité
   chronoSound: 'pb8_chrono_sound', // map { "<role>:<playerId|->": soundId } — ambiance sonore chrono
   chronoTension: 'pb8_chrono_tension', // map { "<role>:<playerId|->": bool } — mode tension 3-2-1
+  sessionLogs: 'pb8_session_logs', // [] logs de session live d'entraînement (local, non sync, cap 50)
   guideSeen: 'pb8_guide_seen', // map { "<role>:<playerId|->": true } — mini-guide joueuse vu
 };
 function load(k, d) { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : d; } catch { return d; } }
@@ -17101,6 +17102,7 @@ function renderTrainingPlanEditor() {
       </div>
     </div>
     <div class="modal-footer" style="flex-direction:column;gap:6px">
+      ${plan.exercises.some(ex => (parseInt(ex.duration) || 0) > 0) ? `<button class="btn btn-primary btn-block" style="background:var(--green);border-color:var(--green)" onclick="startLiveSession('${convocId}','${dateStr || c.date}')">▶️ Démarrer la session live</button>` : ''}
       ${plan.exercises.length > 0 ? `<button class="btn btn-secondary btn-block" onclick="_saveTrainingPlanNow()">💾 Sauvegarder le plan</button>` : ''}
       ${plan.exercises.length > 0 ? `
         ${!plan.validated ? `
@@ -17269,6 +17271,308 @@ function computeExerciseTimes(plan, startHHMM) {
     });
   }
   return times;
+}
+
+// ============================================================
+// SESSION LIVE D'ENTRAÎNEMENT (coach) — chrono de déroulé du plan
+// ------------------------------------------------------------
+// Pendant l'entraînement, le coach lance une session qui suit la chronologie
+// du plan : compte à rebours par exo (durée en min), bip à 30 s, alarme à 0
+// (son choisi dans ⚙ Personnalisation, RÉUTILISE le moteur chrono possession),
+// reveal de l'exo suivant, +temps / skip / pause / stop.
+//
+// State VOLATILE dans window._liveSession (JAMAIS sync ni persisté — éphémère).
+// endAt = horodatage mur (Date.now()+remaining) → le backgrounding est géré
+// nativement : au retour, remaining = endAt - now reflète le temps RÉEL écoulé.
+// Comme on s'arrête en phase 'reveal' (décision coach), un seul exo peut
+// déborder pendant une absence → pas de rattrapage multi-exo à gérer.
+// À la fin : log local (localStorage pb8_session_logs, pas de table/sync car
+// donnée coach-locale de faible valeur partagée) + récap réel vs planifié.
+// ============================================================
+function _liveFmt(ms) {
+  ms = Math.max(0, ms);
+  const t = Math.ceil(ms / 1000), m = Math.floor(t / 60), s = t % 60;
+  return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+}
+function _liveExtractExos(plan) {
+  return (plan.exercises || []).map(ex => ({
+    id: ex.id, title: ex.title || 'Exercice',
+    plannedMs: Math.max(0, (parseInt(ex.duration) || 0) * 60000),
+  })).filter(e => e.plannedMs > 0);
+}
+function startLiveSession(convocId, dateStr) {
+  const c = state.convocations.find(x => x.id === convocId); if (!c) return;
+  const plan = resolveTrainingPlan(c, dateStr || c.date);
+  const exos = _liveExtractExos(plan);
+  if (!exos.length) { alert('Donne une durée (min) à au moins un exercice pour lancer une session live.'); return; }
+  _chronoUnlockAudio();
+  const now = Date.now();
+  window._liveSession = {
+    convocId, dateStr: dateStr || c.date, planTitle: formatDate(dateStr || c.date, 'long'),
+    exos, idx: 0, phase: 'running',
+    startedAt: now, exoStartedAt: now, endAt: now + exos[0].plannedMs, endedAt: 0,
+    pausedAccumMs: 0, pauseStartedAt: 0, pausedRemaining: 0,
+    results: [], _warned30: false, _lastTickSec: null,
+  };
+  try { closeModal(); } catch (e) {}
+  state._editingTraining = null;
+  _liveRequestWakeLock();
+  document.addEventListener('visibilitychange', _liveOnVisibility);
+  _liveStartTicker();
+  renderLiveSession();
+}
+function _liveStartTicker() { if (!window._liveTimer) window._liveTimer = setInterval(_liveTick, 250); }
+function _liveStopTicker() { if (window._liveTimer) { clearInterval(window._liveTimer); window._liveTimer = null; } }
+function _liveTick() {
+  const s = window._liveSession; if (!s) { _liveStopTicker(); return; }
+  if (s.phase !== 'running') return;
+  const remaining = s.endAt - Date.now();
+  if (remaining <= 0) { _liveExoEnded(); return; }
+  const secLeft = Math.ceil(remaining / 1000);
+  // Bip d'alerte à 30 s de la fin (double tick aigu), une seule fois.
+  if (remaining <= 30400 && !s._warned30) { s._warned30 = true; _chronoTickSound(880); setTimeout(() => _chronoTickSound(880), 150); }
+  // Tension 3-2-1 (réutilise le moteur du chrono possession).
+  const f = tensionTickFreq(secLeft);
+  if (f && s._lastTickSec !== secLeft) { s._lastTickSec = secLeft; _chronoTickSound(f); }
+  if (secLeft > 3) s._lastTickSec = null;
+  const el = document.getElementById('live-timer'); if (el) el.textContent = _liveFmt(remaining);
+  const sub = document.getElementById('live-timer-sub');
+  if (sub) sub.textContent = '/ ' + _liveFmt(s.exos[s.idx].plannedMs);
+  _liveUpdateGlobals();
+}
+// Fin du compte à rebours de l'exo courant : alarme + flash + vibration.
+function _liveExoEnded() {
+  const s = window._liveSession; if (!s) return;
+  s.endedAt = Date.now();
+  _chronoBeep(); _chronoVibrate([300, 120, 300, 120, 400]); _chronoFlash();
+  const isLast = s.idx >= s.exos.length - 1;
+  if (isLast) { _liveRecordCurrent(false); _liveFinish(false); return; }
+  s.phase = 'reveal';
+  renderLiveSession();
+}
+function _liveRecordCurrent(skipped) {
+  const s = window._liveSession; if (!s) return;
+  const ex = s.exos[s.idx];
+  const end = s.endedAt || Date.now();
+  s.results.push({ id: ex.id, title: ex.title, plannedMs: ex.plannedMs, actualMs: Math.max(0, end - s.exoStartedAt), skipped: !!skipped });
+}
+// Passe à l'exo suivant. autostart=true : lance directement le compte à rebours.
+function _liveStep(autostart) {
+  const s = window._liveSession; if (!s) return;
+  s.idx++;
+  if (s.idx >= s.exos.length) { _liveFinish(false); return; }
+  s.endedAt = 0; s._warned30 = false; s._lastTickSec = null;
+  if (autostart) {
+    const now = Date.now();
+    s.phase = 'running'; s.exoStartedAt = now; s.endAt = now + s.exos[s.idx].plannedMs;
+    _liveStartTicker();
+  } else { s.phase = 'reveal'; }
+  renderLiveSession();
+}
+// Bouton « OK, lancer le suivant » (depuis le reveal) : valide l'exo courant.
+function liveAdvance() { _liveRecordCurrent(false); _liveStep(true); }
+// Bouton « Skip » (depuis running) : passe sans terminer, marque skippé.
+function liveSkip() {
+  const s = window._liveSession; if (!s) return;
+  s.endedAt = 0; _liveRecordCurrent(true); _liveStep(true);
+}
+// +2 / +5 min : prolonge l'exo COURANT. Depuis le reveal, reprend l'exo courant.
+function liveAddTime(min) {
+  const s = window._liveSession; if (!s) return;
+  const add = min * 60000;
+  if (s.phase === 'reveal') { s.phase = 'running'; s.endAt = Date.now() + add; s.endedAt = 0; }
+  else if (s.phase === 'running') { s.endAt += add; if (s.endAt - Date.now() > 30400) s._warned30 = false; }
+  else return;
+  _liveStartTicker(); renderLiveSession();
+}
+function livePause() {
+  const s = window._liveSession; if (!s || s.phase !== 'running') return;
+  s.pausedRemaining = Math.max(0, s.endAt - Date.now());
+  s.pauseStartedAt = Date.now(); s.phase = 'paused';
+  _liveStopTicker(); renderLiveSession();
+}
+function liveResume() {
+  const s = window._liveSession; if (!s || s.phase !== 'paused') return;
+  if (s.pauseStartedAt) { s.pausedAccumMs += Date.now() - s.pauseStartedAt; s.pauseStartedAt = 0; }
+  s.endAt = Date.now() + (s.pausedRemaining || 0); s.phase = 'running';
+  _liveStartTicker(); renderLiveSession();
+}
+function liveStop() {
+  const s = window._liveSession; if (!s) return;
+  if (!confirm('Arrêter la session ? Le récap sera enregistré.')) return;
+  if (s.phase === 'running' || s.phase === 'paused' || s.phase === 'reveal') {
+    if (!s.endedAt) s.endedAt = Date.now();
+    _liveRecordCurrent(false);
+  }
+  _liveFinish(true);
+}
+function _liveFinish(stoppedEarly) {
+  const s = window._liveSession; if (!s) return;
+  _liveStopTicker(); _liveReleaseWakeLock();
+  document.removeEventListener('visibilitychange', _liveOnVisibility);
+  s.phase = 'done'; s.stoppedEarly = !!stoppedEarly; s.finishedAt = Date.now();
+  _liveSaveLog(s);
+  renderLiveSession();
+}
+function closeLiveSession() {
+  _liveStopTicker(); _liveReleaseWakeLock();
+  document.removeEventListener('visibilitychange', _liveOnVisibility);
+  window._liveSession = null;
+  const ov = document.getElementById('live-session-overlay'); if (ov) ov.remove();
+  _doRender();
+}
+// Au retour au premier plan : si le temps réel a dépassé l'exo courant pendant
+// l'absence, on déclenche l'alarme « rattrapée » maintenant (un seul exo possible
+// car on se fige en reveal). Re-demande le wake lock (relâché par l'OS en arrière-plan).
+function _liveOnVisibility() {
+  if (document.visibilityState !== 'visible') return;
+  const s = window._liveSession; if (!s) return;
+  _liveRequestWakeLock();
+  if (s.phase === 'running' && s.endAt - Date.now() <= 0) _liveExoEnded();
+}
+async function _liveRequestWakeLock() {
+  try { if ('wakeLock' in navigator) { window._liveWakeLock = await navigator.wakeLock.request('screen'); } } catch (e) { /* refusé / non supporté */ }
+}
+function _liveReleaseWakeLock() {
+  try { if (window._liveWakeLock) { window._liveWakeLock.release(); window._liveWakeLock = null; } } catch (e) {}
+}
+function _liveSaveLog(s) {
+  try {
+    const plannedTotal = s.exos.reduce((a, e) => a + e.plannedMs, 0);
+    const actualTotal = s.results.reduce((a, r) => a + r.actualMs, 0);
+    const log = {
+      at: s.finishedAt || Date.now(), convocId: s.convocId, dateStr: s.dateStr,
+      plannedMs: plannedTotal, actualMs: actualTotal,
+      exosTotal: s.exos.length, exosDone: s.results.filter(r => !r.skipped).length,
+      skipped: s.results.filter(r => r.skipped).map(r => r.title),
+      stoppedEarly: !!s.stoppedEarly,
+    };
+    const all = load(K.sessionLogs, []) || [];
+    all.unshift(log);
+    save(K.sessionLogs, all.slice(0, 50));
+  } catch (e) { /* non bloquant */ }
+}
+// Temps total écoulé (hors pauses) + temps restant prévu (exos non encore passés).
+function _liveGlobals(s) {
+  const now = Date.now();
+  const pausedNow = s.phase === 'paused' && s.pauseStartedAt ? now - s.pauseStartedAt : 0;
+  const elapsed = Math.max(0, now - s.startedAt - s.pausedAccumMs - pausedNow);
+  let remainingPlanned = 0;
+  if (s.phase === 'running') remainingPlanned += Math.max(0, s.endAt - now);
+  else if (s.phase === 'reveal' || s.phase === 'paused') remainingPlanned += (s.phase === 'paused' ? s.pausedRemaining : 0);
+  for (let i = s.idx + 1; i < s.exos.length; i++) remainingPlanned += s.exos[i].plannedMs;
+  return { elapsed, remainingPlanned };
+}
+function _liveUpdateGlobals() {
+  const s = window._liveSession; if (!s) return;
+  const g = _liveGlobals(s);
+  const e = document.getElementById('live-elapsed'); if (e) e.textContent = _liveFmt(g.elapsed);
+  const r = document.getElementById('live-remaining'); if (r) r.textContent = _liveFmt(g.remainingPlanned);
+}
+function renderLiveSession() {
+  const s = window._liveSession; if (!s) return;
+  let ov = document.getElementById('live-session-overlay');
+  if (!ov) { ov = document.createElement('div'); ov.id = 'live-session-overlay'; document.body.appendChild(ov); }
+  ov.setAttribute('style', 'position:fixed;inset:0;z-index:9500;background:var(--bg);display:flex;flex-direction:column;padding:calc(env(safe-area-inset-top) + 14px) 16px calc(env(safe-area-inset-bottom) + 14px);overflow-y:auto');
+  const cur = s.exos[s.idx];
+  const g = _liveGlobals(s);
+  const progress = s.exos.map((ex, i) => {
+    const res = s.results[i];
+    const done = i < s.idx;
+    const icon = done ? (res && res.skipped ? '⏭' : '✅') : (i === s.idx ? '▶️' : '○');
+    const col = done ? (res && res.skipped ? 'var(--ink-4)' : 'var(--green)') : (i === s.idx ? 'var(--orange)' : 'var(--ink-3)');
+    const bg = i === s.idx ? 'rgba(var(--accent-rgb),0.10)' : 'transparent';
+    return `<div style="display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:8px;background:${bg};${i===s.idx?'border:1px solid var(--orange)':''}">
+      <span style="font-size:14px">${icon}</span>
+      <span style="flex:1;min-width:0;font-size:12px;color:${col};${done&&res&&res.skipped?'text-decoration:line-through':''};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(ex.title)}</span>
+      <span style="font-family:'JetBrains Mono';font-size:10px;color:var(--ink-4)">${Math.round(ex.plannedMs/60000)}min</span>
+    </div>`;
+  }).join('');
+  const globalsBar = `<div style="display:flex;gap:8px;margin-top:14px">
+      <div style="flex:1;text-align:center;padding:8px;background:var(--bg-3);border-radius:8px">
+        <div class="eyebrow-muted" style="font-size:9px">Écoulé</div>
+        <div id="live-elapsed" style="font-family:'JetBrains Mono';font-size:15px;color:var(--ink)">${_liveFmt(g.elapsed)}</div>
+      </div>
+      <div style="flex:1;text-align:center;padding:8px;background:var(--bg-3);border-radius:8px">
+        <div class="eyebrow-muted" style="font-size:9px">Restant prévu</div>
+        <div id="live-remaining" style="font-family:'JetBrains Mono';font-size:15px;color:var(--ink)">${_liveFmt(g.remainingPlanned)}</div>
+      </div>
+    </div>`;
+
+  if (s.phase === 'done') {
+    const plannedTotal = s.exos.reduce((a, e) => a + e.plannedMs, 0);
+    const actualTotal = s.results.reduce((a, r) => a + r.actualMs, 0);
+    const diff = actualTotal - plannedTotal;
+    const skipped = s.results.filter(r => r.skipped);
+    ov.innerHTML = `
+      <div style="margin:auto;width:100%;max-width:460px;text-align:center">
+        <div style="font-size:46px;margin-bottom:8px">✅</div>
+        <div style="font-family:'Anton';font-size:24px;text-transform:uppercase">Session terminée</div>
+        <div style="color:var(--ink-3);font-size:12px;margin-bottom:18px">${esc(s.planTitle)}${s.stoppedEarly ? ' · arrêtée en cours' : ''}</div>
+        <div style="display:flex;gap:8px;margin-bottom:12px">
+          <div style="flex:1;padding:12px;background:var(--bg-3);border-radius:10px">
+            <div class="eyebrow-muted">Réel</div>
+            <div style="font-family:'Anton';font-size:26px;color:var(--orange)">${Math.round(actualTotal/60000)}<span style="font-size:13px;color:var(--ink-4)">min</span></div>
+          </div>
+          <div style="flex:1;padding:12px;background:var(--bg-3);border-radius:10px">
+            <div class="eyebrow-muted">Planifié</div>
+            <div style="font-family:'Anton';font-size:26px;color:var(--ink-2)">${Math.round(plannedTotal/60000)}<span style="font-size:13px;color:var(--ink-4)">min</span></div>
+          </div>
+        </div>
+        <div style="padding:10px 12px;border-radius:8px;margin-bottom:14px;font-size:13px;background:${diff>60000?'rgba(239,68,68,0.10)':'rgba(34,197,94,0.10)'};color:${diff>60000?'var(--red)':'var(--green)'}">
+          ${Math.abs(diff) < 60000 ? '🎯 Pile dans les temps' : (diff > 0 ? '⏱ Dépassé de ' + Math.round(diff/60000) + ' min' : '⚡ Terminé ' + Math.round(-diff/60000) + ' min plus tôt')}
+        </div>
+        ${skipped.length ? `<div style="font-size:11px;color:var(--ink-3);margin-bottom:14px">Exos sautés : ${skipped.map(r => esc(r.title)).join(', ')}</div>` : ''}
+        <button class="btn btn-primary btn-block" onclick="closeLiveSession()">Fermer</button>
+      </div>`;
+    return;
+  }
+
+  if (s.phase === 'reveal') {
+    const next = s.exos[s.idx + 1];
+    ov.innerHTML = `
+      <div style="margin:auto;width:100%;max-width:460px;text-align:center">
+        <div class="eyebrow" style="color:var(--orange)">➡️ Au suivant</div>
+        <div style="font-size:13px;color:var(--ink-3);margin:6px 0 2px">Fin de : ${esc(cur.title)}</div>
+        <div style="font-family:'Anton';font-size:30px;text-transform:uppercase;line-height:1.1;margin:14px 0 4px">${esc(next.title)}</div>
+        <div style="font-family:'JetBrains Mono';color:var(--ink-2);font-size:15px;margin-bottom:20px">${Math.round(next.plannedMs/60000)} min</div>
+        <button class="btn btn-primary btn-block" style="font-size:16px;padding:16px" onclick="liveAdvance()">▶️ OK, lancer</button>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button class="btn btn-secondary btn-block" onclick="liveAddTime(2)">⏱ +2 min (reprendre)</button>
+          <button class="btn btn-secondary btn-block" onclick="liveAddTime(5)">+5 min</button>
+        </div>
+        <button class="btn btn-ghost btn-block" style="margin-top:10px;color:var(--ink-3)" onclick="liveStop()">⏹ Arrêter la session</button>
+        <div style="margin-top:18px;text-align:left">${progress}</div>
+      </div>`;
+    return;
+  }
+
+  // phases 'running' et 'paused'
+  const remaining = s.phase === 'paused' ? (s.pausedRemaining || 0) : Math.max(0, s.endAt - Date.now());
+  ov.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+      <div class="eyebrow" style="color:var(--orange)">Session live · exo ${s.idx + 1}/${s.exos.length}</div>
+      <button class="btn btn-ghost" style="font-size:11px;color:var(--ink-3);padding:4px 8px" onclick="liveStop()">⏹ Stop</button>
+    </div>
+    <div style="margin:auto 0;text-align:center;width:100%">
+      <div style="font-family:'Anton';font-size:22px;text-transform:uppercase;line-height:1.15;margin-bottom:6px">${esc(cur.title)}</div>
+      <div style="font-family:'JetBrains Mono';font-weight:700;font-size:84px;line-height:1;color:${remaining<=30000?'var(--red)':'var(--orange)'}" id="live-timer">${_liveFmt(remaining)}</div>
+      <div id="live-timer-sub" style="font-family:'JetBrains Mono';font-size:14px;color:var(--ink-4);margin-top:2px">/ ${_liveFmt(cur.plannedMs)}</div>
+      ${s.phase === 'paused' ? '<div style="color:var(--ink-3);font-size:13px;margin-top:10px">⏸ En pause</div>' : ''}
+      <div style="display:flex;gap:8px;margin-top:22px">
+        ${s.phase === 'paused'
+          ? `<button class="btn btn-primary btn-block" style="font-size:15px;padding:14px" onclick="liveResume()">⏯ Reprendre</button>`
+          : `<button class="btn btn-secondary btn-block" onclick="livePause()">⏸ Pause</button>`}
+      </div>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="btn btn-secondary btn-block" onclick="liveAddTime(2)">+2 min</button>
+        <button class="btn btn-secondary btn-block" onclick="liveAddTime(5)">+5 min</button>
+        <button class="btn btn-secondary btn-block" onclick="liveSkip()">⏭ Passer</button>
+      </div>
+    </div>
+    ${globalsBar}
+    <div style="margin-top:14px">${progress}</div>`;
+  _liveUpdateGlobals();
 }
 
 // Drag-and-drop entre lignes
@@ -26487,7 +26791,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.18';
+const APP_VERSION = '2026-06-28.19';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
