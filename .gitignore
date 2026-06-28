@@ -26,3 +26,6 @@ dist/
 build/
 Backups/
 *.tmp
+
+# Supabase CLI scratch
+supabase/.temp/
