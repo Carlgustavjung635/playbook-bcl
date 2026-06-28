@@ -25665,7 +25665,44 @@ function scheduleRender(immediate) {
   _renderPending = setTimeout(() => { _renderPending = null; _doRender(); }, 100);
 }
 
+// ============================================================
+// APP BADGE (icône d'app) — App Badging API (Phase 1)
+// ------------------------------------------------------------
+// Badge numérique sur l'icône de l'app installée (PWA standalone iOS 16.4+ /
+// Android Chrome) = nombre d'éléments demandant l'attention de l'identité
+// courante, à l'échelle de TOUTE l'app. Mis à jour quand l'app est ouverte
+// (boot / sync / foreground / render). No-op silencieux si l'API est absente
+// (Safari onglet, vieil OS). Phase 2 (mise à jour app fermée via push) = à part.
+function appBadgeCount() {
+  const a = state && state.auth;
+  if (!a) return 0;
+  let n = 0;
+  try {
+    if (a.role === 'player' && a.playerId) {
+      // Messages non lus + tirages de gage en attente.
+      if (typeof playerInboxUnreadCount === 'function') n += playerInboxUnreadCount(a.playerId) || 0;
+      if (typeof pendingDraws === 'function') n += pendingDraws(a.playerId).length;
+    } else if (a.role === 'coach') {
+      // Propositions de gage à modérer + entraînements passés à clôturer.
+      if (typeof gagesPendingCount === 'function') n += gagesPendingCount() || 0;
+      if (typeof getOverdueTrainings === 'function') n += getOverdueTrainings().length;
+    }
+  } catch (e) { /* compteurs best-effort */ }
+  return n;
+}
+function updateAppBadge() {
+  try {
+    if (typeof navigator === 'undefined' || typeof navigator.setAppBadge !== 'function') return; // API absente → no-op
+    const n = appBadgeCount();
+    if (n > 0) navigator.setAppBadge(n).catch(() => {});
+    else if (typeof navigator.clearAppBadge === 'function') navigator.clearAppBadge().catch(() => {});
+  } catch (e) { /* silencieux */ }
+}
+
 function _doRender() {
+  // Badge d'app : reflète l'état courant à chaque rendu (point de passage après
+  // la plupart des mutations + sync). Boot/foreground ont leurs propres appels.
+  try { updateAppBadge(); } catch (e) {}
   // Snapshot scroll + active element pour restauration après innerHTML reflow.
   // IMPORTANT : depuis le fix scroll-past-footer, le scroll est sur .app
   // (overflow-y:auto interne), pas sur window. On capture les deux pour
@@ -25988,7 +26025,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.10';
+const APP_VERSION = '2026-06-28.11';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
@@ -26109,8 +26146,12 @@ document.addEventListener('visibilitychange', () => {
     try { checkForUpdate(); } catch (e) {}
     // Retour au 1er plan : un gage a pu être assigné entre-temps → tirage.
     try { maybeShowGageReveal(); } catch (e) {}
+    // Rafraîchit le badge d'icône (un signal a pu changer pendant l'absence).
+    try { updateAppBadge(); } catch (e) {}
   }
 });
+// Badge initial au boot (l'API n'est dispo qu'en PWA installée → no-op sinon).
+try { updateAppBadge(); } catch (e) {}
 </script>
 </body>
 </html>
