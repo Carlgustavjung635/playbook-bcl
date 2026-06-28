@@ -9125,6 +9125,7 @@ function playerToggleAbsence(cid) {
 function confirmPlayerAbsence(cid) {
   const p = currentPlayer(); if (!p) return;
   const c = state.convocations.find(x => x.id === cid); if (!c) return;
+  const prev = _effectiveConvocStatus(c, null, p.id);
   c.responses = c.responses || {};
   c.responses[p.id] = {
     status: 'absent',
@@ -9132,6 +9133,7 @@ function confirmPlayerAbsence(cid) {
     message: document.getElementById('ab-msg').value.trim(),
   };
   persist(); closeModal(); render();
+  _notifyCoachConvocResponse(c, null, prev, 'absent');
 }
 
 // ============================================================
@@ -14582,6 +14584,7 @@ function coachDeclareAbsence(convocId, playerId) {
 }
 function saveAbsence(convocId, playerId) {
   const c = state.convocations.find(x => x.id === convocId);
+  const prev = _effectiveConvocStatus(c, null, playerId);
   c.responses = c.responses || {};
   c.responses[playerId] = {
     status: 'absent',
@@ -14589,11 +14592,14 @@ function saveAbsence(convocId, playerId) {
     message: document.getElementById('ab-msg').value.trim(),
   };
   persist(); closeModal(); render();
+  _notifyCoachConvocResponse(c, null, prev, 'absent');
 }
 function markPresent(convocId, playerId) {
   const c = state.convocations.find(x => x.id === convocId);
+  const prev = _effectiveConvocStatus(c, null, playerId);
   if (c.responses) delete c.responses[playerId];
   persist(); render();
+  _notifyCoachConvocResponse(c, null, prev, 'present');
 }
 
 function editConvoc(id) {
@@ -19151,6 +19157,7 @@ function declareInstanceAbsence(parentId, dateStr, playerId) {
 function saveInstanceAbsence(parentId, dateStr, playerId) {
   const c = state.convocations.find(x => x.id === parentId);
   if (!c) return;
+  const prev = _effectiveConvocStatus(c, dateStr, playerId);
   if (c.recurrence) {
     c.instanceOverrides = c.instanceOverrides || {};
     c.instanceOverrides[dateStr] = c.instanceOverrides[dateStr] || { responses: {...(c.responses||{})} };
@@ -19169,16 +19176,19 @@ function saveInstanceAbsence(parentId, dateStr, playerId) {
     };
   }
   persist(); closeModal(); openEventInstance(parentId, dateStr);
+  _notifyCoachConvocResponse(c, dateStr, prev, 'absent');
 }
 function restoreInstancePresent(parentId, dateStr, playerId) {
   const c = state.convocations.find(x => x.id === parentId);
   if (!c) return;
+  const prev = _effectiveConvocStatus(c, dateStr, playerId);
   if (c.recurrence && c.instanceOverrides && c.instanceOverrides[dateStr] && c.instanceOverrides[dateStr].responses) {
     delete c.instanceOverrides[dateStr].responses[playerId];
   } else if (c.responses) {
     delete c.responses[playerId];
   }
   persist(); openEventInstance(parentId, dateStr);
+  _notifyCoachConvocResponse(c, dateStr, prev, 'present');
 }
 
 // Challenges
@@ -19662,6 +19672,7 @@ function contributeToCollective(cid, pid, delta) {
   const after = Object.values(c.scores).reduce((a,b) => a+b, 0);
   persist();
   render();
+  _notifyCoachChallengeData(c, pid, delta); // Type B (contribution collective)
   // Confirmation visuelle si on vient d'atteindre l'objectif
   if (after >= (c.target || 0) && before < (c.target || 0)) {
     setTimeout(() => alert('🎉 Objectif équipe atteint !\n\n' + c.title + '\n' + after + ' / ' + c.target + ' ' + c.metric), 100);
@@ -19869,12 +19880,15 @@ function quickIncrementChallenge(cid, pid, delta) {
   c.scores[pid] = Math.max(0, (c.scores[pid] || 0) + delta);
   persist();
   render();
+  _notifyCoachChallengeData(c, pid, delta); // Type B (coche/+1 défi manuel ou métrique)
 }
 function saveChallengeScore(cid, pid) {
   const c = state.challenges.find(x => x.id === cid);
   c.scores = c.scores || {};
+  const before = (c.scores[pid] || 0);
   c.scores[pid] = parseInt(document.getElementById('sc-val').value) || 0;
   persist(); closeModal(); render();
+  _notifyCoachChallengeData(c, pid, c.scores[pid] - before); // Type B (saisie perf perso)
 }
 
 function editChallenge(id) {
@@ -26015,6 +26029,39 @@ function notifyPush(ownerKeys, payload) {
     }).catch(() => {});
   } catch (e) { /* best-effort */ }
 }
+// --- Type A : changement de réponse à une convoc (push coach). Pas de "maybe"
+// dans le modèle (présent par défaut ↔ absent) → directions présent↔absent. ---
+function _effectiveConvocStatus(c, instanceDate, pid) {
+  let resp = null;
+  if (c && c.recurrence && instanceDate && c.instanceOverrides && c.instanceOverrides[instanceDate] && c.instanceOverrides[instanceDate].responses) {
+    resp = c.instanceOverrides[instanceDate].responses[pid];
+  } else { resp = (c && c.responses || {})[pid]; }
+  return (resp && resp.status) || 'present';
+}
+function _notifyCoachConvocResponse(c, instanceDate, prevStatus, newStatus) {
+  if (!c || !state.auth || state.auth.role !== 'player') return; // seulement quand la joueuse change SA réponse
+  if (prevStatus === newStatus) return;
+  const p = currentPlayer(); const who = p ? ('#' + p.num + ' ' + p.name) : 'Une joueuse';
+  const label = c.title || (c.type === 'match' ? 'le match' : "l'entraînement");
+  const dateStr = (instanceDate || c.date) ? formatDate(instanceDate || c.date, 'short') : '';
+  const payload = (newStatus === 'absent')
+    ? { title: '❌ Désistement', body: who + ' ne sera pas là pour ' + label + (dateStr ? ' · ' + dateStr : '') }
+    : { title: '✅ Inscription', body: who + ' sera finalement là pour ' + label + (dateStr ? ' · ' + dateStr : '') };
+  payload.url = '/'; payload.tag = 'convoc-resp-' + c.id; payload.type = 'convoc_response';
+  notifyPush([_pushCoachKey()], payload);
+}
+// --- Type B : une joueuse enregistre des données sur un défi (push coach). ---
+function _notifyCoachChallengeData(c, pid, delta) {
+  if (!c || !state.auth || state.auth.role !== 'player') return;
+  if (pid !== state.auth.playerId) return;     // uniquement quand LA joueuse log SES données
+  const d = Number(delta) || 0; if (!d) return;
+  const p = currentPlayer(); const who = p ? ('#' + p.num + ' ' + p.name) : 'Une joueuse';
+  notifyPush([_pushCoachKey()], {
+    title: '📊 Données de défi',
+    body: who + ' a enregistré ' + (d > 0 ? '+' + d : String(d)) + ' sur « ' + (c.title || 'un défi') + ' »',
+    url: '/', tag: 'challenge-' + c.id, type: 'challenge_data'
+  });
+}
 // Navigation déclenchée par un clic sur notification (postMessage du push-sw).
 if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('message', (e) => {
@@ -26354,7 +26401,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.14';
+const APP_VERSION = '2026-06-28.15';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
