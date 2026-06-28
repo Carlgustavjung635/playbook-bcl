@@ -43,13 +43,13 @@ function contrast(a, b) {
   return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
 }
 
-const THEME_IDS = ['court', 'ocean', 'forest', 'rose', 'mono', 'sunset', 'midnight', 'hardwood', 'daylight', 'chalk', 'bcl'];
+const THEME_IDS = ['court', 'ocean', 'forest', 'rose', 'mono', 'sunset', 'midnight', 'hardwood', 'daylight', 'chalk', 'bcl', 'bloom'];
 
 let pass = 0;
 function t(name, fn) { fn(); pass++; console.log('  ✓', name); }
 
-console.log('SCÉNARIO 1 — les 11 thèmes existent (JS THEMES <-> CSS)');
-t('THEMES JS contient les 11 ids', () => {
+console.log('SCÉNARIO 1 — les 12 thèmes existent (JS THEMES <-> CSS)');
+t('THEMES JS contient les 12 ids', () => {
   const arr = (html.match(/const THEMES = \[([\s\S]*?)\];/) || [])[1] || '';
   THEME_IDS.forEach(id => assert.ok(arr.includes(`id: '${id}'`), `THEMES manque ${id}`));
 });
@@ -70,7 +70,7 @@ THEME_IDS.forEach(id => {
 });
 
 console.log('SCÉNARIO 3 — thèmes clairs : chrome topbar/nav clair (texte ink lisible)');
-['daylight', 'chalk'].forEach(id => {
+['daylight', 'chalk', 'bcl', 'bloom'].forEach(id => {
   t(`${id} définit --topbar-bg / --nav-bg clairs`, () => {
     const k = themeTokens(id);
     assert.ok(/255,\s*255,\s*255/.test(k['topbar-bg']), `${id} topbar-bg pas clair`);
@@ -85,4 +85,4 @@ console.log('SCÉNARIO 4 — thèmes sombres restent sombres');
   t(`${id} : fond sombre`, () => assert.ok(lum(toRgb(themeTokens(id)['bg'])) < 0.1, `${id} bg pas sombre`));
 });
 
-console.log(`\n✅ ${pass} assertions OK — 11 thèmes, contrastes WCAG AA vérifiés (clair + sombre).`);
+console.log(`\n✅ ${pass} assertions OK — 12 thèmes, contrastes WCAG AA vérifiés (clair + sombre).`);
