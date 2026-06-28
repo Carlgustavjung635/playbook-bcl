@@ -20,7 +20,7 @@ function alpha(v) { const m = v.match(/rgba?\(([^)]+)\)/); if (!m) return v.star
 let pass = 0; function t(n, f) { f(); pass++; console.log('  ✓', n); }
 
 console.log('SCÉNARIO 1 — thèmes CLAIRS : chrome topbar/nav OPAQUE');
-['daylight', 'chalk', 'bcl'].forEach(id => {
+['daylight', 'chalk', 'bcl', 'bloom'].forEach(id => {
   t(`${id} : --topbar-bg et --nav-bg opaques (alpha = 1)`, () => {
     const b = themeBlock(id);
     const tb = token(b, 'topbar-bg'), nv = token(b, 'nav-bg');

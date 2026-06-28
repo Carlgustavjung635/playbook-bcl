@@ -16,8 +16,8 @@ function lum([r, g, b]) { const f = c => { c /= 255; return c <= 0.03928 ? c / 1
 function contrast(a, b) { const la = lum(toRgb(a)), lb = lum(toRgb(b)); return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05); }
 
 // --- modèle fidèle de getThemeId / head anti-flicker ---
-const DEFAULT_THEME = 'chalk';
-const VALID = ['court', 'ocean', 'forest', 'rose', 'mono', 'sunset', 'midnight', 'hardwood', 'daylight', 'chalk', 'bcl'];
+const DEFAULT_THEME = 'bcl';
+const VALID = ['court', 'ocean', 'forest', 'rose', 'mono', 'sunset', 'midnight', 'hardwood', 'daylight', 'chalk', 'bcl', 'bloom'];
 function getThemeId(map, key) { const id = map[key]; return VALID.includes(id) ? id : DEFAULT_THEME; }
 
 let pass = 0; function t(n, f) { f(); pass++; console.log('  ✓', n); }
@@ -47,19 +47,19 @@ t('ink/surface ≥ 4.5', () => assert.ok(contrast(k['ink'], k['surface']) >= 4.5
 t('ink-2/surface ≥ 4.5', () => assert.ok(contrast(k['ink-2'], k['surface']) >= 4.5, contrast(k['ink-2'], k['surface']).toFixed(2)));
 t('accent rouge/surface ≥ 3', () => assert.ok(contrast(k['accent-rgb'], k['surface']) >= 3.0, contrast(k['accent-rgb'], k['surface']).toFixed(2)));
 
-console.log('SCÉNARIO 4 — défaut = Chalk');
-t('DEFAULT_THEME = chalk dans le JS', () => assert.ok(/const DEFAULT_THEME = 'chalk';/.test(html)));
-t('head anti-flicker par défaut chalk', () => assert.ok(/var t=\(map&&map\[key\]\)\|\|'chalk';/.test(html)));
-t('plus aucun défaut court résiduel', () => {
-  assert.ok(!/const DEFAULT_THEME = 'court';/.test(html));
-  assert.ok(!/\|\|'court';/.test(html));
+console.log('SCÉNARIO 4 — défaut = BCL');
+t('DEFAULT_THEME = bcl dans le JS', () => assert.ok(/const DEFAULT_THEME = 'bcl';/.test(html)));
+t('head anti-flicker par défaut bcl', () => assert.ok(/var t=\(map&&map\[key\]\)\|\|'bcl';/.test(html)));
+t('plus aucun défaut court/chalk résiduel', () => {
+  assert.ok(!/const DEFAULT_THEME = 'court';/.test(html) && !/const DEFAULT_THEME = 'chalk';/.test(html));
+  assert.ok(!/\|\|'court';/.test(html) && !/\|\|'chalk';/.test(html));
 });
 
 console.log('SCÉNARIO 5 — comportement du défaut (logique getThemeId)');
-t('nouvel user (rien stocké) → Chalk', () => assert.strictEqual(getThemeId({}, 'coach:-'), 'chalk'));
-t('identité jamais connectée (clé absente) → Chalk', () => assert.strictEqual(getThemeId({ 'player:42': 'ocean' }, 'coach:-'), 'chalk'));
-t('choix existant respecté (ex: court) → on NE force PAS Chalk', () => assert.strictEqual(getThemeId({ 'coach:-': 'court' }, 'coach:-'), 'court'));
-t('choix BCL respecté', () => assert.strictEqual(getThemeId({ 'coach:-': 'bcl' }, 'coach:-'), 'bcl'));
-t('valeur invalide stockée → fallback Chalk', () => assert.strictEqual(getThemeId({ 'coach:-': 'zzz' }, 'coach:-'), 'chalk'));
+t('nouvel user (rien stocké) → BCL', () => assert.strictEqual(getThemeId({}, 'coach:-'), 'bcl'));
+t('identité jamais connectée (clé absente) → BCL', () => assert.strictEqual(getThemeId({ 'player:42': 'ocean' }, 'coach:-'), 'bcl'));
+t('choix existant respecté (ex: court) → on NE force PAS BCL', () => assert.strictEqual(getThemeId({ 'coach:-': 'court' }, 'coach:-'), 'court'));
+t('choix chalk respecté', () => assert.strictEqual(getThemeId({ 'coach:-': 'chalk' }, 'coach:-'), 'chalk'));
+t('valeur invalide stockée → fallback BCL', () => assert.strictEqual(getThemeId({ 'coach:-': 'zzz' }, 'coach:-'), 'bcl'));
 
 console.log(`\n✅ ${pass} assertions OK — thème BCL + défaut Chalk.`);

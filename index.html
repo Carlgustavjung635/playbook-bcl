@@ -16,7 +16,7 @@
   var auth=JSON.parse(localStorage.getItem('pb8_auth')||'null');
   var map=JSON.parse(localStorage.getItem('pb8_theme')||'{}');
   var key=auth?(auth.role+':'+(auth.playerId||'-')):'_guest';
-  var t=(map&&map[key])||'chalk'; // défaut Chalk (clair) ; doit matcher DEFAULT_THEME
+  var t=(map&&map[key])||'bcl'; // défaut BCL (clair) ; doit matcher DEFAULT_THEME
   document.documentElement.setAttribute('data-theme',t);
 }catch(e){}})();
 </script>
@@ -81,6 +81,15 @@
     --yellow-soft: rgba(234, 179, 8, 0.12);
     --purple: #a855f7;
     --purple-soft: rgba(168, 85, 247, 0.12);
+
+    /* Chrono possession — thémable. Défaut SOMBRE (lisibilité des chiffres sur
+       fond noir, façon tableau de score). Les thèmes CLAIRS surchargent ces
+       tokens (fond clair + couleurs d'état plus foncées pour rester contrastées
+       de loin). cf. fix « chrono noir en thème clair ». */
+    --chrono-bg: radial-gradient(circle at 50% 28%, #1a1a1a, #050505 75%);
+    --chrono-run: var(--green);
+    --chrono-warn: var(--orange-2);
+    --chrono-done: #ff3b3b;
 
     --radius: 10px;
     --radius-sm: 6px;
@@ -159,6 +168,22 @@
     --ink: #1a1a1a; --ink-2: #525252; --ink-3: #737373; --ink-4: #a3a3a3;
     --accent-rgb: 196, 30, 58; --orange-2: #ea580c;
     --topbar-bg: rgba(255, 255, 255, 1); --nav-bg: rgba(255, 255, 255, 1);
+  }
+  /* 🌸 Bloom — club féminin chic : framboise/fuchsia + prune, fond crème rosé clair */
+  :root[data-theme="bloom"] {
+    --bg: #fdf4f8; --bg-1: #ffffff; --bg-2: #fbeaf1; --bg-3: #f6dde8;
+    --surface: #ffffff; --surface-2: #fdf2f7; --border: #f0d4e0; --border-soft: #f8e6ee;
+    --ink: #2a1620; --ink-2: #6b3a52; --ink-3: #9a6e83; --ink-4: #c9a9b8;
+    --accent-rgb: 219, 39, 119; --orange-2: #ec4899;
+    --topbar-bg: rgba(255, 255, 255, 1); --nav-bg: rgba(255, 255, 255, 1);
+  }
+
+  /* Chrono en thème CLAIR : fond clair (au lieu du gradient noir en dur) +
+     couleurs d'état foncées → chiffres énormes lisibles de loin sur fond clair. */
+  :root[data-theme="daylight"], :root[data-theme="chalk"],
+  :root[data-theme="bcl"], :root[data-theme="bloom"] {
+    --chrono-bg: radial-gradient(circle at 50% 28%, var(--bg-1), var(--bg) 80%);
+    --chrono-run: #15803d; --chrono-warn: #c2410c; --chrono-done: #dc2626;
   }
 
   /* ----- ThemePicker (modale 🎨 Couleur de l'interface) ----- */
@@ -553,7 +578,7 @@
   #chrono-overlay { position: fixed; inset: 0; z-index: 9000; }
   .chrono-screen {
     position: fixed; inset: 0;
-    background: radial-gradient(circle at 50% 28%, #1a1a1a, #050505 75%);
+    background: var(--chrono-bg);
     display: flex; flex-direction: column;
     padding: calc(16px + env(safe-area-inset-top)) 18px calc(20px + env(safe-area-inset-bottom));
     overflow-y: auto;
@@ -590,9 +615,9 @@
     color: var(--ink); letter-spacing: -0.02em;
     transition: color 0.2s;
   }
-  .chrono-time.is-running { color: var(--green); }
-  .chrono-time.is-warn    { color: var(--orange-2); }
-  .chrono-time.is-done    { color: #ff3b3b; animation: chronoFlash 0.5s steps(1) infinite; }
+  .chrono-time.is-running { color: var(--chrono-run); }
+  .chrono-time.is-warn    { color: var(--chrono-warn); }
+  .chrono-time.is-done    { color: var(--chrono-done); animation: chronoFlash 0.5s steps(1) infinite; }
   @keyframes chronoFlash { 50% { opacity: 0.25; } }
   .chrono-sub {
     font-family: 'JetBrains Mono', monospace; font-size: 12px;
@@ -4870,10 +4895,11 @@ const THEMES = [
   { id: 'daylight', name: 'Daylight', emoji: '☀️', desc: 'Blanc + orange · clair', accent: '#ea580c', accent2: '#fb923c', bg: '#ffffff', light: true },
   { id: 'chalk',    name: 'Chalk',    emoji: '📋', desc: 'Gris-bleu + bleu · clair', accent: '#2563eb', accent2: '#60a5fa', bg: '#ffffff', light: true },
   { id: 'bcl',      name: 'BCL',      emoji: '👟', desc: 'Aux couleurs du club · clair', accent: '#c41e3a', accent2: '#ea580c', bg: '#ffffff', light: true },
+  { id: 'bloom',    name: 'Bloom',    emoji: '🌸', desc: 'Framboise chic · clair', accent: '#db2777', accent2: '#ec4899', bg: '#ffffff', light: true },
 ];
-// Défaut = Chalk (clair). N'affecte QUE les identités sans préférence stockée
-// dans pb8_theme : un choix explicite existant est toujours respecté.
-const DEFAULT_THEME = 'chalk';
+// Défaut = BCL (couleurs du club, clair). N'affecte QUE les identités sans
+// préférence stockée dans pb8_theme : un choix explicite existant est respecté.
+const DEFAULT_THEME = 'bcl';
 
 // Clé d'identité : un thème par rôle/joueuse → coach et chaque joueuse gardent
 // leur propre couleur même sur un appareil partagé. Doit matcher la logique du
@@ -26974,7 +27000,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.25';
+const APP_VERSION = '2026-06-28.26';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
