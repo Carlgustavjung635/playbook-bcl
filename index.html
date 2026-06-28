@@ -1378,9 +1378,18 @@
 
   /* ========== MODAL ========== */
   .modal-bg {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 100;
+    /* Safari mobile (onglet) : l'address bar réduit la hauteur visible. On évite
+       `inset:0` (qui mappe sur le LARGE viewport → la modale déborde sous la barre
+       en haut comme en bas). On ancre top/left/right et on impose une hauteur en
+       `dvh` (dynamic viewport) → la modale flex-end colle au bas RÉELLEMENT visible
+       et son haut reste atteignable. Padding-top safe-area = dégagement notch même
+       hors PWA. Fallback vh pour les vieux navigateurs sans dvh. */
+    position: fixed; top: 0; left: 0; right: 0;
+    height: 100vh; height: 100dvh;
+    background: rgba(0,0,0,0.8); z-index: 100;
     backdrop-filter: blur(6px);
     display: flex; align-items: flex-end; justify-content: center;
+    padding-top: env(safe-area-inset-top);
     animation: fadeIn 0.2s;
   }
   @media (min-width: 640px) {
@@ -1391,7 +1400,7 @@
     border: 1px solid var(--border);
     border-radius: 16px 16px 0 0;
     max-width: 480px; width: 100%;
-    max-height: 92vh; overflow-y: auto;
+    max-height: 92vh; max-height: 92dvh; overflow-y: auto;
     animation: slideUp 0.25s cubic-bezier(0.16, 1, 0.3, 1);
     padding-bottom: env(safe-area-inset-bottom);
   }
@@ -26840,7 +26849,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.20';
+const APP_VERSION = '2026-06-28.21';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
@@ -26854,17 +26863,29 @@ async function checkForUpdate(opts) {
     if (!res.ok) return;
     const data = await res.json();
     const remote = data && (data.v || data.version);
-    if (remote && remote !== APP_VERSION) showUpdateBanner();
+    if (remote && remote !== APP_VERSION) showUpdateBanner(remote);
   } catch (e) { /* hors ligne / fichier absent → on ignore */ }
 }
-function showUpdateBanner() {
+// L'app est un index.html mono-fichier (JS inline) → pas de bundle séparé à
+// cache-buster. En Safari onglet, un simple location.reload() peut resservir le
+// HTML caché → on RECHARGE AVEC un paramètre de version (?v=) : l'URL change donc
+// Safari refetch un document frais (et donc le JS inline à jour).
+function _cacheBustReload(v) {
+  try {
+    const u = new URL(location.href);
+    u.searchParams.set('v', v || String(Date.now()));
+    location.replace(u.toString());
+  } catch (e) { location.reload(); }
+}
+function showUpdateBanner(remote) {
   if (_updateBannerShown) return;
   _updateBannerShown = true;
   let el = document.getElementById('update-banner');
   if (!el) { el = document.createElement('div'); el.id = 'update-banner'; document.body.appendChild(el); }
+  const v = (remote || '').replace(/[^\w.\-]/g, '');
   el.innerHTML =
     '<span class="ub-text">🔄 Nouvelle version disponible</span>' +
-    '<button class="ub-reload" onclick="location.reload()">Recharger</button>' +
+    `<button class="ub-reload" onclick="_cacheBustReload('${v}')">Recharger</button>` +
     '<button class="ub-close" onclick="this.parentElement.remove()" aria-label="Fermer">✕</button>';
 }
 
