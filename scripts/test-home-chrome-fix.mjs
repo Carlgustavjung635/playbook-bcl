@@ -21,13 +21,12 @@ let pass = 0; function t(n, f) { f(); pass++; console.log('  ✓', n); }
 
 console.log('SCÉNARIO 1 — thèmes CLAIRS : chrome topbar/nav OPAQUE');
 ['daylight', 'chalk', 'bcl', 'bloom'].forEach(id => {
-  t(`${id} : --topbar-bg et --nav-bg opaques (alpha = 1)`, () => {
+  t(`${id} : --topbar-bg / --nav-bg = var(--bg) (opaque + homogène avec la page)`, () => {
     const b = themeBlock(id);
-    const tb = token(b, 'topbar-bg'), nv = token(b, 'nav-bg');
-    assert.ok(/255,\s*255,\s*255/.test(tb), `${id} topbar pas blanc`);
-    assert.ok(/255,\s*255,\s*255/.test(nv), `${id} nav pas blanc`);
-    assert.strictEqual(alpha(tb), 1, `${id} topbar pas opaque (${tb})`);
-    assert.strictEqual(alpha(nv), 1, `${id} nav pas opaque (${nv})`);
+    // v2 : chrome = couleur de page (var(--bg)), opaque → ni bleed sous la topbar
+    // ni bande blanche tranchant avec le contenu sous la nav.
+    assert.strictEqual(token(b, 'topbar-bg'), 'var(--bg)', `${id} topbar pas homogène`);
+    assert.strictEqual(token(b, 'nav-bg'), 'var(--bg)', `${id} nav pas homogène`);
   });
 });
 

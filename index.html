@@ -151,7 +151,7 @@
     /* Chrome OPAQUE en thème clair : le backdrop-filter échantillonne des fonds
        différents derrière la barre (contenu scrollé vs bg de la safe-area) →
        bande bi-ton visible en clair. Opaque = barre homogène (cf. fix #2). */
-    --topbar-bg: rgba(255, 255, 255, 1); --nav-bg: rgba(255, 255, 255, 1);
+    --topbar-bg: var(--bg); --nav-bg: var(--bg);
   }
   /* 📋 Chalk — gris-bleu clair + bleu tactique (tableau du coach) */
   :root[data-theme="chalk"] {
@@ -159,7 +159,7 @@
     --surface: #ffffff; --surface-2: #eef2f8; --border: #cbd5e1; --border-soft: #e2e8f0;
     --ink: #0f172a; --ink-2: #475569; --ink-3: #64748b; --ink-4: #94a3b8;
     --accent-rgb: 37, 99, 235; --orange-2: #60a5fa;
-    --topbar-bg: rgba(255, 255, 255, 1); --nav-bg: rgba(255, 255, 255, 1);
+    --topbar-bg: var(--bg); --nav-bg: var(--bg);
   }
   /* 👟 BCL — aux couleurs du club : rouge Converse + orange ballon, fond clair */
   :root[data-theme="bcl"] {
@@ -167,7 +167,7 @@
     --surface: #ffffff; --surface-2: #f5f3f1; --border: #dcd9d4; --border-soft: #eceae6;
     --ink: #1a1a1a; --ink-2: #525252; --ink-3: #737373; --ink-4: #a3a3a3;
     --accent-rgb: 196, 30, 58; --orange-2: #ea580c;
-    --topbar-bg: rgba(255, 255, 255, 1); --nav-bg: rgba(255, 255, 255, 1);
+    --topbar-bg: var(--bg); --nav-bg: var(--bg);
   }
   /* 🌸 Bloom — club féminin chic : framboise/fuchsia + prune, fond crème rosé clair */
   :root[data-theme="bloom"] {
@@ -175,7 +175,7 @@
     --surface: #ffffff; --surface-2: #fdf2f7; --border: #f0d4e0; --border-soft: #f8e6ee;
     --ink: #2a1620; --ink-2: #6b3a52; --ink-3: #9a6e83; --ink-4: #c9a9b8;
     --accent-rgb: 219, 39, 119; --orange-2: #ec4899;
-    --topbar-bg: rgba(255, 255, 255, 1); --nav-bg: rgba(255, 255, 255, 1);
+    --topbar-bg: var(--bg); --nav-bg: var(--bg);
   }
 
   /* Chrono en thème CLAIR : fond clair (au lieu du gradient noir en dur) +
@@ -285,6 +285,11 @@
     background: var(--bg);
     padding-bottom: calc(72px + env(safe-area-inset-bottom));
   }
+  /* Respiration sous la topbar (sticky) : la 1re carte du contenu (ex. « Diffuser
+     un message ») a margin-top:0 → sans ça elle est COLLÉE au bas de la topbar
+     (ressenti « coupé »). Vaut dans tous les modes (onglet / standalone / notch),
+     car la topbar sticky réserve déjà sa propre hauteur (safe-area incluse). */
+  .app > main { padding-top: 16px; }
   /* TABLETTE — on élargit le conteneur (avant : strip 560px centré = marges
      énormes sur iPad). Mobile (<768px) STRICTEMENT inchangé. Portrait tablette
      720px, paysage / grand écran 940px. */
@@ -380,8 +385,11 @@
     backdrop-filter: saturate(180%) blur(20px);
     -webkit-backdrop-filter: saturate(180%) blur(20px);
     border-top: 1px solid var(--border);
-    /* home-bar iPhone (bottom) + insets latéraux en landscape. */
-    padding: 8px max(4px, env(safe-area-inset-right)) calc(8px + env(safe-area-inset-bottom)) max(4px, env(safe-area-inset-left));
+    /* home-bar iPhone (bottom) + insets latéraux en landscape. `max(8px, env())`
+       (et NON `8px + env()`) : sur iPhone à home-bar, l'inset (~34px) suffit déjà
+       à dégager la barre → pas de bande vide supplémentaire de 8px sous les
+       boutons ; sur écran sans inset, plancher de 8px conservé. */
+    padding: 8px max(4px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(4px, env(safe-area-inset-left));
     display: flex; justify-content: space-around;
   }
   @media (min-width: 768px) {
@@ -27000,7 +27008,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.26';
+const APP_VERSION = '2026-06-28.27';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {

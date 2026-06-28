@@ -71,11 +71,12 @@ THEME_IDS.forEach(id => {
 
 console.log('SCÉNARIO 3 — thèmes clairs : chrome topbar/nav clair (texte ink lisible)');
 ['daylight', 'chalk', 'bcl', 'bloom'].forEach(id => {
-  t(`${id} définit --topbar-bg / --nav-bg clairs`, () => {
+  t(`${id} : chrome topbar/nav homogène avec le fond clair`, () => {
     const k = themeTokens(id);
-    assert.ok(/255,\s*255,\s*255/.test(k['topbar-bg']), `${id} topbar-bg pas clair`);
-    assert.ok(/255,\s*255,\s*255/.test(k['nav-bg']), `${id} nav-bg pas clair`);
-    // fond réellement clair (luminance haute)
+    // Chrome = var(--bg) (opaque, = couleur de page) → pas de bande blanche qui
+    // tranche avec le contenu (cf. fix standalone v2). Le fond doit rester clair.
+    assert.strictEqual(k['topbar-bg'], 'var(--bg)', `${id} topbar-bg pas homogène`);
+    assert.strictEqual(k['nav-bg'], 'var(--bg)', `${id} nav-bg pas homogène`);
     assert.ok(lum(toRgb(k['bg'])) > 0.7, `${id} bg pas assez clair`);
   });
 });

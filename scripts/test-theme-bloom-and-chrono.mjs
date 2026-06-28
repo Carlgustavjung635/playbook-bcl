@@ -38,10 +38,11 @@ t('bloc CSS + entrée THEMES clair', () => {
 
 console.log('SCÉNARIO 2 — Bloom : féminin clair + WCAG AA');
 const b = theme('bloom');
-t('fond clair + surface blanche + chrome opaque', () => {
+t('fond clair + surface blanche + chrome homogène (var(--bg))', () => {
   assert.ok(lum(toRgb(b['bg'])) > 0.7, 'bg pas clair');
   assert.strictEqual(b['surface'].toLowerCase(), '#ffffff');
-  assert.ok(/255,\s*255,\s*255/.test(b['nav-bg']) && /255,\s*255,\s*255/.test(b['topbar-bg']));
+  assert.strictEqual(b['nav-bg'], 'var(--bg)');
+  assert.strictEqual(b['topbar-bg'], 'var(--bg)');
 });
 t('accent framboise/fuchsia vif', () => assert.strictEqual(b['accent-rgb'].replace(/\s/g, ''), '219,39,119'));
 t('ink/bg, ink/surface, ink-2/surface ≥ 4.5', () => {
