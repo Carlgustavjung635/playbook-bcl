@@ -1675,6 +1675,12 @@
     margin-bottom: 24px;
     animation: pulseGlow 2.5s ease-in-out infinite;
   }
+  /* Logo BCL (remplace l'emoji 🏀 dans les orbes circulaires) : le PNG transparent
+     est posé sur un disque blanc → garde la pastille + l'aura orange autour. */
+  .auth-logo img.brand-logo, .topbar-orb img.brand-logo {
+    width: 100%; height: 100%; border-radius: 50%;
+    object-fit: contain; background: #fff; display: block;
+  }
   @keyframes pulseGlow {
     0%, 100% { box-shadow: 0 0 60px var(--orange-glow), inset 0 0 30px rgba(0,0,0,0.3); }
     50% { box-shadow: 0 0 100px rgba(var(--accent-rgb), 0.5), inset 0 0 30px rgba(0,0,0,0.3); }
@@ -6354,7 +6360,7 @@ function renderAuth() {
     return `
       <div class="auth-screen">
         <div class="auth-bg-glow"></div>
-        <div class="auth-logo">🏀</div>
+        <div class="auth-logo"><img class="brand-logo" src="/assets/bcl-logo-256.png" alt="Basket Club Lislois"></div>
         <div class="auth-title">Playbook</div>
         <div class="auth-subtitle">BCL · IE-Basket Club l'Islois</div>
         <div class="role-picker">
@@ -6376,7 +6382,7 @@ function renderAuth() {
     return `
       <div class="auth-screen" style="position:fixed;inset:0;justify-content:flex-start;padding-top:60px;overflow-y:auto;-webkit-overflow-scrolling:touch;padding-bottom:calc(96px + env(safe-area-inset-bottom))">
         <div class="auth-bg-glow"></div>
-        <div class="auth-logo" style="width:60px;height:60px;font-size:32px">🏀</div>
+        <div class="auth-logo" style="width:60px;height:60px;font-size:32px"><img class="brand-logo" src="/assets/bcl-logo-256.png" alt="Basket Club Lislois"></div>
         <div class="auth-title" style="font-size:28px">Qui es-tu ?</div>
         <div class="auth-subtitle">Choisis ton nom</div>
         <div style="width:100%;max-width:340px;display:grid;grid-template-columns:repeat(2,1fr);gap:10px">
@@ -6415,7 +6421,7 @@ function renderAuth() {
     return `
       <div class="auth-screen" style="justify-content:flex-start;padding-top:50px">
         <div class="auth-bg-glow"></div>
-        <div class="auth-logo" style="width:60px;height:60px;font-size:32px">🏀</div>
+        <div class="auth-logo" style="width:60px;height:60px;font-size:32px"><img class="brand-logo" src="/assets/bcl-logo-256.png" alt="Basket Club Lislois"></div>
         <div class="auth-title" style="font-size:24px">${player ? esc(player.name) : esc(role.label)}</div>
         <div class="auth-subtitle">${isLocked ? 'Trop de tentatives' : 'Saisis ton code à 4 chiffres'}</div>
         <div class="pin-display">
@@ -6462,7 +6468,7 @@ function renderNoActiveSeasonScreen() {
   return `
     <div class="auth-screen" style="justify-content:center;padding:40px 24px;text-align:center">
       <div class="auth-bg-glow"></div>
-      <div class="auth-logo">🏀</div>
+      <div class="auth-logo"><img class="brand-logo" src="/assets/bcl-logo-256.png" alt="Basket Club Lislois"></div>
       <div class="auth-title" style="margin-top:18px">L'équipe n'a pas de saison en cours</div>
       <div class="auth-subtitle" style="margin-top:8px;max-width:320px;line-height:1.5">
         ${name ? 'Salut ' + name + ' — ' : ''}reviens bientôt ! Ton coach activera la prochaine saison dès qu'elle sera prête.
@@ -6801,7 +6807,7 @@ function renderTopbar() {
   return `
     <header class="topbar">
       <div class="topbar-logo">
-        <div class="topbar-orb">🏀</div>
+        <div class="topbar-orb"><img class="brand-logo" src="/assets/bcl-logo-64.png" alt="BCL"></div>
         <div>
           <div class="topbar-title">Playbook</div>
           ${isCoach
@@ -25979,7 +25985,7 @@ function renderPublic() {
     <div class="app" style="padding-bottom:env(safe-area-inset-bottom)">
       <header class="topbar" style="position:sticky;top:0">
         <div class="topbar-logo">
-          <div class="topbar-orb">🏀</div>
+          <div class="topbar-orb"><img class="brand-logo" src="/assets/bcl-logo-64.png" alt="BCL"></div>
           <div>
             <div class="topbar-title">L'Islois</div>
             <div class="topbar-sub">D2F · ${esc(pubSeasonLabel)}</div>
@@ -26951,7 +26957,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.22';
+const APP_VERSION = '2026-06-28.23';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
