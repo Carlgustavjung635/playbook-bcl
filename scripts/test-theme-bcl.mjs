@@ -37,8 +37,9 @@ t('fond clair (luminance haute) + surface blanche', () => {
   assert.ok(lum(toRgb(k['bg'])) > 0.7, 'bg pas clair');
   assert.strictEqual(k['surface'].toLowerCase(), '#ffffff');
 });
-t('chrome topbar/nav clair', () => {
-  assert.ok(/255,\s*255,\s*255/.test(k['topbar-bg']) && /255,\s*255,\s*255/.test(k['nav-bg']));
+t('chrome topbar/nav homogène (var(--bg))', () => {
+  assert.strictEqual(k['topbar-bg'], 'var(--bg)');
+  assert.strictEqual(k['nav-bg'], 'var(--bg)');
 });
 
 console.log('SCÉNARIO 3 — contraste WCAG AA');
