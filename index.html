@@ -8037,7 +8037,9 @@ function renderHomeCoach() {
 
   // Seuls les matchs joués (avec au moins un score > 0) entrent dans le bilan et l'historique
   // Saison courante uniquement (fix #5 : sinon les stats de la saison passée s'affichent).
-  const playedMatches = currentSeasonMatches().filter(m => (m.scoreUs || 0) > 0 || (m.scoreOpp || 0) > 0);
+  const seasonMatches = currentSeasonMatches();
+  const hasAnyMatch = seasonMatches.length > 0; // distingue « première saison » de « rien joué »
+  const playedMatches = seasonMatches.filter(m => (m.scoreUs || 0) > 0 || (m.scoreOpp || 0) > 0);
   const recentMatches = [...playedMatches].sort((a,b) => b.date.localeCompare(a.date)).slice(0, 3);
   const wins = playedMatches.filter(m => m.scoreUs > m.scoreOpp).length;
   const losses = playedMatches.filter(m => m.scoreUs < m.scoreOpp).length;
@@ -8078,37 +8080,49 @@ function renderHomeCoach() {
         ${featuredPlays.map(p => playTile(p)).join('')}
       </div>
 
-      <div class="section-header">
-        <div>
-          <div class="eyebrow">Bilan saison</div>
-          <h2 class="display-md mt-2">Forme</h2>
+      ${!hasAnyMatch ? `
+        <!-- Première saison : aucun match créé → état vide avec CTA fort. -->
+        <div style="padding:18px 18px 4px">
+          <div style="padding:28px 20px;background:var(--surface);border:1.5px dashed var(--border);border-radius:var(--radius);text-align:center">
+            <div style="font-size:42px;margin-bottom:10px;opacity:0.65">🏀</div>
+            <div style="font-family:'Anton';font-size:18px;text-transform:uppercase;letter-spacing:0.02em;margin-bottom:6px">Première saison ?</div>
+            <div style="font-size:12px;color:var(--ink-3);line-height:1.5;margin-bottom:16px">Aucun match pour l'instant. Crée ton premier match pour suivre la forme, l'historique et les convocations.</div>
+            <button class="btn btn-primary btn-block btn-lg" onclick="editMatch()">+ Créer un match</button>
+          </div>
         </div>
-      </div>
-      <div class="stat-grid mb-3">
-        <div class="stat-tile">
-          <div class="stat-tile-label">Bilan</div>
-          <div class="stat-tile-value">${wins}<span style="color:var(--ink-4)"> · ${losses}</span></div>
-          <div class="stat-tile-sub">${playedMatches.length} match${playedMatches.length>1?'s':''} joué${playedMatches.length>1?'s':''}</div>
+      ` : `
+        <div class="section-header">
+          <div>
+            <div class="eyebrow">Bilan saison</div>
+            <h2 class="display-md mt-2">Forme</h2>
+          </div>
         </div>
-        <div class="stat-tile">
-          <div class="stat-tile-label">Win Rate</div>
-          <div class="stat-tile-value">${playedMatches.length ? Math.round(100*wins/playedMatches.length) : 0}<span style="font-size:22px;color:var(--ink-4)">%</span></div>
-          <div class="stat-tile-sub">${esc(getCurrentSeason() ? 'Saison ' + seasonShortLabel(getCurrentSeason()) : 'Saison')}</div>
+        <div class="stat-grid mb-3">
+          <div class="stat-tile">
+            <div class="stat-tile-label">Bilan</div>
+            <div class="stat-tile-value">${wins}<span style="color:var(--ink-4)"> · ${losses}</span></div>
+            <div class="stat-tile-sub">${playedMatches.length} match${playedMatches.length>1?'s':''} joué${playedMatches.length>1?'s':''}</div>
+          </div>
+          <div class="stat-tile">
+            <div class="stat-tile-label">Win Rate</div>
+            <div class="stat-tile-value">${playedMatches.length ? Math.round(100*wins/playedMatches.length) : 0}<span style="font-size:22px;color:var(--ink-4)">%</span></div>
+            <div class="stat-tile-sub">${esc(getCurrentSeason() ? 'Saison ' + seasonShortLabel(getCurrentSeason()) : 'Saison')}</div>
+          </div>
         </div>
-      </div>
 
-      <div class="section-header">
-        <div>
-          <div class="eyebrow">Derniers matchs</div>
-          <h2 class="display-md mt-2">Historique</h2>
+        <div class="section-header">
+          <div>
+            <div class="eyebrow">Derniers matchs</div>
+            <h2 class="display-md mt-2">Historique</h2>
+          </div>
+          ${recentMatches.length ? `<button class="section-action" onclick="goSection('matches')">Tous →</button>` : ''}
         </div>
-        <button class="section-action" onclick="goSection('matches')">Tous →</button>
-      </div>
-      <div class="list-section">
-        ${recentMatches.length === 0 ? `
-          <div class="empty" style="padding:24px"><div class="empty-icon">○</div><div class="empty-title">Aucun match</div></div>
-        ` : recentMatches.map(m => matchRow(m)).join('')}
-      </div>
+        <div class="list-section">
+          ${recentMatches.length === 0 ? `
+            <div class="empty" style="padding:24px"><div class="empty-icon">○</div><div class="empty-title">Aucun match joué pour l'instant</div></div>
+          ` : recentMatches.map(m => matchRow(m)).join('')}
+        </div>
+      `}
 
       ${(() => {
         try {
@@ -8204,11 +8218,11 @@ function renderHomeCoach() {
           const plannedDates = Object.keys(sched).length;
           return `
             <div class="section-header">
-              <div>
+              <div style="min-width:0;flex:1">
                 <div class="eyebrow" style="color:${active?'var(--orange)':'var(--ink-3)'}">${active ? '🗓 Journalier · actif' : '○ Journalier · inactif'}</div>
-                <h2 class="display-md mt-2">${esc(o.title)}</h2>
+                <h2 class="display-md mt-2" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(o.title)}</h2>
               </div>
-              <div style="display:flex;gap:10px;align-items:center">
+              <div style="display:flex;gap:10px;align-items:center;flex-shrink:0">
                 <button class="section-action" onclick="openOffseasonConfig()">⚙ Gérer</button>
                 <button class="section-action" onclick="openOffseasonDashboard()">Suivi →</button>
               </div>
@@ -8222,7 +8236,7 @@ function renderHomeCoach() {
                 ${todayItems.length ? `<div style="height:6px;background:var(--bg-1);border-radius:3px;overflow:hidden;margin-bottom:8px"><div style="height:100%;width:${dPct}%;background:${dColor}"></div></div>` : ''}
                 <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">
                   <span>${plannedDates} date${plannedDates>1?'s':''} planifiée${plannedDates>1?'s':''}</span>
-                  <span>${todayItems.length} exo${todayItems.length>1?'s':''} aujourd'hui</span>
+                  ${todayItems.length ? `<span>${todayItems.length} exo${todayItems.length>1?'s':''} aujourd'hui</span>` : ''}
                 </div>
               </div>
             </div>
@@ -8248,11 +8262,11 @@ function renderHomeCoach() {
         }).length;
         return `
           <div class="section-header">
-            <div>
+            <div style="min-width:0;flex:1">
               <div class="eyebrow" style="color:${active?'var(--orange)':'var(--ink-3)'}">${active ? '☀ Actif · ' + formatWeekRange() : '○ Inactif · ' + formatDate(o.startDate, 'short') + ' → ' + formatDate(o.endDate, 'short')}</div>
-              <h2 class="display-md mt-2">${esc(o.title)}</h2>
+              <h2 class="display-md mt-2" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(o.title)}</h2>
             </div>
-            <div style="display:flex;gap:10px;align-items:center">
+            <div style="display:flex;gap:10px;align-items:center;flex-shrink:0">
               <button class="section-action" onclick="openOffseasonConfig()">⚙ Gérer</button>
               <button class="section-action" onclick="openOffseasonDashboard()">Suivi →</button>
             </div>
@@ -11338,25 +11352,30 @@ function editMatch(id) {
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <div class="modal-body">
-      <div class="fld-row">
+      <!-- QUAND : date + heure (heure compacte) -->
+      <div class="eyebrow-muted" style="margin-bottom:8px">Quand</div>
+      <div class="fld-row" style="grid-template-columns:1.5fr 1fr">
         <div class="fld"><label class="fld-label">Date</label><input id="m-date" type="date" value="${m.date}"></div>
-        <div class="fld"><label class="fld-label">Lieu</label>
-          <select id="m-home"><option value="true" ${m.home?'selected':''}>Domicile</option><option value="false" ${!m.home?'selected':''}>Extérieur</option></select>
-        </div>
-      </div>
-      <div class="fld"><label class="fld-label">Adversaire</label><input id="m-opp" value="${esc(m.opponent)}" placeholder="Ex : CA PONTACQ"></div>
-      ${renderTeamTagField('m-team', isNew ? defaultEventTag() : (m.teamTag === 'e2' ? 'e2' : 'e1'), false)}
-      <div class="fld-row">
-        <div class="fld"><label class="fld-label">Heure du match</label><input id="m-time" type="time" value="${m.time || ''}"></div>
-        <div class="fld"><label class="fld-label">Lieu du match</label><input id="m-place" value="${esc(m.place || '')}" placeholder="Gymnase de..."></div>
-      </div>
-      <div class="fld-row">
-        <div class="fld"><label class="fld-label">Notre score</label><input id="m-us" type="number" value="${m.scoreUs}" min="0"></div>
-        <div class="fld"><label class="fld-label">Adversaire</label><input id="m-them" type="number" value="${m.scoreOpp}" min="0"></div>
+        <div class="fld"><label class="fld-label">Heure</label><input id="m-time" type="time" value="${m.time || ''}"></div>
       </div>
 
-      <div style="padding-top:14px;border-top:1px solid var(--border-soft);margin-top:8px">
-        <div class="eyebrow-muted" style="margin-bottom:10px">🚗 RDV équipe (extérieur)</div>
+      <!-- OÙ : toggle pill domicile/extérieur + gymnase -->
+      <div class="eyebrow-muted" style="margin:14px 0 8px">Où</div>
+      <input type="hidden" id="m-home" value="${m.home ? 'true' : 'false'}">
+      <div class="segmented" style="margin:0 0 10px">
+        <button type="button" id="m-home-dom" class="segmented-btn ${m.home ? 'active' : ''}" onclick="setMatchHome(true)">🏠 Domicile</button>
+        <button type="button" id="m-home-ext" class="segmented-btn ${!m.home ? 'active' : ''}" onclick="setMatchHome(false)">🚗 Extérieur</button>
+      </div>
+      <div class="fld"><label class="fld-label">Gymnase</label><input id="m-place" value="${esc(m.place || '')}" placeholder="Ex : Gymnase du club"></div>
+
+      <!-- ADVERSAIRE -->
+      <div class="eyebrow-muted" style="margin:14px 0 8px">Adversaire</div>
+      <div class="fld"><input id="m-opp" value="${esc(m.opponent)}" placeholder="Ex : CA PONTACQ"></div>
+      ${renderTeamTagField('m-team', isNew ? defaultEventTag() : (m.teamTag === 'e2' ? 'e2' : 'e1'), false)}
+
+      <!-- DÉPLACEMENT : visible uniquement en extérieur -->
+      <div id="m-deplacement" style="padding-top:14px;border-top:1px solid var(--border-soft);margin-top:8px;display:${m.home ? 'none' : 'block'}">
+        <div class="eyebrow-muted" style="margin-bottom:10px">🚗 Déplacement (RDV équipe)</div>
         <div class="fld-row">
           <div class="fld">
             <label class="fld-label">Heure RDV</label>
@@ -11368,11 +11387,26 @@ function editMatch(id) {
           </div>
         </div>
         <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px;line-height:1.5">
-          Laisse vide pour auto-remplir 1h avant l'heure du match (ne s'active que sur les extérieurs).
+          Laisse vide pour auto-remplir 1h avant l'heure du match.
         </div>
       </div>
 
+      <!-- NOTES -->
       <div class="fld" style="margin-top:14px"><label class="fld-label">Notes</label><textarea id="m-notes" placeholder="Mémo du match...">${esc(m.notes || '')}</textarea></div>
+
+      <!-- SCORE : masqué à la création. En édition, repliable derrière un toggle. -->
+      ${isNew ? '' : `
+      <div style="padding-top:14px;border-top:1px solid var(--border-soft);margin-top:8px">
+        ${(m.scoreUs > 0 || m.scoreOpp > 0) ? '' : `<button type="button" id="m-score-toggle" class="btn btn-secondary btn-block" onclick="revealScoreFields()">🏆 Saisir le score</button>`}
+        <div id="m-score-fields" style="display:${(m.scoreUs > 0 || m.scoreOpp > 0) ? 'block' : 'none'}">
+          <div class="eyebrow-muted" style="margin-bottom:10px">🏆 Score final</div>
+          <div class="fld-row">
+            <div class="fld"><label class="fld-label">Notre score</label><input id="m-us" type="number" value="${m.scoreUs}" min="0"></div>
+            <div class="fld"><label class="fld-label">Adversaire</label><input id="m-them" type="number" value="${m.scoreOpp}" min="0"></div>
+          </div>
+        </div>
+      </div>
+      `}
     </div>
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="closeModal()">Annuler</button>
@@ -11380,6 +11414,25 @@ function editMatch(id) {
     </div>
   `);
 }
+// Toggle pill 🏠/🚗 de la modale match : met à jour l'input caché m-home, l'état
+// actif des pills, et masque/affiche le sous-bloc Déplacement (extérieur seul).
+function setMatchHome(home) {
+  const hidden = document.getElementById('m-home');
+  if (hidden) hidden.value = home ? 'true' : 'false';
+  document.getElementById('m-home-dom')?.classList.toggle('active', home);
+  document.getElementById('m-home-ext')?.classList.toggle('active', !home);
+  const dep = document.getElementById('m-deplacement');
+  if (dep) dep.style.display = home ? 'none' : 'block';
+}
+
+// Révèle les champs de score (édition) et retire le bouton-toggle.
+function revealScoreFields() {
+  const f = document.getElementById('m-score-fields');
+  if (f) f.style.display = 'block';
+  document.getElementById('m-score-toggle')?.remove();
+  document.getElementById('m-us')?.focus();
+}
+
 function saveMatch(id, isNew) {
   const opp = document.getElementById('m-opp').value.trim();
   if (!opp) return alert('Adversaire requis');
@@ -11399,8 +11452,12 @@ function saveMatch(id, isNew) {
   // Phase 4 : un nouveau match commence en 'to_play'. Sur édition, on
   // bascule auto 'to_play' → 'played' dès qu'un score est saisi (le coach
   // peut toujours forcer 'played' / 'to_play' depuis l'UI prépa).
-  const newScoreUs = parseInt(document.getElementById('m-us').value) || 0;
-  const newScoreOpp = parseInt(document.getElementById('m-them').value) || 0;
+  // Champs score : absents à la création (section masquée) → 0 ; en édition, on
+  // lit les inputs (préremplis avec l'existant) ou on retombe sur l'existant.
+  const usEl = document.getElementById('m-us');
+  const themEl = document.getElementById('m-them');
+  const newScoreUs = usEl ? (parseInt(usEl.value) || 0) : (existing ? (existing.scoreUs || 0) : 0);
+  const newScoreOpp = themEl ? (parseInt(themEl.value) || 0) : (existing ? (existing.scoreOpp || 0) : 0);
   let nextStatus = existing ? (existing.status || 'to_play') : 'to_play';
   if (nextStatus === 'to_play' && (newScoreUs > 0 || newScoreOpp > 0)) nextStatus = 'played';
 
@@ -27047,7 +27104,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.28';
+const APP_VERSION = '2026-06-28.29';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
