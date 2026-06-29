@@ -2141,6 +2141,7 @@
   .feedback-suggest-chip:active { transform: scale(0.95); }
   .feedback-suggest-chip.suggest-pos:hover { border-color: var(--green); color: var(--green); }
   .feedback-suggest-chip.suggest-neg:hover { border-color: var(--red); color: var(--red); }
+  .feedback-suggest-chip.suggest-tech:hover { border-color: #8b5cf6; color: #8b5cf6; }
   .my-feedback-card {
     padding: 14px;
     background: linear-gradient(135deg, rgba(var(--accent-rgb),0.08), var(--surface));
@@ -16346,21 +16347,22 @@ function renderPlayerInbox() {
 // RETOURS DU COACH — affichage joueuse du feedback général (qualités / axes)
 // ------------------------------------------------------------
 // SECURITY: cette carte ET la modale openMyFeedback ne lisent QUE
-// player.feedback.positives / player.feedback.negatives — le SEUL champ destiné
-// à la joueuse. Ne JAMAIS exposer player.injury (médical privé coach) ni aucune
-// autre propriété privée de player ici. getFeedback() retourne exclusivement
-// {positives, negatives}.
+// player.feedback.positives / player.feedback.negatives / player.feedback.technicals
+// — les SEULS champs destinés à la joueuse. Ne JAMAIS exposer player.injury
+// (médical privé coach) ni aucune autre propriété privée de player ici.
+// getFeedback() retourne exclusivement {positives, negatives, technicals}.
 function renderPlayerFeedbackCard() {
   const p = currentPlayer();
   if (!p) return '';
-  const fb = getFeedback(p); // {positives:[], negatives:[]} — allow-list stricte
-  const pos = fb.positives.length, neg = fb.negatives.length;
-  if (pos + neg === 0) return ''; // jamais de carte vide
+  const fb = getFeedback(p); // {positives, negatives, technicals} — allow-list stricte
+  const pos = fb.positives.length, neg = fb.negatives.length, tech = fb.technicals.length;
+  if (pos + neg + tech === 0) return ''; // jamais de carte vide
   const updatedAt = (p.feedback && p.feedback.updatedAt) || 0;
   const isNew = updatedAt > getNotifSeenAt(); // filigrane partagé pb8_notif_seen
   const parts = [];
   if (pos) parts.push(pos + ' qualité' + (pos > 1 ? 's' : ''));
   if (neg) parts.push(neg + ' axe' + (neg > 1 ? 's' : '') + ' de progression');
+  if (tech) parts.push(tech + ' objectif' + (tech > 1 ? 's' : '') + ' technique' + (tech > 1 ? 's' : ''));
   return `
     <div class="section-header">
       <div>
@@ -16385,11 +16387,11 @@ function renderPlayerFeedbackCard() {
 function openMyFeedback() {
   const p = currentPlayer();
   if (!p) return;
-  // SECURITY: only feedback.positives / feedback.negatives — never expose
-  // player.injury or other private fields.
+  // SECURITY: only feedback.positives / feedback.negatives / feedback.technicals
+  // — never expose player.injury or other private fields.
   const fb = getFeedback(p);
-  const pos = fb.positives, neg = fb.negatives;
-  if (pos.length + neg.length === 0) return;
+  const pos = fb.positives, neg = fb.negatives, tech = fb.technicals;
+  if (pos.length + neg.length + tech.length === 0) return;
   const itemList = (items, color) => items.map(it => `
     <div style="display:flex;gap:8px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--border-soft)">
       <span style="flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:${color};margin-top:7px"></span>
@@ -16408,6 +16410,11 @@ function openMyFeedback() {
       ${neg.length ? `
         <div class="eyebrow" style="color:var(--orange);margin-bottom:4px">🎯 Axes de progression</div>
         <div style="margin-bottom:18px">${itemList(neg, 'var(--orange)')}</div>
+      ` : ''}
+      ${tech.length ? `
+        <div class="eyebrow" style="color:#8b5cf6;margin-bottom:4px">🎯 Objectifs techniques de saison</div>
+        <div style="margin-bottom:8px">${itemList(tech, '#8b5cf6')}</div>
+        <div style="font-size:11px;color:var(--ink-3);font-style:italic;margin-bottom:18px;line-height:1.5">Les compétences techniques sur lesquelles ta coach veut que tu progresses cette saison.</div>
       ` : ''}
       <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:12px;color:var(--ink-2);line-height:1.5">
         Ce sont les retours de ta coach pour t'aider à progresser. Ils sont mis à jour régulièrement.
@@ -21247,14 +21254,16 @@ async function openChallengeStoryModal(challengeId) {
 
 const FB_SUGGEST_POS = ['Énergie défensive', 'Lecture du jeu', 'Adresse à 3pts', 'Communication terrain', 'Boxing-out efficace', 'Vitesse en transition', 'Décision rapide', 'Leadership', 'Esprit d\'équipe', 'Régularité', 'Adresse aux lancers', 'Discipline défensive'];
 const FB_SUGGEST_NEG = ['Choix de tirs', 'Placement défensif', 'Communication', 'Boxing-out', 'Concentration LF', 'Fautes inutiles', 'Pertes de balle', 'Aide défensive', 'Lecture des écrans', 'Préparation physique', 'Gestion émotion', 'Vision périphérique'];
+// Objectifs techniques de saison : compétences basket précises à travailler.
+const FB_SUGGEST_TECH = ['Footwork', 'Eurostep', 'Flotteur', 'Lancer franc', 'Attaque ligne de fond', 'Jeu dos au panier', 'Défense', 'Saut de recul', 'Drive et finition', 'Passe décisive', 'Reading game', 'Box-out', 'Tir à 3pts', 'Posture défensive', 'Communication tactique', 'Vitesse en transition'];
 
 function getFeedback(p) {
   // Défensif : p.feedback peut être undefined (jamais set), {} (reset DB),
-  // ou {positives, negatives, updatedAt}. On garantit toujours la shape
-  // {positives:[], negatives:[]} pour les callers qui font fb.positives.length
-  // direct sans `|| []`.
+  // ou {positives, negatives, technicals, updatedAt}. On garantit toujours la
+  // shape {positives:[], negatives:[], technicals:[]} pour les callers qui font
+  // fb.positives.length direct sans `|| []`.
   const fb = (p && p.feedback) || {};
-  return { positives: fb.positives || [], negatives: fb.negatives || [] };
+  return { positives: fb.positives || [], negatives: fb.negatives || [], technicals: fb.technicals || [] };
 }
 
 function openPlayerFeedback(pid) {
@@ -21265,6 +21274,7 @@ function openPlayerFeedback(pid) {
     pid,
     positives: [...(fb.positives || [])],
     negatives: [...(fb.negatives || [])],
+    technicals: [...(fb.technicals || [])],
   };
   renderFeedbackEditor();
 }
@@ -21341,6 +21351,36 @@ function renderFeedbackEditor() {
           </div>
         </div>
       ` : ''}
+
+      <div style="height:1px;background:var(--border-soft);margin:14px 0"></div>
+
+      <!-- POINTS TECHNIQUES (objectifs de saison) -->
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-family:'Anton';color:#8b5cf6;font-size:15px;text-transform:uppercase">🎯 Points techniques à travailler</span>
+          <span style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">${fb.technicals.length}/5</span>
+        </div>
+        ${fb.technicals.length < 5 ? `<button class="btn btn-ghost" onclick="addFeedbackItem('technicals')" style="color:#8b5cf6;font-size:11px">+ Ajouter</button>` : ''}
+      </div>
+      <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin:-4px 0 10px;line-height:1.5">Objectifs de saison : compétences basket précises à faire progresser.</div>
+      <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px">
+        ${fb.technicals.length === 0 ? `<div style="padding:14px;background:var(--bg-2);border:1px dashed var(--border);border-radius:8px;text-align:center;color:var(--ink-3);font-size:12px;font-style:italic">Aucun objectif technique noté</div>` : fb.technicals.map((txt, i) => `
+          <div class="feedback-item-edit" style="border-left-color:#8b5cf6">
+            <input type="text" value="${esc(txt)}" onchange="state._editingFeedback.technicals[${i}]=this.value" placeholder="Ex : eurostep, lancer franc...">
+            <button class="btn btn-icon" onclick="removeFeedbackItem('technicals',${i})" style="color:var(--red);flex-shrink:0">✕</button>
+          </div>
+        `).join('')}
+      </div>
+      ${fb.technicals.length < 5 ? `
+        <div>
+          <div class="eyebrow-muted" style="margin-bottom:6px;font-size:9px">Suggestions rapides</div>
+          <div style="display:flex;flex-wrap:wrap;gap:4px">
+            ${FB_SUGGEST_TECH.filter(s => !fb.technicals.includes(s)).map(s => `
+              <button class="feedback-suggest-chip suggest-tech" onclick="addFeedbackSuggestion('technicals','${esc(s).replace(/'/g, "\\'")}')">+ ${esc(s)}</button>
+            `).join('')}
+          </div>
+        </div>
+      ` : ''}
     </div>
     <div class="modal-footer" style="flex-direction:column;gap:6px">
       <div style="display:flex;gap:6px;width:100%">
@@ -21378,10 +21418,11 @@ function saveFeedback() {
   if (!p) return;
   const positives = fb.positives.map(s => s.trim()).filter(s => s.length > 0);
   const negatives = fb.negatives.map(s => s.trim()).filter(s => s.length > 0);
-  if (positives.length === 0 && negatives.length === 0) {
+  const technicals = (fb.technicals || []).map(s => s.trim()).filter(s => s.length > 0);
+  if (positives.length === 0 && negatives.length === 0 && technicals.length === 0) {
     delete p.feedback;
   } else {
-    p.feedback = { positives, negatives, updatedAt: Date.now() };
+    p.feedback = { positives, negatives, technicals, updatedAt: Date.now() };
   }
   state._editingFeedback = null;
   persist();
@@ -26573,16 +26614,21 @@ function notifFeed() {
         const n = pendingDraws(pid).length;
         if (n > 0) items.push({ id: 'gages', ts: Math.max(0, ...pendingDraws(pid).map(d => d.assignedAt || 0)), icon: '🎁', title: 'Gage à tirer', detail: n + ' tirage' + (n > 1 ? 's' : '') + ' au sort à faire', count: n, unread: true, action: 'maybeShowGageReveal()' });
       }
-      // Retour du coach (feedback général qualités/axes) — informationnel.
-      // SECURITY: ne lit que feedback.positives/negatives, jamais injury/etc.
+      // Retour du coach (feedback général qualités/axes/objectifs techniques) — informationnel.
+      // SECURITY: ne lit que feedback.positives/negatives/technicals, jamais injury/etc.
       const meFb = (state.players || []).find(p => p.id === pid);
       if (meFb && meFb.feedback) {
         const fpos = (meFb.feedback.positives || []).length;
         const fneg = (meFb.feedback.negatives || []).length;
-        if (fpos + fneg > 0) {
+        const ftech = (meFb.feedback.technicals || []).length;
+        if (fpos + fneg + ftech > 0) {
           const fts = meFb.feedback.updatedAt || 0;
+          const dParts = [];
+          if (fpos) dParts.push(fpos + ' qualité' + (fpos > 1 ? 's' : ''));
+          if (fneg) dParts.push(fneg + ' axe' + (fneg > 1 ? 's' : ''));
+          if (ftech) dParts.push(ftech + ' objectif' + (ftech > 1 ? 's' : '') + ' technique' + (ftech > 1 ? 's' : ''));
           items.push({ id: 'feedback-' + pid, ts: fts, icon: '📝', title: 'Retour du coach',
-            detail: fpos + ' qualité' + (fpos > 1 ? 's' : '') + ' · ' + fneg + ' axe' + (fneg > 1 ? 's' : ''),
+            detail: dParts.join(' · '),
             count: 1, unread: fts > seen, action: 'openMyFeedback()' });
         }
       }
@@ -27181,7 +27227,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.31';
+const APP_VERSION = '2026-06-28.32';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
