@@ -8452,6 +8452,9 @@ function renderHomePlayer() {
       <!-- 1bis. Inbox messages (diffusions/sondages reçus) — audit #4 -->
       ${renderPlayerInbox()}
 
+      <!-- 1bis-2. Retours du coach (feedback général qualités/axes) -->
+      ${renderPlayerFeedbackCard()}
+
       <!-- 1ter. Boîte à gages : point d'entrée visible pour proposer -->
       ${renderGageHomeCard()}
 
@@ -16337,6 +16340,86 @@ function renderPlayerInbox() {
     </div>
     <div class="list-section" style="margin-bottom:18px">${rows}</div>
   `;
+}
+
+// ------------------------------------------------------------
+// RETOURS DU COACH — affichage joueuse du feedback général (qualités / axes)
+// ------------------------------------------------------------
+// SECURITY: cette carte ET la modale openMyFeedback ne lisent QUE
+// player.feedback.positives / player.feedback.negatives — le SEUL champ destiné
+// à la joueuse. Ne JAMAIS exposer player.injury (médical privé coach) ni aucune
+// autre propriété privée de player ici. getFeedback() retourne exclusivement
+// {positives, negatives}.
+function renderPlayerFeedbackCard() {
+  const p = currentPlayer();
+  if (!p) return '';
+  const fb = getFeedback(p); // {positives:[], negatives:[]} — allow-list stricte
+  const pos = fb.positives.length, neg = fb.negatives.length;
+  if (pos + neg === 0) return ''; // jamais de carte vide
+  const updatedAt = (p.feedback && p.feedback.updatedAt) || 0;
+  const isNew = updatedAt > getNotifSeenAt(); // filigrane partagé pb8_notif_seen
+  const parts = [];
+  if (pos) parts.push(pos + ' qualité' + (pos > 1 ? 's' : ''));
+  if (neg) parts.push(neg + ' axe' + (neg > 1 ? 's' : '') + ' de progression');
+  return `
+    <div class="section-header">
+      <div>
+        <div class="eyebrow">📝 Retours coach${isNew ? ' <span style="background:var(--orange);color:#000;font-size:9px;font-weight:700;padding:1px 6px;border-radius:6px;letter-spacing:0.04em;margin-left:4px">NEW</span>' : ''}</div>
+        <h2 class="display-md mt-2">Mes retours</h2>
+      </div>
+    </div>
+    <div class="list-section" style="margin-bottom:18px">
+      <div class="list-row" onclick="openMyFeedback()">
+        <div style="font-size:20px;flex:0 0 auto;width:30px;text-align:center">📝</div>
+        <div class="list-row-content">
+          <div class="list-row-title" style="${isNew ? 'font-weight:700' : ''}">Retours de ta coach</div>
+          <div class="list-row-subtitle" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(parts.join(' · '))}${updatedAt ? ' · maj ' + _notifAgo(updatedAt) : ''}</div>
+        </div>
+        ${isNew
+          ? '<span aria-label="non lu" style="flex:0 0 auto;width:9px;height:9px;border-radius:50%;background:var(--orange)"></span>'
+          : '<span class="list-row-trail">›</span>'}
+      </div>
+    </div>`;
+}
+
+function openMyFeedback() {
+  const p = currentPlayer();
+  if (!p) return;
+  // SECURITY: only feedback.positives / feedback.negatives — never expose
+  // player.injury or other private fields.
+  const fb = getFeedback(p);
+  const pos = fb.positives, neg = fb.negatives;
+  if (pos.length + neg.length === 0) return;
+  const itemList = (items, color) => items.map(it => `
+    <div style="display:flex;gap:8px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--border-soft)">
+      <span style="flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:${color};margin-top:7px"></span>
+      <div class="md-content" style="flex:1;color:var(--ink-2);font-size:14px;line-height:1.5">${mdToHtml(it)}</div>
+    </div>`).join('');
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">📝 Mes retours</div>
+      <button class="modal-close" onclick="closeModal();render()">✕</button>
+    </div>
+    <div class="modal-body">
+      ${pos.length ? `
+        <div class="eyebrow" style="color:var(--green);margin-bottom:4px">✨ Tes qualités</div>
+        <div style="margin-bottom:18px">${itemList(pos, 'var(--green)')}</div>
+      ` : ''}
+      ${neg.length ? `
+        <div class="eyebrow" style="color:var(--orange);margin-bottom:4px">🎯 Axes de progression</div>
+        <div style="margin-bottom:18px">${itemList(neg, 'var(--orange)')}</div>
+      ` : ''}
+      <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:12px;color:var(--ink-2);line-height:1.5">
+        Ce sont les retours de ta coach pour t'aider à progresser. Ils sont mis à jour régulièrement.
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary btn-block" onclick="closeModal();render()">Fermer</button>
+    </div>
+  `);
+  // Marque comme lu (filigrane partagé) dès l'ouverture + maj badge cloche.
+  setNotifSeenAt(Date.now());
+  updateAppBadge();
 }
 
 // ------------------------------------------------------------
@@ -26490,6 +26573,19 @@ function notifFeed() {
         const n = pendingDraws(pid).length;
         if (n > 0) items.push({ id: 'gages', ts: Math.max(0, ...pendingDraws(pid).map(d => d.assignedAt || 0)), icon: '🎁', title: 'Gage à tirer', detail: n + ' tirage' + (n > 1 ? 's' : '') + ' au sort à faire', count: n, unread: true, action: 'maybeShowGageReveal()' });
       }
+      // Retour du coach (feedback général qualités/axes) — informationnel.
+      // SECURITY: ne lit que feedback.positives/negatives, jamais injury/etc.
+      const meFb = (state.players || []).find(p => p.id === pid);
+      if (meFb && meFb.feedback) {
+        const fpos = (meFb.feedback.positives || []).length;
+        const fneg = (meFb.feedback.negatives || []).length;
+        if (fpos + fneg > 0) {
+          const fts = meFb.feedback.updatedAt || 0;
+          items.push({ id: 'feedback-' + pid, ts: fts, icon: '📝', title: 'Retour du coach',
+            detail: fpos + ' qualité' + (fpos > 1 ? 's' : '') + ' · ' + fneg + ' axe' + (fneg > 1 ? 's' : ''),
+            count: 1, unread: fts > seen, action: 'openMyFeedback()' });
+        }
+      }
       // Convocs (nouvelle / modifiée) — informationnel
       if (typeof currentSeasonConvocations === 'function') {
         currentSeasonConvocations().forEach(c => {
@@ -27085,7 +27181,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.30';
+const APP_VERSION = '2026-06-28.31';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
