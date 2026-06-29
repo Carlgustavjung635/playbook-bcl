@@ -7624,12 +7624,15 @@ function openSettings() {
         ← Changer d'utilisateur
       </button>
 
-      <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border-soft)">
-        <button class="btn btn-danger btn-block" onclick="closeModal();setTimeout(()=>confirmHardReset(),50)">
-          ⚠ Réinitialiser toutes les données
-        </button>
-        <div style="margin-top:8px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-align:center">Supprime tout et recharge les joueuses FFBB</div>
-      </div>
+      ${role === 'coach' ? `
+        <div style="margin-top:20px;padding:14px;background:var(--red-soft);border:1.5px solid var(--red);border-radius:10px">
+          <div style="font-family:'Anton';font-size:12px;text-transform:uppercase;letter-spacing:0.08em;color:var(--red);margin-bottom:4px">⚠ Zone dangereuse</div>
+          <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';line-height:1.5;margin-bottom:10px">Réservé au coach. Action irréversible : supprime toutes les données du club et recharge l'effectif FFBB.</div>
+          <button class="btn btn-danger btn-block" onclick="closeModal();setTimeout(()=>confirmHardReset(),50)">
+            ⚠ Réinitialiser toutes les données
+          </button>
+        </div>
+      ` : ''}
     </div>
   `);
 }
@@ -7878,7 +7881,19 @@ function saveMyPin() {
   setTimeout(() => alert('✓ Code PIN modifié'), 200);
 }
 
+// Mot exact à taper pour confirmer le hard reset (case-sensitive).
+const HARD_RESET_WORD = 'SUPPRIMER';
+// Clé d'audit HORS espace pb8_ (sinon effacée par le reset lui-même) : trace la
+// dernière réinitialisation pour pouvoir l'investiguer après coup.
+const HARD_RESET_AUDIT_KEY = 'bcl_last_hard_reset';
+
 function confirmHardReset() {
+  // Garde-fou défensif : seul le coach peut atteindre cette action. La joueuse ne
+  // voit plus le bouton (gating dans openSettings), mais on re-vérifie au cas où.
+  if (!(state.auth && state.auth.role === 'coach')) {
+    alert('Action réservée au coach.');
+    return;
+  }
   openModal(`
     <div class="modal-header">
       <div class="modal-title" style="color:var(--red)">⚠ Réinitialiser tout</div>
@@ -7889,26 +7904,50 @@ function confirmHardReset() {
         <div style="font-weight:700;margin-bottom:6px;color:var(--red)">Cette action est IRRÉVERSIBLE</div>
         <div style="font-size:12px;color:var(--ink-2);line-height:1.5">Toutes les données seront supprimées : plays, matchs, stats, convocations, challenges, PIN... et remplacées par les valeurs par défaut (joueuses FFBB, challenges présences, etc.).</div>
       </div>
-      <div style="font-size:13px;color:var(--ink-2)">Tape <strong style="color:var(--red)">RESET</strong> pour confirmer :</div>
-      <input id="reset-confirm" placeholder="RESET" autocomplete="off" style="margin-top:8px">
+      <div style="font-size:13px;color:var(--ink-2)">Tape <strong style="color:var(--red)">${HARD_RESET_WORD}</strong> pour confirmer :</div>
+      <input id="reset-confirm" placeholder="${HARD_RESET_WORD}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" oninput="syncHardResetBtn()" style="margin-top:8px">
     </div>
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="closeModal()">Annuler</button>
-      <button class="btn btn-danger" onclick="doHardReset()">Tout supprimer</button>
+      <button id="reset-go" class="btn btn-danger" onclick="doHardReset()" disabled style="opacity:0.45;pointer-events:none">Tout supprimer</button>
     </div>
   `);
   setTimeout(() => document.getElementById('reset-confirm')?.focus(), 100);
 }
 
+// Active le bouton de suppression uniquement quand le mot est tapé à l'identique.
+function syncHardResetBtn() {
+  const inp = document.getElementById('reset-confirm');
+  const btn = document.getElementById('reset-go');
+  if (!inp || !btn) return;
+  const ok = inp.value === HARD_RESET_WORD; // match exact, case-sensitive
+  btn.disabled = !ok;
+  btn.style.opacity = ok ? '1' : '0.45';
+  btn.style.pointerEvents = ok ? 'auto' : 'none';
+}
+
 function doHardReset() {
-  const val = document.getElementById('reset-confirm').value.trim();
-  if (val !== 'RESET') {
-    alert('Tape exactement RESET pour confirmer');
+  // Re-garde-fou : rôle coach obligatoire.
+  if (!(state.auth && state.auth.role === 'coach')) {
+    alert('Action réservée au coach.');
+    return;
+  }
+  const inp = document.getElementById('reset-confirm');
+  const val = inp ? inp.value : '';
+  if (val !== HARD_RESET_WORD) {
+    alert('Tape exactement ' + HARD_RESET_WORD + ' pour confirmer');
     return;
   }
   Object.values(K).forEach(key => localStorage.removeItem(key));
   // Nettoyer aussi les sessions live
   Object.keys(localStorage).filter(k => k.startsWith('pb8_')).forEach(k => localStorage.removeItem(k));
+  // Trace d'audit APRÈS l'effacement (la clé survit car hors espace pb8_).
+  try {
+    localStorage.setItem(HARD_RESET_AUDIT_KEY, JSON.stringify({
+      at: new Date().toISOString(),
+      by: 'coach'
+    }));
+  } catch (_) { /* quota/stockage indisponible : non bloquant */ }
   closeModal();
   setTimeout(() => window.location.reload(), 100);
 }
@@ -27008,7 +27047,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.27';
+const APP_VERSION = '2026-06-28.28';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
