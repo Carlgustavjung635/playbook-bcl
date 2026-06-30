@@ -8349,6 +8349,10 @@ function playTile(p, opts) {
   const hasVideo = !!v;
   const previewSrc = hasGallery ? images[0] : (v && v.thumb ? v.thumb : null);
   const concepts = p.concepts || [];
+  // Aperçu : texte nu (mdToPlain) — strip les artefacts [span_N]/{…_span} ET la
+  // syntaxe markdown (cf. PR #96). Sinon le snippet affiche du MD brut sur la
+  // home (carrousel Playbook). Clamp visuel géré par CSS (.v-tile-meta).
+  const descPlain = mdToPlain(p.desc || '');
 
   // SAISON : surcouches optionnelles
   // opts.seasonActive : true/false/undefined — affiche un badge "Inactif" si false
@@ -8374,7 +8378,7 @@ function playTile(p, opts) {
                 ? `<div class="v-tile-placeholder-tags">${concepts.slice(0,2).map(c => esc(c)).join(' · ')}</div>`
                 : (p.tags && p.tags.length > 0
                   ? `<div class="v-tile-placeholder-tags">${p.tags.slice(0,2).map(t => esc(t)).join(' · ')}</div>`
-                  : `<div class="v-tile-placeholder-tags">${esc((p.desc || '').slice(0, 40))}${(p.desc || '').length > 40 ? '…' : ''}</div>`)}
+                  : `<div class="v-tile-placeholder-tags">${esc(descPlain.slice(0, 40))}${descPlain.length > 40 ? '…' : ''}</div>`)}
             </div>`}
         <div style="position:absolute;top:6px;left:6px;display:flex;gap:4px;flex-wrap:wrap">
           ${hasGallery ? `<div class="v-tile-badge" style="background:rgba(var(--accent-rgb),0.9);color:black">📷 ${images.length}</div>` : ''}
@@ -8386,7 +8390,7 @@ function playTile(p, opts) {
       </div>
       <div class="v-tile-body" onclick="openPlay('${p.id}')" style="cursor:pointer">
         <div class="v-tile-title">${esc(p.title)}</div>
-        <div class="v-tile-meta">${esc(p.desc || (concepts.length > 0 ? concepts.slice(0,3).join(' · ') : ''))}</div>
+        <div class="v-tile-meta">${esc(descPlain || (concepts.length > 0 ? concepts.slice(0,3).join(' · ') : ''))}</div>
       </div>
       ${opts.seasonToggleBtn || ''}
     </div>
@@ -27227,7 +27231,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.32';
+const APP_VERSION = '2026-06-28.33';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
