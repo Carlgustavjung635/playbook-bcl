@@ -5449,6 +5449,77 @@ function getSeasonPlays(seasonId, { includeInactive = false } = {}) {
   }).filter(Boolean);
 }
 
+// ── AUTO-LIEN À LA CRÉATION ─────────────────────────────────────────────────
+// Rattache automatiquement une joueuse / un play à la saison COURANTE éditable
+// (draft ou active — jamais archivée) dès sa création, pour éliminer le piège
+// « créé mais invisible ». No-op + warning console si pas de saison éditable
+// (fallback ancien comportement : l'user liera manuellement).
+function _editableCurrentSeasonId() {
+  const sid = state.currentSeasonId;
+  if (!sid) return null;
+  const s = getCurrentSeason();
+  if (s && s.status === 'archived') return null;
+  return sid;
+}
+// Joueuse : toujours sûr (l'effectif saison est strictement basé sur les liens ;
+// ajouter un lien ne masque jamais d'autre joueuse). Idempotent.
+function autoLinkPlayerToCurrentSeason(playerId, teamTag) {
+  const sid = _editableCurrentSeasonId();
+  if (!sid) { console.warn('[auto-link] pas de saison courante éditable — joueuse non liée:', playerId); return false; }
+  state.seasonPlayers = state.seasonPlayers || [];
+  const existing = state.seasonPlayers.find(sp => sp.seasonId === sid && sp.playerId === playerId);
+  if (existing) { if (existing.leftAt) existing.leftAt = ''; if (!existing.joinedAt) existing.joinedAt = isoDate(new Date()); return true; }
+  state.seasonPlayers.push({ seasonId: sid, playerId, joinedAt: isoDate(new Date()), leftAt: '', role: '', teamTag: teamTag || 'e1' });
+  return true;
+}
+// Play : on NE lie QUE si la saison utilise déjà le rattachement par saison
+// (au moins 1 lien season_plays). Sinon on reste en mode legacy « tous les plays
+// visibles » — sinon lier le 1er play masquerait tous les plays existants
+// (rétrocompat). Idempotent (réactive un lien inactif).
+function autoLinkPlayToCurrentSeason(playId) {
+  const sid = _editableCurrentSeasonId();
+  if (!sid) { console.warn('[auto-link] pas de saison courante éditable — play non lié:', playId); return false; }
+  const seasonUsesLinks = (state.seasonPlays || []).some(sp => sp.seasonId === sid);
+  if (!seasonUsesLinks) { console.warn('[auto-link] saison en mode legacy (aucun lien play) — play non lié pour préserver la visibilité des plays existants:', playId); return false; }
+  state.seasonPlays = state.seasonPlays || [];
+  const existing = state.seasonPlays.find(sp => sp.seasonId === sid && sp.playId === playId);
+  if (existing) { existing.active = true; return true; }
+  state.seasonPlays.push({ seasonId: sid, playId, active: true });
+  return true;
+}
+
+// Réactive la saison courante archivée (→ active). Archive l'active existante
+// (une seule active à la fois). Local optimiste + PbSync pousse les UPDATE.
+function reactivateCurrentSeason() {
+  const s = getCurrentSeason();
+  if (!s || s.status !== 'archived') return;
+  if (!confirm(`Réactiver la saison « ${s.name} » ?\n\nToute autre saison active sera archivée. Les joueuses la verront immédiatement.`)) return;
+  const now = Date.now();
+  (state.seasons || []).forEach(x => { if (x.status === 'active' && x.id !== s.id) { x.status = 'archived'; x.archivedAt = x.archivedAt || now; } });
+  s.status = 'active';
+  s.activatedAt = now;
+  s.archivedAt = null;
+  state.currentSeasonId = s.id;
+  persist();
+  render();
+  if (state._effectifOpen) { openEffectif(state._effectifTab || 'season'); }
+}
+
+// Bannière « saison archivée » réutilisable (effectif + playbook). '' si éditable.
+function _archivedSeasonBanner() {
+  const s = getCurrentSeason();
+  if (!s || s.status !== 'archived') return '';
+  return `
+    <div style="padding:12px 14px;background:rgba(128,128,128,0.10);border:1px solid var(--border);border-left:3px solid var(--ink-3);border-radius:8px;margin-bottom:14px">
+      <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;letter-spacing:0.02em;margin-bottom:4px">🔒 Cette saison est archivée</div>
+      <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';line-height:1.5;margin-bottom:10px">Réactive-la ou passe sur la saison courante pour modifier l'effectif et le playbook.</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn btn-secondary" style="font-size:11px;padding:7px 10px" onclick="closeModal();setTimeout(()=>openSeasonsModal(),50)">⚙ Autre saison</button>
+        <button class="btn btn-primary" style="font-size:11px;padding:7px 10px" onclick="reactivateCurrentSeason()">↻ Réactiver cette saison</button>
+      </div>
+    </div>`;
+}
+
 // Matches / convocations / challenges de la saison courante. Inclut aussi
 // les entries legacy sans seasonId si on est sur la saison active (backward
 // compat : avant la migration, tout match était implicitement "saison active").
@@ -7267,27 +7338,24 @@ function deleteSeason(id) {
 //   delete : on conserve l'historique de présence saison)
 // - Toggle "Afficher historique" : montre aussi les joueuses parties
 // Lecture seule si la saison est archivée (isCurrentSeasonReadOnly).
-function openSeasonRosterEditor() {
+// Écran Effectif unifié : ouvre openEffectif sur l'onglet Saison (rétrocompat :
+// tous les call-sites existants continuent de marcher).
+function openSeasonRosterEditor() { openEffectif('season'); }
+
+// Corps (HTML interne) de l'onglet « Saison en cours » de l'écran Effectif.
+function _effectifSeasonBody() {
   const seasonId = state.currentSeasonId;
   const cur = getCurrentSeason();
   const readOnly = isCurrentSeasonReadOnly();
   const showHistory = !!state._seasonRosterShowHistory;
 
   if (!seasonId) {
-    openModal(`
-      <div class="modal-header">
-        <div class="modal-title">Effectif</div>
-        <button class="modal-close" onclick="closeModal()">✕</button>
-      </div>
-      <div class="modal-body">
-        <div class="empty">
-          <div class="empty-icon">📅</div>
-          <div class="empty-title">Aucune saison sélectionnée</div>
-          <div class="empty-desc">Crée ou sélectionne une saison via le badge 📅 dans la topbar.</div>
-        </div>
-      </div>
-    `);
-    return;
+    return `
+      <div class="empty" style="padding:24px">
+        <div class="empty-icon">📅</div>
+        <div class="empty-title">Aucune saison sélectionnée</div>
+        <div class="empty-desc">Crée ou sélectionne une saison via le badge 📅 dans la topbar.</div>
+      </div>`;
   }
 
   // Tous les links de la saison (avec leftAt éventuel)
@@ -7313,21 +7381,17 @@ function openSeasonRosterEditor() {
       ? '<span style="font-size:9px;font-family:\'JetBrains Mono\';color:#888;background:rgba(128,128,128,0.10);padding:2px 6px;border-radius:4px;text-transform:uppercase;letter-spacing:0.06em">Archivée</span>'
       : '<span style="font-size:9px;font-family:\'JetBrains Mono\';color:#22c55e;background:rgba(34,197,94,0.10);padding:2px 6px;border-radius:4px;text-transform:uppercase;letter-spacing:0.06em">● Active</span>';
 
-  openModal(`
-    <div class="modal-header">
-      <div>
-        <div class="eyebrow-muted" style="margin-bottom:4px">Effectif · ${esc(seasonLabel)}</div>
-        <div class="modal-title">👥 ${active.length} joueuse${active.length>1?'s':''}</div>
-      </div>
-      <button class="modal-close" onclick="closeModal()">✕</button>
-    </div>
-    <div class="modal-body">
+  return `
+      ${_archivedSeasonBanner()}
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <div><span class="eyebrow-muted">${esc(seasonLabel)} · ${active.length} joueuse${active.length>1?'s':''}</span></div>
         ${statusTag}
-        ${readOnly ? '<span style="font-size:10px;color:var(--ink-3);font-family:\'JetBrains Mono\';text-transform:uppercase">🔒 Lecture seule</span>' : ''}
       </div>
 
-      ${readOnly ? '' : `
+      ${readOnly ? `
+        <button class="btn btn-primary btn-block mb-2" disabled style="opacity:0.5;cursor:not-allowed" title="Saison archivée : réactive-la pour modifier l'effectif">+ Ajouter joueuse à la saison</button>
+        <button class="btn btn-secondary btn-block mb-3" disabled style="opacity:0.5;cursor:not-allowed" title="Saison archivée : réactive-la pour modifier l'effectif">+ Créer une nouvelle joueuse</button>
+      ` : `
         <button class="btn btn-primary btn-block mb-2" onclick="openAddPlayersToSeasonModal()">+ Ajouter joueuse à la saison</button>
         <button class="btn btn-secondary btn-block mb-3" onclick="openCreateNewPlayerForSeason()">+ Créer une nouvelle joueuse</button>
       `}
@@ -7376,12 +7440,7 @@ function openSeasonRosterEditor() {
           </div>
         </div>
       ` : ''}
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-secondary btn-block" onclick="closeModal();setTimeout(()=>managePlayers(),50)">Gérer PIN / photos (roster global) →</button>
-      <button class="btn btn-primary btn-block" onclick="closeModal();render()">Terminé</button>
-    </div>
-  `);
+  `;
 }
 
 function toggleSeasonRosterHistory() {
@@ -7646,11 +7705,8 @@ function openSettings() {
         <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openPublicShare(),50)">
           🔗 Portail public (partager le lien)
         </button>
-        ${_seasonsLoaded() ? `<button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openSeasonRosterEditor(),50)">
-          👥 Effectif de la saison
-        </button>` : ''}
-        <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>managePlayers(),50)">
-          👤 Gérer les joueuses (PIN, photos…)
+        <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openEffectif('season'),50)">
+          👥 Effectif (saison + roster)
         </button>
         <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openSeasonsModal(),50)">
           📅 Gérer les saisons
@@ -9380,6 +9436,7 @@ function renderPlays() {
 
   return `
     <div class="fade-up">
+      ${isCoach ? `<div style="padding:0 18px">${_archivedSeasonBanner()}</div>` : ''}
       <div class="section-header">
         <div>
           <div class="eyebrow-muted">${items.length} ${items.length > 1 ? 'plays' : 'play'}${orphanItems.length > 0 ? ' · ' + orphanItems.length + ' dispo' : ''}</div>
@@ -9422,7 +9479,8 @@ function renderPlays() {
         <div class="plays-grid">
           ${items.map(p => playTile(p, {
             seasonActive: p._seasonActive,
-            dimmed: hasSeasonLinks && p._seasonActive === false
+            dimmed: hasSeasonLinks && p._seasonActive === false,
+            seasonToggleBtn: _playbookToggleBtn(p.id, p._seasonActive !== false, isCoach && hasSeasonLinks && !readOnly)
           })).join('')}
         </div>
       `}
@@ -9430,22 +9488,18 @@ function renderPlays() {
       ${isCoach && orphanItems.length > 0 && !readOnly ? `
         <div class="section-header" style="margin-top:18px">
           <div>
-            <div class="eyebrow-muted">Pas dans la saison</div>
+            <div class="eyebrow-muted">Hors playbook de la saison</div>
             <h2 class="display-md mt-2">Plays disponibles</h2>
           </div>
         </div>
         <div style="padding:0 18px 10px;font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';line-height:1.5">
-          Ces plays existent dans le catalogue mais ne sont pas rattachés à la saison courante. Ajoute-les pour les rendre visibles aux joueuses.
+          Ces plays existent dans le catalogue mais ne sont pas dans le playbook de la saison courante. Ajoute-les pour les rendre visibles aux joueuses.
         </div>
         <div class="plays-grid">
           ${orphanItems.map(p => playTile(p, {
             seasonOrphan: true,
             dimmed: true,
-            seasonToggleBtn: `
-              <button class="btn btn-ghost" style="font-size:10px;padding:8px 10px;border-top:1px solid var(--border);border-radius:0;width:100%;text-align:center;color:var(--orange)"
-                onclick="event.stopPropagation();addPlayToCurrentSeason('${esc(p.id)}')">
-                + Ajouter à la saison
-              </button>`
+            seasonToggleBtn: _playbookToggleBtn(p.id, false, true)
           })).join('')}
         </div>
       ` : ''}
@@ -9497,6 +9551,18 @@ function togglePlayEditorSeasonActive() {
   persist();
   const isNew = state.plays.findIndex(x => x.id === playId) === -1;
   renderPlayEditor(isNew);
+}
+
+// Bouton toggle UNIFIÉ « Dans le playbook de la saison » rendu en pied de carte
+// play (coach). inPlaybook = lié+actif. Un seul libellé/chemin pour les 3 états
+// (actif / inactif / orphelin) → toggleSeasonPlayActive gère tout (crée le lien
+// actif s'il manque, sinon bascule). '' si non affichable.
+function _playbookToggleBtn(playId, inPlaybook, show) {
+  if (!show) return '';
+  const col = inPlaybook ? 'var(--ink-3)' : 'var(--orange)';
+  const label = inPlaybook ? '✓ Dans le playbook' : '+ Ajouter au playbook';
+  return `<button class="btn btn-ghost" style="font-size:10px;padding:8px 10px;border-top:1px solid var(--border);border-radius:0;width:100%;text-align:center;color:${col}"
+    onclick="event.stopPropagation();toggleSeasonPlayActive('${esc(playId)}')">${label}</button>`;
 }
 
 // SAISON · Ajoute un play (orphan) à la saison courante en actif.
@@ -9859,16 +9925,16 @@ function renderPlayEditor(isNew) {
         const active = link ? (link.active !== false) : false;
         return `
           <div class="fld" style="padding-top:14px;border-top:1px solid var(--border-soft);margin-top:14px">
-            <label class="fld-label">📅 Statut dans la saison courante</label>
+            <label class="fld-label">📅 Dans le playbook de la saison</label>
             <button class="btn btn-block" type="button" ${readOnly ? 'disabled' : ''}
               onclick="togglePlayEditorSeasonActive()"
               style="font-size:12px;color:${active ? 'var(--green)' : 'var(--ink-3)'};background:var(--bg-3);border:1px solid var(--border);${readOnly ? 'opacity:0.5;cursor:not-allowed' : ''}">
-              ${active ? '🟢 Actif cette saison' : '⚪ Inactif cette saison'}
+              ${active ? '✓ Dans le playbook de la saison' : '+ Ajouter au playbook de la saison'}
             </button>
             <div style="margin-top:6px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';line-height:1.5">
               ${readOnly
                 ? 'Saison archivée : le statut ne peut plus être modifié.'
-                : 'Les plays inactifs restent dans le catalogue mais sont masqués aux joueuses dans la liste du playbook de cette saison.'}
+                : 'Hors playbook, le play reste dans le catalogue mais est masqué aux joueuses pour cette saison.'}
             </div>
           </div>
         `;
@@ -10073,6 +10139,10 @@ function savePlay(id, isNew) {
     const backup = state.plays.slice();
     if (isNew) state.plays.unshift(obj);
     else { const i = state.plays.findIndex(x => x.id === id); state.plays[i] = obj; }
+    // AUTO-LIEN : un nouveau play rejoint le playbook de la saison courante (actif)
+    // — sauf mode legacy (saison sans aucun lien play) où on préserve l'affichage
+    // « tous les plays visibles » (cf. autoLinkPlayToCurrentSeason).
+    if (isNew) autoLinkPlayToCurrentSeason(obj.id);
     state._editingPlay = null;
     // persist() ne throw plus (save() catch maintenant), donc on continue toujours
     persist();
@@ -24144,14 +24214,15 @@ function removeMyPhoto() {
   setTimeout(() => editMyPhoto(), 50);
 }
 
-function managePlayers() {
-  openModal(`
-    <div class="modal-header">
-      <div class="modal-title">Joueuses (${state.players.length})</div>
-      <button class="modal-close" onclick="closeModal()">✕</button>
-    </div>
-    <div class="modal-body" ${_modalScrollAttr('players')}>
-      <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em;margin-bottom:14px">Chaque joueuse a un PIN à 4 chiffres pour se connecter</div>
+// Rétrocompat : ouvre l'écran Effectif unifié sur l'onglet Roster global.
+function managePlayers() { openEffectif('roster'); }
+
+// Corps (HTML interne) de l'onglet « Roster global » de l'écran Effectif.
+function _effectifRosterBody() {
+  const sid = state.currentSeasonId;
+  const inSeason = pid => !!sid && (state.seasonPlayers || []).some(sp => sp.seasonId === sid && sp.playerId === pid && !sp.leftAt);
+  return `
+      <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em;margin-bottom:14px">Roster global (toutes saisons). Une nouvelle joueuse est aussi ajoutée à la saison en cours.</div>
       <div class="fld-row" style="margin-bottom:14px">
         <input id="pl-new-name" placeholder="Prénom" onkeydown="if(event.key==='Enter')addNewPlayer()">
         <input id="pl-new-num" type="number" placeholder="N°" min="0" max="99" onkeydown="if(event.key==='Enter')addNewPlayer()">
@@ -24160,25 +24231,53 @@ function managePlayers() {
       <div style="margin-top:18px;display:flex;flex-direction:column;gap:6px">
         ${state.players.map(p => {
           const ls = _lastSeenBadge(p.lastSeenAt);
+          const sTag = inSeason(p.id)
+            ? '<span style="font-size:8px;font-family:\'JetBrains Mono\';color:#22c55e;background:rgba(34,197,94,0.10);padding:2px 5px;border-radius:4px;text-transform:uppercase;letter-spacing:0.04em">✓ saison</span>'
+            : '<span style="font-size:8px;font-family:\'JetBrains Mono\';color:var(--ink-4);background:var(--bg-3);padding:2px 5px;border-radius:4px;text-transform:uppercase;letter-spacing:0.04em">hors saison</span>';
           return `
           <div style="display:flex;align-items:center;gap:8px;padding:10px;background:var(--bg-1);border-radius:8px;border:1px solid var(--border);cursor:pointer" onclick="editPlayer('${p.id}')">
-            ${p.photo ? `<img src="${p.photo}" style="width:36px;height:36px;border-radius:50%;object-fit:cover;border:2px solid var(--orange)">` : `<div style="width:36px;height:36px;border-radius:50%;background:var(--bg-3);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:14px;color:var(--orange);border:2px solid var(--border)">${esc(p.name.charAt(0).toUpperCase())}</div>`}
+            ${p.photo ? `<img src="${p.photo}" style="width:36px;height:36px;border-radius:50%;object-fit:cover;border:2px solid var(--orange)">` : `<div style="width:36px;height:36px;border-radius:50%;background:var(--bg-3);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:14px;color:var(--orange);border:2px solid var(--border)">${esc((p.name||'?').charAt(0).toUpperCase())}</div>`}
             <div style="font-family:'Anton';font-size:18px;color:var(--orange);min-width:32px">#${p.num}</div>
             <div style="flex:1;min-width:0">
-              <div style="font-family:'Anton';text-transform:uppercase;font-size:13px">${esc(p.name)}</div>
+              <div style="display:flex;align-items:center;gap:6px"><div style="font-family:'Anton';text-transform:uppercase;font-size:13px">${esc(p.name)}</div>${sTag}</div>
               <div style="font-size:9px;color:${ls.color};font-family:'JetBrains Mono';margin-top:2px"><span style="font-size:7px;vertical-align:middle">${ls.dot}</span> ${ls.label}</div>
             </div>
             <div style="font-size:9px;color:${p.pin === '0000' ? 'var(--red)' : 'var(--ink-3)'};font-family:'JetBrains Mono';text-transform:uppercase">${p.pin === '0000' ? '⚠ pin 0000' : '✎ ouvrir'}</div>
           </div>
         `;}).join('')}
+      </div>`;
+}
+
+// ÉCRAN EFFECTIF UNIFIÉ — 2 onglets : [Saison en cours] / [Roster global].
+// Remplace les 2 anciennes portes ⚙ (« Effectif de la saison » + « Gérer les
+// joueuses »). Tous les call-sites existants (openSeasonRosterEditor /
+// managePlayers) y sont redirigés.
+function openEffectif(tab) {
+  tab = (tab === 'roster') ? 'roster' : 'season';
+  state._effectifOpen = true;
+  state._effectifTab = tab;
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">👥 Effectif</div>
+      <button class="modal-close" onclick="state._effectifOpen=false;closeModal()">✕</button>
+    </div>
+    <div style="padding:14px 16px 0">
+      <div class="segmented" style="margin:0">
+        <button class="segmented-btn ${tab === 'season' ? 'active' : ''}" onclick="openEffectif('season')">Saison en cours</button>
+        <button class="segmented-btn ${tab === 'roster' ? 'active' : ''}" onclick="openEffectif('roster')">Roster global</button>
       </div>
     </div>
+    <div class="modal-body" ${tab === 'roster' ? _modalScrollAttr('players') : ''}>
+      ${tab === 'roster' ? _effectifRosterBody() : _effectifSeasonBody()}
+    </div>
     <div class="modal-footer">
-      <button class="btn btn-primary" onclick="closeModal();render()">Terminé</button>
+      <button class="btn btn-primary btn-block" onclick="state._effectifOpen=false;closeModal();render()">Terminé</button>
     </div>
   `);
-  _restoreModalScroll('players');
-  setTimeout(() => document.getElementById('pl-new-name')?.focus(), 100);
+  if (tab === 'roster') {
+    _restoreModalScroll('players');
+    setTimeout(() => document.getElementById('pl-new-name')?.focus(), 100);
+  }
 }
 function addNewPlayer() {
   const name = document.getElementById('pl-new-name').value.trim();
@@ -24186,6 +24285,9 @@ function addNewPlayer() {
   if (!name) return;
   const newP = { id: uid(), name, num, pin: '0000' };
   state.players.push(newP);
+  // AUTO-LIEN : la joueuse est aussi ajoutée à l'effectif de la saison courante
+  // (fini « créée dans le roster mais absente de la saison »).
+  autoLinkPlayerToCurrentSeason(newP.id, 'e1');
   persist();
   if (window.PbStore) PbStore.upsertPlayer(newP).catch(e => console.warn('[sync] upsertPlayer:', e.message));
   managePlayers();
@@ -27231,7 +27333,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.33';
+const APP_VERSION = '2026-06-28.34';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
