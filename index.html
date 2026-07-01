@@ -24218,9 +24218,36 @@ function removeMyPhoto() {
 function managePlayers() { openEffectif('roster'); }
 
 // Corps (HTML interne) de l'onglet « Roster global » de l'écran Effectif.
+// Rattache une joueuse du Roster global à la saison en cours (crée le lien, ou
+// réintègre si elle était partie — autoLinkPlayerToCurrentSeason est idempotent).
+// Reste sur l'onglet Roster : le badge « hors saison » bascule en « ✓ saison ».
+function attachPlayerToCurrentSeason(pid) {
+  if (!autoLinkPlayerToCurrentSeason(pid, 'e1')) return; // no-op si saison non éditable
+  persist();
+  const p = (state.players || []).find(x => x.id === pid);
+  if (typeof showToast === 'function') showToast('✓ ' + ((p && p.name) || 'Joueuse') + ' ajoutée à la saison');
+  openEffectif('roster');
+}
+
 function _effectifRosterBody() {
   const sid = state.currentSeasonId;
+  const cur = getCurrentSeason();
+  const archived = !!(cur && cur.status === 'archived');
+  const editable = !!sid && !archived; // saison courante modifiable ?
   const inSeason = pid => !!sid && (state.seasonPlayers || []).some(sp => sp.seasonId === sid && sp.playerId === pid && !sp.leftAt);
+  const hasLeftLink = pid => !!sid && (state.seasonPlayers || []).some(sp => sp.seasonId === sid && sp.playerId === pid && sp.leftAt);
+  // Bouton de rattachement pour une joueuse hors de l'effectif de la saison :
+  // « ↺ Réintégrer » si elle était partie (leftAt), sinon « + Ajouter ». Grisé
+  // si saison archivée / absente (avec tooltip explicatif).
+  const attachBtn = p => {
+    if (inSeason(p.id)) return ''; // déjà dans l'effectif → pas de bouton
+    const label = hasLeftLink(p.id) ? '↺ Réintégrer' : '+ Ajouter';
+    if (!editable) {
+      const tip = archived ? 'Saison archivée, réactive-la pour modifier' : 'Aucune saison courante';
+      return `<button class="btn btn-secondary" disabled style="font-size:10px;padding:6px 9px;flex-shrink:0;opacity:0.5;cursor:not-allowed" title="${tip}">${label}</button>`;
+    }
+    return `<button class="btn btn-primary" style="font-size:10px;padding:6px 9px;flex-shrink:0" onclick="event.stopPropagation();attachPlayerToCurrentSeason('${esc(p.id)}')" title="Ajouter à la saison en cours">${label}</button>`;
+  };
   return `
       <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em;margin-bottom:14px">Roster global (toutes saisons). Une nouvelle joueuse est aussi ajoutée à la saison en cours.</div>
       <div class="fld-row" style="margin-bottom:14px">
@@ -24243,6 +24270,7 @@ function _effectifRosterBody() {
               <div style="font-size:9px;color:${ls.color};font-family:'JetBrains Mono';margin-top:2px"><span style="font-size:7px;vertical-align:middle">${ls.dot}</span> ${ls.label}</div>
             </div>
             <div style="font-size:9px;color:${p.pin === '0000' ? 'var(--red)' : 'var(--ink-3)'};font-family:'JetBrains Mono';text-transform:uppercase">${p.pin === '0000' ? '⚠ pin 0000' : '✎ ouvrir'}</div>
+            ${attachBtn(p)}
           </div>
         `;}).join('')}
       </div>`;
@@ -27333,7 +27361,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.34';
+const APP_VERSION = '2026-06-28.35';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
