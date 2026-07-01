@@ -9626,6 +9626,56 @@ async function _autoDetectVimeoOrientations(playId) {
   }
 }
 
+// Liste ORDONNÉE de navigation (flèches ◀▶) pour la vue détail d'un play.
+// Reproduit l'ordre/le filtre de la grille renderPlays : plays du playbook de la
+// saison (+ orphelins côté coach), catégorie du play courant, filtre de tag
+// respecté seulement s'il n'exclut pas le play courant. Garantit la présence du
+// play courant. Pas de wrapping (bords = flèche grisée).
+function _playNavList(cur) {
+  const isCoach = state.auth && state.auth.role === 'coach';
+  const includeInactive = isCoach && !!state._showInactivePlays;
+  const seasonId = state.currentSeasonId;
+  const hasSeasonLinks = !!seasonId && (state.seasonPlays || []).some(sp => sp.seasonId === seasonId);
+  let pool = hasSeasonLinks ? getSeasonPlays(seasonId, { includeInactive }) : (state.plays || []);
+  if (isCoach && hasSeasonLinks && _seasonsLoaded()) {
+    const linkedIds = new Set((state.seasonPlays || []).filter(sp => sp.seasonId === seasonId).map(sp => sp.playId));
+    pool = pool.concat((state.plays || []).filter(p => !linkedIds.has(p.id)));
+  }
+  let list = pool.filter(x => x.cat === cur.cat);
+  if (state.playsTag && (cur.tags || []).includes(state.playsTag)) {
+    list = list.filter(x => (x.tags || []).includes(state.playsTag));
+  }
+  const seen = new Set();
+  list = list.filter(x => { if (seen.has(x.id)) return false; seen.add(x.id); return true; });
+  if (!list.some(x => x.id === cur.id)) list = [cur, ...list]; // garde-fou : au moins le play courant
+  return list;
+}
+
+// Saute au play précédent (dir=-1) / suivant (dir=+1) dans _playNavList. No-op au bord.
+function _playNavAdjacent(dir) {
+  if (!state.view || state.view.type !== 'play') return;
+  const cur = (state.plays || []).find(x => x.id === state.view.id);
+  if (!cur) return;
+  const list = _playNavList(cur);
+  const idx = list.findIndex(x => x.id === cur.id);
+  if (idx < 0) return;
+  const target = list[idx + dir];
+  if (target) openPlay(target.id);
+}
+
+// Flèches clavier ← / → (desktop) — listener global installé une seule fois.
+function _ensurePlayNavKeys() {
+  if (window._playNavKeyBound) return;
+  window._playNavKeyBound = true;
+  document.addEventListener('keydown', (e) => {
+    if (!state.view || state.view.type !== 'play') return;
+    const tag = (e.target && e.target.tagName) || '';
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(tag) || (e.target && e.target.isContentEditable)) return;
+    if (e.key === 'ArrowLeft') { e.preventDefault(); _playNavAdjacent(-1); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); _playNavAdjacent(1); }
+  });
+}
+
 function renderPlayDetail() {
   const p = state.plays.find(x => x.id === state.view.id);
   if (!p) { state.view = null; return renderPlays(); }
@@ -9641,9 +9691,24 @@ function renderPlayDetail() {
   // Index vidéo actif (transient UI state)
   const vIdx = Math.max(0, Math.min((state._playVideoIdx || 0), videos.length - 1));
 
+  // Navigation ◀▶ entre plays (même liste filtrée que la grille).
+  const navList = _playNavList(p);
+  const navIdx = navList.findIndex(x => x.id === p.id);
+  const showNav = navList.length > 1;
+  const hasPrev = navIdx > 0;
+  const hasNext = navIdx >= 0 && navIdx < navList.length - 1;
+  _ensurePlayNavKeys();
+
   return `
     <div class="fade-up">
       <button class="detail-back" onclick="state.view=null;render()">← Retour</button>
+      ${showNav ? `
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:2px 18px 8px">
+          <button class="btn btn-secondary" ${hasPrev ? '' : 'disabled'} onclick="_playNavAdjacent(-1)" aria-label="Play précédent" title="Play précédent (←)" style="min-width:60px;font-size:15px${hasPrev ? '' : ';opacity:0.4;cursor:not-allowed'}">◀</button>
+          <span style="font-family:'JetBrains Mono';font-size:11px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em">${navIdx + 1} / ${navList.length}</span>
+          <button class="btn btn-secondary" ${hasNext ? '' : 'disabled'} onclick="_playNavAdjacent(1)" aria-label="Play suivant" title="Play suivant (→)" style="min-width:60px;font-size:15px${hasNext ? '' : ';opacity:0.4;cursor:not-allowed'}">▶</button>
+        </div>
+      ` : ''}
       <div style="padding:0 18px 8px;display:flex;gap:6px;flex-wrap:wrap">
         <span class="chip chip-${PLAY_CATEGORIES.find(c=>c.id===p.cat).color}">${getCatLabel(p.cat)}</span>
         ${hasGallery ? `<span class="chip" style="background:rgba(var(--accent-rgb),0.15);border-color:var(--orange);color:var(--orange)">📷 ${images.length}</span>` : ''}
@@ -27361,7 +27426,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.35';
+const APP_VERSION = '2026-06-28.36';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
