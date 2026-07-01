@@ -59,9 +59,9 @@ console.log('SCÉNARIO 3 — corps Roster global (exécuté) : indicateur saison
     players: [{ id: 'p1', name: 'Lea', num: 7, pin: '1234' }, { id: 'p2', name: 'Candice', num: 9, pin: '0000' }],
     seasonPlayers: [{ seasonId: 's1', playerId: 'p1', leftAt: '' }], // Lea dans la saison, Candice non
   };
-  const render = new Function('state', 'esc', '_lastSeenBadge',
+  const render = new Function('state', 'esc', '_lastSeenBadge', 'getCurrentSeason',
     body + '\nreturn _effectifRosterBody();'
-  )(state, s => String(s), () => ({ color: '#888', dot: '●', label: 'jamais vue' }));
+  )(state, s => String(s), () => ({ color: '#888', dot: '●', label: 'jamais vue' }), () => ({ id: 's1', status: 'active' }));
   t('liste les 2 joueuses + bouton + Ajouter', () => {
     assert.ok(render.includes('Lea') && render.includes('Candice'));
     assert.ok(/addNewPlayer\(\)/.test(render) && render.includes('+ Ajouter'));
