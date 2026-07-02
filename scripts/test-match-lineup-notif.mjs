@@ -24,7 +24,7 @@ function extractFn(name) {
 
 console.log('SCÉNARIO 1 — 2 messages distincts, jamais d\'exclusion explicite');
 {
-  const src = ['getMatchRoster', 'getMatchComposition', '_notifyLineupRevealed'].map(extractFn).join('\n\n');
+  const src = ['getMatchRoster', 'getMatchComposition', '_rdvDefaultFromTime', 'getMatchRdvTime', '_notifyLineupRevealed'].map(extractFn).join('\n\n');
   const players = [{ id: 'a', num: 4, name: 'Lea' }, { id: 'b', num: 7, name: 'Mia' }, { id: 'c', num: 9, name: 'Zoe' }];
   const state = { players, convocations: [], currentSeasonId: 's1' };
   const pushed = [];
@@ -55,7 +55,7 @@ console.log('SCÉNARIO 1 — 2 messages distincts, jamais d\'exclusion explicite
 
 console.log('SCÉNARIO 2 — compo sans retenue → seulement le message neutre');
 {
-  const src = ['getMatchRoster', 'getMatchComposition', '_notifyLineupRevealed'].map(extractFn).join('\n\n');
+  const src = ['getMatchRoster', 'getMatchComposition', '_rdvDefaultFromTime', 'getMatchRdvTime', '_notifyLineupRevealed'].map(extractFn).join('\n\n');
   const players = [{ id: 'b', num: 7, name: 'Mia' }];
   const state = { players, convocations: [], currentSeasonId: 's1' };
   const pushed = [];
