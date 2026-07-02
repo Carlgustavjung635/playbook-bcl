@@ -44,8 +44,8 @@ t('deux pills segmented 🏠 Domicile / 🚗 Extérieur', () => {
 });
 
 console.log('SCÉNARIO 3 — sous-bloc Déplacement conditionnel à l\'extérieur');
-t('m-deplacement masqué quand domicile (display dépend de m.home)', () => {
-  assert.ok(/id="m-deplacement"[^>]*display:\$\{m\.home \? 'none' : 'block'\}/.test(editBlock));
+t('m-deplacement masqué à domicile SAUF si lieu RDV déjà saisi', () => {
+  assert.ok(/id="m-deplacement"[^>]*display:\$\{\(m\.home && !\(m\.rdvPlace \|\| ''\)\.trim\(\)\) \? 'none' : 'block'\}/.test(editBlock));
 });
 t('contient bien Heure RDV + Lieu RDV', () => {
   assert.ok(/id="m-rdv-time"/.test(editBlock) && /id="m-rdv-place"/.test(editBlock));
@@ -55,22 +55,23 @@ console.log('SCÉNARIO 4 — layout & ordre des sections');
 t('Date large / Heure compacte (grid 1.5fr 1fr)', () => {
   assert.ok(/grid-template-columns:1\.5fr 1fr[\s\S]*?id="m-date"[\s\S]*?id="m-time"/.test(editBlock));
 });
-t('Adversaire en pleine largeur (un .fld simple, pas de fld-row)', () => {
-  assert.ok(/<div class="fld"><input id="m-opp"/.test(editBlock));
+t('Adversaire en pleine largeur (un .fld simple avec label, pas de fld-row)', () => {
+  assert.ok(/<div class="fld"><label class="fld-label">Nom de l'adversaire<\/label><input id="m-opp"/.test(editBlock));
 });
-t('ordre Quand → Où → Adversaire → Déplacement → Notes → Score', () => {
+t('ordre Quand → Où → Adversaire → Logistique → Notes → Résultat', () => {
   const idx = s => editBlock.indexOf(s);
-  const quand = idx('>Quand<');
-  const ou = idx('>Où<');
-  const adv = idx('>Adversaire<');
+  const quand = idx('mm-section">🗓 Quand');
+  const ou = idx('mm-section">📍 Où');
+  const adv = idx('mm-section">🆚 Adversaire');
+  const logi = idx('mm-section">⏰ Logistique');
   const dep = idx('id="m-deplacement"');
-  const notes = idx('id="m-notes"');
-  const score = idx('id="m-score-fields"');
+  const notes = idx('mm-section">📝 Notes');
+  const score = idx('mm-section">🏆 Résultat');
   assert.ok(quand >= 0 && quand < ou, 'Quand avant Où');
   assert.ok(ou < adv, 'Où avant Adversaire');
-  assert.ok(adv < dep, 'Adversaire avant Déplacement');
-  assert.ok(dep < notes, 'Déplacement avant Notes');
-  assert.ok(notes < score, 'Notes avant Score');
+  assert.ok(adv < logi, 'Adversaire avant Logistique');
+  assert.ok(logi < dep && dep < notes, 'Logistique (m-deplacement) avant Notes');
+  assert.ok(notes < score, 'Notes avant Résultat');
 });
 
 console.log('SCÉNARIO 5 — comportement réel des helpers (sandbox)');

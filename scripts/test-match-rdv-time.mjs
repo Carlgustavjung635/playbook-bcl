@@ -68,8 +68,8 @@ console.log('SCÉNARIO 3 — notif « tu es retenue » inclut le RDV');
 console.log('SCÉNARIO 4 — champ toujours visible + sync + rétrocompat');
 t('modale : « Heure de RDV équipe » hors bloc extérieur (toujours visible)', () => {
   const ed = extractFn('editMatch');
-  assert.ok(/⏰ Heure de RDV équipe/.test(ed));
-  // l'input m-rdv-time n'est PAS dans le bloc #m-deplacement (extérieur only)
+  assert.ok(/Heure de RDV équipe/.test(ed)); // libellé du champ (section « ⏰ Logistique »)
+  // l'input m-rdv-time n'est PAS dans le bloc #m-deplacement (lieu covoiturage)
   const idxRdv = ed.indexOf('id="m-rdv-time"');
   const idxDep = ed.indexOf('id="m-deplacement"');
   assert.ok(idxRdv >= 0 && idxRdv < idxDep, 'm-rdv-time doit précéder le bloc déplacement');
