@@ -39,8 +39,9 @@ console.log('SCÉNARIO 1 — match À VENIR : section visible + label « prévue
   t('bouton « ✏️ Modifier » coach → openRosterManager', () => {
     assert.ok(/openRosterManager\('m1'\)/.test(outCoach) && outCoach.includes('✏️ Modifier'));
   });
-  const outPlayer = render('player', upcoming);
-  t('joueuse : section visible mais AUCUN bouton Modifier', () => {
+  // Joueuse : la compo n'est visible qu'une fois RÉVÉLÉE (cf. lineupRevealed, PR #122).
+  const outPlayer = render('player', { ...upcoming, lineupRevealed: true });
+  t('joueuse (compo révélée) : section visible mais AUCUN bouton Modifier', () => {
     assert.ok(/Composition prévue/.test(outPlayer));
     assert.ok(!/openRosterManager/.test(outPlayer));
   });

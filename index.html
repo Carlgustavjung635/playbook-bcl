@@ -3541,7 +3541,8 @@ const ENTITIES = [
         stats_pdf_uploaded_at: m.statsPdfUploadedAt ? new Date(m.statsPdfUploadedAt).toISOString() : null,
         // Multi-PDF (migration 009) : liste source de vérité ; les champs
         // singuliers ci-dessus restent écrits pour la rétro-compat front.
-        stats_pdfs: _matchPdfsToDb(m)
+        stats_pdfs: _matchPdfsToDb(m),
+        lineup_revealed: !!m.lineupRevealed // compo révélée aux joueuses (migration 20260702_003)
       }];
     })),
     apply: (state, rows) => {
@@ -3595,7 +3596,8 @@ const ENTITIES = [
           statsPdfShared: !!r.stats_pdf_shared,
           statsPdfUploadedAt: r.stats_pdf_uploaded_at ? Date.parse(r.stats_pdf_uploaded_at) : null,
           // Multi-PDF (migration 009). Remote = source de vérité (array Storage).
-          statsPdfs: _matchPdfsFromDb(r)
+          statsPdfs: _matchPdfsFromDb(r),
+          lineupRevealed: !!r.lineup_revealed // rétrocompat : colonne absente → false
         };
       });
       // Préserve les matches locaux non encore push (id format uid() = 'x...')
@@ -9318,15 +9320,27 @@ function playerEventRow(ev, playerId) {
     : `openEventInstance('${parentId}','${instanceDate}')`;
   // Badge "MATCH" pour différencier visuellement
   const matchBadge = isMatch ? '<span class="chip chip-orange" style="font-size:8px;padding:2px 5px;margin-left:6px;vertical-align:middle">MATCH</span>' : '';
+  // COMPO RÉVÉLÉE + joueuse PAS retenue → événement public NEUTRE (pas
+  // « attendue/convoquée »). Dignité : on n'écrit jamais « pas retenue », juste
+  // un match d'équipe qu'elle peut venir voir. Compo non révélée → inchangé.
+  const linkedMatch = linkedMatchId ? (state.matches || []).find(x => x.id === linkedMatchId) : null;
+  const neutralPublic = !!(linkedMatch && linkedMatch.lineupRevealed
+    && !(getMatchRoster(linkedMatch) || []).some(pp => pp.id === playerId));
+  const badgeBg = neutralPublic ? 'var(--bg-3)' : (isPresent ? 'var(--green-soft)' : 'var(--red-soft)');
+  const badgeBorder = neutralPublic ? 'var(--border)' : (isPresent ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)');
+  const dayColor = neutralPublic ? 'var(--ink-3)' : (isPresent ? 'var(--green)' : 'var(--red)');
+  const statusLine = neutralPublic
+    ? `<span style="color:var(--ink-3)">Match de l'équipe</span>`
+    : `<span style="color:${isPresent?'var(--green)':'var(--red)'}">${isPresent ? '✓ Présente' : '✕ Absente'}</span>`;
   return `
     <div class="list-row" onclick="${onClick}">
-      <div class="event-date-badge" style="background:${isPresent ? 'var(--green-soft)' : 'var(--red-soft)'};border-color:${isPresent ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)'}">
-        <div class="event-date-day" style="color:${isPresent ? 'var(--green)' : 'var(--red)'}">${day}</div>
+      <div class="event-date-badge" style="background:${badgeBg};border-color:${badgeBorder}">
+        <div class="event-date-day" style="color:${dayColor}">${day}</div>
         <div class="event-date-month">${month}</div>
       </div>
       <div class="list-row-content">
         <div class="list-row-title">${esc(ev.title)}${matchBadge}</div>
-        <div class="list-row-subtitle">${ev.time ? ev.time + ' · ' : ''}<span style="color:${isPresent?'var(--green)':'var(--red)'}">${isPresent ? '✓ Présente' : '✕ Absente'}</span></div>
+        <div class="list-row-subtitle">${ev.time ? ev.time + ' · ' : ''}${statusLine}</div>
       </div>
       <span class="list-row-trail">›</span>
     </div>
@@ -11497,7 +11511,7 @@ function renderStatsTable(m, stats, canEdit) {
 function editMatch(id) {
   const isNew = !id;
   const m = isNew
-    ? { id: uid(), date: new Date().toISOString().slice(0,10), opponent: '', home: true, scoreUs: 0, scoreOpp: 0, notes: '', videoUrl: '', positives: [], negatives: [], playerStats: {}, status: 'to_play', prepVideos: [], prepComment: '', prepCommentPrivate: '', prepShared: false }
+    ? { id: uid(), date: new Date().toISOString().slice(0,10), opponent: '', home: true, scoreUs: 0, scoreOpp: 0, notes: '', videoUrl: '', positives: [], negatives: [], playerStats: {}, status: 'to_play', prepVideos: [], prepComment: '', prepCommentPrivate: '', prepShared: false, lineupRevealed: false }
     : state.matches.find(x => x.id === id);
   openModal(`
     <div class="modal-header">
@@ -11654,6 +11668,7 @@ function saveMatch(id, isNew) {
     statsPdfShared: existing ? !!existing.statsPdfShared : false,
     statsPdfUploadedAt: existing ? (existing.statsPdfUploadedAt || null) : null,
     statsPdfs: existing ? (Array.isArray(existing.statsPdfs) ? existing.statsPdfs : []) : [],
+    lineupRevealed: existing ? !!existing.lineupRevealed : false, // compo révélée aux joueuses
     // Multi-effectif : un match appartient à E1 ou E2. Sélecteur absent (multi
     // off) → préserve l'existant / 'e1' par défaut.
     teamTag: (() => {
@@ -13409,19 +13424,38 @@ function getMatchComposition(m, viewerId) {
 function renderMatchComposition(m) {
   const viewerId = (state.auth && state.auth.role === 'player') ? state.auth.playerId : null;
   const isCoach = state.auth && state.auth.role === 'coach';
+  const revealed = !!m.lineupRevealed;
+  // JOUEUSE : tant que la compo n'est PAS révélée, elle ne voit RIEN de l'effectif
+  // (juste un message d'attente). Une fois révélée → compo normale.
+  if (!isCoach && !revealed) {
+    return `
+      <div class="section-header"><div><div class="eyebrow">Effectif</div><h2 class="display-md mt-2">🏀 Composition</h2></div></div>
+      <div class="list-section" style="margin-top:0"><div style="padding:18px;text-align:center;color:var(--ink-3);font-size:12px;font-style:italic;line-height:1.5">⏳ La compo n'a pas encore été annoncée par la coach.</div></div>
+    `;
+  }
   const comp = getMatchComposition(m, viewerId);
   if (!comp.length && !isCoach) return '';
   const anyStats = comp.some(c => c.hasStats);
-  // Match à venir (pas encore de score) → « Composition prévue » ; sinon « Composition ».
   const isPlayed = (m.scoreUs || 0) > 0 || (m.scoreOpp || 0) > 0;
   const title = isPlayed ? 'Composition' : 'Composition prévue';
-  // Coach : peut modifier la compo À TOUT MOMENT (avant / pendant / après le
-  // match). Ouvre l'éditeur openRosterManager (écrit m.roster.included, synced).
+  // Coach : bouton d'annonce (👁 / 🙈) + édition. La joueuse ne voit la compo
+  // qu'après annonce (lineupRevealed=true) — cf. toggleLineupRevealed (notifs).
   return `
     <div class="section-header">
       <div><div class="eyebrow">Effectif · ${comp.length} joueuse${comp.length>1?'s':''}</div><h2 class="display-md mt-2">🏀 ${title}</h2></div>
       ${isCoach ? `<button class="section-action" onclick="openRosterManager('${m.id}')">✏️ Modifier</button>` : ''}
     </div>
+    ${isCoach ? `
+      <div style="padding:0 18px 8px">
+        <div style="padding:10px 12px;background:${revealed ? 'rgba(34,197,94,0.08)' : 'var(--bg-3)'};border:1px solid ${revealed ? '#22c55e' : 'var(--border)'};border-radius:8px;display:flex;align-items:center;justify-content:space-between;gap:10px">
+          <div style="min-width:0">
+            <div style="font-family:'Anton';font-size:12px;text-transform:uppercase;letter-spacing:0.02em">${revealed ? '👁 Compo annoncée' : '🔒 Compo privée (non annoncée)'}</div>
+            <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;line-height:1.4">${revealed ? 'Les joueuses voient la compo.' : 'Les joueuses ne voient pas encore la compo.'}</div>
+          </div>
+          <button class="btn ${revealed ? 'btn-secondary' : 'btn-primary'}" style="flex-shrink:0;font-size:11px;padding:8px 12px" onclick="toggleLineupRevealed('${m.id}')">${revealed ? '🙈 Masquer' : '👁 Annoncer la compo'}</button>
+        </div>
+      </div>
+    ` : ''}
     <div class="list-section" style="margin-top:0">
       <div style="display:flex;flex-wrap:wrap;gap:6px;padding:12px">
         ${comp.map(c => `
@@ -13433,6 +13467,55 @@ function renderMatchComposition(m) {
   `;
 }
 
+// Coach : annonce / retire l'annonce de la compo. À la 1re annonce
+// (false→true), notifie les joueuses (retenues = message perso « tu es retenue »,
+// non retenues de l'effectif/équipe = message NEUTRE « compo publiée », jamais
+// « tu n'es pas retenue »).
+function toggleLineupRevealed(matchId) {
+  if (state.auth.role !== 'coach') return;
+  const m = state.matches.find(x => x.id === matchId);
+  if (!m) return;
+  const wasRevealed = !!m.lineupRevealed;
+  m.lineupRevealed = !wasRevealed;
+  persist(); render();
+  if (!wasRevealed && m.lineupRevealed) {
+    try { _notifyLineupRevealed(m); } catch (e) { console.warn('[lineup] notif:', e && e.message); }
+    if (typeof showToast === 'function') showToast('👁 Compo annoncée aux joueuses');
+  } else if (wasRevealed && !m.lineupRevealed) {
+    if (typeof showToast === 'function') showToast('🙈 Annonce retirée (compo re-privée)');
+  }
+}
+
+// Envoie les push de révélation de compo. Retenues → perso ; non retenues de
+// l'effectif de l'équipe du match → neutre. Jamais d'« exclusion » explicite.
+function _notifyLineupRevealed(m) {
+  const retained = (getMatchRoster(m) || []).map(p => p.id);
+  const retainedSet = new Set(retained);
+  const dateLbl = typeof formatDate === 'function' ? formatDate(m.date, 'long') : m.date;
+  const where = m.place ? ' (' + m.place + ')' : (m.home ? ' (domicile)' : '');
+  const timeLbl = m.time ? ' à ' + m.time : '';
+  // Retenues : message personnel.
+  if (retained.length) {
+    notifyPush(_pushPlayerKeys(retained), {
+      title: '🏀 Tu es retenue !',
+      body: 'Match vs ' + (m.opponent || '') + ' le ' + dateLbl + timeLbl + where,
+      url: '/', tag: 'lineup-' + m.id, type: 'lineup_in'
+    });
+  }
+  // Non retenues (même effectif + même équipe E1/E2) : message NEUTRE.
+  const sid = m.seasonId || getActiveSeasonId();
+  const team = m.teamTag === 'e2' ? 'e2' : 'e1';
+  const pool = (_seasonsLoaded() && sid) ? getSeasonPlayers(sid, { team }) : (state.players || []);
+  const others = pool.map(p => p.id).filter(id => !retainedSet.has(id));
+  if (others.length) {
+    notifyPush(_pushPlayerKeys(others), {
+      title: '📋 Compo publiée',
+      body: 'La compo pour le match vs ' + (m.opponent || '') + ' a été publiée.',
+      url: '/', tag: 'lineup-' + m.id, type: 'lineup_pub'
+    });
+  }
+}
+
 // Initialise le roster du match si pas encore défini
 function ensureMatchRoster(m) {
   if (m.roster && Array.isArray(m.roster.included)) return;
@@ -13441,6 +13524,51 @@ function ensureMatchRoster(m) {
 }
 
 // Modale de gestion de l'effectif du match (ajouter/retirer une joueuse)
+// Heure de début d'un match en minutes (null si pas d'heure).
+function _matchStartMin(m) {
+  if (!m || !m.time || !/^\d{1,2}:\d{2}/.test(m.time)) return null;
+  const [h, mi] = m.time.split(':').map(n => parseInt(n, 10));
+  return h * 60 + mi;
+}
+// Conflits de compo E1/E2 pour une joueuse : autres matchs OÙ elle est
+// EXPLICITEMENT dans la compo (roster.included), même DATE, chevauchement
+// horaire (fenêtre 3h ; heure absente d'un côté → conflit potentiel). Sert à
+// prévenir le coach qu'une joueuse est double-bookée (E1 vs A / E2 vs B).
+function _lineupConflictsFor(pid, matchId) {
+  const m = state.matches.find(x => x.id === matchId);
+  if (!m || !m.date) return [];
+  const startM = _matchStartMin(m);
+  return (state.matches || []).filter(y => {
+    if (y.id === matchId || y.date !== m.date) return false;
+    if (!(y.roster && Array.isArray(y.roster.included) && y.roster.included.includes(pid))) return false;
+    const startY = _matchStartMin(y);
+    if (startM == null || startY == null) return true; // heure inconnue → on prévient quand même
+    return Math.abs(startM - startY) < 180; // ~3h : un match bloque la joueuse
+  });
+}
+// Retire une joueuse de la compo d'un AUTRE match (swap depuis l'éditeur courant).
+function removeFromOtherLineup(otherMatchId, pid, currentMatchId) {
+  if (state.auth.role !== 'coach') return;
+  const y = state.matches.find(x => x.id === otherMatchId);
+  if (!y || !y.roster || !Array.isArray(y.roster.included)) return;
+  y.roster.included = y.roster.included.filter(x => x !== pid);
+  persist();
+  closeModal();
+  setTimeout(() => openRosterManager(currentMatchId), 50);
+}
+// Badge HTML « ⚠️ déjà dans compo {équipe} vs {adv} » (ou '' si pas de conflit).
+function _lineupConflictBadge(pid, matchId) {
+  const conflicts = _lineupConflictsFor(pid, matchId);
+  if (!conflicts.length) return '';
+  return conflicts.map(y => {
+    const teamLbl = (typeof teamLabel === 'function' && isMultiSquad()) ? teamLabel(y.teamTag === 'e2' ? 'e2' : 'e1', true) : (y.teamTag === 'e2' ? 'E2' : 'E1');
+    return `<div style="margin-top:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+      <span style="font-size:8px;font-family:'JetBrains Mono';color:var(--orange);background:rgba(var(--accent-rgb),0.10);padding:1px 5px;border-radius:4px;text-transform:uppercase;letter-spacing:0.04em">⚠️ déjà ${esc(teamLbl)} vs ${esc(y.opponent || '?')}${y.time ? ' · ' + esc(y.time) : ''}</span>
+      <button class="btn btn-ghost" style="font-size:9px;padding:2px 6px;color:var(--orange)" onclick="event.stopPropagation();removeFromOtherLineup('${y.id}','${esc(pid)}','${matchId}')">Retirer de l'autre</button>
+    </div>`;
+  }).join('');
+}
+
 function openRosterManager(matchId) {
   const m = state.matches.find(x => x.id === matchId);
   if (!m) return;
@@ -13493,6 +13621,7 @@ function openRosterManager(matchId) {
             <div style="flex:1;min-width:0">
               <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"><span style="font-family:'Anton';font-size:13px;text-transform:uppercase">#${p.num} ${esc(p.name)}</span>${convBadge}</div>
               ${p.injury && p.injury.status && p.injury.status !== 'apte' ? `<div style="font-size:9px;color:var(--orange);font-family:'JetBrains Mono';margin-top:2px">⚠ ${esc((INJURY_STATUS[p.injury.status]||{}).label || '')}</div>` : ''}
+              ${_lineupConflictBadge(p.id, matchId)}
             </div>
             <button class="btn btn-icon" onclick="toggleRosterPlayer('${matchId}','${p.id}',false)" style="color:var(--red)" title="Retirer">✕</button>
           </div>
@@ -13513,6 +13642,7 @@ function openRosterManager(matchId) {
                 <div style="flex:1;min-width:0">
                   <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;color:var(--ink-3)">#${p.num} ${esc(p.name)}</div>
                   ${reason ? `<div style="font-size:9px;color:var(--red);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${esc(reason)}</div>` : ''}
+                  ${_lineupConflictBadge(p.id, matchId)}
                 </div>
                 <button class="btn btn-icon" onclick="toggleRosterPlayer('${matchId}','${p.id}',true)" style="color:var(--green)" title="Ajouter">+</button>
               </div>
@@ -27706,7 +27836,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.42';
+const APP_VERSION = '2026-06-28.43';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
