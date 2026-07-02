@@ -7415,7 +7415,7 @@ function _effectifSeasonBody() {
               <div style="font-family:'Anton';font-size:16px;color:var(--orange);min-width:36px">#${p.num}</div>
               <div style="flex:1;min-width:0">
                 <div style="display:flex;align-items:center;gap:6px"><div style="font-family:'Anton';text-transform:uppercase;font-size:13px">${esc(p.name)}</div>${teamTagBadge(link.teamTag)}</div>
-                ${(() => { const ls = _lastSeenBadge(p.lastSeenAt); return `<div style="font-size:9px;color:${ls.color};font-family:'JetBrains Mono';margin-top:2px"><span style="font-size:7px;vertical-align:middle">${ls.dot}</span> ${ls.label}</div>`; })()}
+                ${(() => { const ls = _lastSeenBadge(p.lastSeenAt); return `<div style="font-size:9px;color:${ls.color};font-family:'JetBrains Mono';margin-top:2px"${ls.exact ? ` title="Dernière connexion : ${ls.exact}"` : ''}><span style="font-size:7px;vertical-align:middle">${ls.dot}</span> ${ls.label}</div>`; })()}
                 ${readOnly ? '' : renderPlayerTeamTagToggle(p.id, link.teamTag)}
               </div>
               ${readOnly ? '' : `<button class="btn btn-ghost" style="font-size:10px;color:var(--red);padding:6px 8px" onclick="removePlayerFromSeason('${esc(p.id)}')" title="Retirer de la saison">↗ Partir</button>`}
@@ -24332,7 +24332,7 @@ function _effectifRosterBody() {
             <div style="font-family:'Anton';font-size:18px;color:var(--orange);min-width:32px">#${p.num}</div>
             <div style="flex:1;min-width:0">
               <div style="display:flex;align-items:center;gap:6px"><div style="font-family:'Anton';text-transform:uppercase;font-size:13px">${esc(p.name)}</div>${sTag}</div>
-              <div style="font-size:9px;color:${ls.color};font-family:'JetBrains Mono';margin-top:2px"><span style="font-size:7px;vertical-align:middle">${ls.dot}</span> ${ls.label}</div>
+              <div style="font-size:9px;color:${ls.color};font-family:'JetBrains Mono';margin-top:2px"${ls.exact ? ` title="Dernière connexion : ${ls.exact}"` : ''}><span style="font-size:7px;vertical-align:middle">${ls.dot}</span> ${ls.label}</div>
             </div>
             <div style="font-size:9px;color:${p.pin === '0000' ? 'var(--red)' : 'var(--ink-3)'};font-family:'JetBrains Mono';text-transform:uppercase">${p.pin === '0000' ? '⚠ pin 0000' : '✎ ouvrir'}</div>
             ${attachBtn(p)}
@@ -26607,7 +26607,7 @@ function _ensureLastSeenForegroundTouch() {
 // Badge "dernière connexion" pour l'effectif coach.
 // Vert < 24h · orange < 7j · rouge >= 7j ou jamais (spec).
 function _lastSeenBadge(ms) {
-  if (!ms) return { label: 'jamais vue', color: 'var(--red)', dot: '●' };
+  if (!ms) return { label: 'jamais vue', color: 'var(--red)', dot: '●', exact: '' };
   const hours = (Date.now() - ms) / 3600000;
   const days = Math.floor(hours / 24);
   const color = hours < 24 ? 'var(--green)' : (hours < 24 * 7 ? 'var(--orange)' : 'var(--red)');
@@ -26617,7 +26617,11 @@ function _lastSeenBadge(ms) {
   else if (days < 7) label = 'vue il y a ' + days + 'j';
   else if (days < 30) label = 'vue il y a ' + Math.floor(days / 7) + ' sem';
   else label = 'vue il y a ' + Math.floor(days / 30) + ' mois';
-  return { label, color, dot: '●' };
+  // Date + heure exactes (FR, DD/MM/YYYY à HH:mm) pour le tooltip (survol / long press).
+  const d = new Date(ms);
+  const z = n => String(n).padStart(2, '0');
+  const exact = z(d.getDate()) + '/' + z(d.getMonth() + 1) + '/' + d.getFullYear() + ' à ' + z(d.getHours()) + ':' + z(d.getMinutes());
+  return { label, color, dot: '●', exact };
 }
 
 function _initPlayersSync() {
@@ -27451,7 +27455,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.37';
+const APP_VERSION = '2026-06-28.38';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
