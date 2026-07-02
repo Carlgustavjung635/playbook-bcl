@@ -11108,7 +11108,7 @@ function renderMatchDetail() {
         </div>
       ` : ''}
 
-      ${cancelled ? '' : isToPlay ? (renderMatchPrep(m) + renderMatchPrepForPlayer(m)) : `
+      ${cancelled ? '' : isToPlay ? (renderMatchComposition(m) + renderMatchPrep(m) + renderMatchPrepForPlayer(m)) : `
         ${isCoach ? `
           <div style="padding:0 18px 6px;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
             <button class="btn btn-secondary" onclick="state._showPrepArchive=${showPrepArchive?'null':`'${m.id}'`};render()" style="font-size:11px">
@@ -13368,11 +13368,14 @@ function renderMatchComposition(m) {
   const comp = getMatchComposition(m, viewerId);
   if (!comp.length && !isCoach) return '';
   const anyStats = comp.some(c => c.hasStats);
+  // Match à venir (pas encore de score) → « Composition prévue » ; sinon « Composition ».
+  const isPlayed = (m.scoreUs || 0) > 0 || (m.scoreOpp || 0) > 0;
+  const title = isPlayed ? 'Composition' : 'Composition prévue';
   // Coach : peut modifier la compo À TOUT MOMENT (avant / pendant / après le
   // match). Ouvre l'éditeur openRosterManager (écrit m.roster.included, synced).
   return `
     <div class="section-header">
-      <div><div class="eyebrow">Effectif · ${comp.length} joueuse${comp.length>1?'s':''}</div><h2 class="display-md mt-2">Composition</h2></div>
+      <div><div class="eyebrow">Effectif · ${comp.length} joueuse${comp.length>1?'s':''}</div><h2 class="display-md mt-2">🏀 ${title}</h2></div>
       ${isCoach ? `<button class="section-action" onclick="openRosterManager('${m.id}')">✏️ Modifier</button>` : ''}
     </div>
     <div class="list-section" style="margin-top:0">
@@ -27659,7 +27662,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.40';
+const APP_VERSION = '2026-06-28.41';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
