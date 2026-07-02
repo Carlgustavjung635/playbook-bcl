@@ -6705,8 +6705,8 @@ async function tryPin() {
     if (role === 'stat') state.section = 'live';
     else state.section = 'home';
     persist();
-    // Dernière connexion : login frais d'une joueuse → tampon immédiat.
-    try { _touchCurrentPlayerLastSeen(); } catch (e) {}
+    // Dernière connexion : login frais d'une joueuse → tampon immédiat (force).
+    try { _touchCurrentPlayerLastSeen(true); } catch (e) {}
     render();
     return;
   }
@@ -26572,13 +26572,36 @@ window.addEventListener('hashchange', () => render());
 // 2) tout le reste est piloté par window.PbSync (sync engine générique)
 // Tamponne la dernière connexion de la joueuse courante (rôle 'player').
 // Optimiste local + UPDATE ciblé Supabase (silencieux si colonne absente).
-function _touchCurrentPlayerLastSeen() {
+// Tampon "dernière connexion" de la joueuse courante.
+// force=true : login / boot (toujours). Sinon : retour au premier plan, throttlé
+// à 1 push serveur / 5 min pour ne pas marteler la DB. CORRECTIF : avant, le
+// tampon ne se déclenchait qu'au login et au 1er boot ; une joueuse en PWA
+// installée qui reste connectée et rouvre l'app chaque jour ne rafraîchissait
+// JAMAIS sa date → le coach voyait une dernière connexion figée.
+let _lastSeenTouchAt = 0;
+function _touchCurrentPlayerLastSeen(force) {
   if (!state.auth || state.auth.role !== 'player' || !state.auth.playerId) return;
+  const now = Date.now();
+  if (!force && (now - _lastSeenTouchAt) < 5 * 60 * 1000) return; // throttle 5 min
+  _lastSeenTouchAt = now;
   const pid = state.auth.playerId;
   const p = state.players.find(x => x.id === pid);
-  if (p) p.lastSeenAt = Date.now();
+  if (p) p.lastSeenAt = now;
   try { save(K.players, state.players); } catch (e) {}
   if (window.PbStore) PbStore.touchLastSeen(pid).catch(() => {});
+}
+
+// Rafraîchit la dernière connexion quand la joueuse revient au premier plan
+// (onglet re-visible / focus fenêtre). Listener installé une seule fois.
+function _ensureLastSeenForegroundTouch() {
+  if (window._lastSeenFgBound) return;
+  window._lastSeenFgBound = true;
+  const onFg = () => {
+    if (typeof document !== 'undefined' && document.visibilityState && document.visibilityState !== 'visible') return;
+    try { _touchCurrentPlayerLastSeen(false); } catch (e) {}
+  };
+  document.addEventListener('visibilitychange', onFg);
+  window.addEventListener('focus', onFg);
 }
 
 // Badge "dernière connexion" pour l'effectif coach.
@@ -26620,7 +26643,7 @@ function _initPlayersSync() {
     }
     // Dernière connexion : si une joueuse charge l'app, on tamponne son
     // last_seen_at (après la fusion → la joueuse existe dans state.players).
-    try { _touchCurrentPlayerLastSeen(); } catch (e) {}
+    try { _touchCurrentPlayerLastSeen(true); } catch (e) {}
   }).catch(e => console.warn('[sync] fetchPlayers:', e.message))
     .finally(() => {
       // --- B) Toutes les autres entités via PbSync ---
@@ -27168,6 +27191,8 @@ function _renderBody() {
   _bootCleanupOnce();
   // Sync effectif au premier render (idempotent : flag interne)
   _initPlayersSync();
+  // Rafraîchit la dernière connexion joueuse au retour au premier plan (une fois)
+  _ensureLastSeenForegroundTouch();
   // Portail public via hash #public
   if (window.location.hash === '#public') {
     // 1) Fetch initial des matches depuis Supabase (si dispo) puis re-render
@@ -27426,7 +27451,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.36';
+const APP_VERSION = '2026-06-28.37';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
