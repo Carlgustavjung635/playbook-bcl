@@ -56,7 +56,7 @@ console.log('SCÉNARIO 2 — coach : voit tout + bouton Annoncer (même non rév
 
 console.log('SCÉNARIO 3 — toggleLineupRevealed : flip + gating coach + notif à l\'annonce');
 {
-  const tsrc = [extractFn('getMatchRoster'), extractFn('getMatchComposition'), extractFn('_notifyLineupRevealed'), extractFn('toggleLineupRevealed')].join('\n\n');
+  const tsrc = [extractFn('getMatchRoster'), extractFn('getMatchComposition'), extractFn('_rdvDefaultFromTime'), extractFn('getMatchRdvTime'), extractFn('_notifyLineupRevealed'), extractFn('toggleLineupRevealed')].join('\n\n');
   function build(role) {
     const state = { auth: { role, playerId: null }, players: [{ id: 'a', num: 4, name: 'Lea' }], convocations: [], currentSeasonId: 's1',
       matches: [{ id: 'm1', opponent: 'CAP', date: '2026-12-31', time: '18:00', teamTag: 'e1', seasonId: 's1', lineupRevealed: false, roster: { included: ['a'] } }] };

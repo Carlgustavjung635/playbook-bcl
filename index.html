@@ -3532,6 +3532,8 @@ const ENTITIES = [
         prep_shared: !!m.prepShared, // partage prépa aux joueuses (migration 20260702_001)
         location: m.place || null,
         time: m.time || null,
+        rdv_time: m.rdvTime || null,   // RDV équipe (migration 20260702_004)
+        rdv_place: m.rdvPlace || null,
         team_tag: (m.teamTag === 'e2') ? 'e2' : 'e1',  // multi-effectif : e1 | e2 (jamais both pour un match)
         // Feature : PDF stats FFBB (cf. migration 20260607_007). On ne pousse que
         // les URLs Storage (http/https) ; null sinon.
@@ -3586,6 +3588,8 @@ const ENTITIES = [
           prepShared: !!r.prep_shared, // partage prépa aux joueuses (rétrocompat : colonne absente → false)
           place: r.location || local.place || '',
           time: r.time || local.time || '',
+          rdvTime: r.rdv_time || local.rdvTime || '',   // RDV équipe (rétrocompat : absent → '')
+          rdvPlace: r.rdv_place || local.rdvPlace || '',
           positives: local.positives || [], negatives: local.negatives || [],
           playerStats: local.playerStats || {},
           seasonId: r.season_id || local.seasonId || null,
@@ -10992,7 +10996,7 @@ function renderMatchDetail() {
                 </div>
                 <div>
                   <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em;margin-bottom:2px">RDV équipe</div>
-                  <div style="font-family:'Anton';font-size:16px;color:var(--orange)">${m.rdvTime || '?'}</div>
+                  <div style="font-family:'Anton';font-size:16px;color:var(--orange)">${getMatchRdvTime(m) || '?'}</div>
                   ${m.rdvPlace ? `<div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;line-height:1.3">${esc(m.rdvPlace)}</div>` : ''}
                 </div>
               </div>
@@ -11508,6 +11512,23 @@ function renderStatsTable(m, stats, canEdit) {
   `;
 }
 
+// Heure de RDV par défaut = 1h avant l'heure du match (HH:MM). '' si pas d'heure.
+function _rdvDefaultFromTime(timeStr) {
+  if (!timeStr || !/^\d{1,2}:\d{2}/.test(timeStr)) return '';
+  const [hh, mm] = timeStr.split(':').map(n => parseInt(n, 10));
+  let h = hh - 1;
+  if (h < 0) h = 0; // garde-fou : match à 00:xx → 00:xx
+  return String(h).padStart(2, '0') + ':' + String(mm).padStart(2, '0');
+}
+// Heure de RDV EFFECTIVE d'un match : l'override saisi par le coach (m.rdvTime),
+// sinon le défaut calculé (1h avant l'heure du match). '' si aucune heure connue.
+// Le coach peut ajuster (ex. extérieur = partir plus tôt pour le trajet).
+function getMatchRdvTime(m) {
+  if (!m) return '';
+  if (m.rdvTime) return m.rdvTime;
+  return _rdvDefaultFromTime(m.time || '');
+}
+
 function editMatch(id) {
   const isNew = !id;
   const m = isNew
@@ -11535,26 +11556,29 @@ function editMatch(id) {
       </div>
       <div class="fld"><label class="fld-label">Gymnase</label><input id="m-place" value="${esc(m.place || '')}" placeholder="Ex : Gymnase du club"></div>
 
+      <!-- RDV ÉQUIPE (toujours visible : défaut 1h avant, ajustable) -->
+      <div class="fld" style="margin-top:14px">
+        <label class="fld-label">⏰ Heure de RDV équipe</label>
+        <input id="m-rdv-time" type="time" value="${m.rdvTime || ''}">
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px;line-height:1.5">
+          Vide = auto <strong>1h avant</strong> le match${m.time ? ` (soit ${esc(_rdvDefaultFromTime(m.time))})` : ''}. Ajuste si besoin (trajet extérieur…).
+        </div>
+      </div>
+
       <!-- ADVERSAIRE -->
       <div class="eyebrow-muted" style="margin:14px 0 8px">Adversaire</div>
       <div class="fld"><input id="m-opp" value="${esc(m.opponent)}" placeholder="Ex : CA PONTACQ"></div>
       ${renderTeamTagField('m-team', isNew ? defaultEventTag() : (m.teamTag === 'e2' ? 'e2' : 'e1'), false)}
 
-      <!-- DÉPLACEMENT : visible uniquement en extérieur -->
+      <!-- DÉPLACEMENT : lieu de RDV (covoiturage) — visible uniquement en extérieur -->
       <div id="m-deplacement" style="padding-top:14px;border-top:1px solid var(--border-soft);margin-top:8px;display:${m.home ? 'none' : 'block'}">
-        <div class="eyebrow-muted" style="margin-bottom:10px">🚗 Déplacement (RDV équipe)</div>
-        <div class="fld-row">
-          <div class="fld">
-            <label class="fld-label">Heure RDV</label>
-            <input id="m-rdv-time" type="time" value="${m.rdvTime || ''}" placeholder="Auto = 1h avant">
-          </div>
-          <div class="fld">
-            <label class="fld-label">Lieu RDV</label>
-            <input id="m-rdv-place" value="${esc(m.rdvPlace || '')}" placeholder="Ex : gymnase club">
-          </div>
+        <div class="eyebrow-muted" style="margin-bottom:10px">🚗 Déplacement</div>
+        <div class="fld">
+          <label class="fld-label">Lieu de RDV (covoiturage)</label>
+          <input id="m-rdv-place" value="${esc(m.rdvPlace || '')}" placeholder="Ex : parking du gymnase club">
         </div>
         <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px;line-height:1.5">
-          Laisse vide pour auto-remplir 1h avant l'heure du match.
+          Optionnel — point de rassemblement s'il diffère du gymnase.
         </div>
       </div>
 
@@ -11606,15 +11630,13 @@ function saveMatch(id, isNew) {
   const existing = isNew ? null : state.matches.find(x => x.id === id);
   const matchTime = document.getElementById('m-time').value || '';
   const home = document.getElementById('m-home').value === 'true';
-  let rdvTime = document.getElementById('m-rdv-time').value || '';
-  let rdvPlace = document.getElementById('m-rdv-place').value.trim();
-  // Auto-fill RDV pour les extérieurs si vide
-  if (!home && !rdvTime && matchTime) {
-    const [hh, mm] = matchTime.split(':').map(n => parseInt(n));
-    let h = hh - 1;
-    if (h < 0) h = 0;
-    rdvTime = String(h).padStart(2, '0') + ':' + String(mm).padStart(2, '0');
-  }
+  // RDV : on stocke uniquement l'override explicite du coach. Vide = auto
+  // (1h avant), calculé dynamiquement à la lecture par getMatchRdvTime(m) →
+  // reste juste même si l'heure du match change ensuite.
+  const rdvTimeEl = document.getElementById('m-rdv-time');
+  const rdvPlaceEl = document.getElementById('m-rdv-place');
+  const rdvTime = rdvTimeEl ? (rdvTimeEl.value || '') : (existing ? (existing.rdvTime || '') : '');
+  const rdvPlace = rdvPlaceEl ? rdvPlaceEl.value.trim() : (existing ? (existing.rdvPlace || '') : '');
 
   // Phase 4 : un nouveau match commence en 'to_play'. Sur édition, on
   // bascule auto 'to_play' → 'played' dès qu'un score est saisi (le coach
@@ -11689,7 +11711,7 @@ function syncConvocFromMatch(m) {
   state.convocations = state.convocations || [];
   let convoc = m.convocId ? state.convocations.find(c => c.id === m.convocId) : null;
   // Heure d'événement : RDV si défini, sinon heure du match
-  const effectiveTime = m.rdvTime || m.time || '';
+  const effectiveTime = getMatchRdvTime(m) || m.time || '';
   const effectivePlace = m.rdvPlace || m.place || '';
   if (!convoc) {
     // Création
@@ -11760,7 +11782,7 @@ function cleanupOrphanMatchConvocs() {
     }
     if (!m.convocId) {
       // Créer la convoc maintenant
-      const effectiveTime = m.rdvTime || m.time || '';
+      const effectiveTime = getMatchRdvTime(m) || m.time || '';
       const effectivePlace = m.rdvPlace || m.place || '';
       const convoc = {
         id: uid(),
@@ -13494,11 +13516,14 @@ function _notifyLineupRevealed(m) {
   const dateLbl = typeof formatDate === 'function' ? formatDate(m.date, 'long') : m.date;
   const where = m.place ? ' (' + m.place + ')' : (m.home ? ' (domicile)' : '');
   const timeLbl = m.time ? ' à ' + m.time : '';
+  // RDV : override coach sinon défaut (1h avant). Ajoute « RDV à HH:MM [au lieu] ».
+  const rdv = getMatchRdvTime(m);
+  const rdvLbl = rdv ? '. RDV à ' + rdv + (m.rdvPlace ? ' au ' + m.rdvPlace : '') : '';
   // Retenues : message personnel.
   if (retained.length) {
     notifyPush(_pushPlayerKeys(retained), {
       title: '🏀 Tu es retenue !',
-      body: 'Match vs ' + (m.opponent || '') + ' le ' + dateLbl + timeLbl + where,
+      body: 'Match vs ' + (m.opponent || '') + ' le ' + dateLbl + timeLbl + where + rdvLbl,
       url: '/', tag: 'lineup-' + m.id, type: 'lineup_in'
     });
   }
@@ -15245,7 +15270,7 @@ function convocCard(c, isPast, isCoach) {
         </div>
         <div style="font-family:'Anton';font-size:18px;text-transform:uppercase;letter-spacing:0.02em;margin-bottom:4px">${esc(c.title)}</div>
         ${matchPlace ? `<div style="font-size:12px;color:var(--ink-3);font-family:'JetBrains Mono'">⌖ ${esc(matchPlace)}</div>` : ''}
-        ${linkedMatch && linkedMatch.time ? `<div style="font-size:11px;color:var(--orange);font-family:'JetBrains Mono';margin-top:4px;text-transform:uppercase;letter-spacing:0.04em">⏰ Match à ${esc(linkedMatch.time)}${linkedMatch.rdvTime ? ' · RDV ' + esc(linkedMatch.rdvTime) : ''}</div>` : ''}
+        ${linkedMatch && linkedMatch.time ? `<div style="font-size:11px;color:var(--orange);font-family:'JetBrains Mono';margin-top:4px;text-transform:uppercase;letter-spacing:0.04em">⏰ Match à ${esc(linkedMatch.time)}${getMatchRdvTime(linkedMatch) ? ' · RDV ' + esc(getMatchRdvTime(linkedMatch)) : ''}</div>` : ''}
         ${c.note ? `<div style="margin-top:10px;padding:10px 12px;background:var(--bg-3);border-left:2px solid var(--orange);border-radius:6px;font-size:13px;color:var(--ink-2);line-height:1.5;font-style:italic">"${esc(c.note)}"</div>` : ''}
         ${linkedMatch ? `<button class="btn btn-secondary" onclick="event.stopPropagation();openMatch('${linkedMatch.id}')" style="margin-top:10px;font-size:11px">🏀 Voir la fiche du match →</button>` : ''}
       </div>
@@ -27836,7 +27861,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.43';
+const APP_VERSION = '2026-06-28.44';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
