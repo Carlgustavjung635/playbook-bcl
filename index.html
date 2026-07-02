@@ -1439,6 +1439,16 @@
   }
   .fld-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 
+  /* En-tête de section dans les formulaires longs (ex. modale match) */
+  .mm-section {
+    font-family: 'Anton', sans-serif;
+    font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--ink-2);
+    margin: 18px 0 10px; padding-bottom: 6px;
+    border-bottom: 1px solid var(--border-soft, var(--border));
+  }
+  .mm-section:first-child { margin-top: 0; }
+
   /* ========== MODAL ========== */
   .modal-bg {
     /* Safari mobile (onglet) : l'address bar réduit la hauteur visible. On évite
@@ -11540,15 +11550,15 @@ function editMatch(id) {
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <div class="modal-body">
-      <!-- QUAND : date + heure (heure compacte) -->
-      <div class="eyebrow-muted" style="margin-bottom:8px">Quand</div>
+      <!-- ═══ QUAND ═══ -->
+      <div class="mm-section">🗓 Quand</div>
       <div class="fld-row" style="grid-template-columns:1.5fr 1fr">
         <div class="fld"><label class="fld-label">Date</label><input id="m-date" type="date" value="${m.date}"></div>
         <div class="fld"><label class="fld-label">Heure</label><input id="m-time" type="time" value="${m.time || ''}"></div>
       </div>
 
-      <!-- OÙ : toggle pill domicile/extérieur + gymnase -->
-      <div class="eyebrow-muted" style="margin:14px 0 8px">Où</div>
+      <!-- ═══ OÙ ═══ -->
+      <div class="mm-section">📍 Où</div>
       <input type="hidden" id="m-home" value="${m.home ? 'true' : 'false'}">
       <div class="segmented" style="margin:0 0 10px">
         <button type="button" id="m-home-dom" class="segmented-btn ${m.home ? 'active' : ''}" onclick="setMatchHome(true)">🏠 Domicile</button>
@@ -11556,45 +11566,36 @@ function editMatch(id) {
       </div>
       <div class="fld"><label class="fld-label">Gymnase</label><input id="m-place" value="${esc(m.place || '')}" placeholder="Ex : Gymnase du club"></div>
 
-      <!-- RDV ÉQUIPE (toujours visible : défaut 1h avant, ajustable) -->
-      <div class="fld" style="margin-top:14px">
-        <label class="fld-label">⏰ Heure de RDV équipe</label>
+      <!-- ═══ ADVERSAIRE ═══ -->
+      <div class="mm-section">🆚 Adversaire</div>
+      <div class="fld"><label class="fld-label">Nom de l'adversaire</label><input id="m-opp" value="${esc(m.opponent)}" placeholder="Ex : CA PONTACQ"></div>
+      ${_matchTeamPill(isNew ? defaultEventTag() : (m.teamTag === 'e2' ? 'e2' : 'e1'))}
+
+      <!-- ═══ LOGISTIQUE ═══ -->
+      <div class="mm-section">⏰ Logistique</div>
+      <div class="fld">
+        <label class="fld-label">Heure de RDV équipe</label>
         <input id="m-rdv-time" type="time" value="${m.rdvTime || ''}">
-        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px;line-height:1.5">
-          Vide = auto <strong>1h avant</strong> le match${m.time ? ` (soit ${esc(_rdvDefaultFromTime(m.time))})` : ''}. Ajuste si besoin (trajet extérieur…).
-        </div>
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px">Vide = auto 1h avant${m.time ? ` (${esc(_rdvDefaultFromTime(m.time))})` : ''}</div>
+      </div>
+      <!-- Lieu de RDV covoiturage : visible si Extérieur OU si déjà saisi -->
+      <div id="m-deplacement" class="fld" style="margin-top:12px;display:${(m.home && !(m.rdvPlace || '').trim()) ? 'none' : 'block'}">
+        <label class="fld-label">📍 Lieu de RDV (covoiturage)</label>
+        <input id="m-rdv-place" value="${esc(m.rdvPlace || '')}" placeholder="Ex : parking du gymnase club">
       </div>
 
-      <!-- ADVERSAIRE -->
-      <div class="eyebrow-muted" style="margin:14px 0 8px">Adversaire</div>
-      <div class="fld"><input id="m-opp" value="${esc(m.opponent)}" placeholder="Ex : CA PONTACQ"></div>
-      ${renderTeamTagField('m-team', isNew ? defaultEventTag() : (m.teamTag === 'e2' ? 'e2' : 'e1'), false)}
+      <!-- ═══ NOTES ═══ -->
+      <div class="mm-section">📝 Notes</div>
+      <div class="fld"><textarea id="m-notes" placeholder="Mémo du match…">${esc(m.notes || '')}</textarea></div>
 
-      <!-- DÉPLACEMENT : lieu de RDV (covoiturage) — visible uniquement en extérieur -->
-      <div id="m-deplacement" style="padding-top:14px;border-top:1px solid var(--border-soft);margin-top:8px;display:${m.home ? 'none' : 'block'}">
-        <div class="eyebrow-muted" style="margin-bottom:10px">🚗 Déplacement</div>
-        <div class="fld">
-          <label class="fld-label">Lieu de RDV (covoiturage)</label>
-          <input id="m-rdv-place" value="${esc(m.rdvPlace || '')}" placeholder="Ex : parking du gymnase club">
-        </div>
-        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px;line-height:1.5">
-          Optionnel — point de rassemblement s'il diffère du gymnase.
-        </div>
-      </div>
-
-      <!-- NOTES -->
-      <div class="fld" style="margin-top:14px"><label class="fld-label">Notes</label><textarea id="m-notes" placeholder="Mémo du match...">${esc(m.notes || '')}</textarea></div>
-
-      <!-- SCORE : masqué à la création. En édition, repliable derrière un toggle. -->
+      <!-- ═══ RÉSULTAT (édition seulement, repliable) ═══ -->
       ${isNew ? '' : `
-      <div style="padding-top:14px;border-top:1px solid var(--border-soft);margin-top:8px">
-        ${(m.scoreUs > 0 || m.scoreOpp > 0) ? '' : `<button type="button" id="m-score-toggle" class="btn btn-secondary btn-block" onclick="revealScoreFields()">🏆 Saisir le score</button>`}
-        <div id="m-score-fields" style="display:${(m.scoreUs > 0 || m.scoreOpp > 0) ? 'block' : 'none'}">
-          <div class="eyebrow-muted" style="margin-bottom:10px">🏆 Score final</div>
-          <div class="fld-row">
-            <div class="fld"><label class="fld-label">Notre score</label><input id="m-us" type="number" value="${m.scoreUs}" min="0"></div>
-            <div class="fld"><label class="fld-label">Adversaire</label><input id="m-them" type="number" value="${m.scoreOpp}" min="0"></div>
-          </div>
+      <div class="mm-section">🏆 Résultat</div>
+      ${(m.scoreUs > 0 || m.scoreOpp > 0) ? '' : `<button type="button" id="m-score-toggle" class="btn btn-ghost btn-block" style="color:var(--ink-3);font-size:12px" onclick="revealScoreFields()">+ Saisir le score du match</button>`}
+      <div id="m-score-fields" style="display:${(m.scoreUs > 0 || m.scoreOpp > 0) ? 'block' : 'none'}">
+        <div class="fld-row">
+          <div class="fld"><label class="fld-label">Notre score</label><input id="m-us" type="number" value="${m.scoreUs}" min="0"></div>
+          <div class="fld"><label class="fld-label">Adversaire</label><input id="m-them" type="number" value="${m.scoreOpp}" min="0"></div>
         </div>
       </div>
       `}
@@ -11606,14 +11607,41 @@ function editMatch(id) {
   `);
 }
 // Toggle pill 🏠/🚗 de la modale match : met à jour l'input caché m-home, l'état
-// actif des pills, et masque/affiche le sous-bloc Déplacement (extérieur seul).
+// actif des pills, et masque/affiche le Lieu de RDV covoiturage. Visible en
+// extérieur, OU à domicile si un lieu a déjà été saisi (ne pas le cacher).
 function setMatchHome(home) {
   const hidden = document.getElementById('m-home');
   if (hidden) hidden.value = home ? 'true' : 'false';
   document.getElementById('m-home-dom')?.classList.toggle('active', home);
   document.getElementById('m-home-ext')?.classList.toggle('active', !home);
   const dep = document.getElementById('m-deplacement');
-  if (dep) dep.style.display = home ? 'none' : 'block';
+  if (dep) {
+    const hasPlace = ((document.getElementById('m-rdv-place') || {}).value || '').trim() !== '';
+    dep.style.display = (home && !hasPlace) ? 'none' : 'block';
+  }
+}
+
+// Toggle pill E1/E2 de la modale match (multi-effectif). Input caché m-team lu
+// par saveMatch. Rien si mono-équipe. Réutilise le style .segmented (comme 🏠/🚗).
+function _matchTeamPill(currentTag) {
+  if (!isMultiSquad()) return '';
+  const t = currentTag === 'e2' ? 'e2' : 'e1';
+  return `
+    <input type="hidden" id="m-team" value="${t}">
+    <div class="fld">
+      <label class="fld-label">Équipe</label>
+      <div class="segmented" style="margin:0">
+        <button type="button" id="m-team-e1" class="segmented-btn ${t === 'e1' ? 'active' : ''}" onclick="setMatchTeam('e1')">${esc(teamLabel('e1', true))}</button>
+        <button type="button" id="m-team-e2" class="segmented-btn ${t === 'e2' ? 'active' : ''}" onclick="setMatchTeam('e2')">${esc(teamLabel('e2', true))}</button>
+      </div>
+    </div>`;
+}
+function setMatchTeam(tag) {
+  const t = tag === 'e2' ? 'e2' : 'e1';
+  const hidden = document.getElementById('m-team');
+  if (hidden) hidden.value = t;
+  document.getElementById('m-team-e1')?.classList.toggle('active', t === 'e1');
+  document.getElementById('m-team-e2')?.classList.toggle('active', t === 'e2');
 }
 
 // Révèle les champs de score (édition) et retire le bouton-toggle.
@@ -27861,7 +27889,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.44';
+const APP_VERSION = '2026-06-28.45';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
