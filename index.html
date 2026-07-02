@@ -3527,7 +3527,8 @@ const ENTITIES = [
         // Phase 4 — prépa match (cf. migration 20260524_007).
         status: inferredStatus,
         prep_videos: Array.isArray(m.prepVideos) ? m.prepVideos : [],
-        prep_comment: m.prepComment || null,
+        prep_comment: m.prepComment || null,            // note PUBLIQUE (partagée si prep_shared)
+        prep_comment_private: m.prepCommentPrivate || null, // note PRIVÉE coach (migration 20260702_002)
         prep_shared: !!m.prepShared, // partage prépa aux joueuses (migration 20260702_001)
         location: m.place || null,
         time: m.time || null,
@@ -3579,7 +3580,8 @@ const ENTITIES = [
           // déjà `m.place` / `m.time` depuis longtemps).
           status: r.status || 'to_play',
           prepVideos: Array.isArray(r.prep_videos) ? r.prep_videos : [],
-          prepComment: r.prep_comment || '',
+          prepComment: r.prep_comment || '',                 // note PUBLIQUE
+          prepCommentPrivate: r.prep_comment_private || '',   // note PRIVÉE coach
           prepShared: !!r.prep_shared, // partage prépa aux joueuses (rétrocompat : colonne absente → false)
           place: r.location || local.place || '',
           time: r.time || local.time || '',
@@ -4123,7 +4125,8 @@ const ENTITIES = [
         out[`${lk.matchId}|${lk.playId}`] = {
           match_id: lk.matchId, play_id: lk.playId,
           position: Number.isFinite(lk.position) ? lk.position : 0,
-          coach_note: lk.coachNote || null
+          coach_note: lk.coachNote || null,
+          visibility: lk.visibility === 'private' ? 'private' : 'public' // migration 20260702_002
         };
       });
       return out;
@@ -4133,6 +4136,7 @@ const ENTITIES = [
         matchId: r.match_id, playId: r.play_id,
         position: Number.isFinite(r.position) ? r.position : 0,
         coachNote: r.coach_note || '',
+        visibility: r.visibility === 'private' ? 'private' : 'public', // rétrocompat : colonne absente → public
         createdAt: r.created_at ? Date.parse(r.created_at) : null
       }));
     }
@@ -11493,7 +11497,7 @@ function renderStatsTable(m, stats, canEdit) {
 function editMatch(id) {
   const isNew = !id;
   const m = isNew
-    ? { id: uid(), date: new Date().toISOString().slice(0,10), opponent: '', home: true, scoreUs: 0, scoreOpp: 0, notes: '', videoUrl: '', positives: [], negatives: [], playerStats: {}, status: 'to_play', prepVideos: [], prepComment: '', prepShared: false }
+    ? { id: uid(), date: new Date().toISOString().slice(0,10), opponent: '', home: true, scoreUs: 0, scoreOpp: 0, notes: '', videoUrl: '', positives: [], negatives: [], playerStats: {}, status: 'to_play', prepVideos: [], prepComment: '', prepCommentPrivate: '', prepShared: false }
     : state.matches.find(x => x.id === id);
   openModal(`
     <div class="modal-header">
@@ -11639,7 +11643,8 @@ function saveMatch(id, isNew) {
     // Phase 4 — prépa match.
     status: nextStatus,
     prepVideos: existing ? (existing.prepVideos || []) : [],
-    prepComment: existing ? (existing.prepComment || '') : '',
+    prepComment: existing ? (existing.prepComment || '') : '',             // note publique
+    prepCommentPrivate: existing ? (existing.prepCommentPrivate || '') : '', // note privée coach
     prepShared: existing ? !!existing.prepShared : false, // prépa partagée aux joueuses
 
     // Feature : PDF stats FFBB — préservé tel quel sur édition (jamais saisi
@@ -12574,9 +12579,19 @@ function addPlayToMatch(matchId, playId, coachNote) {
     matchId, playId,
     position: nextPos,
     coachNote: coachNote || '',
+    visibility: 'public', // défaut : partagé aux joueuses si prepShared (togglable en privé)
     createdAt: Date.now()
   });
   persist();
+}
+// Bascule la visibilité d'un play lié : public (partagé si prepShared) ↔ privé
+// (jamais partagé, tactique/scouting). Coach-only.
+function toggleMatchPlayVisibility(matchId, playId) {
+  if (state.auth.role !== 'coach') return;
+  const lk = (state.matchPlayLinks || []).find(x => x.matchId === matchId && x.playId === playId);
+  if (!lk) return;
+  lk.visibility = (lk.visibility === 'private') ? 'public' : 'private';
+  persist(); render();
 }
 function removePlayFromMatch(matchId, playId) {
   state.matchPlayLinks = (state.matchPlayLinks || []).filter(lk => !(lk.matchId === matchId && lk.playId === playId));
@@ -12664,16 +12679,25 @@ function editPrepComment(matchId) {
   if (!m) return;
   openModal(`
     <div class="modal-header">
-      <div class="modal-title">📝 Notes coach</div>
+      <div class="modal-title">📝 Notes de match</div>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <div class="modal-body">
+      <!-- NOTE PUBLIQUE -->
       <div class="fld">
-        <label class="fld-label">Consignes / focus tactique</label>
-        <textarea id="pc-text" rows="8" placeholder="Tout ce que l'équipe doit avoir en tête pour ce match…">${esc(m.prepComment || '')}</textarea>
+        <label class="fld-label" style="color:var(--green)">📤 Note publique (joueuses)</label>
+        <textarea id="pc-public" rows="5" placeholder="Ce que l'équipe doit avoir en tête : consignes, focus, état d'esprit…">${esc(m.prepComment || '')}</textarea>
       </div>
-      <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';line-height:1.5;text-transform:uppercase;letter-spacing:0.04em">
-        🔒 Coach-only. Pas visible côté joueuse.
+      <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';line-height:1.5;margin:-6px 0 14px">
+        Visible par les joueuses <strong>uniquement si la prépa est partagée</strong> (📤).
+      </div>
+      <!-- NOTE PRIVÉE -->
+      <div class="fld">
+        <label class="fld-label" style="color:var(--red)">🔒 Note privée (coach seul)</label>
+        <textarea id="pc-private" rows="5" placeholder="Tactique adverse, scouting, rotations, notes internes…">${esc(m.prepCommentPrivate || '')}</textarea>
+      </div>
+      <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';line-height:1.5;margin-top:-6px">
+        🔒 <strong>Jamais</strong> partagée aux joueuses, même prépa partagée.
       </div>
     </div>
     <div class="modal-footer">
@@ -12681,12 +12705,13 @@ function editPrepComment(matchId) {
       <button class="btn btn-primary" onclick="savePrepComment('${matchId}')">Enregistrer</button>
     </div>
   `);
-  setTimeout(() => document.getElementById('pc-text')?.focus(), 80);
+  setTimeout(() => document.getElementById('pc-public')?.focus(), 80);
 }
 function savePrepComment(matchId) {
   const m = state.matches.find(x => x.id === matchId);
   if (!m) return;
-  m.prepComment = (document.getElementById('pc-text').value || '').trim();
+  m.prepComment = ((document.getElementById('pc-public') || {}).value || '').trim();          // publique
+  m.prepCommentPrivate = ((document.getElementById('pc-private') || {}).value || '').trim();   // privée
   persist(); closeModal(); render();
 }
 
@@ -12830,7 +12855,8 @@ function renderMatchPrep(m) {
   const links = getMatchPlayLinks(m.id);
   const playsById = Object.fromEntries((state.plays || []).map(p => [p.id, p]));
   const prepVideos = Array.isArray(m.prepVideos) ? m.prepVideos : [];
-  const prepComment = m.prepComment || '';
+  const prepComment = m.prepComment || '';               // note publique
+  const prepCommentPrivate = m.prepCommentPrivate || '';  // note privée coach
   const phase = getMatchPhase(m);
   // Sous-titre contextuel : la prépa se lit différemment avant / pendant /
   // après le match (les infos générales sont déjà dans le hero, plus de Brief).
@@ -12885,6 +12911,7 @@ function renderMatchPrep(m) {
         if (!p) return '';
         const isFirst = i === 0;
         const isLast = i === links.length - 1;
+        const isPrivate = lk.visibility === 'private';
         return `
           <div style="padding:12px 14px;border-bottom:1px solid var(--border-soft);display:flex;gap:10px;align-items:flex-start">
             <div style="display:flex;flex-direction:column;gap:2px;align-items:center;padding-top:4px">
@@ -12896,13 +12923,17 @@ function renderMatchPrep(m) {
               ? `<img src="${p.images[0]}" style="width:48px;height:48px;border-radius:6px;object-fit:cover;flex-shrink:0;cursor:pointer" onclick="state.view={type:'play',id:'${p.id}'};render()">`
               : `<div style="width:48px;height:48px;border-radius:6px;background:var(--bg-3);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:14px;color:var(--orange);flex-shrink:0;cursor:pointer" onclick="state.view={type:'play',id:'${p.id}'};render()">${getCatShort(p.cat)}</div>`}
             <div style="flex:1;min-width:0">
-              <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;line-height:1.2;cursor:pointer" onclick="state.view={type:'play',id:'${p.id}'};render()">${esc(p.title || '')}</div>
+              <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                <span style="font-family:'Anton';font-size:13px;text-transform:uppercase;line-height:1.2;cursor:pointer" onclick="state.view={type:'play',id:'${p.id}'};render()">${esc(p.title || '')}</span>
+                <span style="font-size:8px;font-family:'JetBrains Mono';padding:1px 5px;border-radius:4px;text-transform:uppercase;letter-spacing:0.04em;${isPrivate ? 'color:var(--red);background:var(--red-soft)' : 'color:#22c55e;background:rgba(34,197,94,0.10)'}">${isPrivate ? '🔒 privé' : '📤 public'}</span>
+              </div>
               <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${getCatLabel(p.cat)}</div>
               ${lk.coachNote ? `
                 <div style="margin-top:8px;padding:8px 10px;background:rgba(var(--accent-rgb),0.08);border-left:2px solid var(--orange);border-radius:0 6px 6px 0;font-size:12px;color:var(--ink-2);line-height:1.4;white-space:pre-wrap">${esc(lk.coachNote)}</div>
               ` : ''}
             </div>
             <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
+              <button class="btn btn-icon" onclick="toggleMatchPlayVisibility('${m.id}','${p.id}')" title="${isPrivate ? 'Play privé (jamais partagé) — rendre public' : 'Play public (partagé si prépa partagée) — rendre privé'}">${isPrivate ? '🔒' : '📤'}</button>
               <button class="btn btn-icon" onclick="editPlayLinkNote('${m.id}','${p.id}')" title="Note coach">${lk.coachNote ? '✎' : '+'}</button>
               <button class="btn btn-icon" onclick="if(confirm('Retirer ce play du match ?')){removePlayFromMatch('${m.id}','${p.id}');render()}" style="color:var(--red)" title="Retirer">✕</button>
             </div>
@@ -12953,22 +12984,31 @@ function renderMatchPrep(m) {
       `}
     </div>
 
-    <!-- NOTES COACH -->
+    <!-- NOTES : publique (joueuses si partagé) + privée (coach seul) -->
     <div class="section-header">
       <div>
         <div class="eyebrow">📝 Briefing</div>
-        <h2 class="display-md mt-2">Notes coach</h2>
+        <h2 class="display-md mt-2">Notes de match</h2>
       </div>
-      <button class="section-action" onclick="editPrepComment('${m.id}')">${prepComment ? '✎ Éditer' : '+ Ajouter'}</button>
+      <button class="section-action" onclick="editPrepComment('${m.id}')">${(prepComment || prepCommentPrivate) ? '✎ Éditer' : '+ Ajouter'}</button>
     </div>
     <div class="list-section">
-      ${prepComment ? `
-        <div style="padding:16px;line-height:1.6;color:var(--ink-2);white-space:pre-wrap;font-size:13px">${esc(prepComment)}</div>
+      ${(prepComment || prepCommentPrivate) ? `
+        ${prepComment ? `
+          <div style="padding:14px 16px;border-bottom:${prepCommentPrivate ? '1px solid var(--border-soft)' : 'none'}">
+            <div class="eyebrow-muted" style="color:var(--green);margin-bottom:6px">📤 Publique${m.prepShared ? ' · visible joueuses' : ' · non partagée'}</div>
+            <div style="line-height:1.6;color:var(--ink-2);white-space:pre-wrap;font-size:13px">${esc(prepComment)}</div>
+          </div>` : ''}
+        ${prepCommentPrivate ? `
+          <div style="padding:14px 16px">
+            <div class="eyebrow-muted" style="color:var(--red);margin-bottom:6px">🔒 Privée · coach seul</div>
+            <div style="line-height:1.6;color:var(--ink-2);white-space:pre-wrap;font-size:13px">${esc(prepCommentPrivate)}</div>
+          </div>` : ''}
       ` : `
         <div class="empty" style="padding:24px 16px">
           <div class="empty-icon">📝</div>
           <div class="empty-title">Aucune note</div>
-          <div class="empty-desc">Consignes, focus tactique, points d'attention</div>
+          <div class="empty-desc">📤 Publique (joueuses) et/ou 🔒 privée (coach)</div>
         </div>
       `}
     </div>
@@ -12994,7 +13034,11 @@ function toggleMatchPrepShared(matchId) {
 function renderMatchPrepForPlayer(m) {
   if (!m || state.auth.role === 'coach') return '';
   if (!m.prepShared) return '';
-  const links = getMatchPlayLinks(m.id);
+  // SECURITY : n'exposer QUE les plays liés PUBLICS. Les plays privés
+  // (visibility==='private') sont tactiques/scouting → jamais partagés, même
+  // prépa partagée. Idem : on utilise m.prepComment (note PUBLIQUE), jamais
+  // m.prepCommentPrivate.
+  const links = getMatchPlayLinks(m.id).filter(lk => lk.visibility !== 'private');
   const playsById = Object.fromEntries((state.plays || []).map(p => [p.id, p]));
   const prepVideos = Array.isArray(m.prepVideos) ? m.prepVideos : [];
   const prepComment = m.prepComment || '';
@@ -27662,7 +27706,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.41';
+const APP_VERSION = '2026-06-28.42';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
