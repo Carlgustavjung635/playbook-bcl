@@ -3528,6 +3528,7 @@ const ENTITIES = [
         status: inferredStatus,
         prep_videos: Array.isArray(m.prepVideos) ? m.prepVideos : [],
         prep_comment: m.prepComment || null,
+        prep_shared: !!m.prepShared, // partage prépa aux joueuses (migration 20260702_001)
         location: m.place || null,
         time: m.time || null,
         team_tag: (m.teamTag === 'e2') ? 'e2' : 'e1',  // multi-effectif : e1 | e2 (jamais both pour un match)
@@ -3579,6 +3580,7 @@ const ENTITIES = [
           status: r.status || 'to_play',
           prepVideos: Array.isArray(r.prep_videos) ? r.prep_videos : [],
           prepComment: r.prep_comment || '',
+          prepShared: !!r.prep_shared, // partage prépa aux joueuses (rétrocompat : colonne absente → false)
           place: r.location || local.place || '',
           time: r.time || local.time || '',
           positives: local.positives || [], negatives: local.negatives || [],
@@ -10873,6 +10875,37 @@ function renderMatchDetail() {
             </div>
           `;
         })()}
+        ${(() => {
+          // Joueuse : RSVP présence/absence pour un match À VENIR (via la convoc liée).
+          if (state.auth.role !== 'player') return '';
+          if (cancelled) return '';
+          const todayStr = new Date().toISOString().slice(0,10);
+          if (m.date < todayStr) return ''; // match passé → pas de RSVP
+          const myPid = state.auth.playerId;
+          const myConvoc = m.convocId ? state.convocations.find(x => x.id === m.convocId) : null;
+          if (!myConvoc) return '';
+          const status = _effectiveConvocStatus(myConvoc, m.date, myPid);
+          const resp = (myConvoc.responses || {})[myPid];
+          if (status === 'absent') {
+            return `
+              <div style="margin-top:14px;padding:14px;background:var(--red-soft);border:1.5px solid var(--red);border-radius:var(--radius)">
+                <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;letter-spacing:0.02em;color:var(--red);margin-bottom:4px">❌ Tu t'es déclarée absente</div>
+                ${resp && resp.reason ? `<div style="font-size:12px;color:var(--ink-2);font-family:'JetBrains Mono';line-height:1.4">${esc(resp.reason)}${resp.message ? ' · ' + esc(resp.message) : ''}</div>` : ''}
+                <button class="btn btn-secondary btn-block" style="margin-top:10px" onclick="matchRestorePresence('${m.id}')">↩ Revenir sur ma décision</button>
+              </div>`;
+          }
+          return `
+            <div style="margin-top:14px;padding:14px;background:var(--surface);border:1.5px solid var(--border);border-radius:var(--radius)">
+              <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+                <span style="font-size:24px">🏀</span>
+                <div>
+                  <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;letter-spacing:0.04em">Tu es attendue à ce match</div>
+                  <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase;letter-spacing:0.04em">Préviens le coach si tu ne peux pas venir</div>
+                </div>
+              </div>
+              <button class="btn btn-secondary btn-block" style="color:var(--red)" onclick="matchDeclareAbsence('${m.id}')">⚠️ Signaler mon absence</button>
+            </div>`;
+        })()}
       </div>
 
       ${(() => {
@@ -11075,7 +11108,7 @@ function renderMatchDetail() {
         </div>
       ` : ''}
 
-      ${cancelled ? '' : isToPlay ? renderMatchPrep(m) : `
+      ${cancelled ? '' : isToPlay ? (renderMatchPrep(m) + renderMatchPrepForPlayer(m)) : `
         ${isCoach ? `
           <div style="padding:0 18px 6px;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
             <button class="btn btn-secondary" onclick="state._showPrepArchive=${showPrepArchive?'null':`'${m.id}'`};render()" style="font-size:11px">
@@ -11085,6 +11118,7 @@ function renderMatchDetail() {
           </div>
           ${showPrepArchive ? `<div style="opacity:0.85">${renderMatchPrep(m)}</div>` : ''}
         ` : ''}
+        ${renderMatchPrepForPlayer(m)}
 
         ${win || m.winSelfie ? `
           <div class="section-header">
@@ -11459,7 +11493,7 @@ function renderStatsTable(m, stats, canEdit) {
 function editMatch(id) {
   const isNew = !id;
   const m = isNew
-    ? { id: uid(), date: new Date().toISOString().slice(0,10), opponent: '', home: true, scoreUs: 0, scoreOpp: 0, notes: '', videoUrl: '', positives: [], negatives: [], playerStats: {}, status: 'to_play', prepVideos: [], prepComment: '' }
+    ? { id: uid(), date: new Date().toISOString().slice(0,10), opponent: '', home: true, scoreUs: 0, scoreOpp: 0, notes: '', videoUrl: '', positives: [], negatives: [], playerStats: {}, status: 'to_play', prepVideos: [], prepComment: '', prepShared: false }
     : state.matches.find(x => x.id === id);
   openModal(`
     <div class="modal-header">
@@ -11606,6 +11640,8 @@ function saveMatch(id, isNew) {
     status: nextStatus,
     prepVideos: existing ? (existing.prepVideos || []) : [],
     prepComment: existing ? (existing.prepComment || '') : '',
+    prepShared: existing ? !!existing.prepShared : false, // prépa partagée aux joueuses
+
     // Feature : PDF stats FFBB — préservé tel quel sur édition (jamais saisi
     // dans ce formulaire, géré par la section dédiée de la fiche match).
     statsPdfUrl: existing ? (existing.statsPdfUrl || '') : '',
@@ -12815,6 +12851,19 @@ function renderMatchPrep(m) {
       </div>
     </div>
 
+    <!-- PARTAGE PRÉPA AUX JOUEUSES -->
+    <div style="padding:0 18px 6px">
+      <div style="padding:12px 14px;background:${m.prepShared ? 'rgba(34,197,94,0.08)' : 'var(--bg-3)'};border:1px solid ${m.prepShared ? 'var(--green)' : 'var(--border)'};border-radius:8px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+          <div style="min-width:0">
+            <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;letter-spacing:0.02em">${m.prepShared ? '📤 Prépa partagée aux joueuses' : '🔒 Prépa privée (coach seul)'}</div>
+            <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;line-height:1.4">${m.prepShared ? 'Les joueuses voient les plays liés, les notes et les vidéos de prépa.' : 'Active pour montrer plays + notes + vidéos aux joueuses. Tes notes par play restent privées.'}</div>
+          </div>
+          <button class="btn ${m.prepShared ? 'btn-secondary' : 'btn-primary'}" style="flex-shrink:0;font-size:11px;padding:8px 12px" onclick="toggleMatchPrepShared('${m.id}')">${m.prepShared ? 'Repasser en privé' : '📤 Partager'}</button>
+        </div>
+      </div>
+    </div>
+
     <!-- PLAYS LIÉS -->
     <div class="section-header">
       <div>
@@ -12925,6 +12974,148 @@ function renderMatchPrep(m) {
     </div>
     ` : ''}
   `;
+}
+
+// Coach : bascule le partage de la prépa aux joueuses (m.prepShared).
+function toggleMatchPrepShared(matchId) {
+  if (state.auth.role !== 'coach') return;
+  const m = state.matches.find(x => x.id === matchId);
+  if (!m) return;
+  m.prepShared = !m.prepShared;
+  persist(); render();
+  if (typeof showToast === 'function') showToast(m.prepShared ? '📤 Prépa partagée aux joueuses' : '🔒 Prépa repassée en privé');
+}
+
+// Prépa match VISIBLE PAR LA JOUEUSE — uniquement si le coach a partagé
+// (m.prepShared). Montre plays liés (titre/catégorie, cliquables), notes de
+// prépa et vidéos de prépa, en LECTURE SEULE.
+// SECURITY : n'expose QUE p.title / p.cat / m.prepComment / m.prepVideos. Le
+// coachNote PAR play (lk.coachNote, tactique) n'est JAMAIS rendu ici.
+function renderMatchPrepForPlayer(m) {
+  if (!m || state.auth.role === 'coach') return '';
+  if (!m.prepShared) return '';
+  const links = getMatchPlayLinks(m.id);
+  const playsById = Object.fromEntries((state.plays || []).map(p => [p.id, p]));
+  const prepVideos = Array.isArray(m.prepVideos) ? m.prepVideos : [];
+  const prepComment = m.prepComment || '';
+  if (links.length === 0 && prepVideos.length === 0 && !prepComment) return '';
+  return `
+    <div class="section-header">
+      <div>
+        <div class="eyebrow">📋 Préparation</div>
+        <h2 class="display-md mt-2">Plan de match</h2>
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px;text-transform:uppercase;letter-spacing:0.04em">Partagé par ton coach</div>
+      </div>
+    </div>
+    ${links.length ? `
+      <div class="section-header"><div><div class="eyebrow">📚 Tactique</div><h2 class="display-md mt-2">Plays liés <span style="font-size:14px;color:var(--ink-3)">· ${links.length}</span></h2></div></div>
+      <div class="list-section">
+        ${links.map(lk => {
+          const p = playsById[lk.playId];
+          if (!p) return '';
+          return `
+          <div style="padding:12px 14px;border-bottom:1px solid var(--border-soft);display:flex;gap:10px;align-items:center;cursor:pointer" onclick="state.view={type:'play',id:'${p.id}'};render()">
+            ${p.images && p.images.length ? `<img src="${p.images[0]}" style="width:48px;height:48px;border-radius:6px;object-fit:cover;flex-shrink:0">` : `<div style="width:48px;height:48px;border-radius:6px;background:var(--bg-3);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:14px;color:var(--orange);flex-shrink:0">${getCatShort(p.cat)}</div>`}
+            <div style="flex:1;min-width:0">
+              <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;line-height:1.2">${esc(p.title || '')}</div>
+              <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${getCatLabel(p.cat)}</div>
+            </div>
+            <span style="color:var(--ink-3);font-family:'Anton';font-size:18px;flex-shrink:0">›</span>
+          </div>`;
+        }).join('')}
+      </div>` : ''}
+    ${prepVideos.length ? `
+      <div class="section-header"><div><div class="eyebrow">▶ Vidéo</div><h2 class="display-md mt-2">Vidéos prépa <span style="font-size:14px;color:var(--ink-3)">· ${prepVideos.length}</span></h2></div></div>
+      <div class="list-section"><div style="padding:12px 16px"><div class="focus-images">
+        ${prepVideos.map(v => {
+          const parsed = parseVideo(v.url);
+          const thumb = parsed && parsed.thumb ? parsed.thumb : '';
+          const startSec = (v.startSec | 0);
+          const safeUrl = String(v.url).replace(/'/g, "\\'");
+          const lbl = v.label ? `<div style="font-size:10px;color:var(--ink-2);margin-top:3px;line-height:1.2;text-align:center">${esc(v.label)}</div>` : '';
+          return `
+            <div>
+              <div class="focus-img-thumb" onclick="viewFocusVideo('${safeUrl}',${startSec})" style="position:relative">
+                ${thumb ? `<img src="${esc(thumb)}" alt="">` : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:var(--ink-3);font-size:28px">▶</div>`}
+                <span style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:32px;height:32px;border-radius:50%;background:rgba(0,0,0,0.75);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px">▶</span>
+              </div>
+              ${lbl}
+            </div>`;
+        }).join('')}
+      </div></div></div>` : ''}
+    ${prepComment ? `
+      <div class="section-header"><div><div class="eyebrow">📝 Briefing</div><h2 class="display-md mt-2">Notes du coach</h2></div></div>
+      <div class="list-section"><div style="padding:16px;line-height:1.6;color:var(--ink-2);white-space:pre-wrap;font-size:13px">${esc(prepComment)}</div></div>` : ''}
+  `;
+}
+
+// ── ABSENCE JOUEUSE DEPUIS LE DÉTAIL MATCH ──────────────────────────────────
+// Réutilise la convoc liée au match (m.convocId, non récurrente → c.responses).
+// Ne détourne PAS vers openEventInstance (on reste dans le détail match).
+// Push coach via _notifyCoachConvocResponse (déjà en place, agnostique au type).
+function _matchConvoc(matchId) {
+  const m = state.matches.find(x => x.id === matchId);
+  if (!m || !m.convocId) return null;
+  return state.convocations.find(x => x.id === m.convocId) || null;
+}
+function matchDeclareAbsence(matchId) {
+  if (state.auth.role !== 'player') return;
+  const m = state.matches.find(x => x.id === matchId);
+  const c = _matchConvoc(matchId);
+  if (!m || !c) return;
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">vs ${esc(m.opponent || '')}</div>
+        <div class="modal-title">Signaler mon absence</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:14px;font-size:11px;color:var(--ink-2);line-height:1.5">
+        ${formatDate(m.date, 'long')}${m.time ? ' · ' + esc(m.time) : ''}<br>Préviens ton coach avec une raison et un petit mot si tu veux.
+      </div>
+      <div class="fld">
+        <label class="fld-label">Raison</label>
+        <select id="ab-reason">${ABSENCE_REASONS.map(r => `<option value="${r}">${r}</option>`).join('')}</select>
+      </div>
+      <div class="fld">
+        <label class="fld-label">Petit mot (optionnel)</label>
+        <textarea id="ab-msg" placeholder="Ex : désolée, empêchement ce week-end"></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary btn-block" onclick="closeModal()">Annuler</button>
+      <button class="btn btn-primary btn-block" onclick="matchSaveAbsence('${matchId}')">Confirmer mon absence</button>
+    </div>
+  `);
+}
+function matchSaveAbsence(matchId) {
+  if (state.auth.role !== 'player') return;
+  const m = state.matches.find(x => x.id === matchId);
+  const c = _matchConvoc(matchId);
+  if (!m || !c) return;
+  const pid = state.auth.playerId;
+  const prev = _effectiveConvocStatus(c, m.date, pid);
+  c.responses = c.responses || {};
+  c.responses[pid] = {
+    status: 'absent',
+    reason: (document.getElementById('ab-reason') || {}).value || '',
+    message: ((document.getElementById('ab-msg') || {}).value || '').trim(),
+  };
+  persist(); closeModal(); render();
+  _notifyCoachConvocResponse(c, m.date, prev, 'absent');
+}
+function matchRestorePresence(matchId) {
+  if (state.auth.role !== 'player') return;
+  const m = state.matches.find(x => x.id === matchId);
+  const c = _matchConvoc(matchId);
+  if (!m || !c) return;
+  const pid = state.auth.playerId;
+  const prev = _effectiveConvocStatus(c, m.date, pid);
+  if (c.responses) delete c.responses[pid];
+  persist(); render();
+  _notifyCoachConvocResponse(c, m.date, prev, 'present');
 }
 
 // PLAYER STATS
@@ -27455,7 +27646,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.38';
+const APP_VERSION = '2026-06-28.39';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
