@@ -52,8 +52,10 @@ t('contient bien Heure RDV + Lieu RDV', () => {
 });
 
 console.log('SCÉNARIO 4 — layout & ordre des sections');
-t('Date large / Heure compacte (grid 1.5fr 1fr)', () => {
-  assert.ok(/grid-template-columns:1\.5fr 1fr[\s\S]*?id="m-date"[\s\S]*?id="m-time"/.test(editBlock));
+t('Date large / Heure compacte (classe mm-when : ratio 3fr/2fr, stack <400px)', () => {
+  // Le ratio (Date > Heure) est désormais porté par la classe .fld-row.mm-when
+  // (et non un style inline, qui empêchait le stack responsive sur mobile étroit).
+  assert.ok(/<div class="fld-row mm-when">[\s\S]*?id="m-date"[\s\S]*?id="m-time"/.test(editBlock));
 });
 t('Adversaire en pleine largeur (un .fld simple avec label, pas de fld-row)', () => {
   assert.ok(/<div class="fld"><label class="fld-label">Nom de l'adversaire<\/label><input id="m-opp"/.test(editBlock));

@@ -1440,6 +1440,15 @@
     margin-bottom: 6px; font-weight: 600;
   }
   .fld-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  /* Modale match — lignes 2 colonnes (Date/Heure, score). Au-dessus de 400px on
+     donne plus de place à la Date (texte long) qu'à l'Heure. Sous 400px on
+     STACKE en 1 colonne : côte à côte, les inputs se compressaient et le label
+     Date passait sur 2 lignes / se coupait. IMPORTANT : c'est une classe et non
+     un style inline — un style inline battrait la media query (bug de PR #125). */
+  .fld-row.mm-when { grid-template-columns: 3fr 2fr; }
+  @media (max-width: 400px) {
+    .fld-row.mm-when, .fld-row.mm-score { grid-template-columns: 1fr; gap: 6px; }
+  }
 
   /* En-tête de section dans les formulaires longs (ex. modale match) */
   .mm-section {
@@ -11637,7 +11646,7 @@ function editMatch(id) {
     <div class="modal-body">
       <!-- ═══ QUAND ═══ -->
       <div class="mm-section">🗓 Quand</div>
-      <div class="fld-row" style="grid-template-columns:1.5fr 1fr">
+      <div class="fld-row mm-when">
         <div class="fld"><label class="fld-label">Date</label><input id="m-date" type="date" value="${m.date}"></div>
         <div class="fld"><label class="fld-label">Heure</label><input id="m-time" type="time" value="${m.time || ''}"></div>
       </div>
@@ -11678,7 +11687,7 @@ function editMatch(id) {
       <div class="mm-section">🏆 Résultat</div>
       ${(m.scoreUs > 0 || m.scoreOpp > 0) ? '' : `<button type="button" id="m-score-toggle" class="btn btn-ghost btn-block" style="color:var(--ink-3);font-size:12px" onclick="revealScoreFields()">+ Saisir le score du match</button>`}
       <div id="m-score-fields" style="display:${(m.scoreUs > 0 || m.scoreOpp > 0) ? 'block' : 'none'}">
-        <div class="fld-row">
+        <div class="fld-row mm-score">
           <div class="fld"><label class="fld-label">Notre score</label><input id="m-us" type="number" value="${m.scoreUs}" min="0"></div>
           <div class="fld"><label class="fld-label">Adversaire</label><input id="m-them" type="number" value="${m.scoreOpp}" min="0"></div>
         </div>
@@ -27974,7 +27983,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.47';
+const APP_VERSION = '2026-06-28.48';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
