@@ -9213,6 +9213,41 @@ function renderPlayerProgramme() {
   `;
 }
 
+// Un jour du programme journalier est cochable si : (1) le programme a démarré
+// (today >= startDate), (2) le jour n'est pas dans le futur (date <= today), et
+// (3) le jour n'est pas antérieur au démarrage (date >= startDate). Permet de
+// cocher EN RETARD (jours passés post-démarrage) sans jamais cocher le futur ni
+// avant le lancement. Pur & déterministe (today/startDate injectés) → testable.
+function offseasonDayCheckable(date, startDate, today) {
+  const started = !startDate || today >= startDate;
+  return started && date <= today && (!startDate || date >= startDate);
+}
+
+// Retards prépa physique (journalier) : par joueuse, exos planifiés ÉCHUS non
+// cochés. « Échu » = date planifiée >= démarrage ET <= aujourd'hui. Le log reste
+// indexé sur la date planifiée (aucun changement de modèle). Trié par retard
+// décroissant (les moins assidues en tête). Pur & déterministe → testable.
+function computeOffseasonDailyLag(sched, logs, pool, startDate, today) {
+  const dueDates = Object.keys(sched || {})
+    .filter(d => (!startDate || d >= startDate) && d <= today)
+    .sort();
+  return pool.map(p => {
+    const pLogs = (logs || {})[p.id] || {};
+    let planned = 0, done = 0;
+    const lateDates = [];
+    dueDates.forEach(d => {
+      const items = sched[d] || [];
+      const dLog = pLogs[d] || {};
+      const dDone = items.filter(it => dLog[it.id] && dLog[it.id].done).length;
+      planned += items.length;
+      done += dDone;
+      if (items.length - dDone > 0) lateDates.push({ date: d, missing: items.length - dDone });
+    });
+    return { player: p, planned, done, lag: planned - done, lateDates };
+  }).filter(x => x.planned > 0)
+    .sort((a, b) => b.lag - a.lag || String(a.player.name).localeCompare(String(b.player.name)));
+}
+
 // PHASE 4 : onglet Forme en mode journalier (programme du jour + à venir).
 function renderPlayerProgrammeDaily(p, o, teamReview) {
   const pid = p.id;
@@ -9232,6 +9267,8 @@ function renderPlayerProgrammeDaily(p, o, teamReview) {
   state.offseasonLogs = state.offseasonLogs || {};
   state.offseasonLogs[pid] = state.offseasonLogs[pid] || {};
   const todayItems = sched[todayStr] || [];
+  // Programme démarré ? (gate le cochage : rien avant le lancement).
+  const canToday = offseasonDayCheckable(todayStr, o.startDate, todayStr);
 
   const exoRow = (date, it, clickable) => {
     const dLog = state.offseasonLogs[pid][date] || {};
@@ -9275,7 +9312,7 @@ function renderPlayerProgrammeDaily(p, o, teamReview) {
           </div>
         </div>
         <div style="padding:0 18px;display:flex;flex-direction:column;gap:8px;margin-bottom:18px">
-          ${todayItems.map(it => exoRow(todayStr, it, true)).join('')}
+          ${todayItems.map(it => exoRow(todayStr, it, canToday)).join('')}
         </div>
       ` : `
         <div style="padding:14px;background:var(--bg-3);border-left:3px solid var(--ink-3);border-radius:6px;margin:0 18px ${nextTrainingDate ? '10px' : '18px'};font-size:12px;color:var(--ink-2);line-height:1.5">Rien de prévu aujourd'hui. Repos ou séance libre 💪</div>
@@ -9304,19 +9341,22 @@ function renderPlayerProgrammeDaily(p, o, teamReview) {
         </div>
       ` : ''}
       ${past.length ? `
-        <div class="section-header"><div><div class="eyebrow-muted">Jours passés</div></div></div>
-        <div style="padding:0 18px;display:flex;flex-direction:column;gap:4px;margin-bottom:18px">
+        <div class="section-header"><div><div class="eyebrow-muted">Jours passés</div><div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">${canToday ? 'Tu peux encore cocher tes séances en retard' : 'Coche disponible dès le démarrage'}</div></div></div>
+        <div style="padding:0 18px;display:flex;flex-direction:column;gap:10px;margin-bottom:18px">
           ${past.map(date => {
             const items = sched[date] || [];
             const dLog = state.offseasonLogs[pid][date] || {};
             const wDone = items.filter(it => dLog[it.id] && dLog[it.id].done).length;
-            const wPct = items.length ? Math.round((wDone / items.length) * 100) : 0;
-            const c = wPct >= 80 ? 'var(--green)' : wPct >= 50 ? 'var(--orange)' : 'var(--red)';
+            const canLate = offseasonDayCheckable(date, o.startDate, todayStr);
+            const allDone = items.length > 0 && wDone === items.length;
+            const hc = allDone ? 'var(--green)' : (canLate ? 'var(--orange)' : 'var(--ink-3)');
             return `
-              <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--bg-2);border-radius:6px">
-                <div style="font-family:'JetBrains Mono';font-size:10px;color:var(--ink-3);text-transform:uppercase;min-width:90px">${formatDate(date, 'short')}</div>
-                <div style="flex:1;height:5px;background:var(--bg-1);border-radius:3px;overflow:hidden"><div style="height:100%;width:${wPct}%;background:${c}"></div></div>
-                <div style="font-family:'Anton';font-size:13px;color:${c};min-width:50px;text-align:right">${wDone}/${items.length}</div>
+              <div style="border:1px solid ${allDone ? 'var(--green)' : 'var(--border)'};border-radius:8px;overflow:hidden">
+                <div style="padding:8px 10px;background:var(--bg-3);display:flex;align-items:center;justify-content:space-between;gap:8px">
+                  <span style="font-family:'Anton';font-size:12px;text-transform:uppercase">${formatDate(date, 'long')}</span>
+                  <span style="font-family:'Anton';font-size:12px;color:${hc}">${wDone}/${items.length}${canLate && !allDone ? ' · à rattraper' : ''}</span>
+                </div>
+                <div style="padding:8px 10px;display:flex;flex-direction:column;gap:6px">${items.map(it => exoRow(date, it, canLate)).join('')}</div>
               </div>`;
           }).join('')}
         </div>
@@ -9327,6 +9367,11 @@ function renderPlayerProgrammeDaily(p, o, teamReview) {
 
 function togglePlayerProgrammeDailyExercise(date, exId) {
   if (state.auth.role !== 'player') return;
+  // Garde-fou : jamais cocher un jour futur ou antérieur au démarrage (le rendu
+  // ne rend pas ces lignes cliquables, mais on double la protection ici).
+  const o = state.offseason;
+  const todayStr = new Date().toISOString().slice(0, 10);
+  if (o && !offseasonDayCheckable(date, o.startDate, todayStr)) return;
   const pid = state.auth.playerId;
   state.offseasonLogs = state.offseasonLogs || {};
   state.offseasonLogs[pid] = state.offseasonLogs[pid] || {};
@@ -24294,6 +24339,30 @@ function openOffseasonDashboardDaily() {
   const teamColor = teamPct >= 70 ? 'var(--green)' : teamPct >= 40 ? 'var(--orange)' : 'var(--red)';
   const plannedDates = Object.keys(sched).length;
 
+  // ⚠️ RETARDS : qui n'a pas fait ? Cumul des exos échus non cochés depuis le
+  // démarrage (voir computeOffseasonDailyLag). Seules les joueuses avec du retard.
+  const lagRows = computeOffseasonDailyLag(sched, logs, _seasonPool, o.startDate, today).filter(x => x.lag > 0);
+  const lagAlert = lagRows.filter(x => x.lag > 3).length; // > 3 exos en retard = attention
+  const lagSection = lagRows.length === 0 ? `
+    <div style="margin-top:16px;padding:12px;background:rgba(34,197,94,0.08);border-left:3px solid var(--green);border-radius:6px;font-size:12px;color:var(--ink-2);line-height:1.5">✅ Tout le monde est à jour — aucun exercice échu en retard.</div>
+  ` : `
+    <div class="section-header" style="margin-top:18px;padding:0"><div><div class="eyebrow" style="color:var(--red)">⚠️ Retards · à rattraper</div></div></div>
+    ${lagAlert > 0 ? `<div style="padding:10px 12px;background:rgba(239,68,68,0.10);border-left:3px solid var(--red);border-radius:6px;margin-bottom:10px;font-size:12px;color:var(--ink-2);line-height:1.4"><strong>${lagAlert} joueuse${lagAlert>1?'s':''}</strong> ${lagAlert>1?'ont':'a'} plus de 3 exos en retard.</div>` : ''}
+    <div style="display:flex;flex-direction:column;gap:6px">
+      ${lagRows.map(x => {
+        const dates = x.lateDates.slice(-4).map(ld => formatDate(ld.date, 'short') + ' (' + ld.missing + ')').join(' · ');
+        return `
+          <div class="offseason-row" onclick="openOffseasonPlayerDetail('${x.player.id}')">
+            <div style="flex:1;min-width:0">
+              <div style="font-family:'Anton';font-size:13px;text-transform:uppercase">${esc(x.player.name)}</div>
+              <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${dates}</div>
+            </div>
+            <div style="font-family:'Anton';font-size:15px;color:var(--red);min-width:74px;text-align:right;line-height:1.1">${x.lag}<div style="font-size:8px;color:var(--ink-4)">en retard</div></div>
+          </div>`;
+      }).join('')}
+    </div>
+  `;
+
   openModal(`
     <div class="modal-header">
       <div>
@@ -24328,6 +24397,7 @@ function openOffseasonDashboardDaily() {
           }).join('')}
         </div>
       `}
+      ${lagSection}
     </div>
     <div class="modal-footer" style="flex-direction:column;gap:6px">
       <button class="btn btn-secondary btn-block" onclick="closeModal();setTimeout(()=>openProgramEditor('${o.id}'),50)">✎ Modifier le programme</button>
@@ -27983,7 +28053,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.48';
+const APP_VERSION = '2026-06-28.49';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
