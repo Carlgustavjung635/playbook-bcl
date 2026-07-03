@@ -69,8 +69,9 @@ t('.fld : min-width 0 (permet aux colonnes date/heure de rétrécir sans clipper
 
 console.log('SCÉNARIO 5 — media queries petit mobile / tablette');
 t('@media max-width:400px : paddings resserrés (header/body/footer/section)', () => {
-  const i = html.indexOf('@media (max-width: 400px) {');
-  assert.ok(i >= 0);
+  // Il existe 2 blocs @media 400px (fld-row + modale) : on cible celui de la modale.
+  const i = html.indexOf('@media (max-width: 400px) {\n    .modal-header');
+  assert.ok(i >= 0, 'bloc @media 400px modale absent');
   const block = html.slice(i, i + 400);
   assert.ok(/\.modal-body \{ padding: 14px 16px; \}/.test(block));
   assert.ok(/\.mm-section \{ margin: 14px 0 8px; \}/.test(block));
@@ -92,4 +93,22 @@ t('.segmented-btn conserve flex:1 (équi-parts)', () => {
   assert.ok(/\.segmented-btn \{[\s\S]*?flex: 1;/.test(html));
 });
 
-console.log(`\n✅ ${pass} assertions OK — responsive modale (sticky footer + safe-area + dvh).`);
+console.log('SCÉNARIO 8 — Date/Heure & score : stack 1 colonne sur mobile étroit (<400px)');
+t('.fld-row.mm-when : ratio 3fr/2fr au-dessus de 400px (Date > Heure)', () => {
+  assert.ok(/\.fld-row\.mm-when \{ grid-template-columns: 3fr 2fr; \}/.test(html));
+});
+t('@media max-width:400px : mm-when + mm-score forcés en 1 colonne', () => {
+  const i = html.indexOf('@media (max-width: 400px) {\n    .fld-row.mm-when, .fld-row.mm-score');
+  assert.ok(i >= 0, 'règle stack <400px absente');
+  const block = html.slice(i, i + 140);
+  assert.ok(/\.fld-row\.mm-when, \.fld-row\.mm-score \{ grid-template-columns: 1fr;/.test(block));
+});
+t('modale match : Date/Heure via classe mm-when SANS style inline (sinon la media query serait battue)', () => {
+  const em = html.slice(html.indexOf('function editMatch('), html.indexOf('function setMatchHome'));
+  assert.ok(/<div class="fld-row mm-when">/.test(em), 'row Date/Heure doit porter la classe mm-when');
+  // plus aucun grid-template-columns inline sur une fld-row de la modale match
+  assert.ok(!/class="fld-row"[^>]*style="[^"]*grid-template-columns/.test(em), 'style inline grid-template-columns résiduel');
+  assert.ok(/<div class="fld-row mm-score">/.test(em), 'row score doit porter la classe mm-score');
+});
+
+console.log(`\n✅ ${pass} assertions OK — responsive modale (sticky footer + safe-area + dvh + stack étroit).`);
