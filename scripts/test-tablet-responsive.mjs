@@ -50,11 +50,12 @@ t('.theme-grid base reste en flex column (mobile)', () => {
   assert.match(baseRule('.theme-grid'), /flex-direction:\s*column/);
 });
 t('aucune media query max-width n\'a été ajoutée pour rétrécir le mobile (<768)', () => {
-  // Les seules max-width existantes sont 359 (nav) et 480/640 (modale) — pré-existantes.
+  // max-width autorisées : 359 (nav), 400 (paddings modale iPhone SE), 480/640
+  // (modale) — refinements mobile, aucune ne rétrécit la mise en page globale.
   const maxQueries = (css.match(/@media\s*\(max-width:\s*(\d+)px\)/g) || []);
   maxQueries.forEach(q => {
     const px = Number(q.match(/(\d+)/)[1]);
-    assert.ok([359, 480, 640].includes(px), 'media max-width inattendue: ' + q);
+    assert.ok([359, 400, 480, 640].includes(px), 'media max-width inattendue: ' + q);
   });
 });
 

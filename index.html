@@ -1411,10 +1411,12 @@
      width:100% + padding + background les transforme en gros rectangles
      sombres (au lieu d'une vraie case native). */
   input:not([type="checkbox"]):not([type="radio"]), textarea, select {
-    width: 100%; padding: 12px 14px;
+    width: 100%; min-width: 0; padding: 12px 14px;
     background: var(--bg-1); border: 1px solid var(--border);
     border-radius: var(--radius-sm);
-    font-family: inherit; font-size: 15px; color: var(--ink);
+    /* 16px : évite le zoom auto d'iOS au focus (qui décalait la modale sous la
+       topbar) et le débordement des inputs date/time natifs. */
+    font-family: inherit; font-size: 16px; color: var(--ink);
     transition: border-color 0.15s, box-shadow 0.15s;
   }
   input[type="checkbox"], input[type="radio"] {
@@ -1429,7 +1431,7 @@
     box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.15);
   }
   textarea { min-height: 80px; resize: vertical; }
-  .fld { margin-bottom: 12px; }
+  .fld { margin-bottom: 12px; min-width: 0; }
   .fld-label {
     display: block;
     font-family: 'JetBrains Mono', monospace;
@@ -1474,8 +1476,9 @@
     border-radius: 16px 16px 0 0;
     max-width: 480px; width: 100%;
     max-height: 92vh; max-height: 92dvh; overflow-y: auto;
+    -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
     animation: slideUp 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-    padding-bottom: env(safe-area-inset-bottom);
+    /* safe-area gérée par le footer sticky (ou le body si pas de footer) */
   }
   @media (min-width: 640px) {
     .modal { border-radius: var(--radius-lg); animation: scaleIn 0.2s ease-out; }
@@ -1489,6 +1492,8 @@
     padding: 18px 20px 14px;
     display: flex; align-items: center; justify-content: space-between;
     border-bottom: 1px solid var(--border-soft);
+    position: sticky; top: 0; z-index: 3;
+    background: var(--bg-2);
   }
   .modal-title {
     font-family: 'Anton', sans-serif;
@@ -1502,10 +1507,30 @@
     color: var(--ink-2); font-size: 14px;
   }
   .modal-body { padding: 18px 20px; }
+  /* Modale SANS footer : le body porte la safe-area basse (sinon le dernier
+     champ passe sous l'indicateur home iOS). */
+  .modal-body:last-child { padding-bottom: max(18px, calc(env(safe-area-inset-bottom) + 8px)); }
   .modal-footer {
-    padding: 14px 20px;
+    padding: 12px 20px;
+    padding-bottom: max(12px, calc(env(safe-area-inset-bottom) + 4px));
     border-top: 1px solid var(--border-soft);
     display: flex; gap: 8px; justify-content: flex-end;
+    position: sticky; bottom: 0; z-index: 3;
+    background: var(--bg-2);
+    box-shadow: 0 -2px 10px rgba(0,0,0,0.10);
+  }
+  /* Très petit mobile (iPhone SE ~375px) : padding plus serré = plus de surface
+     utile pour les champs. */
+  @media (max-width: 400px) {
+    .modal-header { padding: 14px 16px 12px; }
+    .modal-body { padding: 14px 16px; }
+    .mm-section { margin: 14px 0 8px; }
+    .modal-footer { padding: 10px 16px; padding-bottom: max(10px, calc(env(safe-area-inset-bottom) + 4px)); }
+  }
+  /* Tablette : on aère. */
+  @media (min-width: 768px) {
+    .modal-body { padding: 22px 24px; }
+    .mm-section { margin: 22px 0 12px; }
   }
 
   /* ========== EMPTY ========== */
@@ -11601,8 +11626,8 @@ function editMatch(id) {
       `}
     </div>
     <div class="modal-footer">
-      <button class="btn btn-secondary" onclick="closeModal()">Annuler</button>
-      <button class="btn btn-primary" onclick="saveMatch('${m.id}',${isNew})">Enregistrer</button>
+      <button class="btn btn-secondary" style="flex:0 0 auto" onclick="closeModal()">Annuler</button>
+      <button class="btn btn-primary" style="flex:1 1 0" onclick="saveMatch('${m.id}',${isNew})">Enregistrer</button>
     </div>
   `);
 }
@@ -27889,7 +27914,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.45';
+const APP_VERSION = '2026-06-28.46';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
