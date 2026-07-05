@@ -14711,10 +14711,14 @@ function pendingDraws(pid) {
 // (completed_at posé quand un tirage a été coach_confirmed → retiré du pool).
 function _gageTirable(g) { return !!g && g.status === 'approved' && !g.deletedAt && !g.completedAt; }
 // Pool tirable pour une joueuse : gages approuvés (saison) qu'elle n'a PAS déjà
-// tirés (anti-répétition). Repli sur le pool complet si elle les a tous tirés.
+// ENGAGÉS (anti-répétition). Repli sur le pool complet si elle les a tous tirés.
+// Un SKIP (refus) ne compte PAS comme « déjà tiré » : le gage retourne au pool et
+// peut retomber sur elle au prochain tirage (le hasard peut y revenir). Seuls les
+// tirages engagés (accepted/player_done/coach_confirmed) ou invalidés bloquent la
+// répétition.
 function _drawPoolFor(pid) {
   const approved = currentSeasonGages().filter(g => _gageTirable(g));
-  const drawn = new Set((state.gageDraws || []).filter(d => d.playerId === pid && d.gageId).map(d => d.gageId));
+  const drawn = new Set((state.gageDraws || []).filter(d => d.playerId === pid && d.gageId && d.status !== 'skipped').map(d => d.gageId));
   const fresh = approved.filter(g => !drawn.has(g.id));
   return fresh.length ? fresh : approved;
 }
@@ -28692,7 +28696,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-06.52';
+const APP_VERSION = '2026-07-06.53';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {

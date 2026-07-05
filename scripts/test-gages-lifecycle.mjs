@@ -19,7 +19,8 @@ function currentSeasonGages() { const active = getActiveSeasonId(); if (!_season
 function _gageTirable(g) { return !!g && g.status === 'approved' && !g.deletedAt && !g.completedAt; }
 function _drawPoolFor(pid) {
   const approved = currentSeasonGages().filter(g => _gageTirable(g));
-  const drawn = new Set((state.gageDraws || []).filter(d => d.playerId === pid && d.gageId).map(d => d.gageId));
+  // Un SKIP ne compte PAS comme « déjà tiré » → le gage reste re-tirable par elle.
+  const drawn = new Set((state.gageDraws || []).filter(d => d.playerId === pid && d.gageId && d.status !== 'skipped').map(d => d.gageId));
   const fresh = approved.filter(g => !drawn.has(g.id));
   return fresh.length ? fresh : approved;
 }
@@ -108,4 +109,35 @@ t('coach confirme un accepted directement', () => {
   assert.strictEqual(d.status, 'coach_confirmed');
 });
 
-console.log(`\n✅ ${pass} assertions OK — cycle de vie complet, remise au pool, invalidation neutre.`);
+console.log('SCÉNARIO 5 — un SKIP renvoie le gage au pool (re-tirable, même joueuse)');
+fresh();
+t('gage skippé reste tirable pour la MÊME joueuse', () => {
+  const gid = submitCoachGage('gage skippable');
+  const d = assignDraw('p1');
+  d.gageId = gid; d.drawnAt = now(); d.status = 'skipped'; d.completedAt = now(); // refus
+  // le gage entity n'a pas été marqué réalisé…
+  assert.strictEqual(_gageById(gid).completedAt, null);
+  // …et il est de nouveau dans SON pool tirable (l'anti-répétition ignore les skips)
+  assert.ok(_drawPoolFor('p1').some(g => g.id === gid), 'le gage skippé doit rester tirable par p1');
+});
+t('le hasard peut retomber dessus : re-tirage possible', () => {
+  const gid = state.gages[0].id;
+  const pool = _drawPoolFor('p1');
+  assert.strictEqual(pool.length, 1);
+  assert.strictEqual(pool[0].id, gid, 'seul gage du pool → peut être re-tiré');
+});
+t('gage skippé par PLUSIEURS joueuses reste tirable pour toutes', () => {
+  fresh();
+  const gid = submitCoachGage('gage très refusé');
+  ['p1', 'p2', 'p3'].forEach(pid => { const d = assignDraw(pid); d.gageId = gid; d.status = 'skipped'; d.completedAt = now(); });
+  ['p1', 'p2', 'p3'].forEach(pid => assert.ok(_drawPoolFor(pid).some(g => g.id === gid), 'tirable pour ' + pid));
+  assert.strictEqual(_gageById(gid).completedAt, null); // jamais retiré du pool global
+});
+t('un gage ACCEPTÉ, lui, n\'est PAS re-tiré à la même joueuse (anti-répétition conservée)', () => {
+  fresh();
+  submitCoachGage('gage A'); submitCoachGage('gage B'); // 2 gages pour laisser un « fresh »
+  assignDraw('p1'); const d = drawAndAccept('p1'); // accepte le 1er piochable
+  assert.ok(!_drawPoolFor('p1').some(g => g.id === d.gageId), 'le gage accepté sort du pool fresh de p1');
+});
+
+console.log(`\n✅ ${pass} assertions OK — cycle de vie complet, remise au pool, invalidation neutre, skip re-tirable.`);
