@@ -13057,6 +13057,36 @@ function savePlayLinkNote(matchId, playId) {
   closeModal(); render();
 }
 
+// Bloc « Adversaire — stats championnat » auto-injecté en haut de la prépa.
+// Cherche l'adversaire (m.opponent) dans les données FFBB chargées localement et
+// affiche PM/M + PE/M + MJ. Renvoie '' si aucune donnée (ex : match non-FFBB, ou
+// championnat pas encore synchronisé sur ce device). Best-effort, jamais bloquant.
+function _matchOpponentScoutBlock(m) {
+  if (!m || !m.opponent) return '';
+  let sc = null;
+  try { sc = (typeof ffbbOpponentScout === 'function') ? ffbbOpponentScout(m.opponent) : null; } catch (e) { sc = null; }
+  if (!sc || !sc.played) return '';
+  const fmt = n => (Math.round(n * 10) / 10).toFixed(1);
+  const metric = (lbl, val, color) => `
+    <div style="flex:1;text-align:center">
+      <div style="font-family:'Anton';font-size:20px;line-height:1;color:${color}">${val}</div>
+      <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:.04em;margin-top:3px">${lbl}</div>
+    </div>`;
+  return `
+    <div style="padding:0 18px 6px">
+      <div style="padding:12px 14px;background:rgba(var(--accent-rgb),0.06);border:1px solid var(--border);border-left:3px solid var(--orange);border-radius:8px">
+        <div style="font-size:10px;color:var(--orange);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:.06em;margin-bottom:2px">🎯 Adversaire — stats championnat</div>
+        <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:10px;line-height:1.2">${esc(m.opponent)}</div>
+        <div style="display:flex;gap:8px;align-items:flex-start">
+          ${metric('Pts marqués / match', fmt(sc.pmPerG), 'var(--green,#16a34a)')}
+          ${metric('Pts encaissés / match', fmt(sc.pePerG), 'var(--red,#ef4444)')}
+          ${metric('Matchs joués', String(sc.played), 'var(--ink-1)')}
+        </div>
+        ${!sc.enough ? `<div style="font-size:9px;color:var(--ink-4);font-family:'JetBrains Mono';margin-top:8px;line-height:1.4">⚠ Échantillon faible (< ${FFBB_SCOUT_MIN_GAMES} matchs) — à prendre avec prudence.</div>` : ''}
+      </div>
+    </div>`;
+}
+
 // ----- Rendu UI -----
 function renderMatchPrep(m) {
   const isCoach = state.auth.role === 'coach';
@@ -13084,6 +13114,9 @@ function renderMatchPrep(m) {
         <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px">${prepIntro}</div>
       </div>
     </div>
+
+    <!-- ADVERSAIRE — STATS CHAMPIONNAT (auto-injecté depuis les données FFBB) -->
+    ${_matchOpponentScoutBlock(m)}
 
     <!-- PARTAGE PRÉPA AUX JOUEUSES -->
     <div style="padding:0 18px 6px">
@@ -26210,7 +26243,55 @@ function ffbbDash() {
   if (!Array.isArray(d.collapsedCats)) d.collapsedCats = []; // catégories repliées (legacy, inerte)
   if (d.autoUpdate === undefined) d.autoUpdate = true;    // MAJ auto convocs (default ON)
   if (d.catTab === undefined) d.catTab = null;            // itér.4 : catégorie sélectionnée (U13/U15/U18/Séniors)
+  // SCOUTING adversaires (local device, non synchronisé) : vue calendrier ↔ adversaires,
+  // tri du tableau, et filtre « stats suffisantes uniquement ».
+  if (d.viewMode !== 'scout' && d.viewMode !== 'calendar') d.viewMode = 'calendar';
+  if (!d.scoutSort || typeof d.scoutSort !== 'object') d.scoutSort = { col: 'pmPerG', dir: 'desc' };
+  if (d.scoutEnoughOnly === undefined) d.scoutEnoughOnly = true;
   return d;
+}
+// Seuil « stats suffisantes » : nb minimal de matchs joués pour qu'une équipe
+// soit considérée fiable (décision produit — ajustable).
+const FFBB_SCOUT_MIN_GAMES = 3;
+// Agrège PM/M (points marqués par match) et PE/M (encaissés) par équipe, à partir
+// des matchs JOUÉS. Clé = nom d'équipe FFBB (mêmes strings que m.opponent, ce qui
+// permet l'injection en prépa). Réutilise ffbbComputeStandings (pf/pa/played).
+function ffbbTeamAggFromMatches(matches) {
+  return ffbbComputeStandings(matches || []).map(s => ({
+    team: s.team, played: s.played, wins: s.wins, losses: s.losses, pf: s.pf, pa: s.pa,
+    pmPerG: s.played ? s.pf / s.played : 0,
+    pePerG: s.played ? s.pa / s.played : 0,
+    diffPerG: s.played ? (s.pf - s.pa) / s.played : 0,
+    enough: s.played >= FFBB_SCOUT_MIN_GAMES
+  }));
+}
+// Toutes les équipes d'une catégorie (union des poules classées, hors phases finales).
+function ffbbScoutRows(catTab) {
+  const d = ffbbDash();
+  const engs = (d.engagements || []).filter(e => ffbbCatLabel(e) === catTab && !e.phase);
+  const seen = new Set(); const matches = [];
+  engs.forEach(e => {
+    const p = e.pouleId && d.poules[e.pouleId];
+    if (!p || !Array.isArray(p.matches)) return;
+    p.matches.forEach(m => { if (!seen.has(m.id)) { seen.add(m.id); matches.push(m); } });
+  });
+  return ffbbTeamAggFromMatches(matches);
+}
+// Stats agrégées d'UNE équipe adverse par son nom (toutes poules chargées), pour
+// l'injection dans la prépa de match. Recherche exacte puis normalisée (casse/espaces).
+function ffbbOpponentScout(opponentName) {
+  if (!opponentName) return null;
+  const d = ffbbDash();
+  const seen = new Set(); const matches = [];
+  Object.values(d.poules || {}).forEach(p => {
+    (p && Array.isArray(p.matches) ? p.matches : []).forEach(m => {
+      if (!seen.has(m.id)) { seen.add(m.id); matches.push(m); }
+    });
+  });
+  const rows = ffbbTeamAggFromMatches(matches);
+  const norm = s => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const target = norm(opponentName);
+  return rows.find(r => norm(r.team) === target) || null;
 }
 
 async function ffbbLoadPoule(pouleId, force) {
@@ -26600,6 +26681,73 @@ function ffbbStandingsCardHtml(eng, standings, official) {
     </div>`;
 }
 
+// ---------------------------------------------------------------------------
+// SCOUTING ADVERSAIRES — tableau triable (PM/M, PE/M, MJ) par catégorie.
+// ---------------------------------------------------------------------------
+function ffbbSetViewMode(m) { ffbbDash().viewMode = (m === 'scout') ? 'scout' : 'calendar'; render(); }
+function ffbbScoutSort(col) {
+  const s = ffbbDash().scoutSort;
+  if (s.col === col) { s.dir = s.dir === 'asc' ? 'desc' : 'asc'; }
+  else { s.col = col; s.dir = (col === 'team' || col === 'pePerG') ? 'asc' : 'desc'; } // défauts sensés : meilleure défense / meilleure attaque en tête
+  render();
+}
+function ffbbScoutToggleEnough(v) { ffbbDash().scoutEnoughOnly = !!v; render(); }
+function _ffbbScoutArrow(col) {
+  const s = ffbbDash().scoutSort;
+  if (s.col !== col) return '';
+  return s.dir === 'asc' ? ' ▲' : ' ▼';
+}
+function renderFFBBScoutTable(catTab) {
+  const d = ffbbDash();
+  const all = ffbbScoutRows(catTab);
+  const enoughCount = all.filter(r => r.enough).length;
+  let rows = d.scoutEnoughOnly ? all.filter(r => r.enough) : all;
+  const s = d.scoutSort; const dir = s.dir === 'asc' ? 1 : -1;
+  rows = rows.slice().sort((a, b) => {
+    if (s.col === 'team') return dir * (a.team || '').localeCompare(b.team || '');
+    return dir * (((a[s.col] || 0) - (b[s.col] || 0)) || (b.played - a.played));
+  });
+  const teamLower = ffbbClubSearch().toLowerCase();
+  const fmt = n => (Math.round(n * 10) / 10).toFixed(1);
+  const th = (col, lbl, align) => `<th onclick="ffbbScoutSort('${col}')" style="cursor:pointer;user-select:none;${align ? 'text-align:' + align + ';' : ''}white-space:nowrap">${lbl}${_ffbbScoutArrow(col)}</th>`;
+  if (!all.length) {
+    return `<div class="px"><div style="text-align:center;padding:30px 18px;color:var(--ink-3);font-family:'JetBrains Mono';font-size:12px;line-height:1.6">
+      Aucune donnée d'équipe pour cette catégorie.<br><span style="font-size:10px;color:var(--ink-4)">Lance une synchro FFBB, puis reviens ici quand des matchs auront été joués.</span>
+    </div></div>`;
+  }
+  const filterBar = `
+    <div class="px" style="margin-bottom:10px">
+      <label style="display:flex;align-items:center;gap:8px;min-height:44px;cursor:pointer;font-family:'JetBrains Mono';font-size:11px;text-transform:uppercase;color:var(--ink-2)">
+        <input type="checkbox" ${d.scoutEnoughOnly ? 'checked' : ''} onchange="ffbbScoutToggleEnough(this.checked)" style="width:18px;height:18px">
+        Stats suffisantes uniquement (≥ ${FFBB_SCOUT_MIN_GAMES} matchs) · ${enoughCount}/${all.length}
+      </label>
+    </div>`;
+  const body = rows.length ? rows.map(r => {
+    const me = (r.team || '').toLowerCase().includes(teamLower);
+    return `<tr style="${me ? 'background:var(--orange-soft)' : ''}">
+      <td style="font-family:'Anton';font-size:12px;text-transform:uppercase">${esc(r.team)}${r.enough ? '' : ' <span style="color:var(--ink-4);font-size:9px;font-weight:400">(peu de matchs)</span>'}</td>
+      <td class="num">${r.played}</td>
+      <td class="num" style="color:var(--green,#16a34a)">${fmt(r.pmPerG)}</td>
+      <td class="num" style="color:var(--red,#ef4444)">${fmt(r.pePerG)}</td>
+      <td class="num">${r.diffPerG > 0 ? '+' : ''}${fmt(r.diffPerG)}</td>
+    </tr>`;
+  }).join('') : `<tr><td colspan="5" style="text-align:center;padding:18px;color:var(--ink-3);font-family:'JetBrains Mono';font-size:11px">Aucune équipe ne remplit le seuil. Décoche le filtre pour tout voir.</td></tr>`;
+  return `
+    ${filterBar}
+    <div class="list-section"><div class="stats-wrap"><table class="stats-table">
+      <thead><tr>
+        ${th('team', 'Équipe', 'left')}
+        ${th('played', 'MJ', 'right')}
+        ${th('pmPerG', 'PM/M', 'right')}
+        ${th('pePerG', 'PE/M', 'right')}
+        ${th('diffPerG', 'Diff/M', 'right')}
+      </tr></thead>
+      <tbody>${body}</tbody>
+    </table></div>
+      <div style="padding:8px 14px;font-size:9px;color:var(--ink-4);font-family:'JetBrains Mono';line-height:1.5">PM/M = points marqués par match · PE/M = encaissés par match · moyennes sur les matchs joués du championnat. Ligne surlignée = ton club.</div>
+    </div>`;
+}
+
 function renderFFBB() {
   const f = state.ffbb;
   const d = ffbbDash();
@@ -26725,8 +26873,22 @@ function renderFFBB() {
     ? `<div class="section-header"><div><div class="eyebrow">Classement${catEngs.filter(e => !e.phase).length > 1 ? 's' : ''}</div></div></div>${standCards}`
     : '';
 
+  // Bascule Calendrier ↔ Adversaires (scouting championnat).
+  const viewToggle = `
+    <div class="px" style="margin-bottom:10px">
+      <div class="segmented">
+        <button class="segmented-btn ${d.viewMode !== 'scout' ? 'active' : ''}" onclick="ffbbSetViewMode('calendar')">📅 Calendrier</button>
+        <button class="segmented-btn ${d.viewMode === 'scout' ? 'active' : ''}" onclick="ffbbSetViewMode('scout')">🎯 Adversaires</button>
+      </div>
+    </div>`;
+  const body = d.viewMode === 'scout'
+    ? (catLoading && !catMatches.length
+        ? `<div class="px"><div style="text-align:center;padding:30px;color:var(--ink-3);font-family:'JetBrains Mono';font-size:12px">⟳ Chargement de la catégorie…</div></div>`
+        : renderFFBBScoutTable(catTab))
+    : `${filters}${listHtml}${standingsHtml}`;
+
   return `<div class="fade-up">
-    ${header}${catTabsHtml}${infoLine}${filters}${listHtml}${standingsHtml}
+    ${header}${catTabsHtml}${viewToggle}${infoLine}${body}
     <div style="padding:20px 18px;text-align:center;font-size:10px;color:var(--ink-4);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:.1em">Données : api.ffbb.app (officiel)</div>
   </div>`;
 }
@@ -28189,7 +28351,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-06-28.49';
+const APP_VERSION = '2026-07-05.50';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
