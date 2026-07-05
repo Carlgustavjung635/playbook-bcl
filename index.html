@@ -4498,6 +4498,9 @@ const ENTITIES = [
       completed_at: g.completedAt ? new Date(g.completedAt).toISOString() : null,
       rejected_reason: g.rejectedReason || null,
       season_id: g.seasonId || null,
+      // deleted_at : soft-delete (migration 20260706_001). != null = hors pool/tirage,
+      // mais le gage reste résolvable par id pour l'historique des tirages passés.
+      deleted_at: g.deletedAt ? new Date(g.deletedAt).toISOString() : null,
       updated_at: g.updatedAt ? new Date(g.updatedAt).toISOString() : (g.createdAt ? new Date(g.createdAt).toISOString() : null)
     }])),
     apply: (state, rows) => {
@@ -4512,6 +4515,7 @@ const ENTITIES = [
         completedAt: r.completed_at ? Date.parse(r.completed_at) : null,
         rejectedReason: r.rejected_reason || null,
         seasonId: r.season_id || null,
+        deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null,
         createdAt: r.created_at ? Date.parse(r.created_at) : null,
         updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null)
       }));
@@ -14682,7 +14686,7 @@ function pendingDraws(pid) {
 // Pool tirable pour une joueuse : gages approuvés (saison) qu'elle n'a PAS déjà
 // tirés (anti-répétition). Repli sur le pool complet si elle les a tous tirés.
 function _drawPoolFor(pid) {
-  const approved = currentSeasonGages().filter(g => g.status === 'approved');
+  const approved = currentSeasonGages().filter(g => g.status === 'approved' && !g.deletedAt);
   const drawn = new Set((state.gageDraws || []).filter(d => d.playerId === pid && d.gageId).map(d => d.gageId));
   const fresh = approved.filter(g => !drawn.has(g.id));
   return fresh.length ? fresh : approved;
@@ -14785,7 +14789,7 @@ function openAssignDraw() {
   const pool = (_seasonsLoaded() && getActiveSeasonId())
     ? getSeasonPlayers(getActiveSeasonId(), { team: 'all' }) : (state.players || []);
   const sorted = pool.slice().sort((a, b) => (a.num || 0) - (b.num || 0));
-  const poolCount = currentSeasonGages().filter(g => g.status === 'approved').length;
+  const poolCount = currentSeasonGages().filter(g => g.status === 'approved' && !g.deletedAt).length;
   openModal(`
     <div class="modal-header">
       <div><div class="eyebrow-muted">Faire tirer un gage à…</div><div class="modal-title" style="font-size:15px">Elle piochera au sort dans le pool</div></div>
@@ -14872,6 +14876,50 @@ function submitCoachGageFromModal() {
   if (typeof showToast === 'function') showToast('🎁 Gage ajouté au pool');
 }
 
+// --- Coach : édition & suppression douce d'un gage du pool. ---
+// Édition = corriger le texte (faute, formulation). Suppression = soft-delete
+// (deleted_at) : le gage sort du pool/tirage mais reste résolvable par id pour
+// l'historique des tirages passés qui le référencent (gageDraws.gageId).
+function openEditGage(id) {
+  const g = _gageById(id); if (!g) return;
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">✏️ Modifier le gage</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:12px;color:var(--ink-3);line-height:1.5;margin-bottom:10px">
+        Corrige le texte du gage. La modification s'applique aussi aux tirages déjà effectués qui l'affichent.
+      </div>
+      <textarea id="edit-gage-text" maxlength="${GAGE_TEXT_MAX}" rows="3" style="width:100%">${esc(g.text)}</textarea>
+      <div style="display:flex;justify-content:flex-end;margin-top:10px">
+        <button class="btn btn-primary" onclick="saveGageEdit('${g.id}')">Enregistrer</button>
+      </div>
+    </div>
+  `);
+  setTimeout(() => { const el = document.getElementById('edit-gage-text'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }, 80);
+}
+function saveGageEdit(id) {
+  const el = document.getElementById('edit-gage-text');
+  const g = _gageById(id); if (!g || !el) return;
+  const text = (el.value || '').trim().slice(0, GAGE_TEXT_MAX);
+  if (!text) return;
+  g.text = text; _gageTouch(g); persist(); _gageFlush();
+  closeModal(); render();
+  if (typeof showToast === 'function') showToast('✏️ Gage modifié');
+}
+function deleteGage(id) {
+  const g = _gageById(id); if (!g || g.deletedAt) return;
+  const drawn = (state.gageDraws || []).filter(d => d.gageId === id).length;
+  const msg = drawn
+    ? `Ce gage a été tiré ${drawn} fois : il restera dans l'historique mais ne sera plus tirable. Supprimer ?`
+    : 'Supprimer ce gage ? Il ne sera plus tirable.';
+  let ok = false; try { ok = confirm(msg); } catch (e) { ok = true; }
+  if (!ok) return;
+  g.deletedAt = Date.now(); _gageTouch(g); persist(); _gageFlush(); render();
+  if (typeof showToast === 'function') showToast('🗑️ Gage retiré du pool');
+}
+
 // --- Coach : panneau « Gérer les dettes de tirage » (outil de correction). ---
 // Liste les joueuses de la saison avec leur dette courante + tirages en attente,
 // et permet +1 / −1 / remise à zéro. La dette pilote le nb de tirages ajoutés
@@ -14926,7 +14974,7 @@ function renderGageCoachHomeCard() {
   const all = currentSeasonGages();
   const active = getActiveSeasonId();
   const pending = all.filter(g => g.status === 'pending').length;
-  const pool = all.filter(g => g.status === 'approved').length;
+  const pool = all.filter(g => g.status === 'approved' && !g.deletedAt).length;
   const owed = (state.gageDraws || []).filter(d => d.status === 'owed'
     && (!_seasonsLoaded() || !active || (d.seasonId ? d.seasonId === active : true))).length;
   const sub = pending
@@ -14954,7 +15002,7 @@ function renderGagesCoach() {
   const active = getActiveSeasonId();
   const inSeasonDraw = d => !_seasonsLoaded() || !active || (d.seasonId ? d.seasonId === active : true);
   const pending = all.filter(g => g.status === 'pending').sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
-  const pool = all.filter(g => g.status === 'approved').sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  const pool = all.filter(g => g.status === 'approved' && !g.deletedAt).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   const draws = (state.gageDraws || []).filter(inSeasonDraw);
   const owed = draws.filter(d => d.status === 'owed');
   const history = draws.filter(d => d.status === 'accepted' || d.status === 'skipped')
@@ -14991,7 +15039,14 @@ function renderGagesCoach() {
 
       <div class="section-header"><div><div class="eyebrow">Pool (réservoir de tirage)</div><h2 class="display-md mt-2">Approuvés (${pool.length})</h2></div></div>
       <div class="px">
-        ${pool.length ? pool.map(g => card(`<div style="font-size:14px;color:var(--ink);line-height:1.45">🎁 ${esc(g.text)}</div>`)).join('') : '<div style="color:var(--ink-3);font-size:13px;font-style:italic;padding-bottom:8px">Pool vide. Approuve des propositions pour alimenter les tirages.</div>'}
+        ${pool.length ? pool.map(g => { const drawn = (state.gageDraws || []).filter(d => d.gageId === g.id).length; return card(`
+          <div style="display:flex;align-items:flex-start;gap:8px">
+            <div style="flex:1;min-width:0;font-size:14px;color:var(--ink);line-height:1.45">🎁 ${esc(g.text)}${drawn ? `<span style="display:block;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;margin-top:3px">tiré ${drawn} fois</span>` : ''}</div>
+            <div style="display:flex;gap:4px;flex:0 0 auto">
+              <button class="btn btn-ghost" style="padding:5px 9px;font-size:14px;line-height:1" title="Modifier le texte" onclick="openEditGage('${g.id}')">✏️</button>
+              <button class="btn btn-ghost" style="padding:5px 9px;font-size:14px;line-height:1" title="Supprimer du pool" onclick="deleteGage('${g.id}')">🗑️</button>
+            </div>
+          </div>`); }).join('') : '<div style="color:var(--ink-3);font-size:13px;font-style:italic;padding-bottom:8px">Pool vide. Approuve des propositions pour alimenter les tirages.</div>'}
       </div>
 
       <div class="section-header"><div><div class="eyebrow">En attente de tirage</div><h2 class="display-md mt-2">Tirages dûs (${owed.length})</h2></div></div>
@@ -28351,7 +28406,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-05.50';
+const APP_VERSION = '2026-07-06.51';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
