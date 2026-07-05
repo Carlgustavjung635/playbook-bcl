@@ -493,7 +493,9 @@
   #gage-overlay:empty { display: none; }
   .gage-screen {
     position: fixed; inset: 0; z-index: 10000;
-    background: radial-gradient(circle at 50% 35%, rgba(var(--accent-rgb),0.18), var(--bg) 70%);
+    /* Fond PLEIN (var(--bg)) sous le halo accent → gate vraiment opaque, l'app
+       ne transparaît pas au centre (sinon rgba 0.18 = 82% transparent). */
+    background: radial-gradient(circle at 50% 35%, rgba(var(--accent-rgb),0.18), transparent 70%), var(--bg);
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     padding: calc(env(safe-area-inset-top) + 24px) 24px calc(env(safe-area-inset-bottom) + 24px);
     text-align: center; gap: 14px; animation: gageIn 0.25s ease-out;
@@ -4527,7 +4529,8 @@ const ENTITIES = [
     key: 'gageDraws', table: 'gage_draws', pk: 'id', realtime: true, auth: 'anon',
     dump: (state) => Object.fromEntries((state.gageDraws || []).map(d => [d.id, {
       id: d.id, player_id: d.playerId || null, gage_id: d.gageId || null,
-      status: ['owed', 'accepted', 'skipped'].includes(d.status) ? d.status : 'owed',
+      status: ['owed', 'accepted', 'skipped', 'adjust'].includes(d.status) ? d.status : 'owed',
+      delta: Number.isFinite(d.delta) ? d.delta : 0,
       assigned_at: d.assignedAt ? new Date(d.assignedAt).toISOString() : null,
       drawn_at: d.drawnAt ? new Date(d.drawnAt).toISOString() : null,
       completed_at: d.completedAt ? new Date(d.completedAt).toISOString() : null,
@@ -4540,6 +4543,7 @@ const ENTITIES = [
       const fromRemote = rows.map(r => ({
         id: r.id, playerId: r.player_id || null, gageId: r.gage_id || null,
         status: r.status || 'owed',
+        delta: Number.isFinite(r.delta) ? r.delta : 0,
         assignedAt: r.assigned_at ? Date.parse(r.assigned_at) : null,
         drawnAt: r.drawn_at ? Date.parse(r.drawn_at) : null,
         completedAt: r.completed_at ? Date.parse(r.completed_at) : null,
@@ -14598,7 +14602,8 @@ function _seasonGageDraws(pid) {
 // Exemple : skip A → dette 1 ; assign → 2 tirages ; accepter les 2 → reset 0 ;
 // skip l'un des 2 → dette 2 → prochain assign = 3 tirages.
 function gageDebt(pid) {
-  const mine = _seasonGageDraws(pid).filter(d => d.assignedAt);
+  const all = _seasonGageDraws(pid);
+  const mine = all.filter(d => d.assignedAt && d.status !== 'adjust');
   const batches = {};
   mine.forEach(d => { (batches[d.assignedAt] = batches[d.assignedAt] || []).push(d); });
   let resetTime = 0;
@@ -14607,7 +14612,35 @@ function gageDebt(pid) {
     const clean = allDone && arr.every(d => d.status === 'accepted'); // aucun skip dans le batch
     if (clean) { const c = Math.max(...arr.map(d => d.completedAt || 0)); if (c > resetTime) resetTime = c; }
   });
-  return mine.filter(d => d.status === 'skipped' && (d.completedAt || 0) > resetTime).length;
+  const skips = mine.filter(d => d.status === 'skipped' && (d.completedAt || 0) > resetTime).length;
+  // Corrections manuelles du coach (lignes 'adjust', delta ±1 ou reset) postérieures
+  // au dernier batch propre. Un batch propre ultérieur les périme (dette réelle 0).
+  const adj = all.filter(d => d.status === 'adjust' && (d.completedAt || 0) > resetTime)
+    .reduce((s, d) => s + (Number.isFinite(d.delta) ? d.delta : 0), 0);
+  return Math.max(0, skips + adj);
+}
+// --- Correction manuelle de dette (coach) : matérialise une ligne 'adjust'. ---
+// delta > 0 augmente la dette, delta < 0 la diminue (clampée à 0 à la lecture).
+function _pushDebtAdjust(pid, delta) {
+  if (!delta) return;
+  const now = Date.now();
+  const sid = getActiveSeasonId() || null;
+  state.gageDraws = state.gageDraws || [];
+  state.gageDraws.push({ id: uid(), playerId: pid, gageId: null, status: 'adjust',
+    delta: delta, assignedAt: null, drawnAt: null, completedAt: now, seasonId: sid,
+    createdAt: now, updatedAt: now });
+  persist(); _gageFlush();
+}
+function adjustPlayerDebt(pid, delta) {
+  if (delta < 0 && gageDebt(pid) <= 0) return;        // rien à retirer
+  _pushDebtAdjust(pid, delta);
+  try { renderGageDebtManager(); } catch (e) { render(); }
+}
+function resetPlayerDebt(pid) {
+  const d = gageDebt(pid);
+  if (d <= 0) return;
+  _pushDebtAdjust(pid, -d);                            // ramène la dette à 0
+  try { renderGageDebtManager(); } catch (e) { render(); }
 }
 // Tirages dûs (status 'owed') de la joueuse, plus anciens d'abord.
 function pendingDraws(pid) {
@@ -14764,6 +14797,93 @@ function cancelOwedDraws(pid) {
   persist(); _gageFlush(); render();
 }
 
+// --- Coach : ajoute un gage DIRECTEMENT au pool (auto-validé, sans modération). ---
+// Flux parallèle à la proposition joueuse : le coach crée un gage déjà 'approved'.
+function submitCoachGage(text) {
+  text = (text || '').trim().slice(0, GAGE_TEXT_MAX);
+  if (!text) return false;
+  const now = Date.now();
+  state.gages = state.gages || [];
+  state.gages.unshift({
+    id: uid(), text, authorId: 'coach',
+    status: 'approved', assignedTo: null, assignedAt: null, revealedAt: null,
+    completedAt: null, rejectedReason: null, seasonId: getActiveSeasonId() || null,
+    createdAt: now, updatedAt: now
+  });
+  persist(); _gageFlush();
+  return true;
+}
+function openCoachAddGage() {
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">🎁 Ajouter un gage au pool</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:12px;color:var(--ink-3);line-height:1.5;margin-bottom:10px">
+        Ton gage entre <strong>directement dans le pool</strong> de tirage (pas de modération). Les joueuses pourront le piocher au sort.
+      </div>
+      <textarea id="coach-gage-text" maxlength="${GAGE_TEXT_MAX}" rows="3" placeholder="Ex : porter le maillot à l'envers tout l'entraînement…" style="width:100%"></textarea>
+      <div style="display:flex;justify-content:flex-end;margin-top:10px">
+        <button class="btn btn-primary" onclick="submitCoachGageFromModal()">Ajouter au pool</button>
+      </div>
+    </div>
+  `);
+  setTimeout(() => { const el = document.getElementById('coach-gage-text'); if (el) el.focus(); }, 80);
+}
+function submitCoachGageFromModal() {
+  const el = document.getElementById('coach-gage-text');
+  if (!el || !el.value.trim()) return;
+  submitCoachGage(el.value);
+  closeModal(); render();
+  if (typeof showToast === 'function') showToast('🎁 Gage ajouté au pool');
+}
+
+// --- Coach : panneau « Gérer les dettes de tirage » (outil de correction). ---
+// Liste les joueuses de la saison avec leur dette courante + tirages en attente,
+// et permet +1 / −1 / remise à zéro. La dette pilote le nb de tirages ajoutés
+// automatiquement à la prochaine assignation (cf. assignDrawsToPlayer).
+function _gageDebtManagerBody() {
+  const pool = (_seasonsLoaded() && getActiveSeasonId())
+    ? getSeasonPlayers(getActiveSeasonId(), { team: 'all' }) : (state.players || []);
+  const sorted = pool.slice().sort((a, b) => (a.num || 0) - (b.num || 0));
+  if (!sorted.length) return '<div style="color:var(--ink-3);font-size:13px">Aucune joueuse dans la saison.</div>';
+  return `
+    <div style="font-size:12px;color:var(--ink-3);line-height:1.5;margin-bottom:12px">
+      La <strong>dette</strong> ajoute des tirages en plus à la prochaine assignation. Outil de correction en cas d'erreur.
+    </div>
+    ${sorted.map(p => {
+      const d = gageDebt(p.id); const owed = pendingDraws(p.id).length;
+      return `
+      <div style="padding:10px 12px;background:var(--surface);border:1px solid var(--border-soft);border-radius:10px;margin-bottom:8px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">
+          <div style="min-width:0">
+            <div style="font-size:14px;color:var(--ink)">#${p.num} ${esc(p.name)}</div>
+            <div style="font-size:10px;font-family:'JetBrains Mono';color:var(--ink-3);text-transform:uppercase;margin-top:2px">${owed ? owed + ' tirage' + (owed > 1 ? 's' : '') + ' en attente · ' : ''}dette : <span style="color:${d > 0 ? 'var(--orange)' : 'var(--ink-2)'}">${d}</span></div>
+          </div>
+          <div style="display:flex;gap:5px;flex:0 0 auto">
+            <button class="btn btn-ghost" style="font-size:15px;padding:6px 11px;line-height:1"${d <= 0 ? ' disabled' : ''} onclick="adjustPlayerDebt('${p.id}',-1)">−</button>
+            <button class="btn btn-secondary" style="font-size:15px;padding:6px 11px;line-height:1" onclick="adjustPlayerDebt('${p.id}',1)">＋</button>
+            <button class="btn btn-ghost" style="font-size:10px;padding:6px 9px"${d <= 0 ? ' disabled' : ''} onclick="resetPlayerDebt('${p.id}')">Reset</button>
+          </div>
+        </div>
+      </div>`;
+    }).join('')}`;
+}
+function openGageDebtManager() {
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">🎛️ Gérer les dettes de tirage</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body" id="gage-debt-body">${_gageDebtManagerBody()}</div>
+  `);
+}
+function renderGageDebtManager() {
+  const b = document.getElementById('gage-debt-body');
+  if (b) b.innerHTML = _gageDebtManagerBody(); else render();
+}
+
 function openGagesCoach() { state.section = 'team'; state.view = { type: 'gages' }; render(); _scrollTopApp(); }
 // Carte home coach : point d'entrée VISIBLE vers la boîte à gages. S'affiche dès
 // qu'il y a quelque chose à faire (propositions à modérer OU pool à assigner),
@@ -14820,6 +14940,10 @@ function renderGagesCoach() {
         <div class="display-lg" style="margin-bottom:2px">🎁 Boîte à gages</div>
         <div style="font-size:12px;color:var(--ink-3);margin-bottom:14px">Modère les propositions, garnis le pool, puis fais <strong>tirer au sort</strong> un gage à une joueuse (elle découvre lequel au tirage).</div>
         <button class="btn btn-primary btn-block" onclick="openAssignDraw()" style="margin-bottom:6px">➕ Faire tirer un gage à…</button>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-secondary" style="flex:1" onclick="openCoachAddGage()">🎁 Ajouter un gage</button>
+          <button class="btn btn-secondary" style="flex:1" onclick="openGageDebtManager()">🎛️ Gérer les dettes</button>
+        </div>
       </div>
 
       <div class="section-header"><div><div class="eyebrow" style="color:var(--orange)">À modérer</div><h2 class="display-md mt-2">En attente (${pending.length})</h2></div></div>
@@ -27321,6 +27445,11 @@ function _initPlayersSync() {
               && state.auth && state.auth.role === 'player') {
             setTimeout(() => { try { maybeShowBroadcastPopup(); } catch(e) {} }, 200);
           }
+          // GATE GAGES : un tirage assigné en direct (coach) doit ouvrir l'overlay
+          // bloquant sans attendre un reload (réassertion realtime).
+          if (entityKey === 'gageDraws' && state.auth && state.auth.role === 'player') {
+            setTimeout(() => { try { maybeShowGageReveal(); } catch(e) {} }, 250);
+          }
         });
         // Filet de sécurité : si l'utilisateur ferme l'onglet avant la fin
         // du debounce 400ms du PbSync, on flush immédiatement pour ne pas
@@ -27904,6 +28033,13 @@ function _renderBody() {
   // pending) → pas de spam. Différé pour ne pas réentrer dans le render.
   if (role === 'player' && !window._broadcastPopupOpen) {
     setTimeout(() => { try { maybeShowBroadcastPopup(); } catch (e) {} }, 300);
+  }
+  // GATE GAGES : réassertion à CHAQUE render pour la joueuse. Tant qu'un tirage
+  // est dû, l'overlay bloquant se ré-affiche (impossible de le contourner par
+  // navigation). Idempotent : maybeShowGageReveal se tait si overlay/modal/popup
+  // déjà ouvert, ou s'il n'y a plus de tirage owed.
+  if (role === 'player') {
+    setTimeout(() => { try { maybeShowGageReveal(); } catch (e) {} }, 320);
   }
 }
 
