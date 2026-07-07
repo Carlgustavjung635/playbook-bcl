@@ -4495,46 +4495,39 @@ const ENTITIES = [
   // ==========================================================================
   {
     key: 'gages', table: 'gages', pk: 'id', realtime: true, auth: 'anon',
-    dump: (state) => Object.fromEntries((state.gages || []).map(g => [g.id, {
-      id: g.id, text: g.text || '', author_id: g.authorId || null,
-      status: ['pending', 'approved', 'assigned', 'accepted', 'skipped', 'rejected'].includes(g.status) ? g.status : 'pending',
-      assigned_to: g.assignedTo || null,
-      assigned_at: g.assignedAt ? new Date(g.assignedAt).toISOString() : null,
-      revealed_at: g.revealedAt ? new Date(g.revealedAt).toISOString() : null,
-      completed_at: g.completedAt ? new Date(g.completedAt).toISOString() : null,
-      rejected_reason: g.rejectedReason || null,
-      season_id: g.seasonId || null,
-      // deleted_at : soft-delete (migration 20260706_001). != null = hors pool/tirage,
-      // mais le gage reste résolvable par id pour l'historique des tirages passés.
-      deleted_at: g.deletedAt ? new Date(g.deletedAt).toISOString() : null,
-      // Cycle de vie + types (migration 20260706_002). completed_at (déjà mappé
-      // plus haut) sert désormais aussi de marqueur « réalisé » (coach_confirmed)
-      // qui retire le gage du pool tirable.
-      gage_type: ['standard', 'secret', 'sport', 'time_limited'].includes(g.gageType) ? g.gageType : 'standard',
-      time_limit_hours: Number.isFinite(g.timeLimitHours) ? g.timeLimitHours : null,
-      updated_at: g.updatedAt ? new Date(g.updatedAt).toISOString() : (g.createdAt ? new Date(g.createdAt).toISOString() : null)
-    }])),
+    dump: (state) => Object.fromEntries((state.gages || []).map(g => [g.id, _dumpGageRow(g)])),
     apply: (state, rows) => {
       const local = state.gages || [];
+      const localById = Object.fromEntries(local.map(g => [g.id, g]));
       const remoteIds = new Set(rows.map(r => r.id));
-      const fromRemote = rows.map(r => ({
-        id: r.id, text: r.text || '', authorId: r.author_id || null,
-        status: r.status || 'pending',
-        assignedTo: r.assigned_to || null,
-        assignedAt: r.assigned_at ? Date.parse(r.assigned_at) : null,
-        revealedAt: r.revealed_at ? Date.parse(r.revealed_at) : null,
-        completedAt: r.completed_at ? Date.parse(r.completed_at) : null,
-        rejectedReason: r.rejected_reason || null,
-        seasonId: r.season_id || null,
-        deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null,
-        gageType: r.gage_type || 'standard',
-        timeLimitHours: Number.isFinite(r.time_limit_hours) ? r.time_limit_hours : null,
-        createdAt: r.created_at ? Date.parse(r.created_at) : null,
-        updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null)
-      }));
+      const ahead = [];
+      const fromRemote = rows.map(r => {
+        const mapped = {
+          id: r.id, text: r.text || '', authorId: r.author_id || null,
+          status: r.status || 'pending',
+          assignedTo: r.assigned_to || null,
+          assignedAt: r.assigned_at ? Date.parse(r.assigned_at) : null,
+          revealedAt: r.revealed_at ? Date.parse(r.revealed_at) : null,
+          completedAt: r.completed_at ? Date.parse(r.completed_at) : null,
+          rejectedReason: r.rejected_reason || null,
+          seasonId: r.season_id || null,
+          deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null,
+          gageType: r.gage_type || 'standard',
+          timeLimitHours: Number.isFinite(r.time_limit_hours) ? r.time_limit_hours : null,
+          createdAt: r.created_at ? Date.parse(r.created_at) : null,
+          updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null)
+        };
+        // LAST-WRITER-WINS par updatedAt : préserve une mutation locale plus
+        // récente (ex : coach edit) qu'un refetch realtime concurrent ramènerait
+        // à l'ancienne version distante (clobber). Cf. _reassertRows plus bas.
+        const loc = localById[r.id];
+        if (loc && (loc.updatedAt || 0) > (mapped.updatedAt || 0)) { ahead.push(loc); return loc; }
+        return mapped;
+      });
       // Anti-wipe : un gage local fraîchement créé (id 'x…') pas encore en remote.
       const pendingLocal = local.filter(g => !remoteIds.has(g.id) && typeof g.id === 'string' && g.id.startsWith('x'));
       state.gages = [...pendingLocal, ...fromRemote];
+      if (ahead.length) _reassertRows('gages', ahead.map(_dumpGageRow));
     }
   },
   // ==========================================================================
@@ -4544,44 +4537,89 @@ const ENTITIES = [
   // ==========================================================================
   {
     key: 'gageDraws', table: 'gage_draws', pk: 'id', realtime: true, auth: 'anon',
-    dump: (state) => Object.fromEntries((state.gageDraws || []).map(d => [d.id, {
-      id: d.id, player_id: d.playerId || null, gage_id: d.gageId || null,
-      status: ['owed', 'accepted', 'skipped', 'adjust', 'player_done', 'coach_confirmed', 'invalidated'].includes(d.status) ? d.status : 'owed',
-      delta: Number.isFinite(d.delta) ? d.delta : 0,
-      assigned_at: d.assignedAt ? new Date(d.assignedAt).toISOString() : null,
-      drawn_at: d.drawnAt ? new Date(d.drawnAt).toISOString() : null,
-      completed_at: d.completedAt ? new Date(d.completedAt).toISOString() : null,
-      // Cycle de vie (migration 20260706_002).
-      player_done_at: d.playerDoneAt ? new Date(d.playerDoneAt).toISOString() : null,
-      confirmed_at: d.confirmedAt ? new Date(d.confirmedAt).toISOString() : null,
-      invalidated_at: d.invalidatedAt ? new Date(d.invalidatedAt).toISOString() : null,
-      invalidation_reason: d.invalidationReason || null,
-      season_id: d.seasonId || null,
-      updated_at: d.updatedAt ? new Date(d.updatedAt).toISOString() : (d.createdAt ? new Date(d.createdAt).toISOString() : null)
-    }])),
+    dump: (state) => Object.fromEntries((state.gageDraws || []).map(d => [d.id, _dumpGageDrawRow(d)])),
     apply: (state, rows) => {
       const local = state.gageDraws || [];
+      const localById = Object.fromEntries(local.map(d => [d.id, d]));
       const remoteIds = new Set(rows.map(r => r.id));
-      const fromRemote = rows.map(r => ({
-        id: r.id, playerId: r.player_id || null, gageId: r.gage_id || null,
-        status: r.status || 'owed',
-        delta: Number.isFinite(r.delta) ? r.delta : 0,
-        assignedAt: r.assigned_at ? Date.parse(r.assigned_at) : null,
-        drawnAt: r.drawn_at ? Date.parse(r.drawn_at) : null,
-        completedAt: r.completed_at ? Date.parse(r.completed_at) : null,
-        playerDoneAt: r.player_done_at ? Date.parse(r.player_done_at) : null,
-        confirmedAt: r.confirmed_at ? Date.parse(r.confirmed_at) : null,
-        invalidatedAt: r.invalidated_at ? Date.parse(r.invalidated_at) : null,
-        invalidationReason: r.invalidation_reason || null,
-        seasonId: r.season_id || null,
-        createdAt: r.created_at ? Date.parse(r.created_at) : null,
-        updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null)
-      }));
+      const ahead = [];
+      const fromRemote = rows.map(r => {
+        const mapped = {
+          id: r.id, playerId: r.player_id || null, gageId: r.gage_id || null,
+          status: r.status || 'owed',
+          delta: Number.isFinite(r.delta) ? r.delta : 0,
+          assignedAt: r.assigned_at ? Date.parse(r.assigned_at) : null,
+          drawnAt: r.drawn_at ? Date.parse(r.drawn_at) : null,
+          completedAt: r.completed_at ? Date.parse(r.completed_at) : null,
+          playerDoneAt: r.player_done_at ? Date.parse(r.player_done_at) : null,
+          confirmedAt: r.confirmed_at ? Date.parse(r.confirmed_at) : null,
+          invalidatedAt: r.invalidated_at ? Date.parse(r.invalidated_at) : null,
+          invalidationReason: r.invalidation_reason || null,
+          seasonId: r.season_id || null,
+          createdAt: r.created_at ? Date.parse(r.created_at) : null,
+          updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null)
+        };
+        // LAST-WRITER-WINS par updatedAt : ne PAS écraser une mutation locale plus
+        // récente (ex : accept/skip/player_done pas encore flushée) par un refetch
+        // realtime concurrent — c'était la cause du bug « acceptation perdue » (une
+        // rafale d'events pendant le flush ramenait la ligne à 'owed'). On garde le
+        // local ET on le re-pousse (car _seedCacheFromRemote va recacher la valeur
+        // locale → sans re-upsert, le prochain flush ne détecterait aucun delta).
+        const loc = localById[r.id];
+        if (loc && (loc.updatedAt || 0) > (mapped.updatedAt || 0)) { ahead.push(loc); return loc; }
+        return mapped;
+      });
       const pendingLocal = local.filter(d => !remoteIds.has(d.id) && typeof d.id === 'string' && d.id.startsWith('x'));
       state.gageDraws = [...pendingLocal, ...fromRemote];
+      if (ahead.length) _reassertRows('gage_draws', ahead.map(_dumpGageDrawRow));
     }
   }
 ];
+
+// Dump d'UNE ligne (partagé entre l'entité `dump` et le re-upsert anti-clobber
+// `_reassertRows`) — garantit un format identique des deux côtés.
+function _dumpGageRow(g) {
+  return {
+    id: g.id, text: g.text || '', author_id: g.authorId || null,
+    status: ['pending', 'approved', 'assigned', 'accepted', 'skipped', 'rejected'].includes(g.status) ? g.status : 'pending',
+    assigned_to: g.assignedTo || null,
+    assigned_at: g.assignedAt ? new Date(g.assignedAt).toISOString() : null,
+    revealed_at: g.revealedAt ? new Date(g.revealedAt).toISOString() : null,
+    completed_at: g.completedAt ? new Date(g.completedAt).toISOString() : null,
+    rejected_reason: g.rejectedReason || null,
+    season_id: g.seasonId || null,
+    deleted_at: g.deletedAt ? new Date(g.deletedAt).toISOString() : null,
+    gage_type: ['standard', 'secret', 'sport', 'time_limited'].includes(g.gageType) ? g.gageType : 'standard',
+    time_limit_hours: Number.isFinite(g.timeLimitHours) ? g.timeLimitHours : null,
+    updated_at: g.updatedAt ? new Date(g.updatedAt).toISOString() : (g.createdAt ? new Date(g.createdAt).toISOString() : null)
+  };
+}
+function _dumpGageDrawRow(d) {
+  return {
+    id: d.id, player_id: d.playerId || null, gage_id: d.gageId || null,
+    status: ['owed', 'accepted', 'skipped', 'adjust', 'player_done', 'coach_confirmed', 'invalidated'].includes(d.status) ? d.status : 'owed',
+    delta: Number.isFinite(d.delta) ? d.delta : 0,
+    assigned_at: d.assignedAt ? new Date(d.assignedAt).toISOString() : null,
+    drawn_at: d.drawnAt ? new Date(d.drawnAt).toISOString() : null,
+    completed_at: d.completedAt ? new Date(d.completedAt).toISOString() : null,
+    player_done_at: d.playerDoneAt ? new Date(d.playerDoneAt).toISOString() : null,
+    confirmed_at: d.confirmedAt ? new Date(d.confirmedAt).toISOString() : null,
+    invalidated_at: d.invalidatedAt ? new Date(d.invalidatedAt).toISOString() : null,
+    invalidation_reason: d.invalidationReason || null,
+    season_id: d.seasonId || null,
+    updated_at: d.updatedAt ? new Date(d.updatedAt).toISOString() : (d.createdAt ? new Date(d.createdAt).toISOString() : null)
+  };
+}
+// Re-pousse immédiatement (fire-and-forget, idempotent) des lignes locales
+// détectées PLUS RÉCENTES que le remote lors d'un apply : sans ça, un refetch
+// realtime concurrent + _seedCacheFromRemote masqueraient la mutation au flush.
+function _reassertRows(table, dumpRows) {
+  if (!dumpRows || !dumpRows.length || !window.sb) return;
+  try {
+    sb.from(table).upsert(dumpRows, { onConflict: 'id' })
+      .then(({ error }) => { if (error) console.warn('[sync] reassert ' + table + ':', error.message); });
+  } catch (e) { /* offline / sb absent : le flush normal réessaiera */ }
+}
 
 // Caches : { entityKey: { rowKey: hash } }
 const _lastSeen = Object.fromEntries(ENTITIES.map(e => [e.key, {}]));
@@ -28696,7 +28734,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-06.53';
+const APP_VERSION = '2026-07-06.54';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
