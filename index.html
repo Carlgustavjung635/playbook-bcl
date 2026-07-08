@@ -14698,25 +14698,63 @@ function _seasonGageDraws(pid) {
 // BATCH (assignedAt) de tirages entièrement accepté sans skip. skip = +1 tirage.
 // Exemple : skip A → dette 1 ; assign → 2 tirages ; accepter les 2 → reset 0 ;
 // skip l'un des 2 → dette 2 → prochain assign = 3 tirages.
+// Plafond de dette : à GAGE_DEBT_MAX skips non compensés, la joueuse ne peut
+// plus passer (accept obligatoire pour se libérer). Règle purement client.
+const GAGE_DEBT_MAX = 2;
+// Dette de tirage = nombre de SKIPS non compensés (+ corrections manuelles du
+// coach). Modèle « solde courant » chronologique, BORNÉ À 0 à chaque étape :
+//   • un SKIP ajoute 1 ;
+//   • un LOT (même assignedAt) entièrement résolu SANS aucun skip rembourse
+//     autant de dette qu'il compte de tirages ENGAGÉS (accepted/player_done/
+//     coach_confirmed) — un accept ISOLÉ (tirage immédiat) rembourse donc 1 ;
+//   • une INVALIDATION est NEUTRE (ne rembourse rien, n'ajoute rien) ;
+//   • une ligne 'adjust' applique son delta (±1 / reset coach).
+// Un lot MIXTE (skip + accept dans le même assignedAt) ne rembourse PAS : ses
+// skips comptent, ses accepts sont « gâchés » (règle historique conservée →
+// les tests coach-batch restent verts). Le clamp à 0 empêche un remboursement
+// de pré-payer un skip futur ou de rendre la dette négative.
 function gageDebt(pid) {
-  const all = _seasonGageDraws(pid);
-  const mine = all.filter(d => d.assignedAt && d.status !== 'adjust');
+  const draws = _seasonGageDraws(pid);
+  const events = []; // { at, v } — v>0 ajoute, v<0 rembourse
+  // 1) Lots de tirages (groupés par assignedAt), hors lignes 'adjust'.
   const batches = {};
-  mine.forEach(d => { (batches[d.assignedAt] = batches[d.assignedAt] || []).push(d); });
-  let resetTime = 0;
-  Object.values(batches).forEach(arr => {
-    const allDone = arr.every(d => d.completedAt);
-    // Batch propre = aucun skip. Les états post-acceptation (accepted, player_done,
-    // coach_confirmed) et invalidated (échec NEUTRE) comptent comme « non-skip ».
-    const clean = allDone && arr.every(d => d.status !== 'skipped');
-    if (clean) { const c = Math.max(...arr.map(d => d.completedAt || 0)); if (c > resetTime) resetTime = c; }
+  draws.forEach(d => {
+    if (d.status === 'adjust' || !d.assignedAt) return;
+    (batches[d.assignedAt] = batches[d.assignedAt] || []).push(d);
   });
-  const skips = mine.filter(d => d.status === 'skipped' && (d.completedAt || 0) > resetTime).length;
-  // Corrections manuelles du coach (lignes 'adjust', delta ±1 ou reset) postérieures
-  // au dernier batch propre. Un batch propre ultérieur les périme (dette réelle 0).
-  const adj = all.filter(d => d.status === 'adjust' && (d.completedAt || 0) > resetTime)
-    .reduce((s, d) => s + (Number.isFinite(d.delta) ? d.delta : 0), 0);
-  return Math.max(0, skips + adj);
+  Object.values(batches).forEach(arr => {
+    const at = Math.max(0, ...arr.map(d => d.completedAt || 0));
+    const skips = arr.filter(d => d.status === 'skipped').length;
+    if (skips) { events.push({ at, v: skips }); return; }   // lot avec skip → +skips (accepts gâchés)
+    if (arr.some(d => d.status === 'owed')) return;          // lot pas encore entièrement résolu
+    const engaged = arr.filter(d => d.status === 'accepted' || d.status === 'player_done' || d.status === 'coach_confirmed').length;
+    if (engaged) events.push({ at, v: -engaged });           // lot propre → rembourse (invalidated = 0)
+  });
+  // 2) Corrections manuelles du coach (lignes 'adjust').
+  draws.filter(d => d.status === 'adjust').forEach(d => {
+    events.push({ at: d.completedAt || 0, v: Number.isFinite(d.delta) ? d.delta : 0 });
+  });
+  // 3) Solde courant chronologique, borné à 0 à chaque étape.
+  events.sort((a, b) => a.at - b.at);
+  let bal = 0;
+  events.forEach(e => { bal += e.v; if (bal < 0) bal = 0; });
+  return bal;
+}
+// Tirage forcé (drip) : si la joueuse a une dette et AUCUN tirage owed en cours,
+// crée un tirage owed pour qu'elle continue à « rembourser ». Bloqueur = owed
+// uniquement (un accept relance donc aussitôt tant que la dette > 0, cf. effet
+// combiné). Repli si pool vide (rien à tirer → on ne crée pas d'owed infaisable).
+function _ensureDebtDraw(pid) {
+  if (!pid || gageDebt(pid) <= 0) return false;
+  if (pendingDraws(pid).length) return false;              // un owed est déjà en attente
+  if (!_drawPoolFor(pid).length) return false;             // pool vide → on attend qu'il se remplisse
+  const now = Date.now();
+  const sid = (getSeasonIdForDate(isoDate(new Date(now))) || getActiveSeasonId()) || null;
+  state.gageDraws = state.gageDraws || [];
+  state.gageDraws.push({ id: uid(), playerId: pid, gageId: null, status: 'owed',
+    assignedAt: now, drawnAt: null, completedAt: null, seasonId: sid, createdAt: now, updatedAt: now });
+  persist(); _gageFlush();
+  return true;
 }
 // --- Correction manuelle de dette (coach) : matérialise une ligne 'adjust'. ---
 // delta > 0 augmente la dette, delta < 0 la diminue (clampée à 0 à la lecture).
@@ -15273,6 +15311,7 @@ function _gageRevealResult(draw) {
   const host = document.getElementById('gage-overlay'); if (!host) return;
   const pid = state.auth && state.auth.playerId;
   const debt = gageDebt(pid);
+  const skipBlocked = debt >= GAGE_DEBT_MAX;                     // dette maxi → passer interdit
   const remaining = pendingDraws(pid).length;                    // dont le tirage courant
   const total = Math.max(window._gageSessionTotal || remaining, remaining);
   const idx = total - remaining + 1;
@@ -15285,9 +15324,11 @@ function _gageRevealResult(draw) {
       <div style="width:100%;max-width:340px">${_gageTypeBannerHtml(g, null)}</div>
       <div style="display:flex;flex-direction:column;gap:10px;width:100%;max-width:340px;margin-top:8px">
         <button class="btn btn-primary btn-block" style="font-size:15px;padding:14px" onclick="acceptGage('${draw.id}')">✓ J'accepte le défi</button>
-        <button class="btn btn-secondary btn-block" style="font-size:14px;padding:12px" onclick="skipGage('${draw.id}')">🙈 Je passe</button>
+        <button class="btn btn-secondary btn-block" ${skipBlocked ? 'disabled aria-disabled="true"' : ''} style="font-size:14px;padding:12px${skipBlocked ? ';opacity:.4;cursor:not-allowed' : ''}"${skipBlocked ? '' : ` onclick="skipGage('${draw.id}')"`}>🙈 Je passe</button>
         <div style="font-size:10px;color:var(--orange);font-family:'JetBrains Mono';text-align:center;text-transform:uppercase;letter-spacing:0.04em;line-height:1.5">
-          ⚠️ Passer = +1 tirage à la prochaine assignation${debt > 0 ? ' · dette actuelle : ' + debt : ''}
+          ${skipBlocked
+            ? '🔒 Tu as ' + debt + ' tirages en dette, tu ne peux plus passer. Accepte pour te libérer.'
+            : '⚠️ Passer = +1 tirage immédiat' + (debt > 0 ? ' · dette actuelle : ' + debt : '')}
         </div>
       </div>
     </div>`;
@@ -15300,32 +15341,55 @@ function acceptGage(drawId) {
   if (!d || d.playerId !== pid || d.status !== 'owed') return;
   const now = Date.now();
   d.status = 'accepted'; d.drawnAt = d.drawnAt || now; d.completedAt = now; d.updatedAt = now;
-  persist(); _gageFlush(); _closeGageOverlay();
-  _notifyCoachGageOutcome(pid, true);
+  persist(); _gageFlush();
+  _notifyCoachGageEvent(pid, 'accepted');
+  // Dette encore due → relance IMMÉDIATEMENT un tirage owed (drip). Sinon rien.
+  try { _ensureDebtDraw(pid); } catch (e) {}
+  _closeGageOverlay();
   if (typeof showToast === 'function') showToast('💪 Défi accepté !');
   _gageAdvance();
 }
-// PUSH : prévient le coach du résultat d'un tirage (accepté/passé).
-function _notifyCoachGageOutcome(pid, accepted) {
+// PUSH coach — TABLE STRICTE status→message (source unique de vérité, testée).
+// coach_confirmed n'émet AUCUN push (le coach en est l'auteur) ; un statut
+// inconnu non plus. notifyPush filtre déjà l'auto-notification du device coach.
+const GAGE_COACH_MSG = {
+  accepted:    { title: '💪 Gage accepté',    tail: ' a accepté le gage' },
+  skipped:     { title: '🙈 Gage passé',       tail: ' a passé le gage' },
+  player_done: { title: '✅ Gage à confirmer',  tail: ' a marqué son gage comme fait' },
+  invalidated: { title: '❌ Gage invalidé',     lead: 'Le gage de ', tail: ' a été invalidé' },
+};
+function _gageCoachMsg(pid, status) {
+  const cfg = GAGE_COACH_MSG[status];
+  if (!cfg) return null; // coach_confirmed / statut inconnu → pas de push
   const p = (state.players || []).find(x => x.id === pid);
   const who = p ? ('#' + p.num + ' ' + p.name) : 'Une joueuse';
-  notifyPush([_pushCoachKey()], {
-    title: accepted ? '💪 Gage accepté' : '🙈 Gage passé',
-    body: who + (accepted ? ' a accepté son gage' : ' a passé son gage'),
-    url: '/', tag: 'gage-outcome', type: 'gage_outcome'
-  });
+  return { title: cfg.title, body: (cfg.lead || '') + who + cfg.tail,
+    url: '/', tag: 'gage-evt-' + status, type: 'gage_event', status };
+}
+function _notifyCoachGageEvent(pid, status) {
+  const payload = _gageCoachMsg(pid, status);
+  if (payload) { try { notifyPush([_pushCoachKey()], payload); } catch (e) {} }
 }
 function skipGage(drawId) {
   const d = (state.gageDraws || []).find(x => x.id === drawId); const pid = state.auth && state.auth.playerId;
   if (!d || d.playerId !== pid || d.status !== 'owed') return;
-  // Skip TOUJOURS autorisé. Coût = +1 tirage à la prochaine assignation (dette).
-  let ok = false; try { ok = confirm('Passer ce gage te coûtera 1 tirage supplémentaire à la prochaine assignation. Continuer ?'); } catch (e) { ok = true; }
+  // GARDE dette maxi (double sécurité même si l'UI est contournée) : à
+  // GAGE_DEBT_MAX skips non compensés, passer est INTERDIT → accept obligatoire.
+  if (gageDebt(pid) >= GAGE_DEBT_MAX) {
+    if (typeof showToast === 'function') showToast('🚫 ' + GAGE_DEBT_MAX + ' gages en dette — accepte pour te libérer');
+    return;
+  }
+  let ok = false; try { ok = confirm('Passer ce gage relance aussitôt un nouveau tirage et ajoute 1 à ta dette. Continuer ?'); } catch (e) { ok = true; }
   if (!ok) return;
   const now = Date.now();
   d.status = 'skipped'; d.drawnAt = d.drawnAt || now; d.completedAt = now; d.updatedAt = now;
-  persist(); _gageFlush(); _closeGageOverlay();
-  _notifyCoachGageOutcome(pid, false);
-  if (typeof showToast === 'function') showToast('🙈 Gage passé · +1 tirage plus tard');
+  persist(); _gageFlush();
+  _notifyCoachGageEvent(pid, 'skipped');
+  // Tirage IMMÉDIAT (drip) : le skip ne se paie plus « à la prochaine
+  // assignation » coach, il relance tout de suite un tirage owed.
+  try { _ensureDebtDraw(pid); } catch (e) {}
+  _closeGageOverlay();
+  if (typeof showToast === 'function') showToast('🙈 Gage passé · nouveau tirage');
   _gageAdvance();
 }
 
@@ -15389,6 +15453,9 @@ function _sweepExpiredGages() {
       d.status = 'invalidated'; d.invalidatedAt = now;
       d.invalidationReason = d.invalidationReason || 'Temps écoulé'; d.updatedAt = now;
       changed = true;
+      // Push coach (best-effort). notifyPush ignore l'auto-notif → si c'est le
+      // device coach qui balaie, rien n'est envoyé.
+      try { _notifyCoachGageEvent(d.playerId, 'invalidated'); } catch (e) {}
     }
   });
   if (changed) { persist(); _gageFlush(); }
@@ -15462,9 +15529,7 @@ function markGageDone(drawId) {
   const now = Date.now();
   d.status = 'player_done'; d.playerDoneAt = now; d.updatedAt = now;
   persist(); _gageFlush();
-  const p = (state.players || []).find(x => x.id === pid);
-  const who = p ? ('#' + p.num + ' ' + p.name) : 'Une joueuse';
-  try { notifyPush([_pushCoachKey()], { title: '✅ Gage à confirmer', body: who + ' a marqué son gage comme fait', url: '/', tag: 'gage-done', type: 'gage_player_done' }); } catch (e) {}
+  _notifyCoachGageEvent(pid, 'player_done');
   try { if (typeof _pbModalOpen === 'function' && _pbModalOpen()) closeModal(); } catch (e) {}
   if (typeof showToast === 'function') showToast('✓ Marqué fait · en attente de la coach');
   render();
@@ -28584,6 +28649,10 @@ function _renderBody() {
   // navigation). Idempotent : maybeShowGageReveal se tait si overlay/modal/popup
   // déjà ouvert, ou s'il n'y a plus de tirage owed.
   if (role === 'player') {
+    // Filet drip : dette non nulle sans tirage owed en cours → relance un tirage
+    // owed (p.ex. après avoir marqué « fait », ou dette posée par le coach). La
+    // gate ci-dessous affichera alors l'overlay bloquant.
+    try { _ensureDebtDraw(state.auth.playerId); } catch (e) {}
     setTimeout(() => { try { maybeShowGageReveal(); } catch (e) {} }, 320);
   }
 }
@@ -28734,7 +28803,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-06.54';
+const APP_VERSION = '2026-07-08.55';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
