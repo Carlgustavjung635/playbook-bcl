@@ -16,12 +16,21 @@ let CLOCK = 1000; function now() { return ++CLOCK; }
 function _gageInSeason(g, seasonId) { if (!_seasonsLoaded()) return true; if (g.seasonId) return g.seasonId === seasonId; return seasonId === getActiveSeasonId(); }
 function currentSeasonGages() { const active = getActiveSeasonId(); if (!_seasonsLoaded() || !active) return state.gages || []; return (state.gages || []).filter(g => _gageInSeason(g, active)); }
 function _seasonGageDraws(pid) { const active = getActiveSeasonId(); return (state.gageDraws || []).filter(d => d.playerId === pid && (!_seasonsLoaded() || !active || (d.seasonId ? d.seasonId === active : true))); }
-function gageDebt(pid) {
-  const mine = _seasonGageDraws(pid).filter(d => d.assignedAt);
-  const batches = {}; mine.forEach(d => { (batches[d.assignedAt] = batches[d.assignedAt] || []).push(d); });
-  let resetTime = 0;
-  Object.values(batches).forEach(arr => { const allDone = arr.every(d => d.completedAt); const clean = allDone && arr.every(d => d.status === 'accepted'); if (clean) { const c = Math.max(...arr.map(d => d.completedAt || 0)); if (c > resetTime) resetTime = c; } });
-  return mine.filter(d => d.status === 'skipped' && (d.completedAt || 0) > resetTime).length;
+function gageDebt(pid) { // solde courant chronologique par lot, borné à 0 (extrait fidèle)
+  const draws = _seasonGageDraws(pid); const events = []; const batches = {};
+  draws.forEach(d => { if (d.status === 'adjust' || !d.assignedAt) return; (batches[d.assignedAt] = batches[d.assignedAt] || []).push(d); });
+  Object.values(batches).forEach(arr => {
+    const at = Math.max(0, ...arr.map(d => d.completedAt || 0));
+    const skips = arr.filter(d => d.status === 'skipped').length;
+    if (skips) { events.push({ at, v: skips }); return; }
+    if (arr.some(d => d.status === 'owed')) return;
+    const engaged = arr.filter(d => d.status === 'accepted' || d.status === 'player_done' || d.status === 'coach_confirmed').length;
+    if (engaged) events.push({ at, v: -engaged });
+  });
+  draws.filter(d => d.status === 'adjust').forEach(d => events.push({ at: d.completedAt || 0, v: Number.isFinite(d.delta) ? d.delta : 0 }));
+  events.sort((a, b) => a.at - b.at);
+  let bal = 0; events.forEach(e => { bal += e.v; if (bal < 0) bal = 0; });
+  return bal;
 }
 function pendingDraws(pid) { return _seasonGageDraws(pid).filter(d => d.status === 'owed').sort((a, b) => (a.assignedAt || 0) - (b.assignedAt || 0)); }
 function _drawPoolFor(pid) {
