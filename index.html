@@ -4573,6 +4573,40 @@ const ENTITIES = [
       state.gageDraws = [...pendingLocal, ...fromRemote];
       if (ahead.length) _reassertRows('gage_draws', ahead.map(_dumpGageDrawRow));
     }
+  },
+  // ==========================================================================
+  // COACHES (cf. migration 20260709_001) — identités coach PIN-only (rôles
+  // multi-équipes). admin_coach = le coach historique (seed local depuis
+  // pins.coach) ; coach = coach non-admin scopé à ses team_tag.
+  // ==========================================================================
+  {
+    key: 'coaches', table: 'coaches', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.coaches || []).map(c => [c.id, _dumpCoachRow(c)])),
+    apply: (state, rows) => {
+      const local = state.coaches || [];
+      const localById = Object.fromEntries(local.map(c => [c.id, c]));
+      const remoteIds = new Set(rows.map(r => r.id));
+      const ahead = [];
+      const fromRemote = rows.map(r => {
+        const mapped = {
+          id: r.id, name: r.name || '',
+          coachRole: r.coach_role === 'admin_coach' ? 'admin_coach' : 'coach',
+          teams: Array.isArray(r.teams) && r.teams.length ? r.teams.filter(t => t === 'e1' || t === 'e2') : ['e1'],
+          code: r.code || null,
+          createdAt: r.created_at ? Date.parse(r.created_at) : null,
+          updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null)
+        };
+        const loc = localById[r.id];
+        if (loc && (loc.updatedAt || 0) > (mapped.updatedAt || 0)) { ahead.push(loc); return loc; }
+        return mapped;
+      });
+      // Anti-wipe : coach local fraîchement créé (id 'x…') OU l'admin_coach seedé
+      // localement (id stable 'admin') pas encore flushé → un fetch vide ne doit
+      // pas l'effacer avant son premier push.
+      const pendingLocal = local.filter(c => !remoteIds.has(c.id) && (c.coachRole === 'admin_coach' || (typeof c.id === 'string' && c.id.startsWith('x'))));
+      state.coaches = [...pendingLocal, ...fromRemote];
+      if (ahead.length) _reassertRows('coaches', ahead.map(_dumpCoachRow));
+    }
   }
 ];
 
@@ -4608,6 +4642,16 @@ function _dumpGageDrawRow(d) {
     invalidation_reason: d.invalidationReason || null,
     season_id: d.seasonId || null,
     updated_at: d.updatedAt ? new Date(d.updatedAt).toISOString() : (d.createdAt ? new Date(d.createdAt).toISOString() : null)
+  };
+}
+function _dumpCoachRow(c) {
+  return {
+    id: c.id, name: c.name || '',
+    coach_role: c.coachRole === 'admin_coach' ? 'admin_coach' : 'coach',
+    teams: (Array.isArray(c.teams) ? c.teams.filter(t => t === 'e1' || t === 'e2') : []).length
+      ? c.teams.filter(t => t === 'e1' || t === 'e2') : ['e1'],
+    code: c.code || null,
+    updated_at: c.updatedAt ? new Date(c.updatedAt).toISOString() : (c.createdAt ? new Date(c.createdAt).toISOString() : null)
   };
 }
 // Re-pousse immédiatement (fire-and-forget, idempotent) des lignes locales
@@ -5032,6 +5076,7 @@ const K = {
   broadcastReceipts: 'pb8_broadcast_receipts',
   gages: 'pb8_gages',
   gageDraws: 'pb8_gage_draws',
+  coaches: 'pb8_coaches', // [{ id, name, coachRole, teams[], code, createdAt, updatedAt }] — identités coach (rôles multi-équipes)
   theme: 'pb8_theme', // map { "<role>:<playerId|->": themeId } — préférence couleur par identité
   chronoSound: 'pb8_chrono_sound', // map { "<role>:<playerId|->": soundId } — ambiance sonore chrono
   chronoTension: 'pb8_chrono_tension', // map { "<role>:<playerId|->": bool } — mode tension 3-2-1
@@ -5439,6 +5484,14 @@ let state = {
   //   assignedAt, drawnAt, completedAt, seasonId, createdAt, updatedAt }]
   gageDraws: load(K.gageDraws, []),
 
+  // === RÔLES MULTI-COACH (cf. migration 20260709_001_coach_roles_multi_team) ===
+  // coaches : identités coach PIN-only, synchronisées (comme les joueuses).
+  // [{ id, name, coachRole:'admin_coach'|'coach', teams:['e1'|'e2'...], code,
+  //    createdAt, updatedAt }]. Seed d'un admin_coach au boot depuis pins.coach
+  //  (_seedAdminCoach) → golden path mono-coach identique à avant tant qu'aucun
+  //  coach non-admin n'existe.
+  coaches: load(K.coaches, []),
+
   // === JOUEUSES GUESTS (Phase 5 — cf. migration 20260524_009_guest_players) ===
   // guestPlayers : humains temporaires identifiés par leur nom (copine d'une
   //   joueuse, essayeuse). [{ id, name, note, promotedToPlayerId, firstSeenAt,
@@ -5539,6 +5592,7 @@ function persist() {
   save(K.broadcastReceipts, state.broadcastReceipts);
   save(K.gages, state.gages);
   save(K.gageDraws, state.gageDraws);
+  save(K.coaches, state.coaches);
   // FIX Option B : pendant l'édition d'un plan, bumper updatedAt de l'entrée
   // courante AVANT le save → la garde anti-écho de l'apply() trainingPlans peut
   // distinguer une édition locale fraîche d'un écho realtime obsolète (qui
@@ -6658,6 +6712,83 @@ function currentPlayer() {
 }
 
 // ============================================================
+// RÔLES MULTI-COACH (admin_coach / coach) — cf. ROLES_SPEC.md
+// ------------------------------------------------------------
+// Tous les coachs sont role:'coach' au niveau L1 (state.auth.role) : l'UI coach
+// existante marche pour les deux. La distinction admin/non-admin vit dans
+// l'entité `coaches` (coachRole), résolue depuis state.auth.coachId. Une session
+// coach SANS coachId (connectée avant la MAJ, ou coach supprimé) = ADMIN
+// (rétrocompat). Golden path mono-coach : tant qu'aucun coach non-admin n'existe,
+// pas de sélecteur au login, admin implicite.
+// ============================================================
+function _adminCoach() {
+  const found = (state.coaches || []).find(c => c.coachRole === 'admin_coach');
+  if (found) return found;
+  // Fallback synthétique (avant le seed / offline) : pas persisté ici.
+  return { id: 'admin', name: 'Coach', coachRole: 'admin_coach', teams: ['e1', 'e2'], code: (state.pins && state.pins.coach) || '1234' };
+}
+function _coachById(id) { return (state.coaches || []).find(c => c.id === id) || null; }
+function _nonAdminCoaches() { return (state.coaches || []).filter(c => c.coachRole === 'coach'); }
+
+// Crée l'admin_coach s'il n'existe pas (id déterministe 'admin' → convergence
+// multi-device, upsert idempotent). Code = PIN coach historique → login
+// inchangé. Appelé au boot d'une session coach + à chaque login coach réussi.
+function _seedAdminCoach() {
+  state.coaches = state.coaches || [];
+  const existing = state.coaches.find(c => c.coachRole === 'admin_coach');
+  if (existing) return existing;
+  const now = Date.now();
+  const admin = {
+    id: 'admin', name: 'Coach', coachRole: 'admin_coach',
+    teams: ['e1', 'e2'], code: (state.pins && state.pins.coach) || '1234',
+    createdAt: now, updatedAt: now
+  };
+  state.coaches.unshift(admin);
+  persist();
+  return admin;
+}
+
+// Le coach de la session courante (objet coaches). null hors rôle coach.
+function currentCoach() {
+  if (!state.auth || state.auth.role !== 'coach') return null;
+  if (state.auth.coachId) {
+    const c = _coachById(state.auth.coachId);
+    if (c) return c;
+    // Entité coaches pas encore synchronisée sur cet appareil → snapshot de
+    // session (évite de retomber sur admin pour un coach non-admin = escalade).
+    if (state.auth.coachRole) return {
+      id: state.auth.coachId, name: state.auth.coachName || '',
+      coachRole: state.auth.coachRole,
+      teams: Array.isArray(state.auth.teams) && state.auth.teams.length ? state.auth.teams : ['e1'],
+      code: null
+    };
+  }
+  return _adminCoach(); // session sans coachId (connectée avant la MAJ) → admin
+}
+function isAdminCoach() { const c = currentCoach(); return !!c && c.coachRole === 'admin_coach'; }
+// Coach non-admin (portée restreinte) actuellement connecté.
+function isScopedCoach() { return !!(state.auth && state.auth.role === 'coach') && !isAdminCoach(); }
+// Équipes (team_tag) couvertes par le coach courant. Admin → toutes.
+function coachTeams() {
+  const c = currentCoach();
+  const t = (c && Array.isArray(c.teams)) ? c.teams.filter(x => x === 'e1' || x === 'e2') : [];
+  return t.length ? t : ['e1', 'e2'];
+}
+
+// Filtre une liste de joueuses selon la portée du user courant. Admin (ou tout
+// rôle non-coach : la joueuse est déjà auto-scopée ailleurs) → inchangé. Coach
+// non-admin → uniquement les joueuses de ses équipes (team_tag du lien saison,
+// 'both' = visible par tous). Ceinture+bretelles au-dessus d'effectiveTeamFilter.
+function visiblePlayersForUser(players) {
+  if (!isScopedCoach()) return players || [];
+  const teams = coachTeams();
+  return (players || []).filter(p => {
+    const tag = (p && p._seasonLink && p._seasonLink.teamTag) || 'e1';
+    return tag === 'both' || teams.includes(tag);
+  });
+}
+
+// ============================================================
 // AUTH
 // ============================================================
 function renderAuth() {
@@ -6705,9 +6836,40 @@ function renderAuth() {
     `;
   }
 
+  if (flow.stage === 'pickCoach') {
+    // Admin d'abord, puis les coachs non-admin (avec leurs équipes).
+    const admin = _adminCoach();
+    const list = [admin, ..._nonAdminCoaches()];
+    const teamsLbl = (c) => (Array.isArray(c.teams) ? c.teams : ['e1'])
+      .map(t => teamLabel(t, true)).join(' · ');
+    return `
+      <div class="auth-screen" style="position:fixed;inset:0;justify-content:flex-start;padding-top:60px;overflow-y:auto;-webkit-overflow-scrolling:touch;padding-bottom:calc(96px + env(safe-area-inset-bottom))">
+        <div class="auth-bg-glow"></div>
+        <div class="auth-logo" style="width:60px;height:60px;font-size:32px"><img class="brand-logo" src="/assets/bcl-logo-256.png" alt="Basket Club Lislois"></div>
+        <div class="auth-title" style="font-size:28px">Quel coach ?</div>
+        <div class="auth-subtitle">Choisis ton identité</div>
+        <div style="width:100%;max-width:340px;display:flex;flex-direction:column;gap:10px">
+          ${list.map(c => `
+            <button class="role-btn" onclick="pickCoach('${c.id}')">
+              <div class="role-icon">${esc((c.name || 'C').trim().charAt(0).toUpperCase() || 'C')}</div>
+              <div class="role-info">
+                <div class="role-name">${esc(c.name || (c.coachRole === 'admin_coach' ? 'Coach' : 'Coach'))}</div>
+                <div class="role-desc">${c.coachRole === 'admin_coach' ? 'Admin · toutes les équipes' : esc(teamsLbl(c))}</div>
+              </div>
+            </button>
+          `).join('')}
+        </div>
+        <button class="btn btn-ghost mt-3" onclick="state.authFlow={stage:'role',role:null,playerId:null,pinInput:''};render()">← Retour</button>
+      </div>
+    `;
+  }
+
   if (flow.stage === 'pin') {
     const player = state.players.find(p => p.id === flow.playerId);
     const role = ROLES[flow.role];
+    // Coach : titre = nom du coach sélectionné (sinon libellé de rôle générique).
+    const pinCoach = flow.role === 'coach' ? (flow.coachId ? _coachById(flow.coachId) : null) : null;
+    const pinTitle = player ? esc(player.name) : (pinCoach && pinCoach.name ? esc(pinCoach.name) : esc(role.label));
     const len = flow.pinInput.length;
     const key = getRateLimitKey(flow.role, flow.playerId);
     const att = state.pinAttempts[key];
@@ -6729,7 +6891,7 @@ function renderAuth() {
       <div class="auth-screen" style="justify-content:flex-start;padding-top:50px">
         <div class="auth-bg-glow"></div>
         <div class="auth-logo" style="width:60px;height:60px;font-size:32px"><img class="brand-logo" src="/assets/bcl-logo-256.png" alt="Basket Club Lislois"></div>
-        <div class="auth-title" style="font-size:24px">${player ? esc(player.name) : esc(role.label)}</div>
+        <div class="auth-title" style="font-size:24px">${pinTitle}</div>
         <div class="auth-subtitle">${isLocked ? 'Trop de tentatives' : 'Saisis ton code à 4 chiffres'}</div>
         <div class="pin-display">
           ${[0,1,2,3].map(i => `<div class="pin-dot ${i < len ? 'filled' : ''}"></div>`).join('')}
@@ -6790,8 +6952,13 @@ function renderNoActiveSeasonScreen() {
 
 function pickRole(role) {
   state.authFlow.role = role;
+  state.authFlow.coachId = null;
   if (role === 'player') {
     state.authFlow.stage = 'pickPlayer';
+  } else if (role === 'coach' && _nonAdminCoaches().length > 0) {
+    // Plusieurs coachs enregistrés → sélecteur "Quel coach ?". Sinon (golden path
+    // mono-coach) : PIN direct, admin implicite → flux STRICTEMENT inchangé.
+    state.authFlow.stage = 'pickCoach';
   } else {
     state.authFlow.stage = 'pin';
     state.authFlow.pinInput = '';
@@ -6802,6 +6969,14 @@ function pickPlayer(pid) {
   state.authFlow.playerId = pid;
   state.authFlow.stage = 'pin';
   state.authFlow.pinInput = '';
+  render();
+}
+// Sélection d'une identité coach (admin ou non-admin) → écran PIN/code.
+function pickCoach(id) {
+  state.authFlow.coachId = id || null;
+  state.authFlow.stage = 'pin';
+  state.authFlow.pinInput = '';
+  state.authFlow.pinError = false;
   render();
 }
 function pinKey(key) {
@@ -6828,6 +7003,10 @@ function pinKey(key) {
 // Identifiant unique pour le rate-limit selon le rôle
 function getRateLimitKey(role, playerId) {
   if (role === 'player') return 'player_' + playerId;
+  // Coach : lockout PAR coach sélectionné (un code faux sur le coach E2 ne
+  // verrouille pas l'admin). Golden path (admin implicite, pas de coachId) →
+  // clé 'coach' historique inchangée.
+  if (role === 'coach' && state.authFlow && state.authFlow.coachId) return 'coach_' + state.authFlow.coachId;
   return role; // 'coach' ou 'stat'
 }
 
@@ -6860,9 +7039,16 @@ async function tryPin() {
     return;
   }
 
+  // Coach : résoudre l'identité visée. coachId présent → ce coach ; sinon (golden
+  // path mono-coach) → admin implicite. coachIsAdmin gouverne le chemin RPC (le
+  // RPC verify_pin ne connaît QUE le PIN coach partagé = celui de l'admin).
+  const targetCoach = role === 'coach' ? (state.authFlow.coachId ? _coachById(state.authFlow.coachId) : _adminCoach()) : null;
+  const coachIsAdmin = role === 'coach' ? (!targetCoach || targetCoach.coachRole === 'admin_coach') : false;
+
   let valid = false;
-  // 1) Tentative RPC Supabase (source de vérité si en ligne)
-  if (window.SbPin) {
+  // 1) Tentative RPC Supabase (source de vérité si en ligne). Pour un coach non-
+  // admin, on NE passe PAS par le RPC (qui validerait contre le PIN coach partagé).
+  if (window.SbPin && (role !== 'coach' || coachIsAdmin)) {
     try {
       const res = await SbPin.verify(role, playerId || null, pinInput);
       if (res.source === 'remote') valid = !!res.ok;
@@ -6870,7 +7056,10 @@ async function tryPin() {
   }
   // 2) Fallback local (compat 100 % avec l'existant si offline ou pas encore migré)
   if (!valid) {
-    if (role === 'coach' && pinInput === (state.pins.coach || '1234')) valid = true;
+    if (role === 'coach') {
+      if (coachIsAdmin && pinInput === (state.pins.coach || '1234')) valid = true;
+      else if (targetCoach && targetCoach.code && pinInput === targetCoach.code) valid = true;
+    }
     else if (role === 'stat' && pinInput === (state.pins.stat || '1234')) valid = true;
     else if (role === 'player') {
       const p = state.players.find(p => p.id === playerId);
@@ -6881,7 +7070,20 @@ async function tryPin() {
   if (valid) {
     // Reset compteur en cas de succès
     delete state.pinAttempts[key];
-    state.auth = { role, playerId: role === 'player' ? playerId : null };
+    if (role === 'coach') {
+      // Garantit l'admin en base (id 'admin', code = PIN historique) puis résout
+      // l'identité effective + snapshot coachRole/teams dans l'auth (autorité de
+      // session, y compris offline avant sync de l'entité coaches).
+      const seededAdmin = _seedAdminCoach();
+      const coach = state.authFlow.coachId ? (_coachById(state.authFlow.coachId) || seededAdmin) : seededAdmin;
+      state.auth = {
+        role: 'coach', playerId: null,
+        coachId: coach.id, coachRole: coach.coachRole, coachName: coach.name || '',
+        teams: Array.isArray(coach.teams) && coach.teams.length ? coach.teams.slice() : ['e1', 'e2']
+      };
+    } else {
+      state.auth = { role, playerId: role === 'player' ? playerId : null };
+    }
     // Email binding strict : si un compte cloud est déjà connecté, on lie cette
     // identité (player/coach) à ce compte. Stat = rôle partagé → pas de binding.
     try { _enforceEmailBinding(); } catch (e) {}
@@ -8139,7 +8341,11 @@ function openChangeMyPin() {
 function saveMyPin() {
   const role = state.auth.role;
   const player = currentPlayer();
-  const currentPin = role === 'player' ? player.pin : state.pins[role];
+  // Coach : le "code PIN" est celui de son identité coach (currentCoach().code).
+  // Pour l'admin il reste aligné avec le PIN coach partagé (state.pins.coach).
+  const _cc = role === 'coach' ? currentCoach() : null;
+  const currentPin = role === 'player' ? player.pin
+    : (role === 'coach' ? ((_cc && _cc.code) || state.pins.coach || '1234') : state.pins[role]);
 
   const oldVal = document.getElementById('pin-old').value;
   const newVal = document.getElementById('pin-new').value;
@@ -8157,10 +8363,20 @@ function saveMyPin() {
 
   if (role === 'player') {
     player.pin = newVal;
+  } else if (role === 'coach') {
+    // Mute l'objet de l'entité coaches (source de vérité, synchronisé) ; seed
+    // l'admin au besoin. L'admin garde aussi le PIN coach partagé aligné.
+    const c = _cc || _seedAdminCoach();
+    let stored = _coachById(c.id);
+    if (!stored && c.coachRole === 'admin_coach') stored = _seedAdminCoach();
+    if (stored) { stored.code = newVal; stored.updatedAt = Date.now(); }
+    if (!c || c.coachRole === 'admin_coach') state.pins.coach = newVal;
   } else {
     state.pins[role] = newVal;
   }
   persist();
+  // Flush immédiat (l'entité coaches doit propager le nouveau code sans attendre).
+  try { if (role === 'coach' && window.PbSync && PbSync.flushNow) PbSync.flushNow(state).catch(() => {}); } catch (e) {}
   closeModal();
   setTimeout(() => alert('✓ Code PIN modifié'), 200);
 }
@@ -27982,6 +28198,9 @@ function _initPlayersSync() {
         // - coach garde son choix s'il est valide, sinon fallback active
         // - joueuse toujours forcée sur la saison active
         try { ensureCurrentSeasonId(); } catch(e) {}
+        // RÔLES : seed de l'admin_coach pour une session coach déjà active (cas
+        // mise à jour d'un coach historique) → il devient admin_coach sans effort.
+        try { if (state.auth && state.auth.role === 'coach') _seedAdminCoach(); } catch(e) { console.warn('[roles] seed admin:', e.message); }
         // DÉFIS AUTO PAR SAISON : backfill legacy + init des défis manquants sur
         // la saison active. COACH UNIQUEMENT (jamais d'écriture défis depuis un
         // device joueuse — la joueuse lit ce que le coach a synchronisé).
