@@ -40,8 +40,8 @@ for (const [rel, size] of [['icon-192.png', 192], ['icon-512.png', 512], ['apple
 }
 
 console.log('SCÉNARIO 3 — câblage UI (emoji club → logo)');
-t('6 <img class="brand-logo"> (4 auth-logo + 2 topbar-orb)', () => {
-  assert.strictEqual((html.match(/class="brand-logo"/g) || []).length, 6);
+t('7 <img class="brand-logo"> (5 auth-logo dont sélecteur coach + 2 topbar-orb)', () => {
+  assert.strictEqual((html.match(/class="brand-logo"/g) || []).length, 7);
 });
 t('plus aucun 🏀 dans auth-logo / topbar-orb', () => {
   assert.ok(!/class="auth-logo"[^>]*>🏀/.test(html));
