@@ -33,9 +33,14 @@ const seasonPlayers = [
 ];
 function renderRoster(state, cur) {
   const body = extractFn(html, '_effectifRosterBody');
+  const POSTES = [1, 2, 3, 4, 5].map(n => ({ n, label: 'P' + n, short: 'P' + n }));
   return new Function('state', 'esc', '_lastSeenBadge', 'getCurrentSeason',
+    'isScopedCoach', 'visiblePlayersForUser', '_seasonsLoaded', 'getSeasonPlayers',
+    'PLAYER_POSTES', '_normPostes', '_postesBadges', '_ageFromDob',
     body + '\nreturn _effectifRosterBody();'
-  )(state, s => String(s).replace(/'/g, '&#39;'), () => ({ color: '#888', dot: 'o', label: 'vue' }), () => cur);
+  )(state, s => String(s).replace(/'/g, '&#39;'), () => ({ color: '#888', dot: 'o', label: 'vue' }), () => cur,
+    () => false, a => a || [], () => false, () => [],
+    POSTES, a => (Array.isArray(a) ? a.filter(n => n >= 1 && n <= 5) : []), () => '', () => null);
 }
 
 console.log('SCÉNARIO 1 — saison active : boutons contextuels');

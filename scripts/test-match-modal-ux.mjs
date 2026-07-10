@@ -80,9 +80,9 @@ t('m-deplacement visible si extérieur OU si lieu déjà saisi', () => {
 console.log('SCÉNARIO 5 — comportement (sandbox)');
 {
   // _matchTeamPill : multi off → '' ; multi on → pills
-  const mk = (multi) => new Function('state', 'esc', 'isMultiSquad', 'teamLabel',
+  const mk = (multi) => new Function('state', 'esc', 'isMultiSquad', 'teamLabel', 'isScopedCoach', 'coachTeams',
     extractFn('_matchTeamPill') + '\nreturn _matchTeamPill;'
-  )({ team: {} }, s => String(s), () => multi, (tag, short) => (tag === 'e2' ? 'E2' : 'E1'));
+  )({ team: {} }, s => String(s), () => multi, (tag, short) => (tag === 'e2' ? 'E2' : 'E1'), () => false, () => ['e1']);
   t('mono-équipe → pas de champ Équipe', () => assert.strictEqual(mk(false)('e1'), ''));
   t('multi-équipe → pills E1/E2, e2 actif si currentTag=e2', () => {
     const out = mk(true)('e2');

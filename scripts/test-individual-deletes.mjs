@@ -57,6 +57,7 @@ function makeSandbox(state, { confirmReturn = true } = {}) {
   const factory = new Function(
     'state', 'confirm', 'alert', 'save', 'K', 'persist', 'showToast', 'closeModal',
     'render', 'openSeasonsModal', 'managePlayers', 'window', 'setTimeout',
+    '_denyIfScopedCoach', 'isAdminCoach',
     concatSrc + '\nreturn { getActiveSeasonId, ensureCurrentSeasonId, deleteSeason, deleteConvoc, removePlayer, deleteMatch };'
   );
   const api = factory(
@@ -72,7 +73,9 @@ function makeSandbox(state, { confirmReturn = true } = {}) {
     () => {},                                  // openSeasonsModal
     () => {},                                  // managePlayers
     { PbStore: null },                         // window
-    () => {}                                   // setTimeout (no-op)
+    () => {},                                  // setTimeout (no-op)
+    () => false,                               // _denyIfScopedCoach (admin → jamais bloqué)
+    () => true                                 // isAdminCoach (session admin dans ces tests)
   );
   return { api, log };
 }

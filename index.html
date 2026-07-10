@@ -3405,6 +3405,12 @@ window.PbStore = {
     // clear → on l'envoie comme {} qui = "pas de feedback"). Cf
     // migration 20260524_005.
     row.feedback = p.feedback || {};
+    // Postes (int[] 1..5) + taille (cm) + date de naissance — toujours envoyés
+    // (cf. migrations 20260709_002/_003, à appliquer AVANT ce build). Rétrocompat
+    // de lecture assurée par le fallback de fetchPlayers.
+    row.postes = Array.isArray(p.postes) ? p.postes.filter(n => n >= 1 && n <= 5) : [];
+    row.taille_cm = Number.isFinite(p.tailleCm) ? p.tailleCm : null;
+    row.date_naissance = p.dateNaissance || null;
     const { error } = await sb.from('players').upsert(row);
     if (error) throw error;
   },
@@ -3439,9 +3445,12 @@ window.PbStore = {
   async fetchPlayers() {
     // last_seen_at peut ne pas encore exister en base (migration 20260601_001) :
     // on tente le select enrichi, fallback legacy si la colonne manque.
-    let res = await sb.from('players').select('id,name,num,photo,feedback,last_seen_at').order('num');
+    let res = await sb.from('players').select('id,name,num,photo,feedback,last_seen_at,postes,taille_cm,date_naissance').order('num');
     if (res.error) {
-      res = await sb.from('players').select('id,name,num,photo,feedback').order('num');
+      // Fallback si postes/taille_cm/date_naissance (migrations 20260709_002/_003)
+      // pas encore appliquées → les nouveaux champs restent locaux (préservés au merge).
+      res = await sb.from('players').select('id,name,num,photo,feedback,last_seen_at').order('num');
+      if (res.error) res = await sb.from('players').select('id,name,num,photo,feedback').order('num');
     }
     return res.data || [];
   },
@@ -4504,6 +4513,8 @@ const ENTITIES = [
       const fromRemote = rows.map(r => {
         const mapped = {
           id: r.id, text: r.text || '', authorId: r.author_id || null,
+          proposedBy: r.proposed_by || null,
+          moderatedBy: r.moderated_by || null,
           status: r.status || 'pending',
           assignedTo: r.assigned_to || null,
           assignedAt: r.assigned_at ? Date.parse(r.assigned_at) : null,
@@ -4573,6 +4584,41 @@ const ENTITIES = [
       state.gageDraws = [...pendingLocal, ...fromRemote];
       if (ahead.length) _reassertRows('gage_draws', ahead.map(_dumpGageDrawRow));
     }
+  },
+  // ==========================================================================
+  // COACHES (cf. migration 20260709_001) — identités coach PIN-only (rôles
+  // multi-équipes). admin_coach = le coach historique (seed local depuis
+  // pins.coach) ; coach = coach non-admin scopé à ses team_tag.
+  // ==========================================================================
+  {
+    key: 'coaches', table: 'coaches', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.coaches || []).map(c => [c.id, _dumpCoachRow(c)])),
+    apply: (state, rows) => {
+      const local = state.coaches || [];
+      const localById = Object.fromEntries(local.map(c => [c.id, c]));
+      const remoteIds = new Set(rows.map(r => r.id));
+      const ahead = [];
+      const fromRemote = rows.map(r => {
+        const mapped = {
+          id: r.id, name: r.name || '',
+          coachRole: r.coach_role === 'admin_coach' ? 'admin_coach' : 'coach',
+          teams: Array.isArray(r.teams) && r.teams.length ? r.teams.filter(t => t === 'e1' || t === 'e2') : ['e1'],
+          code: r.code || null,
+          dateNaissance: r.date_naissance || null,
+          createdAt: r.created_at ? Date.parse(r.created_at) : null,
+          updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null)
+        };
+        const loc = localById[r.id];
+        if (loc && (loc.updatedAt || 0) > (mapped.updatedAt || 0)) { ahead.push(loc); return loc; }
+        return mapped;
+      });
+      // Anti-wipe : coach local fraîchement créé (id 'x…') OU l'admin_coach seedé
+      // localement (id stable 'admin') pas encore flushé → un fetch vide ne doit
+      // pas l'effacer avant son premier push.
+      const pendingLocal = local.filter(c => !remoteIds.has(c.id) && (c.coachRole === 'admin_coach' || (typeof c.id === 'string' && c.id.startsWith('x'))));
+      state.coaches = [...pendingLocal, ...fromRemote];
+      if (ahead.length) _reassertRows('coaches', ahead.map(_dumpCoachRow));
+    }
   }
 ];
 
@@ -4581,6 +4627,8 @@ const ENTITIES = [
 function _dumpGageRow(g) {
   return {
     id: g.id, text: g.text || '', author_id: g.authorId || null,
+    proposed_by: g.proposedBy || null,   // 'coach:<id>' | 'player:<id>' (traçabilité modération)
+    moderated_by: g.moderatedBy || null, // '<admin coach id>'
     status: ['pending', 'approved', 'assigned', 'accepted', 'skipped', 'rejected'].includes(g.status) ? g.status : 'pending',
     assigned_to: g.assignedTo || null,
     assigned_at: g.assignedAt ? new Date(g.assignedAt).toISOString() : null,
@@ -4608,6 +4656,17 @@ function _dumpGageDrawRow(d) {
     invalidation_reason: d.invalidationReason || null,
     season_id: d.seasonId || null,
     updated_at: d.updatedAt ? new Date(d.updatedAt).toISOString() : (d.createdAt ? new Date(d.createdAt).toISOString() : null)
+  };
+}
+function _dumpCoachRow(c) {
+  return {
+    id: c.id, name: c.name || '',
+    coach_role: c.coachRole === 'admin_coach' ? 'admin_coach' : 'coach',
+    teams: (Array.isArray(c.teams) ? c.teams.filter(t => t === 'e1' || t === 'e2') : []).length
+      ? c.teams.filter(t => t === 'e1' || t === 'e2') : ['e1'],
+    code: c.code || null,
+    date_naissance: c.dateNaissance || null,
+    updated_at: c.updatedAt ? new Date(c.updatedAt).toISOString() : (c.createdAt ? new Date(c.createdAt).toISOString() : null)
   };
 }
 // Re-pousse immédiatement (fire-and-forget, idempotent) des lignes locales
@@ -5032,6 +5091,7 @@ const K = {
   broadcastReceipts: 'pb8_broadcast_receipts',
   gages: 'pb8_gages',
   gageDraws: 'pb8_gage_draws',
+  coaches: 'pb8_coaches', // [{ id, name, coachRole, teams[], code, createdAt, updatedAt }] — identités coach (rôles multi-équipes)
   theme: 'pb8_theme', // map { "<role>:<playerId|->": themeId } — préférence couleur par identité
   chronoSound: 'pb8_chrono_sound', // map { "<role>:<playerId|->": soundId } — ambiance sonore chrono
   chronoTension: 'pb8_chrono_tension', // map { "<role>:<playerId|->": bool } — mode tension 3-2-1
@@ -5439,6 +5499,14 @@ let state = {
   //   assignedAt, drawnAt, completedAt, seasonId, createdAt, updatedAt }]
   gageDraws: load(K.gageDraws, []),
 
+  // === RÔLES MULTI-COACH (cf. migration 20260709_001_coach_roles_multi_team) ===
+  // coaches : identités coach PIN-only, synchronisées (comme les joueuses).
+  // [{ id, name, coachRole:'admin_coach'|'coach', teams:['e1'|'e2'...], code,
+  //    createdAt, updatedAt }]. Seed d'un admin_coach au boot depuis pins.coach
+  //  (_seedAdminCoach) → golden path mono-coach identique à avant tant qu'aucun
+  //  coach non-admin n'existe.
+  coaches: load(K.coaches, []),
+
   // === JOUEUSES GUESTS (Phase 5 — cf. migration 20260524_009_guest_players) ===
   // guestPlayers : humains temporaires identifiés par leur nom (copine d'une
   //   joueuse, essayeuse). [{ id, name, note, promotedToPlayerId, firstSeenAt,
@@ -5539,6 +5607,7 @@ function persist() {
   save(K.broadcastReceipts, state.broadcastReceipts);
   save(K.gages, state.gages);
   save(K.gageDraws, state.gageDraws);
+  save(K.coaches, state.coaches);
   // FIX Option B : pendant l'édition d'un plan, bumper updatedAt de l'entrée
   // courante AVANT le save → la garde anti-écho de l'apply() trainingPlans peut
   // distinguer une édition locale fraîche d'un écho realtime obsolète (qui
@@ -5578,7 +5647,9 @@ function getCurrentSeason() {
 // - coach : si currentSeasonId pointe vers rien (ou null), fallback active.
 // - joueuse : toujours forcé sur active.
 function ensureCurrentSeasonId() {
-  const isCoach = state.auth && state.auth.role === 'coach';
+  // Seul l'admin_coach gère/switch les saisons. Un coach non-admin suit la
+  // saison active (comme les joueuses/stat) : pas de sélecteur → pas de choix figé.
+  const isCoach = state.auth && state.auth.role === 'coach' && isAdminCoach();
   const activeId = getActiveSeasonId();
   if (!isCoach) {
     state.currentSeasonId = activeId;
@@ -6131,6 +6202,17 @@ function currentPlayerTeamTag() {
 //   - joueuse both       → 'all' (voit les deux équipes)
 //   - coach / stat       → la pillule topbar (state.teamFilter)
 function effectiveTeamFilter() {
+  // Coach non-admin : portée FORCÉE à ses équipes, indépendamment du flag
+  // multiSquad (sa restriction ne doit pas dépendre de l'activation du multi).
+  // 1 équipe → ce tag ; plusieurs → honore la pillule mais bornée à ses équipes
+  // ('all' = union de ses équipes dans le modèle 2-équipes e1/e2).
+  if (isScopedCoach()) {
+    const t = coachTeams();
+    if (t.length === 1) return t[0];
+    const f = state.teamFilter || 'all';
+    if (f === 'all') return 'all';
+    return t.includes(f) ? f : t[0];
+  }
   if (!(state.team && state.team.multiSquad)) return 'all';
   if (state.auth && state.auth.role === 'player') {
     const tag = currentPlayerTeamTag();
@@ -6139,9 +6221,12 @@ function effectiveTeamFilter() {
   return state.teamFilter || 'all';
 }
 
-// Pillule coach/stat : bascule le filtre actif et re-render.
+// Pillule coach/stat : bascule le filtre actif et re-render. Un coach non-admin
+// ne peut sélectionner que ses propres équipes (garde-fou).
 function setTeamFilter(tag) {
-  state.teamFilter = (tag === 'e1' || tag === 'e2') ? tag : 'all';
+  let t = (tag === 'e1' || tag === 'e2') ? tag : 'all';
+  if (isScopedCoach()) { const mine = coachTeams(); if (t !== 'all' && !mine.includes(t)) t = mine[0]; }
+  state.teamFilter = t;
   save(K.teamFilter, state.teamFilter);
   if (typeof render === 'function') render();
 }
@@ -6186,7 +6271,13 @@ function renderTeamTagField(selectId, currentTag, includeBoth) {
 
 // Tag par défaut pour un NOUVEL événement : la pillule courante (e1/e2), sinon
 // 'e1'. ('all' ne peut pas tagger un événement concret → fallback e1.)
-function defaultEventTag() { return state.teamFilter === 'e2' ? 'e2' : 'e1'; }
+function defaultEventTag() {
+  // Coach non-admin : un nouvel événement est rattaché à SON équipe (la pillule
+  // si dans sa portée, sinon sa 1re équipe) — jamais e1 par défaut alors qu'il
+  // ne couvre que e2.
+  if (isScopedCoach()) { const t = coachTeams(); return t.includes(state.teamFilter) ? state.teamFilter : t[0]; }
+  return state.teamFilter === 'e2' ? 'e2' : 'e1';
+}
 
 // Badge couleur compact pour afficher le tag d'un événement/joueuse (multi on).
 function teamTagBadge(tag) {
@@ -6658,6 +6749,175 @@ function currentPlayer() {
 }
 
 // ============================================================
+// RÔLES MULTI-COACH (admin_coach / coach) — cf. ROLES_SPEC.md
+// ------------------------------------------------------------
+// Tous les coachs sont role:'coach' au niveau L1 (state.auth.role) : l'UI coach
+// existante marche pour les deux. La distinction admin/non-admin vit dans
+// l'entité `coaches` (coachRole), résolue depuis state.auth.coachId. Une session
+// coach SANS coachId (connectée avant la MAJ, ou coach supprimé) = ADMIN
+// (rétrocompat). Golden path mono-coach : tant qu'aucun coach non-admin n'existe,
+// pas de sélecteur au login, admin implicite.
+// ============================================================
+function _adminCoach() {
+  const found = (state.coaches || []).find(c => c.coachRole === 'admin_coach');
+  if (found) return found;
+  // Fallback synthétique (avant le seed / offline) : pas persisté ici.
+  return { id: 'admin', name: 'Coach', coachRole: 'admin_coach', teams: ['e1', 'e2'], code: (state.pins && state.pins.coach) || '1234' };
+}
+function _coachById(id) { return (state.coaches || []).find(c => c.id === id) || null; }
+function _nonAdminCoaches() { return (state.coaches || []).filter(c => c.coachRole === 'coach'); }
+
+// Crée l'admin_coach s'il n'existe pas (id déterministe 'admin' → convergence
+// multi-device, upsert idempotent). Code = PIN coach historique → login
+// inchangé. Appelé au boot d'une session coach + à chaque login coach réussi.
+function _seedAdminCoach() {
+  state.coaches = state.coaches || [];
+  const existing = state.coaches.find(c => c.coachRole === 'admin_coach');
+  if (existing) return existing;
+  const now = Date.now();
+  const admin = {
+    id: 'admin', name: 'Coach', coachRole: 'admin_coach',
+    teams: ['e1', 'e2'], code: (state.pins && state.pins.coach) || '1234',
+    createdAt: now, updatedAt: now
+  };
+  state.coaches.unshift(admin);
+  persist();
+  return admin;
+}
+
+// Le coach de la session courante (objet coaches). null hors rôle coach.
+function currentCoach() {
+  if (!state.auth || state.auth.role !== 'coach') return null;
+  if (state.auth.coachId) {
+    const c = _coachById(state.auth.coachId);
+    if (c) return c;
+    // Entité coaches pas encore synchronisée sur cet appareil → snapshot de
+    // session (évite de retomber sur admin pour un coach non-admin = escalade).
+    if (state.auth.coachRole) return {
+      id: state.auth.coachId, name: state.auth.coachName || '',
+      coachRole: state.auth.coachRole,
+      teams: Array.isArray(state.auth.teams) && state.auth.teams.length ? state.auth.teams : ['e1'],
+      code: null
+    };
+  }
+  return _adminCoach(); // session sans coachId (connectée avant la MAJ) → admin
+}
+function isAdminCoach() { const c = currentCoach(); return !!c && c.coachRole === 'admin_coach'; }
+// Coach non-admin (portée restreinte) actuellement connecté.
+function isScopedCoach() { return !!(state.auth && state.auth.role === 'coach') && !isAdminCoach(); }
+// Équipes (team_tag) couvertes par le coach courant. Admin → toutes.
+function coachTeams() {
+  const c = currentCoach();
+  const t = (c && Array.isArray(c.teams)) ? c.teams.filter(x => x === 'e1' || x === 'e2') : [];
+  return t.length ? t : ['e1', 'e2'];
+}
+
+// Filtre une liste de joueuses selon la portée du user courant. Admin (ou tout
+// rôle non-coach : la joueuse est déjà auto-scopée ailleurs) → inchangé. Coach
+// non-admin → uniquement les joueuses de ses équipes (team_tag du lien saison,
+// 'both' = visible par tous). Ceinture+bretelles au-dessus d'effectiveTeamFilter.
+function visiblePlayersForUser(players) {
+  if (!isScopedCoach()) return players || [];
+  const teams = coachTeams();
+  return (players || []).filter(p => {
+    const tag = (p && p._seasonLink && p._seasonLink.teamTag) || 'e1';
+    return tag === 'both' || teams.includes(tag);
+  });
+}
+// Une joueuse (par id) est-elle dans la portée du user courant ? Admin/joueuse/
+// stat → toujours true ; coach non-admin → uniquement ses joueuses.
+function _playerVisibleToUser(pid) {
+  if (!isScopedCoach()) return true;
+  const sid = state.currentSeasonId;
+  const pool = (_seasonsLoaded() && sid) ? getSeasonPlayers(sid, { team: 'all' }) : (state.players || []);
+  return visiblePlayersForUser(pool).some(p => p.id === pid);
+}
+
+// Garde-fou "action réservée à l'admin" : true (bloqué) si l'utilisateur est un
+// coach non-admin → toast + on interrompt l'action. Utilisé pour le playbook, la
+// prépa physique, l'identité club, la gestion des saisons, la modération gages.
+// Défense en profondeur : les boutons correspondants sont déjà masqués côté UI.
+function _denyIfScopedCoach() {
+  if (isScopedCoach()) { try { showToast('🔒 Action réservée à l\'admin'); } catch (e) {} return true; }
+  return false;
+}
+// Raccourci lisible pour les gabarits : le playbook & la prépa physique ne sont
+// éditables que par l'admin (ressources communes aux deux équipes).
+function canEditSharedLibrary() { return !isScopedCoach(); }
+
+// ============================================================
+// POSTES DE BASKET · TAILLE · ÂGE (cf. migrations 20260709_002/_003)
+// ============================================================
+// Postes 1..5 = meneuse / arrière / ailière / ailière forte / pivot. Multi-valué.
+// (Distinct de POSTES ~l.16332 qui sert aux compos/lineups, id pg/sg/sf/pf/c.)
+const PLAYER_POSTES = [
+  { n: 1, label: 'Meneuse', short: 'MEN' },
+  { n: 2, label: 'Arrière', short: 'ARR' },
+  { n: 3, label: 'Ailière', short: 'AIL' },
+  { n: 4, label: 'Ailière forte', short: 'AF' },
+  { n: 5, label: 'Pivot', short: 'PIV' }
+];
+function _posteLabel(n) { const p = PLAYER_POSTES.find(x => x.n === n); return p ? p.label : ('#' + n); }
+function _posteShort(n) { const p = PLAYER_POSTES.find(x => x.n === n); return p ? p.short : ('#' + n); }
+function _normPostes(arr) { return (Array.isArray(arr) ? arr : []).map(Number).filter(n => n >= 1 && n <= 5).filter((n, i, a) => a.indexOf(n) === i).sort((a, b) => a - b); }
+function _postesLabel(arr) { const a = _normPostes(arr); return a.length ? a.map(n => n + ' ' + _posteLabel(n)).join(' · ') : ''; }
+// Badges compacts « 1 · 4 » (numéros de poste) pour listes/fiches.
+function _postesBadges(arr) {
+  const a = _normPostes(arr);
+  if (!a.length) return '';
+  return a.map(n => `<span title="${esc(_posteLabel(n))}" style="display:inline-block;min-width:18px;text-align:center;font-size:10px;font-family:'JetBrains Mono';font-weight:700;color:var(--orange);background:rgba(255,107,0,0.13);border-radius:4px;padding:1px 5px;margin-right:3px">${n}</span>`).join('');
+}
+// Chips toggle 1..5 pour l'édition (id-préfixé pour cohabiter dans un même DOM).
+function _postesChipsEditor(selected, idPrefix) {
+  const s = new Set(_normPostes(selected));
+  return `<div id="${idPrefix}-postes" data-postes="${_normPostes(selected).join(',')}" style="display:flex;flex-wrap:wrap;gap:6px">
+    ${PLAYER_POSTES.map(p => {
+      const on = s.has(p.n);
+      return `<button type="button" data-poste="${p.n}" onclick="_togglePosteChip('${idPrefix}',${p.n})" class="btn ${on ? 'btn-primary' : 'btn-secondary'}" style="min-height:40px;padding:0 12px;font-size:12px" aria-pressed="${on}">${p.n} · ${esc(p.label)}</button>`;
+    }).join('')}
+  </div>`;
+}
+function _togglePosteChip(idPrefix, n) {
+  const host = document.getElementById(idPrefix + '-postes'); if (!host) return;
+  const cur = new Set((host.dataset.postes || '').split(',').filter(Boolean).map(Number));
+  if (cur.has(n)) cur.delete(n); else cur.add(n);
+  host.dataset.postes = [...cur].sort((a, b) => a - b).join(',');
+  const btn = host.querySelector(`[data-poste="${n}"]`);
+  if (btn) {
+    const on = cur.has(n);
+    btn.classList.toggle('btn-primary', on); btn.classList.toggle('btn-secondary', !on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
+}
+function _readPostesChips(idPrefix) {
+  const host = document.getElementById(idPrefix + '-postes'); if (!host) return [];
+  return _normPostes((host.dataset.postes || '').split(',').filter(Boolean).map(Number));
+}
+// Bornes de saisie date de naissance : 1950-01-01 .. aujourd'hui - 8 ans.
+function _dobMin() { return '1950-01-01'; }
+function _dobMax() { const d = new Date(); d.setFullYear(d.getFullYear() - 8); return isoDate(d); }
+// Âge en années révolues à partir d'une date ISO 'YYYY-MM-DD'. null si invalide.
+function _ageFromDob(dob) {
+  if (!dob) return null;
+  const b = new Date(dob + 'T00:00:00');
+  if (isNaN(b.getTime())) return null;
+  const now = new Date();
+  let age = now.getFullYear() - b.getFullYear();
+  const m = now.getMonth() - b.getMonth();
+  if (m < 0 || (m === 0 && now.getDate() < b.getDate())) age--;
+  return (age >= 0 && age < 120) ? age : null;
+}
+// Affichage localisé fr d'une date ISO → 'JJ/MM/AAAA' (+ '· nn ans' si withAge).
+function _fmtDob(dob, withAge) {
+  if (!dob) return '';
+  const parts = String(dob).slice(0, 10).split('-');
+  if (parts.length !== 3) return esc(dob);
+  const txt = parts[2] + '/' + parts[1] + '/' + parts[0];
+  const age = withAge ? _ageFromDob(dob) : null;
+  return txt + (age != null ? ' · ' + age + ' ans' : '');
+}
+
+// ============================================================
 // AUTH
 // ============================================================
 function renderAuth() {
@@ -6705,9 +6965,40 @@ function renderAuth() {
     `;
   }
 
+  if (flow.stage === 'pickCoach') {
+    // Admin d'abord, puis les coachs non-admin (avec leurs équipes).
+    const admin = _adminCoach();
+    const list = [admin, ..._nonAdminCoaches()];
+    const teamsLbl = (c) => (Array.isArray(c.teams) ? c.teams : ['e1'])
+      .map(t => teamLabel(t, true)).join(' · ');
+    return `
+      <div class="auth-screen" style="position:fixed;inset:0;justify-content:flex-start;padding-top:60px;overflow-y:auto;-webkit-overflow-scrolling:touch;padding-bottom:calc(96px + env(safe-area-inset-bottom))">
+        <div class="auth-bg-glow"></div>
+        <div class="auth-logo" style="width:60px;height:60px;font-size:32px"><img class="brand-logo" src="/assets/bcl-logo-256.png" alt="Basket Club Lislois"></div>
+        <div class="auth-title" style="font-size:28px">Quel coach ?</div>
+        <div class="auth-subtitle">Choisis ton identité</div>
+        <div style="width:100%;max-width:340px;display:flex;flex-direction:column;gap:10px">
+          ${list.map(c => `
+            <button class="role-btn" onclick="pickCoach('${c.id}')">
+              <div class="role-icon">${esc((c.name || 'C').trim().charAt(0).toUpperCase() || 'C')}</div>
+              <div class="role-info">
+                <div class="role-name">${esc(c.name || (c.coachRole === 'admin_coach' ? 'Coach' : 'Coach'))}</div>
+                <div class="role-desc">${c.coachRole === 'admin_coach' ? 'Admin · toutes les équipes' : esc(teamsLbl(c))}</div>
+              </div>
+            </button>
+          `).join('')}
+        </div>
+        <button class="btn btn-ghost mt-3" onclick="state.authFlow={stage:'role',role:null,playerId:null,pinInput:''};render()">← Retour</button>
+      </div>
+    `;
+  }
+
   if (flow.stage === 'pin') {
     const player = state.players.find(p => p.id === flow.playerId);
     const role = ROLES[flow.role];
+    // Coach : titre = nom du coach sélectionné (sinon libellé de rôle générique).
+    const pinCoach = flow.role === 'coach' ? (flow.coachId ? _coachById(flow.coachId) : null) : null;
+    const pinTitle = player ? esc(player.name) : (pinCoach && pinCoach.name ? esc(pinCoach.name) : esc(role.label));
     const len = flow.pinInput.length;
     const key = getRateLimitKey(flow.role, flow.playerId);
     const att = state.pinAttempts[key];
@@ -6729,7 +7020,7 @@ function renderAuth() {
       <div class="auth-screen" style="justify-content:flex-start;padding-top:50px">
         <div class="auth-bg-glow"></div>
         <div class="auth-logo" style="width:60px;height:60px;font-size:32px"><img class="brand-logo" src="/assets/bcl-logo-256.png" alt="Basket Club Lislois"></div>
-        <div class="auth-title" style="font-size:24px">${player ? esc(player.name) : esc(role.label)}</div>
+        <div class="auth-title" style="font-size:24px">${pinTitle}</div>
         <div class="auth-subtitle">${isLocked ? 'Trop de tentatives' : 'Saisis ton code à 4 chiffres'}</div>
         <div class="pin-display">
           ${[0,1,2,3].map(i => `<div class="pin-dot ${i < len ? 'filled' : ''}"></div>`).join('')}
@@ -6790,8 +7081,13 @@ function renderNoActiveSeasonScreen() {
 
 function pickRole(role) {
   state.authFlow.role = role;
+  state.authFlow.coachId = null;
   if (role === 'player') {
     state.authFlow.stage = 'pickPlayer';
+  } else if (role === 'coach' && _nonAdminCoaches().length > 0) {
+    // Plusieurs coachs enregistrés → sélecteur "Quel coach ?". Sinon (golden path
+    // mono-coach) : PIN direct, admin implicite → flux STRICTEMENT inchangé.
+    state.authFlow.stage = 'pickCoach';
   } else {
     state.authFlow.stage = 'pin';
     state.authFlow.pinInput = '';
@@ -6802,6 +7098,14 @@ function pickPlayer(pid) {
   state.authFlow.playerId = pid;
   state.authFlow.stage = 'pin';
   state.authFlow.pinInput = '';
+  render();
+}
+// Sélection d'une identité coach (admin ou non-admin) → écran PIN/code.
+function pickCoach(id) {
+  state.authFlow.coachId = id || null;
+  state.authFlow.stage = 'pin';
+  state.authFlow.pinInput = '';
+  state.authFlow.pinError = false;
   render();
 }
 function pinKey(key) {
@@ -6828,6 +7132,10 @@ function pinKey(key) {
 // Identifiant unique pour le rate-limit selon le rôle
 function getRateLimitKey(role, playerId) {
   if (role === 'player') return 'player_' + playerId;
+  // Coach : lockout PAR coach sélectionné (un code faux sur le coach E2 ne
+  // verrouille pas l'admin). Golden path (admin implicite, pas de coachId) →
+  // clé 'coach' historique inchangée.
+  if (role === 'coach' && state.authFlow && state.authFlow.coachId) return 'coach_' + state.authFlow.coachId;
   return role; // 'coach' ou 'stat'
 }
 
@@ -6860,9 +7168,16 @@ async function tryPin() {
     return;
   }
 
+  // Coach : résoudre l'identité visée. coachId présent → ce coach ; sinon (golden
+  // path mono-coach) → admin implicite. coachIsAdmin gouverne le chemin RPC (le
+  // RPC verify_pin ne connaît QUE le PIN coach partagé = celui de l'admin).
+  const targetCoach = role === 'coach' ? (state.authFlow.coachId ? _coachById(state.authFlow.coachId) : _adminCoach()) : null;
+  const coachIsAdmin = role === 'coach' ? (!targetCoach || targetCoach.coachRole === 'admin_coach') : false;
+
   let valid = false;
-  // 1) Tentative RPC Supabase (source de vérité si en ligne)
-  if (window.SbPin) {
+  // 1) Tentative RPC Supabase (source de vérité si en ligne). Pour un coach non-
+  // admin, on NE passe PAS par le RPC (qui validerait contre le PIN coach partagé).
+  if (window.SbPin && (role !== 'coach' || coachIsAdmin)) {
     try {
       const res = await SbPin.verify(role, playerId || null, pinInput);
       if (res.source === 'remote') valid = !!res.ok;
@@ -6870,7 +7185,10 @@ async function tryPin() {
   }
   // 2) Fallback local (compat 100 % avec l'existant si offline ou pas encore migré)
   if (!valid) {
-    if (role === 'coach' && pinInput === (state.pins.coach || '1234')) valid = true;
+    if (role === 'coach') {
+      if (coachIsAdmin && pinInput === (state.pins.coach || '1234')) valid = true;
+      else if (targetCoach && targetCoach.code && pinInput === targetCoach.code) valid = true;
+    }
     else if (role === 'stat' && pinInput === (state.pins.stat || '1234')) valid = true;
     else if (role === 'player') {
       const p = state.players.find(p => p.id === playerId);
@@ -6881,7 +7199,20 @@ async function tryPin() {
   if (valid) {
     // Reset compteur en cas de succès
     delete state.pinAttempts[key];
-    state.auth = { role, playerId: role === 'player' ? playerId : null };
+    if (role === 'coach') {
+      // Garantit l'admin en base (id 'admin', code = PIN historique) puis résout
+      // l'identité effective + snapshot coachRole/teams dans l'auth (autorité de
+      // session, y compris offline avant sync de l'entité coaches).
+      const seededAdmin = _seedAdminCoach();
+      const coach = state.authFlow.coachId ? (_coachById(state.authFlow.coachId) || seededAdmin) : seededAdmin;
+      state.auth = {
+        role: 'coach', playerId: null,
+        coachId: coach.id, coachRole: coach.coachRole, coachName: coach.name || '',
+        teams: Array.isArray(coach.teams) && coach.teams.length ? coach.teams.slice() : ['e1', 'e2']
+      };
+    } else {
+      state.auth = { role, playerId: role === 'player' ? playerId : null };
+    }
     // Email binding strict : si un compte cloud est déjà connecté, on lie cette
     // identité (player/coach) à ce compte. Stat = rôle partagé → pas de binding.
     try { _enforceEmailBinding(); } catch (e) {}
@@ -7117,7 +7448,7 @@ function renderTopbar() {
         <div class="topbar-orb"><img class="brand-logo" src="/assets/bcl-logo-64.png" alt="BCL"></div>
         <div>
           <div class="topbar-title">Playbook</div>
-          ${isCoach
+          ${isCoach && isAdminCoach()
             ? `<div class="topbar-sub" style="cursor:pointer" onclick="editTeamIdentity()" title="Modifier le surnom de l'équipe">${state.team && state.team.displayNickname ? esc(state.team.displayNickname) : "BCL · L'Islois"} <span style="opacity:.55;font-size:.85em">✏️</span></div>`
             : `<div class="topbar-sub">${state.team && state.team.displayNickname ? esc(state.team.displayNickname) : "BCL · L'Islois"}</div>`}
         </div>
@@ -7125,7 +7456,7 @@ function renderTopbar() {
       <div class="topbar-actions">
         ${isCoach && activeLive ? `<button class="role-badge tb-act" style="background:#ff2222;color:white;border-color:#ff2222;cursor:pointer;animation:pulseGlow 2s infinite" onclick="openMatch('${activeLive.id}')" aria-label="Live en cours — gérer">🔴 LIVE</button>` : ''}
         ${renderTeamPill()}
-        ${isCoach ? renderSeasonSwitcher() : ''}
+        ${isCoach && isAdminCoach() ? renderSeasonSwitcher() : ''}
         ${renderNotifBell()}
         <button class="role-badge tb-act" style="cursor:pointer" onclick="openSettings()" title="Menu" aria-label="Menu${player ? ' — #' + player.num + ' ' + esc(player.name) : ''}" aria-haspopup="menu">${player ? '<span class="tb-act-label">#' + player.num + ' ' + esc(player.name) + '</span> ' : ''}⚙</button>
       </div>
@@ -7146,7 +7477,11 @@ function renderTopbar() {
 // Remplace l'ancien segmented control 3 chips (E1/E2/Toutes) qui saturait le header
 // sur mobile 375px (cf. fix/header-multi-squad-ux-v1).
 function renderTeamPill() {
-  if (!isMultiSquad()) return '';
+  // Coach non-admin : portée fixe → pillule masquée s'il n'a qu'une équipe ;
+  // sinon (2 équipes) on l'affiche même si le multi n'est pas globalement activé.
+  if (isScopedCoach()) {
+    if (coachTeams().length <= 1) return '';
+  } else if (!isMultiSquad()) return '';
   const role = state.auth && state.auth.role;
   if (role !== 'coach' && role !== 'stat') return '';
   const cur = state.teamFilter || 'all';
@@ -7162,7 +7497,9 @@ function renderTeamPill() {
 // re-render l'app ; on ferme la feuille ensuite.
 function openTeamFilterMenu() {
   const cur = state.teamFilter || 'all';
-  const opts = [['e1', teamLabel('e1', false)], ['e2', teamLabel('e2', false)], ['all', 'Toutes les équipes']];
+  const myTeams = isScopedCoach() ? coachTeams() : ['e1', 'e2'];
+  const opts = myTeams.map(t => [t, teamLabel(t, false)]);
+  opts.push(['all', isScopedCoach() ? 'Toutes mes équipes' : 'Toutes les équipes']);
   const row = (tag, label) => {
     const on = cur === tag;
     return `<button class="btn ${on ? 'btn-primary' : 'btn-secondary'} btn-block mb-2" role="menuitemradio" aria-checked="${on}" style="min-height:50px;display:flex;align-items:center;gap:10px;justify-content:flex-start;text-align:left" onclick="setTeamFilter('${tag}');closeModal()">
@@ -7464,6 +7801,7 @@ function confirmArchiveSeason(id) {
 // Coach uniquement. Garde-fou : interdit de supprimer la dernière saison.
 function deleteSeason(id) {
   if (!(state.auth && state.auth.role === 'coach')) return;
+  if (_denyIfScopedCoach()) return; // gestion des saisons = admin only (zone dangereuse)
   const target = (state.seasons || []).find(s => s.id === id);
   if (!target) return;
   if ((state.seasons || []).length <= 1) {
@@ -7846,10 +8184,358 @@ function restorePlayerInSeason(playerId) {
   openSeasonRosterEditor();
 }
 
+// ============================================================
+// PANNEAU ADMIN (admin_coach only) — cf. ROLES_SPEC.md
+// ============================================================
+function _coachFlush() { try { if (window.PbSync && PbSync.flushNow) PbSync.flushNow(state).catch(() => {}); } catch (e) {} }
+
+// Code de connexion coach : 4 chiffres (comme un PIN joueuse → réutilise le
+// pavé PIN existant), unique parmi les codes coach + PIN coach/stat.
+function _genCoachCode() {
+  const taken = new Set((state.coaches || []).map(c => c.code).filter(Boolean));
+  if (state.pins) { taken.add(state.pins.coach); taken.add(state.pins.stat); }
+  for (let i = 0; i < 60; i++) {
+    const c = String(Math.floor(1000 + Math.random() * 9000));
+    if (!taken.has(c)) return c;
+  }
+  return String(Math.floor(1000 + Math.random() * 9000));
+}
+
+function _normCoachTeams(teams) {
+  const t = (Array.isArray(teams) ? teams : []).filter(x => x === 'e1' || x === 'e2');
+  return t.length ? t : ['e2']; // par défaut un nouveau coach est sur E2 (cas d'usage initial)
+}
+
+// Crée un coach non-admin. Active le multi-effectif (nécessaire pour manier 2
+// équipes : attribution roster, badges, pillule admin). Flush immédiat.
+function createCoach(name, teams) {
+  _seedAdminCoach(); // garantit l'admin (sinon le sélecteur au login n'aurait pas d'admin)
+  const now = Date.now();
+  const coach = {
+    id: uid(), name: (name || '').trim().slice(0, 40) || 'Coach',
+    coachRole: 'coach', teams: _normCoachTeams(teams), code: _genCoachCode(),
+    createdAt: now, updatedAt: now
+  };
+  state.coaches = state.coaches || [];
+  state.coaches.push(coach);
+  if (state.team && !state.team.multiSquad) { state.team.multiSquad = true; save(K.team, state.team); }
+  persist(); _coachFlush();
+  return coach;
+}
+function renameCoach(id, name) {
+  let c = _coachById(id);
+  if (!c && id === 'admin') c = _seedAdminCoach();
+  if (!c) return false;
+  c.name = (name || '').trim().slice(0, 40); c.updatedAt = Date.now();
+  persist(); _coachFlush(); return true;
+}
+function setCoachTeams(id, teams) {
+  const c = _coachById(id);
+  if (!c || c.coachRole === 'admin_coach') return false; // l'admin couvre tout, non éditable
+  c.teams = _normCoachTeams(teams); c.updatedAt = Date.now();
+  persist(); _coachFlush(); return true;
+}
+function deleteCoach(id) {
+  const c = _coachById(id);
+  if (!c || c.coachRole === 'admin_coach') return false;
+  let ok = false; try { ok = confirm('Supprimer le coach ' + (c.name || '') + ' ?\nSon code ne fonctionnera plus.'); } catch (e) { ok = true; }
+  if (!ok) return false;
+  state.coaches = (state.coaches || []).filter(x => x.id !== id);
+  persist(); _coachFlush();
+  if (typeof render === 'function') render();
+  return true;
+}
+
+// ---- Profil JOUEUSE (self-edit : postes / taille / date de naissance) ----
+function openMyProfile() {
+  const p = currentPlayer(); if (!p) return;
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">👤 Mon profil</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="fld">
+        <label class="fld-label">Poste(s)</label>
+        ${_postesChipsEditor(p.postes, 'myp')}
+        <div style="margin-top:6px;font-size:10px;color:var(--ink-3)">Sélectionne au moins un poste.</div>
+      </div>
+      <div class="fld-row" style="margin-top:12px">
+        <div class="fld" style="max-width:130px">
+          <label class="fld-label">Taille</label>
+          <div style="display:flex;align-items:center;gap:6px">
+            <input id="myp-taille" type="number" min="140" max="220" value="${Number.isFinite(p.tailleCm) ? p.tailleCm : ''}" placeholder="ex : 170" style="width:90px">
+            <span style="font-size:12px;color:var(--ink-3)">cm</span>
+          </div>
+        </div>
+        <div class="fld">
+          <label class="fld-label">Date de naissance</label>
+          <input id="myp-dob" type="date" min="${_dobMin()}" max="${_dobMax()}" value="${esc(p.dateNaissance || '')}">
+          ${p.dateNaissance && _ageFromDob(p.dateNaissance) != null ? `<div style="margin-top:4px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">${_ageFromDob(p.dateNaissance)} ans</div>` : ''}
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Annuler</button>
+      <button class="btn btn-primary" onclick="saveMyProfile()">Enregistrer</button>
+    </div>
+  `);
+}
+function saveMyProfile() {
+  const p = currentPlayer(); if (!p) return;
+  const postes = _readPostesChips('myp');
+  if (!postes.length) { try { alert('Choisis au moins un poste.'); } catch (e) {} return; }
+  const tEl = document.getElementById('myp-taille');
+  const traw = tEl ? tEl.value.trim() : '';
+  let taille = null;
+  if (traw !== '') { const t = parseInt(traw, 10); if (!Number.isFinite(t) || t < 140 || t > 220) { alert('Taille invalide (140–220 cm) ou laisse vide.'); return; } taille = t; }
+  const dobEl = document.getElementById('myp-dob');
+  const dob = dobEl ? dobEl.value : '';
+  if (dob && (dob < _dobMin() || dob > _dobMax())) { alert('Date de naissance hors bornes plausibles.'); return; }
+  p.postes = postes; p.tailleCm = taille; p.dateNaissance = dob || null;
+  persist();
+  if (window.PbStore) PbStore.upsertPlayer(p).catch(e => console.warn('[sync] upsertPlayer:', e.message));
+  closeModal();
+  if (typeof showToast === 'function') showToast('✓ Profil mis à jour');
+}
+
+// ---- Profil COACH (self-edit : prénom + date de naissance ; admin & non-admin) ----
+function openCoachProfile() {
+  const c = currentCoach(); if (!c) return;
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">👤 Mon profil</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="fld">
+        <label class="fld-label">Prénom</label>
+        <input id="cpf-name" value="${esc(c.name || '')}" maxlength="40" placeholder="Ton prénom">
+      </div>
+      <div class="fld" style="margin-top:10px">
+        <label class="fld-label">Date de naissance</label>
+        <input id="cpf-dob" type="date" min="${_dobMin()}" max="${_dobMax()}" value="${esc(c.dateNaissance || '')}">
+        ${c.dateNaissance && _ageFromDob(c.dateNaissance) != null ? `<div style="margin-top:4px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">${_ageFromDob(c.dateNaissance)} ans</div>` : ''}
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Annuler</button>
+      <button class="btn btn-primary" onclick="saveCoachProfile()">Enregistrer</button>
+    </div>
+  `);
+}
+function saveCoachProfile() {
+  const c = currentCoach(); if (!c) return;
+  let stored = _coachById(c.id);
+  if (!stored && c.coachRole === 'admin_coach') stored = _seedAdminCoach();
+  if (!stored) return;
+  const name = (document.getElementById('cpf-name') || {}).value || '';
+  const dobEl = document.getElementById('cpf-dob');
+  const dob = dobEl ? dobEl.value : '';
+  if (dob && (dob < _dobMin() || dob > _dobMax())) { alert('Date de naissance hors bornes plausibles.'); return; }
+  stored.name = name.trim().slice(0, 40) || 'Coach';
+  stored.dateNaissance = dob || null;
+  stored.updatedAt = Date.now();
+  if (state.auth) state.auth.coachName = stored.name;
+  persist(); _coachFlush();
+  if (typeof render === 'function') render();
+  closeModal();
+  if (typeof showToast === 'function') showToast('✓ Profil mis à jour');
+}
+
+// Panneau admin : profil, coachs, effectifs, modération gages.
+function openAdminPanel() {
+  if (!isAdminCoach()) return;
+  _seedAdminCoach();
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">⚙️ Admin</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body" id="admin-panel-body">${_adminPanelBody()}</div>
+  `);
+}
+function _refreshAdminPanel() {
+  const el = document.getElementById('admin-panel-body');
+  if (el) el.innerHTML = _adminPanelBody();
+}
+function _adminPanelBody() {
+  const admin = _adminCoach();
+  const others = _nonAdminCoaches();
+  const pendingGages = (state.gages || []).filter(g => g.status === 'pending' && !g.deletedAt).length;
+  const teamsLbl = (c) => (Array.isArray(c.teams) ? c.teams : ['e1']).map(t => teamLabel(t, true)).join(' · ');
+  return `
+    <!-- MON PROFIL -->
+    <div class="eyebrow-muted" style="margin-bottom:6px">Mon profil (admin)</div>
+    <div class="fld" style="margin-bottom:16px">
+      <div style="display:flex;gap:6px;align-items:center">
+        <input id="admin-name" value="${esc(admin.name || '')}" placeholder="Ton prénom" maxlength="40" style="flex:1">
+        <button class="btn btn-secondary" onclick="_submitRenameAdmin()">Renommer</button>
+      </div>
+    </div>
+
+    <!-- GÉRER LES COACHS -->
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <div class="eyebrow-muted">Coachs (${others.length + 1})</div>
+      <button class="btn btn-primary" style="min-height:36px;padding:0 12px" onclick="openCreateCoach()">+ Coach</button>
+    </div>
+    <div style="margin-bottom:16px">
+      <div class="btn btn-secondary btn-block mb-2" style="text-align:left;display:flex;justify-content:space-between;align-items:center;cursor:default">
+        <span>👑 ${esc(admin.name || 'Coach')} <span style="opacity:.6">· Admin · toutes les équipes</span></span>
+      </div>
+      ${others.length ? others.map(c => `
+        <div class="btn btn-secondary btn-block mb-2" style="text-align:left;display:flex;justify-content:space-between;align-items:center;gap:8px;cursor:default">
+          <span style="flex:1;min-width:0">
+            <span style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.name || 'Coach')}</span>
+            <span style="font-size:10px;font-family:'JetBrains Mono';color:var(--ink-3)">${esc(teamsLbl(c))} · code ${esc(c.code || '····')}</span>
+          </span>
+          <span style="display:flex;gap:4px;flex:0 0 auto">
+            <button class="btn btn-icon" title="Modifier" onclick="openEditCoach('${c.id}')">✎</button>
+            <button class="btn btn-icon" title="Supprimer" onclick="if(deleteCoach('${c.id}'))_refreshAdminPanel()">🗑</button>
+          </span>
+        </div>
+      `).join('') : '<div style="font-size:12px;color:var(--ink-3);padding:2px 2px 4px">Aucun autre coach. « + Coach » pour en ajouter un (E2 par ex.).</div>'}
+    </div>
+
+    <!-- EFFECTIFS PAR ÉQUIPE -->
+    <div class="eyebrow-muted" style="margin-bottom:6px">Effectifs</div>
+    <button class="btn btn-secondary btn-block mb-3" style="text-align:left" onclick="closeModal();setTimeout(()=>openEffectif('season'),50)">
+      👥 Attribuer les joueuses aux équipes (E1 / E2 / les deux)
+    </button>
+
+    <!-- MODÉRATION GAGES -->
+    <div class="eyebrow-muted" style="margin-bottom:6px">Modération</div>
+    <button class="btn btn-secondary btn-block" style="text-align:left" onclick="closeModal();setTimeout(()=>openGagesCoach(),50)">
+      🎁 Modérer les gages proposés${pendingGages ? ` <span style="color:var(--orange);font-family:'JetBrains Mono';font-size:11px">· ${pendingGages} en attente</span>` : ''}
+    </button>
+  `;
+}
+function _submitRenameAdmin() {
+  const el = document.getElementById('admin-name');
+  if (!el) return;
+  renameCoach('admin', el.value);
+  if (typeof render === 'function') render();
+  _refreshAdminPanel();
+  if (typeof showToast === 'function') showToast('✓ Profil mis à jour');
+}
+function _coachTeamCheckboxes(sel) {
+  const s = new Set(Array.isArray(sel) ? sel : []);
+  return `
+    <label style="display:flex;align-items:center;gap:8px;padding:8px 0;cursor:pointer">
+      <input type="checkbox" id="cc-e1" ${s.has('e1') ? 'checked' : ''}> <span>${esc(teamLabel('e1', false))}</span>
+    </label>
+    <label style="display:flex;align-items:center;gap:8px;padding:8px 0;cursor:pointer">
+      <input type="checkbox" id="cc-e2" ${s.has('e2') ? 'checked' : ''}> <span>${esc(teamLabel('e2', false))}</span>
+    </label>`;
+}
+function _readCoachTeams() {
+  const t = [];
+  if (document.getElementById('cc-e1') && document.getElementById('cc-e1').checked) t.push('e1');
+  if (document.getElementById('cc-e2') && document.getElementById('cc-e2').checked) t.push('e2');
+  return t;
+}
+function openCreateCoach() {
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">+ Nouveau coach</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:12px;color:var(--ink-3);line-height:1.5;margin-bottom:12px">
+        Un <strong>code à 4 chiffres</strong> sera généré : partage-le au coach pour qu'il se connecte (rôle « Coach » → son nom).
+      </div>
+      <div class="fld" style="margin-bottom:10px">
+        <label class="fld-label">Prénom du coach</label>
+        <input id="new-coach-name" placeholder="Ex : Sophie" maxlength="40">
+      </div>
+      <div class="fld">
+        <label class="fld-label">Équipes gérées</label>
+        ${_coachTeamCheckboxes(['e2'])}
+      </div>
+      <div style="display:flex;justify-content:flex-end;margin-top:12px">
+        <button class="btn btn-primary" onclick="submitCreateCoach()">Créer le coach</button>
+      </div>
+    </div>
+  `);
+  setTimeout(() => { const el = document.getElementById('new-coach-name'); if (el) el.focus(); }, 80);
+}
+function submitCreateCoach() {
+  const name = (document.getElementById('new-coach-name') || {}).value || '';
+  const teams = _readCoachTeams();
+  if (!teams.length) { try { alert('Sélectionne au moins une équipe.'); } catch (e) {} return; }
+  const coach = createCoach(name, teams);
+  if (typeof render === 'function') render();
+  // Confirmation avec le code à partager.
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">✓ Coach créé</div>
+      <button class="modal-close" onclick="closeModal();setTimeout(()=>openAdminPanel(),50)">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="text-align:center;padding:8px 0 16px">
+        <div style="font-size:13px;color:var(--ink-2);margin-bottom:8px">Code de connexion de <strong>${esc(coach.name)}</strong></div>
+        <div style="font-family:'JetBrains Mono';font-size:34px;letter-spacing:0.3em;color:var(--orange)">${esc(coach.code)}</div>
+        <div style="font-size:11px;color:var(--ink-3);margin-top:10px;line-height:1.5">Partage-le. Il se connecte via « Coach » → « ${esc(coach.name)} » → ce code.<br>Modifiable ensuite dans Admin.</div>
+      </div>
+      <button class="btn btn-primary btn-block" onclick="closeModal();setTimeout(()=>openAdminPanel(),50)">OK</button>
+    </div>
+  `);
+}
+function openEditCoach(id) {
+  const c = _coachById(id);
+  if (!c || c.coachRole === 'admin_coach') return;
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">Modifier ${esc(c.name || 'coach')}</div>
+      <button class="modal-close" onclick="closeModal();setTimeout(()=>openAdminPanel(),50)">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="fld" style="margin-bottom:10px">
+        <label class="fld-label">Prénom</label>
+        <input id="edit-coach-name" value="${esc(c.name || '')}" maxlength="40">
+      </div>
+      <div class="fld" style="margin-bottom:10px">
+        <label class="fld-label">Équipes gérées</label>
+        ${_coachTeamCheckboxes(c.teams)}
+      </div>
+      <div class="fld">
+        <label class="fld-label">Code de connexion</label>
+        <div style="display:flex;gap:6px;align-items:center">
+          <input id="edit-coach-code" value="${esc(c.code || '')}" maxlength="4" inputmode="numeric" style="font-family:'JetBrains Mono';letter-spacing:0.2em;flex:1">
+          <button class="btn btn-secondary" onclick="document.getElementById('edit-coach-code').value='${_genCoachCode()}'">↻ Régénérer</button>
+        </div>
+      </div>
+      <div style="display:flex;justify-content:flex-end;margin-top:14px">
+        <button class="btn btn-primary" onclick="submitEditCoach('${c.id}')">Enregistrer</button>
+      </div>
+    </div>
+  `);
+}
+function submitEditCoach(id) {
+  const c = _coachById(id);
+  if (!c) return;
+  const name = (document.getElementById('edit-coach-name') || {}).value || '';
+  const teams = _readCoachTeams();
+  const codeRaw = ((document.getElementById('edit-coach-code') || {}).value || '').trim();
+  if (!teams.length) { try { alert('Sélectionne au moins une équipe.'); } catch (e) {} return; }
+  if (!/^\d{4}$/.test(codeRaw)) { try { alert('Le code doit faire 4 chiffres.'); } catch (e) {} return; }
+  c.name = name.trim().slice(0, 40) || 'Coach';
+  c.teams = _normCoachTeams(teams);
+  c.code = codeRaw;
+  c.updatedAt = Date.now();
+  persist(); _coachFlush();
+  if (typeof render === 'function') render();
+  closeModal(); setTimeout(() => openAdminPanel(), 50);
+}
+
 function openSettings() {
   const role = state.auth ? state.auth.role : null;
   const player = currentPlayer();
-  const roleLabel = role === 'coach' ? 'Coach' : role === 'stat' ? "Stat'man" : player ? ('Joueuse · #' + player.num + ' ' + player.name) : '';
+  const cc = role === 'coach' ? currentCoach() : null;
+  const admin = role === 'coach' && isAdminCoach();
+  const roleLabel = role === 'coach'
+    ? ((cc && cc.name ? cc.name : 'Coach') + (admin ? ' · Admin' : (cc ? ' · ' + coachTeams().map(t => teamLabel(t, true)).join('/') : '')))
+    : role === 'stat' ? "Stat'man" : player ? ('Joueuse · #' + player.num + ' ' + player.name) : '';
   openModal(`
     <div class="modal-header">
       <div class="modal-title">Menu</div>
@@ -7874,6 +8560,9 @@ function openSettings() {
       </button>
 
       ${role === 'player' ? `
+        <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openMyProfile(),50)">
+          👤 Mon profil (postes, taille, naissance)
+        </button>
         <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>editMyPhoto(),50)">
           📷 ${player && player.photo ? 'Changer ma photo de profil' : 'Ajouter une photo de profil'}
         </button>
@@ -7886,6 +8575,14 @@ function openSettings() {
       ` : ''}
 
       ${role === 'coach' ? `
+        <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openCoachProfile(),50)">
+          👤 Mon profil (prénom, date de naissance)
+        </button>
+      ` : ''}
+      ${role === 'coach' && admin ? `
+        <button class="btn btn-primary btn-block mb-2" onclick="closeModal();setTimeout(()=>openAdminPanel(),50)">
+          ⚙️ Admin (coachs, effectifs, modération)
+        </button>
         <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openPublicShare(),50)">
           🔗 Portail public (partager le lien)
         </button>
@@ -7897,6 +8594,11 @@ function openSettings() {
         </button>
         <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>editTeamIdentity(),50)">
           🏷 Identité de l'équipe (surnom)
+        </button>
+      ` : ''}
+      ${role === 'coach' && !admin ? `
+        <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openCoachProposeGage(),50)">
+          🎁 Proposer un gage (soumis à l'admin)
         </button>
       ` : ''}
 
@@ -8139,7 +8841,11 @@ function openChangeMyPin() {
 function saveMyPin() {
   const role = state.auth.role;
   const player = currentPlayer();
-  const currentPin = role === 'player' ? player.pin : state.pins[role];
+  // Coach : le "code PIN" est celui de son identité coach (currentCoach().code).
+  // Pour l'admin il reste aligné avec le PIN coach partagé (state.pins.coach).
+  const _cc = role === 'coach' ? currentCoach() : null;
+  const currentPin = role === 'player' ? player.pin
+    : (role === 'coach' ? ((_cc && _cc.code) || state.pins.coach || '1234') : state.pins[role]);
 
   const oldVal = document.getElementById('pin-old').value;
   const newVal = document.getElementById('pin-new').value;
@@ -8157,10 +8863,20 @@ function saveMyPin() {
 
   if (role === 'player') {
     player.pin = newVal;
+  } else if (role === 'coach') {
+    // Mute l'objet de l'entité coaches (source de vérité, synchronisé) ; seed
+    // l'admin au besoin. L'admin garde aussi le PIN coach partagé aligné.
+    const c = _cc || _seedAdminCoach();
+    let stored = _coachById(c.id);
+    if (!stored && c.coachRole === 'admin_coach') stored = _seedAdminCoach();
+    if (stored) { stored.code = newVal; stored.updatedAt = Date.now(); }
+    if (!c || c.coachRole === 'admin_coach') state.pins.coach = newVal;
   } else {
     state.pins[role] = newVal;
   }
   persist();
+  // Flush immédiat (l'entité coaches doit propager le nouveau code sans attendre).
+  try { if (role === 'coach' && window.PbSync && PbSync.flushNow) PbSync.flushNow(state).catch(() => {}); } catch (e) {}
   closeModal();
   setTimeout(() => alert('✓ Code PIN modifié'), 200);
 }
@@ -9683,7 +10399,7 @@ function renderPlays() {
           <div class="eyebrow-muted">${items.length} ${items.length > 1 ? 'plays' : 'play'}${orphanItems.length > 0 ? ' · ' + orphanItems.length + ' dispo' : ''}</div>
           <h2 class="display-lg mt-2">Playbook</h2>
         </div>
-        ${isCoach ? `<button class="btn btn-primary" onclick="editPlay()">+ NOUVEAU</button>` : ''}
+        ${isCoach && canEditSharedLibrary() ? `<button class="btn btn-primary" onclick="editPlay()">+ NOUVEAU</button>` : ''}
       </div>
 
       <div class="segmented">
@@ -9721,12 +10437,12 @@ function renderPlays() {
           ${items.map(p => playTile(p, {
             seasonActive: p._seasonActive,
             dimmed: hasSeasonLinks && p._seasonActive === false,
-            seasonToggleBtn: _playbookToggleBtn(p.id, p._seasonActive !== false, isCoach && hasSeasonLinks && !readOnly)
+            seasonToggleBtn: _playbookToggleBtn(p.id, p._seasonActive !== false, isCoach && hasSeasonLinks && !readOnly && canEditSharedLibrary())
           })).join('')}
         </div>
       `}
 
-      ${isCoach && orphanItems.length > 0 && !readOnly ? `
+      ${isCoach && orphanItems.length > 0 && !readOnly && canEditSharedLibrary() ? `
         <div class="section-header" style="margin-top:18px">
           <div>
             <div class="eyebrow-muted">Hors playbook de la saison</div>
@@ -9759,6 +10475,7 @@ function toggleShowInactivePlays() {
 // fonction, normalement addPlayToCurrentSeason est utilisée).
 // NB: variante depuis le wizard d'édition (modal) : togglePlayEditorSeasonActive.
 function toggleSeasonPlayActive(playId) {
+  if (_denyIfScopedCoach()) return;
   const seasonId = state.currentSeasonId;
   if (!seasonId) return;
   if (isCurrentSeasonReadOnly()) return;
@@ -10022,7 +10739,7 @@ function renderPlayDetail() {
         </div>
       ` : ''}
 
-      ${isCoach ? `
+      ${isCoach && canEditSharedLibrary() ? `
         <div style="padding:14px 18px 24px;display:flex;gap:8px">
           <button class="btn btn-secondary btn-block" onclick="editPlay('${p.id}')">✎ Modifier</button>
           <button class="btn btn-danger" onclick="deletePlay('${p.id}')">🗑</button>
@@ -10071,6 +10788,7 @@ function navPlayFull(playId, delta) {
 }
 
 function editPlay(id) {
+  if (_denyIfScopedCoach()) return; // playbook = édition admin only
   const isNew = !id;
   const p = isNew
     ? { id: uid(), cat: 'off', title: '', desc: '', tags: [], videoUrl: '', videos: [], images: [], concepts: [], attachments: [] }
@@ -10416,6 +11134,7 @@ function addCustomConcept() {
   openConceptPicker();
 }
 function savePlay(id, isNew) {
+  if (_denyIfScopedCoach()) return;
   try {
     const title = document.getElementById('p-title').value.trim();
     if (!title) return alert('Titre requis');
@@ -10462,6 +11181,7 @@ function savePlay(id, isNew) {
   }
 }
 function deletePlay(id) {
+  if (_denyIfScopedCoach()) return;
   if (!confirm('Supprimer ce play ?')) return;
   state.plays = state.plays.filter(x => x.id !== id);
   state.view = null;
@@ -11831,6 +12551,11 @@ function setMatchHome(home) {
 // Toggle pill E1/E2 de la modale match (multi-effectif). Input caché m-team lu
 // par saveMatch. Rien si mono-équipe. Réutilise le style .segmented (comme 🏠/🚗).
 function _matchTeamPill(currentTag) {
+  // Coach non-admin mono-équipe : tag forcé sur son équipe, pas de sélecteur,
+  // mais on garde le champ caché #m-team pour que saveMatch lise le bon tag.
+  if (isScopedCoach() && coachTeams().length <= 1) {
+    return `<input type="hidden" id="m-team" value="${coachTeams()[0] === 'e2' ? 'e2' : 'e1'}">`;
+  }
   if (!isMultiSquad()) return '';
   const t = currentTag === 'e2' ? 'e2' : 'e1';
   return `
@@ -14880,22 +15605,91 @@ function submitGageFromModal() {
   if (typeof showToast === 'function') showToast('🎁 Proposition envoyée à la coach');
 }
 
+// --- PROPOSITION D'UN COACH NON-ADMIN ---
+// Un coach non-admin ne garnit PAS le pool directement (contrairement à l'admin
+// via submitCoachGage) : sa proposition part en 'pending' et l'admin la modère.
+function _coachGageAuthorId() {
+  const c = currentCoach();
+  return 'coach:' + (c ? c.id : ((state.auth && state.auth.coachId) || 'admin'));
+}
+function submitCoachProposal(text) {
+  text = (text || '').trim().slice(0, GAGE_TEXT_MAX);
+  if (!text) return false;
+  const now = Date.now();
+  const author = _coachGageAuthorId();
+  state.gages = state.gages || [];
+  state.gages.unshift({
+    id: uid(), text, authorId: author, proposedBy: author, moderatedBy: null,
+    status: 'pending', assignedTo: null, assignedAt: null, revealedAt: null,
+    completedAt: null, rejectedReason: null, seasonId: getActiveSeasonId() || null,
+    gageType: 'standard', timeLimitHours: null, deletedAt: null,
+    createdAt: now, updatedAt: now
+  });
+  persist(); _gageFlush();
+  // PUSH : prévient l'admin qu'une proposition coach est à modérer.
+  try { notifyPush([_pushCoachKey()], { title: '🎁 Proposition de gage', body: 'Un coach a proposé un gage à modérer', url: '/', tag: 'gage-propose', type: 'gage_proposal' }); } catch (e) {}
+  return true;
+}
+function openCoachProposeGage() {
+  const author = _coachGageAuthorId();
+  const mine = (state.gages || []).filter(g => g.authorId === author)
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 8);
+  const statusLabel = s => s === 'pending' ? '⏳ En attente de validation (admin)'
+    : s === 'approved' ? '✅ Validé · dans le pool de tirage'
+    : s === 'rejected' ? '❌ Refusé' : s;
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">🎁 Proposer un gage</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:12px;color:var(--ink-3);line-height:1.5;margin-bottom:10px">
+        Ta proposition part <strong>en modération</strong> : l'admin la validera avant qu'elle entre dans le pool de tirage.
+      </div>
+      <textarea id="coach-propose-text" maxlength="${GAGE_TEXT_MAX}" rows="3" placeholder="Ex : porter le maillot à l'envers tout l'entraînement…" style="width:100%"></textarea>
+      <div style="display:flex;justify-content:flex-end;margin-top:10px">
+        <button class="btn btn-primary" onclick="submitCoachProposeFromModal()">Envoyer à l'admin</button>
+      </div>
+      ${mine.length ? `
+        <div style="margin-top:16px;border-top:1px solid var(--border-soft);padding-top:12px">
+          <div class="eyebrow-muted" style="margin-bottom:8px">Mes propositions</div>
+          ${mine.map(g => `
+            <div style="padding:8px 10px;background:var(--bg-3);border-radius:8px;margin-bottom:6px">
+              <div style="font-size:13px;color:var(--ink);line-height:1.4">${esc(g.text)}</div>
+              <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;text-transform:uppercase">${statusLabel(g.status)}${g.rejectedReason ? ' · ' + esc(g.rejectedReason) : ''}</div>
+            </div>`).join('')}
+        </div>` : ''}
+    </div>
+  `);
+  setTimeout(() => { const el = document.getElementById('coach-propose-text'); if (el) el.focus(); }, 80);
+}
+function submitCoachProposeFromModal() {
+  const el = document.getElementById('coach-propose-text');
+  if (!el || !el.value.trim()) return;
+  submitCoachProposal(el.value);
+  closeModal(); render();
+  if (typeof showToast === 'function') showToast('🎁 Proposition envoyée à l\'admin');
+}
+
 // --- Modération + assignation (coach) ---
 function approveGage(id) {
+  if (_denyIfScopedCoach()) return; // modération = admin only
   const g = _gageById(id); if (!g || g.status !== 'pending') return;
-  g.status = 'approved'; _gageTouch(g); persist(); _gageFlush(); render();
+  g.status = 'approved'; g.moderatedBy = (currentCoach() || {}).id || 'admin'; _gageTouch(g); persist(); _gageFlush(); render();
 }
 function rejectGage(id) {
+  if (_denyIfScopedCoach()) return; // modération = admin only
   const g = _gageById(id); if (!g || g.status !== 'pending') return;
   let reason = ''; try { reason = prompt('Raison du refus (optionnel) :') || ''; } catch (e) {}
   g.status = 'rejected'; g.rejectedReason = reason.trim() || null; g.completedAt = Date.now();
+  g.moderatedBy = (currentCoach() || {}).id || 'admin';
   _gageTouch(g); persist(); _gageFlush(); render();
 }
 // "➕ Faire tirer un gage à…" : le coach choisit QUI tire (et combien via dette),
 // pas QUEL gage. La joueuse piochera elle-même dans le pool à l'ouverture.
 function openAssignDraw() {
-  const pool = (_seasonsLoaded() && getActiveSeasonId())
-    ? getSeasonPlayers(getActiveSeasonId(), { team: 'all' }) : (state.players || []);
+  const pool = visiblePlayersForUser((_seasonsLoaded() && getActiveSeasonId())
+    ? getSeasonPlayers(getActiveSeasonId(), { team: 'all' }) : (state.players || []));
   const sorted = pool.slice().sort((a, b) => (a.num || 0) - (b.num || 0));
   const poolCount = currentSeasonGages().filter(_gageTirable).length;
   openModal(`
@@ -14945,6 +15739,7 @@ function cancelOwedDraws(pid) {
 // --- Coach : ajoute un gage DIRECTEMENT au pool (auto-validé, sans modération). ---
 // Flux parallèle à la proposition joueuse : le coach crée un gage déjà 'approved'.
 function submitCoachGage(text, type, hours) {
+  if (_denyIfScopedCoach()) return false; // ajout direct au pool = admin only
   text = (text || '').trim().slice(0, GAGE_TEXT_MAX);
   if (!text) return false;
   const now = Date.now();
@@ -14993,6 +15788,7 @@ function submitCoachGageFromModal() {
 // (deleted_at) : le gage sort du pool/tirage mais reste résolvable par id pour
 // l'historique des tirages passés qui le référencent (gageDraws.gageId).
 function openEditGage(id) {
+  if (_denyIfScopedCoach()) return; // édition du pool = admin only
   const g = _gageById(id); if (!g) return;
   openModal(`
     <div class="modal-header">
@@ -15024,6 +15820,7 @@ function saveGageEdit(id) {
   if (typeof showToast === 'function') showToast('✏️ Gage modifié');
 }
 function deleteGage(id) {
+  if (_denyIfScopedCoach()) return; // suppression du pool = admin only
   const g = _gageById(id); if (!g || g.deletedAt) return;
   const drawn = (state.gageDraws || []).filter(d => d.gageId === id).length;
   const msg = drawn
@@ -15040,8 +15837,8 @@ function deleteGage(id) {
 // et permet +1 / −1 / remise à zéro. La dette pilote le nb de tirages ajoutés
 // automatiquement à la prochaine assignation (cf. assignDrawsToPlayer).
 function _gageDebtManagerBody() {
-  const pool = (_seasonsLoaded() && getActiveSeasonId())
-    ? getSeasonPlayers(getActiveSeasonId(), { team: 'all' }) : (state.players || []);
+  const pool = visiblePlayersForUser((_seasonsLoaded() && getActiveSeasonId())
+    ? getSeasonPlayers(getActiveSeasonId(), { team: 'all' }) : (state.players || []));
   const sorted = pool.slice().sort((a, b) => (a.num || 0) - (b.num || 0));
   if (!sorted.length) return '<div style="color:var(--ink-3);font-size:13px">Aucune joueuse dans la saison.</div>';
   return `
@@ -15116,9 +15913,16 @@ function renderGageCoachHomeCard() {
     </div>`;
 }
 function renderGagesCoach() {
+  const admin = isAdminCoach(); // modération + garnissage pool = admin only
+  // Coach non-admin : ne voit/gère que les tirages de SES joueuses.
+  const active0 = getActiveSeasonId();
+  const visIds = admin ? null : new Set(visiblePlayersForUser(
+    (_seasonsLoaded() && active0) ? getSeasonPlayers(active0, { team: 'all' }) : (state.players || [])
+  ).map(p => p.id));
+  const mineDraw = d => admin || (visIds && visIds.has(d.playerId));
   const all = currentSeasonGages();
   const active = getActiveSeasonId();
-  const inSeasonDraw = d => !_seasonsLoaded() || !active || (d.seasonId ? d.seasonId === active : true);
+  const inSeasonDraw = d => (!_seasonsLoaded() || !active || (d.seasonId ? d.seasonId === active : true)) && mineDraw(d);
   const pending = all.filter(g => g.status === 'pending').sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   const pool = all.filter(_gageTirable).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   const draws = (state.gageDraws || []).filter(inSeasonDraw);
@@ -15143,14 +15947,15 @@ function renderGagesCoach() {
       <button class="detail-back" onclick="state.view=null;render()">← Équipe</button>
       <div class="px" style="padding-top:6px">
         <div class="display-lg" style="margin-bottom:2px">🎁 Boîte à gages</div>
-        <div style="font-size:12px;color:var(--ink-3);margin-bottom:14px">Modère les propositions, garnis le pool, puis fais <strong>tirer au sort</strong> un gage à une joueuse (elle découvre lequel au tirage).</div>
+        <div style="font-size:12px;color:var(--ink-3);margin-bottom:14px">${admin ? 'Modère les propositions, garnis le pool, puis fais <strong>tirer au sort</strong> un gage à une joueuse (elle découvre lequel au tirage).' : 'Fais <strong>tirer au sort</strong> un gage du pool à une de tes joueuses. Tu peux aussi proposer des idées (validées par l\'admin).'}</div>
         <button class="btn btn-primary btn-block" onclick="openAssignDraw()" style="margin-bottom:6px">➕ Faire tirer un gage à…</button>
         <div style="display:flex;gap:6px">
-          <button class="btn btn-secondary" style="flex:1" onclick="openCoachAddGage()">🎁 Ajouter un gage</button>
+          <button class="btn btn-secondary" style="flex:1" onclick="${admin ? 'openCoachAddGage()' : 'openCoachProposeGage()'}">🎁 ${admin ? 'Ajouter un gage' : 'Proposer un gage'}</button>
           <button class="btn btn-secondary" style="flex:1" onclick="openGageDebtManager()">🎛️ Gérer les dettes</button>
         </div>
       </div>
 
+      ${admin ? `
       <div class="section-header"><div><div class="eyebrow" style="color:var(--orange)">À modérer</div><h2 class="display-md mt-2">En attente (${pending.length})</h2></div></div>
       <div class="px">
         ${pending.length ? pending.map(g => card(`
@@ -15159,17 +15964,17 @@ function renderGagesCoach() {
             <button class="btn btn-primary" style="flex:1" onclick="approveGage('${g.id}')">✅ Approuver</button>
             <button class="btn btn-secondary" style="flex:1" onclick="rejectGage('${g.id}')">❌ Rejeter</button>
           </div>`)).join('') : '<div style="color:var(--ink-3);font-size:13px;font-style:italic;padding-bottom:8px">Rien à modérer.</div>'}
-      </div>
+      </div>` : ''}
 
       <div class="section-header"><div><div class="eyebrow">Pool (réservoir de tirage)</div><h2 class="display-md mt-2">Approuvés (${pool.length})</h2></div></div>
       <div class="px">
         ${pool.length ? pool.map(g => { const drawn = (state.gageDraws || []).filter(d => d.gageId === g.id).length; const meta = _gageTypeMeta(g); const sub = [meta.label + (_gageTypeOf(g) === 'time_limited' && g.timeLimitHours ? ' · ' + _fmtDuration(g.timeLimitHours) : ''), drawn ? 'tiré ' + drawn + ' fois' : ''].filter(Boolean).join(' · '); return card(`
           <div style="display:flex;align-items:flex-start;gap:8px">
             <div style="flex:1;min-width:0;font-size:14px;color:var(--ink);line-height:1.45">${meta.icon} ${esc(g.text)}<span style="display:block;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;margin-top:3px">${esc(sub)}</span></div>
-            <div style="display:flex;gap:4px;flex:0 0 auto">
+            ${admin ? `<div style="display:flex;gap:4px;flex:0 0 auto">
               <button class="btn btn-ghost" style="padding:5px 9px;font-size:14px;line-height:1" title="Modifier le texte" onclick="openEditGage('${g.id}')">✏️</button>
               <button class="btn btn-ghost" style="padding:5px 9px;font-size:14px;line-height:1" title="Supprimer du pool" onclick="deleteGage('${g.id}')">🗑️</button>
-            </div>
+            </div>` : ''}
           </div>`); }).join('') : '<div style="color:var(--ink-3);font-size:13px;font-style:italic;padding-bottom:8px">Pool vide. Approuve des propositions pour alimenter les tirages.</div>'}
       </div>
 
@@ -24296,6 +25101,7 @@ function isOffseasonActive() {
 // éditer / dupliquer / supprimer.
 function openOffseasonConfig() {
   const progs = state.programs || [];
+  const canEdit = canEditSharedLibrary(); // prépa physique = édition admin only
   const card = (p) => {
     const active = _isProgramActive(p);
     const exCount = p.mode === 'daily'
@@ -24320,11 +25126,11 @@ function openOffseasonConfig() {
               <span>${logN} complétion${logN>1?'s':''}</span>
             </div>
           </div>
-          <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
+          ${canEdit ? `<div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
             <button class="btn btn-icon" title="Éditer" onclick="openProgramEditor('${p.id}')" style="width:28px;height:28px">✎</button>
             <button class="btn btn-icon" title="Dupliquer" onclick="cloneProgram('${p.id}')" style="width:28px;height:28px">⧉</button>
             <button class="btn btn-icon" title="Supprimer" onclick="confirmDeleteProgram('${p.id}')" style="width:28px;height:28px;color:var(--red)">🗑</button>
-          </div>
+          </div>` : ''}
         </div>
       </div>`;
   };
@@ -24340,10 +25146,11 @@ function openOffseasonConfig() {
       <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:14px;font-size:11px;color:var(--ink-2);line-height:1.5">
         Gère plusieurs programmes (prépa estivale, reprise, individualisé…). Chaque joueuse suit le programme <strong>actif</strong>. Les complétions sont rattachées au bon programme.
       </div>
+      ${!canEdit ? `<div style="padding:8px 12px;background:var(--bg-3);border-radius:6px;margin-bottom:12px;font-size:11px;color:var(--ink-3);line-height:1.5">👁 Consultation — la prépa physique est éditée par l'admin.</div>` : ''}
       ${progs.length === 0
-        ? `<div style="padding:18px;text-align:center;color:var(--ink-3);font-size:12px;font-style:italic;border:1px dashed var(--border);border-radius:8px;margin-bottom:12px">Aucun programme · crée ton premier programme ci-dessous</div>`
+        ? `<div style="padding:18px;text-align:center;color:var(--ink-3);font-size:12px;font-style:italic;border:1px dashed var(--border);border-radius:8px;margin-bottom:12px">Aucun programme${canEdit ? ' · crée ton premier programme ci-dessous' : ''}</div>`
         : progs.map(card).join('')}
-      <button class="btn btn-primary btn-block" onclick="openProgramEditor('new')" style="margin-top:4px">+ Nouveau programme</button>
+      ${canEdit ? `<button class="btn btn-primary btn-block" onclick="openProgramEditor('new')" style="margin-top:4px">+ Nouveau programme</button>` : ''}
     </div>
   `);
 }
@@ -24399,6 +25206,7 @@ function confirmDeleteProgram(id) {
 }
 
 function deleteProgram(id) {
+  if (_denyIfScopedCoach()) return; // prépa physique = admin only
   const idx = (state.programs || []).findIndex(x => x.id === id);
   if (idx < 0) return;
   const p = state.programs[idx];
@@ -24438,6 +25246,7 @@ function setOffseasonMode(mode) {
 
 function renderOffseasonEditor() {
   const e = state._editingOffseason;
+  const canEdit = canEditSharedLibrary(); // prépa physique = édition admin only
   openModal(`
     <div class="modal-header">
       <div>
@@ -24497,22 +25306,22 @@ function renderOffseasonEditor() {
         `).join('')}
       </div>
 
-      <button class="btn btn-secondary btn-block" onclick="addOffseasonStep()" style="margin-bottom:14px">+ Exercice personnalisé</button>
+      ${canEdit ? `<button class="btn btn-secondary btn-block" onclick="addOffseasonStep()" style="margin-bottom:14px">+ Exercice personnalisé</button>
 
       <div class="eyebrow-muted" style="margin-bottom:6px;font-size:9px">Templates rapides (tap pour ajouter)</div>
       <div style="display:flex;flex-wrap:wrap;gap:4px">
         ${OFFSEASON_TEMPLATES.map((t, i) => `
           <button class="feedback-suggest-chip suggest-pos" onclick="addOffseasonTemplate(${i})">+ ${esc(t.label)}</button>
         `).join('')}
-      </div>
+      </div>` : ''}
       `}
     </div>
     <div class="modal-footer" style="flex-direction:column;gap:6px">
       <div style="display:flex;gap:6px;width:100%">
-        <button class="btn btn-secondary btn-block" onclick="state._editingOffseason=null;openOffseasonConfig()">Annuler</button>
-        <button class="btn btn-primary btn-block" onclick="saveOffseason()">Enregistrer</button>
+        <button class="btn btn-secondary btn-block" onclick="state._editingOffseason=null;openOffseasonConfig()">${canEdit ? 'Annuler' : 'Fermer'}</button>
+        ${canEdit ? `<button class="btn btn-primary btn-block" onclick="saveOffseason()">Enregistrer</button>` : ''}
       </div>
-      ${!e._isNew && (state.programs || []).some(p => p.id === e.id) ? `<button class="btn btn-ghost btn-block" style="color:var(--red);font-size:11px" onclick="confirmDeleteProgram('${e.id}')">🗑 Supprimer le programme</button>` : ''}
+      ${canEdit && !e._isNew && (state.programs || []).some(p => p.id === e.id) ? `<button class="btn btn-ghost btn-block" style="color:var(--red);font-size:11px" onclick="confirmDeleteProgram('${e.id}')">🗑 Supprimer le programme</button>` : ''}
     </div>
   `);
 }
@@ -24656,6 +25465,7 @@ function setOffseasonDayField(date, idx, field, value) {
 }
 
 function saveOffseason() {
+  if (_denyIfScopedCoach()) return; // prépa physique = édition admin only
   const e = state._editingOffseason;
   const title = document.getElementById('os-title').value.trim() || 'Prépa estivale';
   const startDate = document.getElementById('os-start').value;
@@ -25495,12 +26305,27 @@ function _effectifRosterBody() {
   const cur = getCurrentSeason();
   const archived = !!(cur && cur.status === 'archived');
   const editable = !!sid && !archived; // saison courante modifiable ?
+  // Coach non-admin : liste scopée à SES joueuses ; pas de gestion roster
+  // (ajout / rattachement / retrait = admin), mais édition postes/taille/dob/feedback OK.
+  const scoped = isScopedCoach();
+  const _visIds = scoped ? new Set(visiblePlayersForUser(
+    (_seasonsLoaded() && sid) ? getSeasonPlayers(sid, { team: 'all' }) : (state.players || [])
+  ).map(p => p.id)) : null;
+  let _rosterList = scoped ? (state.players || []).filter(p => _visIds.has(p.id)) : (state.players || []);
+  // Filtre par poste (ex : trouver les pivots = 5). 0 = tous.
+  const _pf = state._rosterPosteFilter || 0;
+  if (_pf) _rosterList = _rosterList.filter(p => _normPostes(p.postes).includes(_pf));
+  const _posteFilterBar = `<div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:14px">
+    <button class="btn ${_pf === 0 ? 'btn-primary' : 'btn-secondary'}" style="min-height:34px;padding:0 10px;font-size:11px" onclick="setRosterPosteFilter(0)">Tous</button>
+    ${PLAYER_POSTES.map(pp => `<button class="btn ${_pf === pp.n ? 'btn-primary' : 'btn-secondary'}" style="min-height:34px;padding:0 10px;font-size:11px" title="${esc(pp.label)}" onclick="setRosterPosteFilter(${pp.n})">${pp.n}</button>`).join('')}
+  </div>`;
   const inSeason = pid => !!sid && (state.seasonPlayers || []).some(sp => sp.seasonId === sid && sp.playerId === pid && !sp.leftAt);
   const hasLeftLink = pid => !!sid && (state.seasonPlayers || []).some(sp => sp.seasonId === sid && sp.playerId === pid && sp.leftAt);
   // Bouton de rattachement pour une joueuse hors de l'effectif de la saison :
   // « ↺ Réintégrer » si elle était partie (leftAt), sinon « + Ajouter ». Grisé
   // si saison archivée / absente (avec tooltip explicatif).
   const attachBtn = p => {
+    if (scoped) return ''; // rattachement = action roster admin only
     if (inSeason(p.id)) return ''; // déjà dans l'effectif → pas de bouton
     const label = hasLeftLink(p.id) ? '↺ Réintégrer' : '+ Ajouter';
     if (!editable) {
@@ -25510,14 +26335,16 @@ function _effectifRosterBody() {
     return `<button class="btn btn-primary" style="font-size:10px;padding:6px 9px;flex-shrink:0" onclick="event.stopPropagation();attachPlayerToCurrentSeason('${esc(p.id)}')" title="Ajouter à la saison en cours">${label}</button>`;
   };
   return `
-      <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em;margin-bottom:14px">Roster global (toutes saisons). Une nouvelle joueuse est aussi ajoutée à la saison en cours.</div>
-      <div class="fld-row" style="margin-bottom:14px">
+      <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em;margin-bottom:14px">${scoped ? 'Tes joueuses. Ouvre une fiche pour ajuster postes, taille, date de naissance, points forts/faibles.' : 'Roster global (toutes saisons). Une nouvelle joueuse est aussi ajoutée à la saison en cours.'}</div>
+      ${scoped ? '' : `<div class="fld-row" style="margin-bottom:14px">
         <input id="pl-new-name" placeholder="Prénom" onkeydown="if(event.key==='Enter')addNewPlayer()">
         <input id="pl-new-num" type="number" placeholder="N°" min="0" max="99" onkeydown="if(event.key==='Enter')addNewPlayer()">
       </div>
-      <button class="btn btn-primary btn-block" onclick="addNewPlayer()">+ Ajouter</button>
-      <div style="margin-top:18px;display:flex;flex-direction:column;gap:6px">
-        ${state.players.map(p => {
+      <button class="btn btn-primary btn-block" onclick="addNewPlayer()">+ Ajouter</button>`}
+      <div style="margin-top:${scoped ? '4' : '18'}px">${_posteFilterBar}</div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        ${_rosterList.length === 0 ? `<div style="padding:16px;text-align:center;color:var(--ink-3);font-size:12px;font-style:italic">${_pf ? 'Aucune joueuse à ce poste.' : 'Aucune joueuse.'}</div>` : ''}
+        ${_rosterList.map(p => {
           const ls = _lastSeenBadge(p.lastSeenAt);
           const sTag = inSeason(p.id)
             ? '<span style="font-size:8px;font-family:\'JetBrains Mono\';color:#22c55e;background:rgba(34,197,94,0.10);padding:2px 5px;border-radius:4px;text-transform:uppercase;letter-spacing:0.04em">✓ saison</span>'
@@ -25528,6 +26355,7 @@ function _effectifRosterBody() {
             <div style="font-family:'Anton';font-size:18px;color:var(--orange);min-width:32px">#${p.num}</div>
             <div style="flex:1;min-width:0">
               <div style="display:flex;align-items:center;gap:6px"><div style="font-family:'Anton';text-transform:uppercase;font-size:13px">${esc(p.name)}</div>${sTag}</div>
+              ${(_normPostes(p.postes).length || _ageFromDob(p.dateNaissance) != null || Number.isFinite(p.tailleCm)) ? `<div style="margin-top:3px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">${_postesBadges(p.postes)}${Number.isFinite(p.tailleCm) ? `<span style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono'">${p.tailleCm}cm</span>` : ''}${_ageFromDob(p.dateNaissance) != null ? `<span style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono'">${_ageFromDob(p.dateNaissance)} ans</span>` : ''}</div>` : ''}
               <div style="font-size:9px;color:${ls.color};font-family:'JetBrains Mono';margin-top:2px"${ls.exact ? ` title="Dernière connexion : ${ls.exact}"` : ''}><span style="font-size:7px;vertical-align:middle">${ls.dot}</span> ${ls.label}</div>
             </div>
             <div style="font-size:9px;color:${p.pin === '0000' ? 'var(--red)' : 'var(--ink-3)'};font-family:'JetBrains Mono';text-transform:uppercase">${p.pin === '0000' ? '⚠ pin 0000' : '✎ ouvrir'}</div>
@@ -25537,25 +26365,36 @@ function _effectifRosterBody() {
       </div>`;
 }
 
+// Filtre poste de la liste roster (ex : « 5 » = pivots). Toggle → re-render.
+function setRosterPosteFilter(n) {
+  n = Number(n) || 0;
+  state._rosterPosteFilter = (n === (state._rosterPosteFilter || 0)) ? 0 : n;
+  openEffectif('roster');
+}
+
 // ÉCRAN EFFECTIF UNIFIÉ — 2 onglets : [Saison en cours] / [Roster global].
 // Remplace les 2 anciennes portes ⚙ (« Effectif de la saison » + « Gérer les
 // joueuses »). Tous les call-sites existants (openSeasonRosterEditor /
 // managePlayers) y sont redirigés.
 function openEffectif(tab) {
   tab = (tab === 'roster') ? 'roster' : 'season';
+  // Coach non-admin : la gestion de saison (attribution d'équipe, roster) est
+  // admin only → il reste sur l'onglet « Mes joueuses » (roster scopé).
+  const scoped = isScopedCoach();
+  if (scoped) tab = 'roster';
   state._effectifOpen = true;
   state._effectifTab = tab;
   openModal(`
     <div class="modal-header">
-      <div class="modal-title">👥 Effectif</div>
+      <div class="modal-title">👥 ${scoped ? 'Mes joueuses' : 'Effectif'}</div>
       <button class="modal-close" onclick="state._effectifOpen=false;closeModal()">✕</button>
     </div>
-    <div style="padding:14px 16px 0">
+    ${scoped ? '' : `<div style="padding:14px 16px 0">
       <div class="segmented" style="margin:0">
         <button class="segmented-btn ${tab === 'season' ? 'active' : ''}" onclick="openEffectif('season')">Saison en cours</button>
         <button class="segmented-btn ${tab === 'roster' ? 'active' : ''}" onclick="openEffectif('roster')">Roster global</button>
       </div>
-    </div>
+    </div>`}
     <div class="modal-body" ${tab === 'roster' ? _modalScrollAttr('players') : ''}>
       ${tab === 'roster' ? _effectifRosterBody() : _effectifSeasonBody()}
     </div>
@@ -25582,6 +26421,7 @@ function addNewPlayer() {
   managePlayers();
 }
 function removePlayer(pid) {
+  if (_denyIfScopedCoach()) return; // gestion roster = admin only
   const p = state.players.find(x => x.id === pid);
   if (!p || !confirm('Supprimer définitivement ' + p.name + ' ?\n\nLa joueuse est retirée du roster global et de toutes les saisons. Ses présences, stats et défis associés sont effacés. Cette action est définitive.')) return;
   state.players = state.players.filter(x => x.id !== pid);
@@ -25598,6 +26438,8 @@ function removePlayer(pid) {
 function editPlayer(pid) {
   const p = state.players.find(x => x.id === pid);
   if (!p) return;
+  if (!_playerVisibleToUser(pid)) { _denyIfScopedCoach(); return; } // coach non-admin : ses joueuses only
+  const canRoster = !isScopedCoach(); // retrait d'effectif = admin only
   openModal(`
     <div class="modal-header">
       <div class="modal-title">Modifier · ${esc(p.name)}</div>
@@ -25624,6 +26466,25 @@ function editPlayer(pid) {
         <div class="fld" style="max-width:90px">
           <label class="fld-label">N°</label>
           <input id="edp-num" type="number" value="${p.num}" min="0" max="99">
+        </div>
+      </div>
+
+      <div class="fld">
+        <label class="fld-label">Poste(s)</label>
+        ${_postesChipsEditor(p.postes, 'edp')}
+      </div>
+      <div class="fld-row" style="margin-top:10px">
+        <div class="fld" style="max-width:130px">
+          <label class="fld-label">Taille</label>
+          <div style="display:flex;align-items:center;gap:6px">
+            <input id="edp-taille" type="number" min="140" max="220" value="${Number.isFinite(p.tailleCm) ? p.tailleCm : ''}" placeholder="ex : 170" style="width:90px">
+            <span style="font-size:12px;color:var(--ink-3)">cm</span>
+          </div>
+        </div>
+        <div class="fld">
+          <label class="fld-label">Date de naissance</label>
+          <input id="edp-dob" type="date" min="${_dobMin()}" max="${_dobMax()}" value="${esc(p.dateNaissance || '')}">
+          ${p.dateNaissance && _ageFromDob(p.dateNaissance) != null ? `<div style="margin-top:4px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">${_ageFromDob(p.dateNaissance)} ans</div>` : ''}
         </div>
       </div>
 
@@ -25690,7 +26551,7 @@ function editPlayer(pid) {
         <button class="btn btn-secondary btn-block" onclick="closeModal();setTimeout(()=>managePlayers(),50)">Annuler</button>
         <button class="btn btn-primary btn-block" onclick="savePlayerEdit('${pid}')">Enregistrer</button>
       </div>
-      <button class="btn btn-ghost btn-block" style="color:var(--red);font-size:11px" onclick="removePlayer('${pid}')">🗑 Retirer cette joueuse de l'effectif</button>
+      ${canRoster ? `<button class="btn btn-ghost btn-block" style="color:var(--red);font-size:11px" onclick="removePlayer('${pid}')">🗑 Retirer cette joueuse de l'effectif</button>` : ''}
     </div>
   `);
   setTimeout(() => document.getElementById('edp-name')?.focus(), 100);
@@ -25699,15 +26560,32 @@ function editPlayer(pid) {
 function savePlayerEdit(pid) {
   const p = state.players.find(x => x.id === pid);
   if (!p) return;
+  if (!_playerVisibleToUser(pid)) { _denyIfScopedCoach(); return; }
   const name = document.getElementById('edp-name').value.trim();
   const num = parseInt(document.getElementById('edp-num').value) || 0;
   const pin = document.getElementById('edp-pin').value.trim();
   if (!name) { alert('Le nom est requis'); return; }
   if (!/^\d{4}$/.test(pin)) { alert('Le PIN doit être 4 chiffres'); return; }
+  // Postes (optionnel côté coach : il ne connaît pas forcément) / taille / dob.
+  const postes = _readPostesChips('edp');
+  const tailleEl = document.getElementById('edp-taille');
+  const tailleRaw = tailleEl ? tailleEl.value.trim() : '';
+  let tailleCm = null;
+  if (tailleRaw !== '') {
+    const t = parseInt(tailleRaw, 10);
+    if (!Number.isFinite(t) || t < 140 || t > 220) { alert('Taille invalide (140–220 cm) ou laisse vide.'); return; }
+    tailleCm = t;
+  }
+  const dobEl = document.getElementById('edp-dob');
+  const dob = dobEl ? dobEl.value : '';
+  if (dob && (dob < _dobMin() || dob > _dobMax())) { alert('Date de naissance hors bornes plausibles.'); return; }
   const pinChanged = (p.pin !== pin);
   p.name = name;
   p.num = num;
   p.pin = pin;
+  p.postes = postes;
+  p.tailleCm = tailleCm;
+  p.dateNaissance = dob || null;
   persist();
   if (window.PbStore) {
     PbStore.upsertPlayer(p).catch(e => console.warn('[sync] upsertPlayer:', e.message));
@@ -27620,6 +28498,7 @@ function saveFFBBConfig() {
 // Synchronisé via l'entité 'team' (table team_settings), pas via ffbb_config.
 // ============================================================
 function editTeamIdentity() {
+  if (_denyIfScopedCoach()) return; // identité club = réglage admin
   if (!state.team) state.team = { displayNickname: '' };
   const t = state.team;
   openModal(`
@@ -27963,7 +28842,12 @@ function _initPlayersSync() {
           photo: rp.photo || lp.photo || null,
           pin: lp.pin || '0000',
           feedback: rp.feedback || lp.feedback || {},
-          lastSeenAt: rp.last_seen_at ? Date.parse(rp.last_seen_at) : (lp.lastSeenAt || null) };
+          lastSeenAt: rp.last_seen_at ? Date.parse(rp.last_seen_at) : (lp.lastSeenAt || null),
+          // Postes / taille / date de naissance : si la colonne manque (fallback
+          // select), rp.xxx = undefined → on garde la valeur locale.
+          postes: Array.isArray(rp.postes) ? rp.postes : (lp.postes || []),
+          tailleCm: (rp.taille_cm != null) ? rp.taille_cm : (lp.tailleCm != null ? lp.tailleCm : null),
+          dateNaissance: (rp.date_naissance !== undefined) ? (rp.date_naissance || null) : (lp.dateNaissance || null) };
       });
       const remoteIds = new Set(remote.map(r => r.id));
       const localOnly = state.players.filter(p => !remoteIds.has(p.id));
@@ -27982,6 +28866,9 @@ function _initPlayersSync() {
         // - coach garde son choix s'il est valide, sinon fallback active
         // - joueuse toujours forcée sur la saison active
         try { ensureCurrentSeasonId(); } catch(e) {}
+        // RÔLES : seed de l'admin_coach pour une session coach déjà active (cas
+        // mise à jour d'un coach historique) → il devient admin_coach sans effort.
+        try { if (state.auth && state.auth.role === 'coach') _seedAdminCoach(); } catch(e) { console.warn('[roles] seed admin:', e.message); }
         // DÉFIS AUTO PAR SAISON : backfill legacy + init des défis manquants sur
         // la saison active. COACH UNIQUEMENT (jamais d'écriture défis depuis un
         // device joueuse — la joueuse lit ce que le coach a synchronisé).
@@ -28084,7 +28971,10 @@ function _initPlayersSync() {
         photo: row.photo || lp.photo || null,
         pin: lp.pin || '0000',
         feedback: row.feedback || lp.feedback || {},
-        lastSeenAt: row.last_seen_at ? Date.parse(row.last_seen_at) : (lp.lastSeenAt || null) };
+        lastSeenAt: row.last_seen_at ? Date.parse(row.last_seen_at) : (lp.lastSeenAt || null),
+        postes: Array.isArray(row.postes) ? row.postes : (lp.postes || []),
+        tailleCm: (row.taille_cm != null) ? row.taille_cm : (lp.tailleCm != null ? lp.tailleCm : null),
+        dateNaissance: (row.date_naissance !== undefined) ? (row.date_naissance || null) : (lp.dateNaissance || null) };
       if (i >= 0) state.players[i] = patched;
       else state.players.push(patched);
     } else if (event === 'DELETE' && old) {
@@ -28803,7 +29693,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-08.55';
+const APP_VERSION = '2026-07-10.57';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
