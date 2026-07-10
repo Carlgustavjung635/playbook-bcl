@@ -6185,6 +6185,17 @@ function currentPlayerTeamTag() {
 //   - joueuse both       → 'all' (voit les deux équipes)
 //   - coach / stat       → la pillule topbar (state.teamFilter)
 function effectiveTeamFilter() {
+  // Coach non-admin : portée FORCÉE à ses équipes, indépendamment du flag
+  // multiSquad (sa restriction ne doit pas dépendre de l'activation du multi).
+  // 1 équipe → ce tag ; plusieurs → honore la pillule mais bornée à ses équipes
+  // ('all' = union de ses équipes dans le modèle 2-équipes e1/e2).
+  if (isScopedCoach()) {
+    const t = coachTeams();
+    if (t.length === 1) return t[0];
+    const f = state.teamFilter || 'all';
+    if (f === 'all') return 'all';
+    return t.includes(f) ? f : t[0];
+  }
   if (!(state.team && state.team.multiSquad)) return 'all';
   if (state.auth && state.auth.role === 'player') {
     const tag = currentPlayerTeamTag();
@@ -6193,9 +6204,12 @@ function effectiveTeamFilter() {
   return state.teamFilter || 'all';
 }
 
-// Pillule coach/stat : bascule le filtre actif et re-render.
+// Pillule coach/stat : bascule le filtre actif et re-render. Un coach non-admin
+// ne peut sélectionner que ses propres équipes (garde-fou).
 function setTeamFilter(tag) {
-  state.teamFilter = (tag === 'e1' || tag === 'e2') ? tag : 'all';
+  let t = (tag === 'e1' || tag === 'e2') ? tag : 'all';
+  if (isScopedCoach()) { const mine = coachTeams(); if (t !== 'all' && !mine.includes(t)) t = mine[0]; }
+  state.teamFilter = t;
   save(K.teamFilter, state.teamFilter);
   if (typeof render === 'function') render();
 }
@@ -6240,7 +6254,13 @@ function renderTeamTagField(selectId, currentTag, includeBoth) {
 
 // Tag par défaut pour un NOUVEL événement : la pillule courante (e1/e2), sinon
 // 'e1'. ('all' ne peut pas tagger un événement concret → fallback e1.)
-function defaultEventTag() { return state.teamFilter === 'e2' ? 'e2' : 'e1'; }
+function defaultEventTag() {
+  // Coach non-admin : un nouvel événement est rattaché à SON équipe (la pillule
+  // si dans sa portée, sinon sa 1re équipe) — jamais e1 par défaut alors qu'il
+  // ne couvre que e2.
+  if (isScopedCoach()) { const t = coachTeams(); return t.includes(state.teamFilter) ? state.teamFilter : t[0]; }
+  return state.teamFilter === 'e2' ? 'e2' : 'e1';
+}
 
 // Badge couleur compact pour afficher le tag d'un événement/joueuse (multi on).
 function teamTagBadge(tag) {
@@ -7348,7 +7368,11 @@ function renderTopbar() {
 // Remplace l'ancien segmented control 3 chips (E1/E2/Toutes) qui saturait le header
 // sur mobile 375px (cf. fix/header-multi-squad-ux-v1).
 function renderTeamPill() {
-  if (!isMultiSquad()) return '';
+  // Coach non-admin : portée fixe → pillule masquée s'il n'a qu'une équipe ;
+  // sinon (2 équipes) on l'affiche même si le multi n'est pas globalement activé.
+  if (isScopedCoach()) {
+    if (coachTeams().length <= 1) return '';
+  } else if (!isMultiSquad()) return '';
   const role = state.auth && state.auth.role;
   if (role !== 'coach' && role !== 'stat') return '';
   const cur = state.teamFilter || 'all';
@@ -7364,7 +7388,9 @@ function renderTeamPill() {
 // re-render l'app ; on ferme la feuille ensuite.
 function openTeamFilterMenu() {
   const cur = state.teamFilter || 'all';
-  const opts = [['e1', teamLabel('e1', false)], ['e2', teamLabel('e2', false)], ['all', 'Toutes les équipes']];
+  const myTeams = isScopedCoach() ? coachTeams() : ['e1', 'e2'];
+  const opts = myTeams.map(t => [t, teamLabel(t, false)]);
+  opts.push(['all', isScopedCoach() ? 'Toutes mes équipes' : 'Toutes les équipes']);
   const row = (tag, label) => {
     const on = cur === tag;
     return `<button class="btn ${on ? 'btn-primary' : 'btn-secondary'} btn-block mb-2" role="menuitemradio" aria-checked="${on}" style="min-height:50px;display:flex;align-items:center;gap:10px;justify-content:flex-start;text-align:left" onclick="setTeamFilter('${tag}');closeModal()">
@@ -12047,6 +12073,11 @@ function setMatchHome(home) {
 // Toggle pill E1/E2 de la modale match (multi-effectif). Input caché m-team lu
 // par saveMatch. Rien si mono-équipe. Réutilise le style .segmented (comme 🏠/🚗).
 function _matchTeamPill(currentTag) {
+  // Coach non-admin mono-équipe : tag forcé sur son équipe, pas de sélecteur,
+  // mais on garde le champ caché #m-team pour que saveMatch lise le bon tag.
+  if (isScopedCoach() && coachTeams().length <= 1) {
+    return `<input type="hidden" id="m-team" value="${coachTeams()[0] === 'e2' ? 'e2' : 'e1'}">`;
+  }
   if (!isMultiSquad()) return '';
   const t = currentTag === 'e2' ? 'e2' : 'e1';
   return `
