@@ -5632,7 +5632,9 @@ function getCurrentSeason() {
 // - coach : si currentSeasonId pointe vers rien (ou null), fallback active.
 // - joueuse : toujours forcé sur active.
 function ensureCurrentSeasonId() {
-  const isCoach = state.auth && state.auth.role === 'coach';
+  // Seul l'admin_coach gère/switch les saisons. Un coach non-admin suit la
+  // saison active (comme les joueuses/stat) : pas de sélecteur → pas de choix figé.
+  const isCoach = state.auth && state.auth.role === 'coach' && isAdminCoach();
   const activeId = getActiveSeasonId();
   if (!isCoach) {
     state.currentSeasonId = activeId;
@@ -6808,6 +6810,18 @@ function visiblePlayersForUser(players) {
   });
 }
 
+// Garde-fou "action réservée à l'admin" : true (bloqué) si l'utilisateur est un
+// coach non-admin → toast + on interrompt l'action. Utilisé pour le playbook, la
+// prépa physique, l'identité club, la gestion des saisons, la modération gages.
+// Défense en profondeur : les boutons correspondants sont déjà masqués côté UI.
+function _denyIfScopedCoach() {
+  if (isScopedCoach()) { try { showToast('🔒 Action réservée à l\'admin'); } catch (e) {} return true; }
+  return false;
+}
+// Raccourci lisible pour les gabarits : le playbook & la prépa physique ne sont
+// éditables que par l'admin (ressources communes aux deux équipes).
+function canEditSharedLibrary() { return !isScopedCoach(); }
+
 // ============================================================
 // AUTH
 // ============================================================
@@ -7339,7 +7353,7 @@ function renderTopbar() {
         <div class="topbar-orb"><img class="brand-logo" src="/assets/bcl-logo-64.png" alt="BCL"></div>
         <div>
           <div class="topbar-title">Playbook</div>
-          ${isCoach
+          ${isCoach && isAdminCoach()
             ? `<div class="topbar-sub" style="cursor:pointer" onclick="editTeamIdentity()" title="Modifier le surnom de l'équipe">${state.team && state.team.displayNickname ? esc(state.team.displayNickname) : "BCL · L'Islois"} <span style="opacity:.55;font-size:.85em">✏️</span></div>`
             : `<div class="topbar-sub">${state.team && state.team.displayNickname ? esc(state.team.displayNickname) : "BCL · L'Islois"}</div>`}
         </div>
@@ -7347,7 +7361,7 @@ function renderTopbar() {
       <div class="topbar-actions">
         ${isCoach && activeLive ? `<button class="role-badge tb-act" style="background:#ff2222;color:white;border-color:#ff2222;cursor:pointer;animation:pulseGlow 2s infinite" onclick="openMatch('${activeLive.id}')" aria-label="Live en cours — gérer">🔴 LIVE</button>` : ''}
         ${renderTeamPill()}
-        ${isCoach ? renderSeasonSwitcher() : ''}
+        ${isCoach && isAdminCoach() ? renderSeasonSwitcher() : ''}
         ${renderNotifBell()}
         <button class="role-badge tb-act" style="cursor:pointer" onclick="openSettings()" title="Menu" aria-label="Menu${player ? ' — #' + player.num + ' ' + esc(player.name) : ''}" aria-haspopup="menu">${player ? '<span class="tb-act-label">#' + player.num + ' ' + esc(player.name) + '</span> ' : ''}⚙</button>
       </div>
@@ -7692,6 +7706,7 @@ function confirmArchiveSeason(id) {
 // Coach uniquement. Garde-fou : interdit de supprimer la dernière saison.
 function deleteSeason(id) {
   if (!(state.auth && state.auth.role === 'coach')) return;
+  if (_denyIfScopedCoach()) return; // gestion des saisons = admin only (zone dangereuse)
   const target = (state.seasons || []).find(s => s.id === id);
   if (!target) return;
   if ((state.seasons || []).length <= 1) {
@@ -8074,10 +8089,261 @@ function restorePlayerInSeason(playerId) {
   openSeasonRosterEditor();
 }
 
+// ============================================================
+// PANNEAU ADMIN (admin_coach only) — cf. ROLES_SPEC.md
+// ============================================================
+function _coachFlush() { try { if (window.PbSync && PbSync.flushNow) PbSync.flushNow(state).catch(() => {}); } catch (e) {} }
+
+// Code de connexion coach : 4 chiffres (comme un PIN joueuse → réutilise le
+// pavé PIN existant), unique parmi les codes coach + PIN coach/stat.
+function _genCoachCode() {
+  const taken = new Set((state.coaches || []).map(c => c.code).filter(Boolean));
+  if (state.pins) { taken.add(state.pins.coach); taken.add(state.pins.stat); }
+  for (let i = 0; i < 60; i++) {
+    const c = String(Math.floor(1000 + Math.random() * 9000));
+    if (!taken.has(c)) return c;
+  }
+  return String(Math.floor(1000 + Math.random() * 9000));
+}
+
+function _normCoachTeams(teams) {
+  const t = (Array.isArray(teams) ? teams : []).filter(x => x === 'e1' || x === 'e2');
+  return t.length ? t : ['e2']; // par défaut un nouveau coach est sur E2 (cas d'usage initial)
+}
+
+// Crée un coach non-admin. Active le multi-effectif (nécessaire pour manier 2
+// équipes : attribution roster, badges, pillule admin). Flush immédiat.
+function createCoach(name, teams) {
+  _seedAdminCoach(); // garantit l'admin (sinon le sélecteur au login n'aurait pas d'admin)
+  const now = Date.now();
+  const coach = {
+    id: uid(), name: (name || '').trim().slice(0, 40) || 'Coach',
+    coachRole: 'coach', teams: _normCoachTeams(teams), code: _genCoachCode(),
+    createdAt: now, updatedAt: now
+  };
+  state.coaches = state.coaches || [];
+  state.coaches.push(coach);
+  if (state.team && !state.team.multiSquad) { state.team.multiSquad = true; save(K.team, state.team); }
+  persist(); _coachFlush();
+  return coach;
+}
+function renameCoach(id, name) {
+  let c = _coachById(id);
+  if (!c && id === 'admin') c = _seedAdminCoach();
+  if (!c) return false;
+  c.name = (name || '').trim().slice(0, 40); c.updatedAt = Date.now();
+  persist(); _coachFlush(); return true;
+}
+function setCoachTeams(id, teams) {
+  const c = _coachById(id);
+  if (!c || c.coachRole === 'admin_coach') return false; // l'admin couvre tout, non éditable
+  c.teams = _normCoachTeams(teams); c.updatedAt = Date.now();
+  persist(); _coachFlush(); return true;
+}
+function deleteCoach(id) {
+  const c = _coachById(id);
+  if (!c || c.coachRole === 'admin_coach') return false;
+  let ok = false; try { ok = confirm('Supprimer le coach ' + (c.name || '') + ' ?\nSon code ne fonctionnera plus.'); } catch (e) { ok = true; }
+  if (!ok) return false;
+  state.coaches = (state.coaches || []).filter(x => x.id !== id);
+  persist(); _coachFlush();
+  if (typeof render === 'function') render();
+  return true;
+}
+
+// Panneau admin : profil, coachs, effectifs, modération gages.
+function openAdminPanel() {
+  if (!isAdminCoach()) return;
+  _seedAdminCoach();
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">⚙️ Admin</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body" id="admin-panel-body">${_adminPanelBody()}</div>
+  `);
+}
+function _refreshAdminPanel() {
+  const el = document.getElementById('admin-panel-body');
+  if (el) el.innerHTML = _adminPanelBody();
+}
+function _adminPanelBody() {
+  const admin = _adminCoach();
+  const others = _nonAdminCoaches();
+  const pendingGages = (state.gages || []).filter(g => g.status === 'pending' && !g.deletedAt).length;
+  const teamsLbl = (c) => (Array.isArray(c.teams) ? c.teams : ['e1']).map(t => teamLabel(t, true)).join(' · ');
+  return `
+    <!-- MON PROFIL -->
+    <div class="eyebrow-muted" style="margin-bottom:6px">Mon profil (admin)</div>
+    <div class="fld" style="margin-bottom:16px">
+      <div style="display:flex;gap:6px;align-items:center">
+        <input id="admin-name" value="${esc(admin.name || '')}" placeholder="Ton prénom" maxlength="40" style="flex:1">
+        <button class="btn btn-secondary" onclick="_submitRenameAdmin()">Renommer</button>
+      </div>
+    </div>
+
+    <!-- GÉRER LES COACHS -->
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <div class="eyebrow-muted">Coachs (${others.length + 1})</div>
+      <button class="btn btn-primary" style="min-height:36px;padding:0 12px" onclick="openCreateCoach()">+ Coach</button>
+    </div>
+    <div style="margin-bottom:16px">
+      <div class="btn btn-secondary btn-block mb-2" style="text-align:left;display:flex;justify-content:space-between;align-items:center;cursor:default">
+        <span>👑 ${esc(admin.name || 'Coach')} <span style="opacity:.6">· Admin · toutes les équipes</span></span>
+      </div>
+      ${others.length ? others.map(c => `
+        <div class="btn btn-secondary btn-block mb-2" style="text-align:left;display:flex;justify-content:space-between;align-items:center;gap:8px;cursor:default">
+          <span style="flex:1;min-width:0">
+            <span style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.name || 'Coach')}</span>
+            <span style="font-size:10px;font-family:'JetBrains Mono';color:var(--ink-3)">${esc(teamsLbl(c))} · code ${esc(c.code || '····')}</span>
+          </span>
+          <span style="display:flex;gap:4px;flex:0 0 auto">
+            <button class="btn btn-icon" title="Modifier" onclick="openEditCoach('${c.id}')">✎</button>
+            <button class="btn btn-icon" title="Supprimer" onclick="if(deleteCoach('${c.id}'))_refreshAdminPanel()">🗑</button>
+          </span>
+        </div>
+      `).join('') : '<div style="font-size:12px;color:var(--ink-3);padding:2px 2px 4px">Aucun autre coach. « + Coach » pour en ajouter un (E2 par ex.).</div>'}
+    </div>
+
+    <!-- EFFECTIFS PAR ÉQUIPE -->
+    <div class="eyebrow-muted" style="margin-bottom:6px">Effectifs</div>
+    <button class="btn btn-secondary btn-block mb-3" style="text-align:left" onclick="closeModal();setTimeout(()=>openEffectif('season'),50)">
+      👥 Attribuer les joueuses aux équipes (E1 / E2 / les deux)
+    </button>
+
+    <!-- MODÉRATION GAGES -->
+    <div class="eyebrow-muted" style="margin-bottom:6px">Modération</div>
+    <button class="btn btn-secondary btn-block" style="text-align:left" onclick="closeModal();setTimeout(()=>openGagesCoach(),50)">
+      🎁 Modérer les gages proposés${pendingGages ? ` <span style="color:var(--orange);font-family:'JetBrains Mono';font-size:11px">· ${pendingGages} en attente</span>` : ''}
+    </button>
+  `;
+}
+function _submitRenameAdmin() {
+  const el = document.getElementById('admin-name');
+  if (!el) return;
+  renameCoach('admin', el.value);
+  if (typeof render === 'function') render();
+  _refreshAdminPanel();
+  if (typeof showToast === 'function') showToast('✓ Profil mis à jour');
+}
+function _coachTeamCheckboxes(sel) {
+  const s = new Set(Array.isArray(sel) ? sel : []);
+  return `
+    <label style="display:flex;align-items:center;gap:8px;padding:8px 0;cursor:pointer">
+      <input type="checkbox" id="cc-e1" ${s.has('e1') ? 'checked' : ''}> <span>${esc(teamLabel('e1', false))}</span>
+    </label>
+    <label style="display:flex;align-items:center;gap:8px;padding:8px 0;cursor:pointer">
+      <input type="checkbox" id="cc-e2" ${s.has('e2') ? 'checked' : ''}> <span>${esc(teamLabel('e2', false))}</span>
+    </label>`;
+}
+function _readCoachTeams() {
+  const t = [];
+  if (document.getElementById('cc-e1') && document.getElementById('cc-e1').checked) t.push('e1');
+  if (document.getElementById('cc-e2') && document.getElementById('cc-e2').checked) t.push('e2');
+  return t;
+}
+function openCreateCoach() {
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">+ Nouveau coach</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:12px;color:var(--ink-3);line-height:1.5;margin-bottom:12px">
+        Un <strong>code à 4 chiffres</strong> sera généré : partage-le au coach pour qu'il se connecte (rôle « Coach » → son nom).
+      </div>
+      <div class="fld" style="margin-bottom:10px">
+        <label class="fld-label">Prénom du coach</label>
+        <input id="new-coach-name" placeholder="Ex : Sophie" maxlength="40">
+      </div>
+      <div class="fld">
+        <label class="fld-label">Équipes gérées</label>
+        ${_coachTeamCheckboxes(['e2'])}
+      </div>
+      <div style="display:flex;justify-content:flex-end;margin-top:12px">
+        <button class="btn btn-primary" onclick="submitCreateCoach()">Créer le coach</button>
+      </div>
+    </div>
+  `);
+  setTimeout(() => { const el = document.getElementById('new-coach-name'); if (el) el.focus(); }, 80);
+}
+function submitCreateCoach() {
+  const name = (document.getElementById('new-coach-name') || {}).value || '';
+  const teams = _readCoachTeams();
+  if (!teams.length) { try { alert('Sélectionne au moins une équipe.'); } catch (e) {} return; }
+  const coach = createCoach(name, teams);
+  if (typeof render === 'function') render();
+  // Confirmation avec le code à partager.
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">✓ Coach créé</div>
+      <button class="modal-close" onclick="closeModal();setTimeout(()=>openAdminPanel(),50)">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="text-align:center;padding:8px 0 16px">
+        <div style="font-size:13px;color:var(--ink-2);margin-bottom:8px">Code de connexion de <strong>${esc(coach.name)}</strong></div>
+        <div style="font-family:'JetBrains Mono';font-size:34px;letter-spacing:0.3em;color:var(--orange)">${esc(coach.code)}</div>
+        <div style="font-size:11px;color:var(--ink-3);margin-top:10px;line-height:1.5">Partage-le. Il se connecte via « Coach » → « ${esc(coach.name)} » → ce code.<br>Modifiable ensuite dans Admin.</div>
+      </div>
+      <button class="btn btn-primary btn-block" onclick="closeModal();setTimeout(()=>openAdminPanel(),50)">OK</button>
+    </div>
+  `);
+}
+function openEditCoach(id) {
+  const c = _coachById(id);
+  if (!c || c.coachRole === 'admin_coach') return;
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">Modifier ${esc(c.name || 'coach')}</div>
+      <button class="modal-close" onclick="closeModal();setTimeout(()=>openAdminPanel(),50)">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="fld" style="margin-bottom:10px">
+        <label class="fld-label">Prénom</label>
+        <input id="edit-coach-name" value="${esc(c.name || '')}" maxlength="40">
+      </div>
+      <div class="fld" style="margin-bottom:10px">
+        <label class="fld-label">Équipes gérées</label>
+        ${_coachTeamCheckboxes(c.teams)}
+      </div>
+      <div class="fld">
+        <label class="fld-label">Code de connexion</label>
+        <div style="display:flex;gap:6px;align-items:center">
+          <input id="edit-coach-code" value="${esc(c.code || '')}" maxlength="4" inputmode="numeric" style="font-family:'JetBrains Mono';letter-spacing:0.2em;flex:1">
+          <button class="btn btn-secondary" onclick="document.getElementById('edit-coach-code').value='${_genCoachCode()}'">↻ Régénérer</button>
+        </div>
+      </div>
+      <div style="display:flex;justify-content:flex-end;margin-top:14px">
+        <button class="btn btn-primary" onclick="submitEditCoach('${c.id}')">Enregistrer</button>
+      </div>
+    </div>
+  `);
+}
+function submitEditCoach(id) {
+  const c = _coachById(id);
+  if (!c) return;
+  const name = (document.getElementById('edit-coach-name') || {}).value || '';
+  const teams = _readCoachTeams();
+  const codeRaw = ((document.getElementById('edit-coach-code') || {}).value || '').trim();
+  if (!teams.length) { try { alert('Sélectionne au moins une équipe.'); } catch (e) {} return; }
+  if (!/^\d{4}$/.test(codeRaw)) { try { alert('Le code doit faire 4 chiffres.'); } catch (e) {} return; }
+  c.name = name.trim().slice(0, 40) || 'Coach';
+  c.teams = _normCoachTeams(teams);
+  c.code = codeRaw;
+  c.updatedAt = Date.now();
+  persist(); _coachFlush();
+  if (typeof render === 'function') render();
+  closeModal(); setTimeout(() => openAdminPanel(), 50);
+}
+
 function openSettings() {
   const role = state.auth ? state.auth.role : null;
   const player = currentPlayer();
-  const roleLabel = role === 'coach' ? 'Coach' : role === 'stat' ? "Stat'man" : player ? ('Joueuse · #' + player.num + ' ' + player.name) : '';
+  const cc = role === 'coach' ? currentCoach() : null;
+  const admin = role === 'coach' && isAdminCoach();
+  const roleLabel = role === 'coach'
+    ? ((cc && cc.name ? cc.name : 'Coach') + (admin ? ' · Admin' : (cc ? ' · ' + coachTeams().map(t => teamLabel(t, true)).join('/') : '')))
+    : role === 'stat' ? "Stat'man" : player ? ('Joueuse · #' + player.num + ' ' + player.name) : '';
   openModal(`
     <div class="modal-header">
       <div class="modal-title">Menu</div>
@@ -8113,7 +8379,10 @@ function openSettings() {
         </button>
       ` : ''}
 
-      ${role === 'coach' ? `
+      ${role === 'coach' && admin ? `
+        <button class="btn btn-primary btn-block mb-2" onclick="closeModal();setTimeout(()=>openAdminPanel(),50)">
+          ⚙️ Admin (coachs, effectifs, modération)
+        </button>
         <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openPublicShare(),50)">
           🔗 Portail public (partager le lien)
         </button>
@@ -8125,6 +8394,11 @@ function openSettings() {
         </button>
         <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>editTeamIdentity(),50)">
           🏷 Identité de l'équipe (surnom)
+        </button>
+      ` : ''}
+      ${role === 'coach' && !admin ? `
+        <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openCoachProposeGage(),50)">
+          🎁 Proposer un gage (soumis à l'admin)
         </button>
       ` : ''}
 
@@ -9925,7 +10199,7 @@ function renderPlays() {
           <div class="eyebrow-muted">${items.length} ${items.length > 1 ? 'plays' : 'play'}${orphanItems.length > 0 ? ' · ' + orphanItems.length + ' dispo' : ''}</div>
           <h2 class="display-lg mt-2">Playbook</h2>
         </div>
-        ${isCoach ? `<button class="btn btn-primary" onclick="editPlay()">+ NOUVEAU</button>` : ''}
+        ${isCoach && canEditSharedLibrary() ? `<button class="btn btn-primary" onclick="editPlay()">+ NOUVEAU</button>` : ''}
       </div>
 
       <div class="segmented">
@@ -9963,12 +10237,12 @@ function renderPlays() {
           ${items.map(p => playTile(p, {
             seasonActive: p._seasonActive,
             dimmed: hasSeasonLinks && p._seasonActive === false,
-            seasonToggleBtn: _playbookToggleBtn(p.id, p._seasonActive !== false, isCoach && hasSeasonLinks && !readOnly)
+            seasonToggleBtn: _playbookToggleBtn(p.id, p._seasonActive !== false, isCoach && hasSeasonLinks && !readOnly && canEditSharedLibrary())
           })).join('')}
         </div>
       `}
 
-      ${isCoach && orphanItems.length > 0 && !readOnly ? `
+      ${isCoach && orphanItems.length > 0 && !readOnly && canEditSharedLibrary() ? `
         <div class="section-header" style="margin-top:18px">
           <div>
             <div class="eyebrow-muted">Hors playbook de la saison</div>
@@ -10001,6 +10275,7 @@ function toggleShowInactivePlays() {
 // fonction, normalement addPlayToCurrentSeason est utilisée).
 // NB: variante depuis le wizard d'édition (modal) : togglePlayEditorSeasonActive.
 function toggleSeasonPlayActive(playId) {
+  if (_denyIfScopedCoach()) return;
   const seasonId = state.currentSeasonId;
   if (!seasonId) return;
   if (isCurrentSeasonReadOnly()) return;
@@ -10264,7 +10539,7 @@ function renderPlayDetail() {
         </div>
       ` : ''}
 
-      ${isCoach ? `
+      ${isCoach && canEditSharedLibrary() ? `
         <div style="padding:14px 18px 24px;display:flex;gap:8px">
           <button class="btn btn-secondary btn-block" onclick="editPlay('${p.id}')">✎ Modifier</button>
           <button class="btn btn-danger" onclick="deletePlay('${p.id}')">🗑</button>
@@ -10313,6 +10588,7 @@ function navPlayFull(playId, delta) {
 }
 
 function editPlay(id) {
+  if (_denyIfScopedCoach()) return; // playbook = édition admin only
   const isNew = !id;
   const p = isNew
     ? { id: uid(), cat: 'off', title: '', desc: '', tags: [], videoUrl: '', videos: [], images: [], concepts: [], attachments: [] }
@@ -10658,6 +10934,7 @@ function addCustomConcept() {
   openConceptPicker();
 }
 function savePlay(id, isNew) {
+  if (_denyIfScopedCoach()) return;
   try {
     const title = document.getElementById('p-title').value.trim();
     if (!title) return alert('Titre requis');
@@ -10704,6 +10981,7 @@ function savePlay(id, isNew) {
   }
 }
 function deletePlay(id) {
+  if (_denyIfScopedCoach()) return;
   if (!confirm('Supprimer ce play ?')) return;
   state.plays = state.plays.filter(x => x.id !== id);
   state.view = null;
@@ -24543,6 +24821,7 @@ function isOffseasonActive() {
 // éditer / dupliquer / supprimer.
 function openOffseasonConfig() {
   const progs = state.programs || [];
+  const canEdit = canEditSharedLibrary(); // prépa physique = édition admin only
   const card = (p) => {
     const active = _isProgramActive(p);
     const exCount = p.mode === 'daily'
@@ -24567,11 +24846,11 @@ function openOffseasonConfig() {
               <span>${logN} complétion${logN>1?'s':''}</span>
             </div>
           </div>
-          <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
+          ${canEdit ? `<div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
             <button class="btn btn-icon" title="Éditer" onclick="openProgramEditor('${p.id}')" style="width:28px;height:28px">✎</button>
             <button class="btn btn-icon" title="Dupliquer" onclick="cloneProgram('${p.id}')" style="width:28px;height:28px">⧉</button>
             <button class="btn btn-icon" title="Supprimer" onclick="confirmDeleteProgram('${p.id}')" style="width:28px;height:28px;color:var(--red)">🗑</button>
-          </div>
+          </div>` : ''}
         </div>
       </div>`;
   };
@@ -24587,10 +24866,11 @@ function openOffseasonConfig() {
       <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:14px;font-size:11px;color:var(--ink-2);line-height:1.5">
         Gère plusieurs programmes (prépa estivale, reprise, individualisé…). Chaque joueuse suit le programme <strong>actif</strong>. Les complétions sont rattachées au bon programme.
       </div>
+      ${!canEdit ? `<div style="padding:8px 12px;background:var(--bg-3);border-radius:6px;margin-bottom:12px;font-size:11px;color:var(--ink-3);line-height:1.5">👁 Consultation — la prépa physique est éditée par l'admin.</div>` : ''}
       ${progs.length === 0
-        ? `<div style="padding:18px;text-align:center;color:var(--ink-3);font-size:12px;font-style:italic;border:1px dashed var(--border);border-radius:8px;margin-bottom:12px">Aucun programme · crée ton premier programme ci-dessous</div>`
+        ? `<div style="padding:18px;text-align:center;color:var(--ink-3);font-size:12px;font-style:italic;border:1px dashed var(--border);border-radius:8px;margin-bottom:12px">Aucun programme${canEdit ? ' · crée ton premier programme ci-dessous' : ''}</div>`
         : progs.map(card).join('')}
-      <button class="btn btn-primary btn-block" onclick="openProgramEditor('new')" style="margin-top:4px">+ Nouveau programme</button>
+      ${canEdit ? `<button class="btn btn-primary btn-block" onclick="openProgramEditor('new')" style="margin-top:4px">+ Nouveau programme</button>` : ''}
     </div>
   `);
 }
@@ -24646,6 +24926,7 @@ function confirmDeleteProgram(id) {
 }
 
 function deleteProgram(id) {
+  if (_denyIfScopedCoach()) return; // prépa physique = admin only
   const idx = (state.programs || []).findIndex(x => x.id === id);
   if (idx < 0) return;
   const p = state.programs[idx];
@@ -24685,6 +24966,7 @@ function setOffseasonMode(mode) {
 
 function renderOffseasonEditor() {
   const e = state._editingOffseason;
+  const canEdit = canEditSharedLibrary(); // prépa physique = édition admin only
   openModal(`
     <div class="modal-header">
       <div>
@@ -24744,22 +25026,22 @@ function renderOffseasonEditor() {
         `).join('')}
       </div>
 
-      <button class="btn btn-secondary btn-block" onclick="addOffseasonStep()" style="margin-bottom:14px">+ Exercice personnalisé</button>
+      ${canEdit ? `<button class="btn btn-secondary btn-block" onclick="addOffseasonStep()" style="margin-bottom:14px">+ Exercice personnalisé</button>
 
       <div class="eyebrow-muted" style="margin-bottom:6px;font-size:9px">Templates rapides (tap pour ajouter)</div>
       <div style="display:flex;flex-wrap:wrap;gap:4px">
         ${OFFSEASON_TEMPLATES.map((t, i) => `
           <button class="feedback-suggest-chip suggest-pos" onclick="addOffseasonTemplate(${i})">+ ${esc(t.label)}</button>
         `).join('')}
-      </div>
+      </div>` : ''}
       `}
     </div>
     <div class="modal-footer" style="flex-direction:column;gap:6px">
       <div style="display:flex;gap:6px;width:100%">
-        <button class="btn btn-secondary btn-block" onclick="state._editingOffseason=null;openOffseasonConfig()">Annuler</button>
-        <button class="btn btn-primary btn-block" onclick="saveOffseason()">Enregistrer</button>
+        <button class="btn btn-secondary btn-block" onclick="state._editingOffseason=null;openOffseasonConfig()">${canEdit ? 'Annuler' : 'Fermer'}</button>
+        ${canEdit ? `<button class="btn btn-primary btn-block" onclick="saveOffseason()">Enregistrer</button>` : ''}
       </div>
-      ${!e._isNew && (state.programs || []).some(p => p.id === e.id) ? `<button class="btn btn-ghost btn-block" style="color:var(--red);font-size:11px" onclick="confirmDeleteProgram('${e.id}')">🗑 Supprimer le programme</button>` : ''}
+      ${canEdit && !e._isNew && (state.programs || []).some(p => p.id === e.id) ? `<button class="btn btn-ghost btn-block" style="color:var(--red);font-size:11px" onclick="confirmDeleteProgram('${e.id}')">🗑 Supprimer le programme</button>` : ''}
     </div>
   `);
 }
@@ -24903,6 +25185,7 @@ function setOffseasonDayField(date, idx, field, value) {
 }
 
 function saveOffseason() {
+  if (_denyIfScopedCoach()) return; // prépa physique = édition admin only
   const e = state._editingOffseason;
   const title = document.getElementById('os-title').value.trim() || 'Prépa estivale';
   const startDate = document.getElementById('os-start').value;
@@ -27867,6 +28150,7 @@ function saveFFBBConfig() {
 // Synchronisé via l'entité 'team' (table team_settings), pas via ffbb_config.
 // ============================================================
 function editTeamIdentity() {
+  if (_denyIfScopedCoach()) return; // identité club = réglage admin
   if (!state.team) state.team = { displayNickname: '' };
   const t = state.team;
   openModal(`
