@@ -136,6 +136,37 @@ function approveGage(id) {
   g.status = 'approved'; g.moderatedBy = (currentCoach() || {}).id || 'admin'; return true;
 }
 
+// ---- Postes / taille / date de naissance (copie fidèle des règles index.html) ----
+function _normPostes(arr) { return (Array.isArray(arr) ? arr : []).map(Number).filter(n => n >= 1 && n <= 5).filter((n, i, a) => a.indexOf(n) === i).sort((a, b) => a - b); }
+function _dobMin() { return '1950-01-01'; }
+function _dobMaxRef(refIso) { const d = new Date(refIso + 'T00:00:00'); d.setFullYear(d.getFullYear() - 8); const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, '0'), day = String(d.getDate()).padStart(2, '0'); return `${y}-${m}-${day}`; }
+function _ageFromDob(dob, refIso) {
+  if (!dob) return null;
+  const b = new Date(dob + 'T00:00:00'); if (isNaN(b.getTime())) return null;
+  const now = new Date(refIso + 'T00:00:00');
+  let age = now.getFullYear() - b.getFullYear();
+  const m = now.getMonth() - b.getMonth();
+  if (m < 0 || (m === 0 && now.getDate() < b.getDate())) age--;
+  return (age >= 0 && age < 120) ? age : null;
+}
+function _playerVisibleToUser(pid) {
+  if (!isScopedCoach()) return true;
+  return visiblePlayersForUser(getSeasonPlayers(getActiveSeasonId(), { team: 'all' })).some(p => p.id === pid);
+}
+// Édition des champs joueuse (postes/taille/dob) avec gating de rôle + validation.
+function editPlayerFields(actorSetup, pid, { postes, tailleCm, dateNaissance }, { requirePoste = false } = {}) {
+  actorSetup();
+  // Coach : uniquement ses joueuses. Joueuse : uniquement elle-même.
+  if (state.auth.role === 'coach') { if (!_playerVisibleToUser(pid)) return { ok: false, reason: 'scope' }; }
+  else if (state.auth.role === 'player') { if (state.auth.playerId !== pid) return { ok: false, reason: 'scope' }; }
+  const p = (state.players || []).find(x => x.id === pid); if (!p) return { ok: false, reason: 'notfound' };
+  const np = _normPostes(postes);
+  if (requirePoste && !np.length) return { ok: false, reason: 'poste-required' };
+  if (tailleCm != null && (tailleCm < 140 || tailleCm > 220)) return { ok: false, reason: 'taille' };
+  p.postes = np; p.tailleCm = (tailleCm != null ? tailleCm : null); p.dateNaissance = dateNaissance || null;
+  return { ok: true };
+}
+
 // ---------------- HARNAIS ----------------
 function reset() {
   _uid = 0; CLOCK = 1000;
@@ -234,4 +265,41 @@ reset();
 state.auth = { role: 'coach', coachId: 'zzz', coachRole: 'coach', coachName: 'X', teams: ['e2'] };
 ok('coachId inconnu + snapshot coach → reste scopé (pas admin)', isScopedCoach() && !isAdminCoach());
 
-console.log(`\n✓ ${passed} assertions passées — rôles multi-coach & multi-équipes OK`);
+// === 10. Postes / taille / date de naissance ===
+reset();
+asAdmin(); const posteCoach = createCoach('Nadia', ['e2']);
+// Coach non-admin édite postes+taille+dob sur SA joueuse (p3 = e2)
+let r = editPlayerFields(() => asCoach(posteCoach), 'p3', { postes: [1, 3], tailleCm: 172, dateNaissance: '2004-05-20' });
+ok('coach E2 édite postes+taille+dob de sa joueuse p3', r.ok === true);
+ok('postes normalisés + triés', JSON.stringify(state.players.find(p => p.id === 'p3').postes) === JSON.stringify([1, 3]));
+ok('taille enregistrée', state.players.find(p => p.id === 'p3').tailleCm === 172);
+// Coach non-admin NE peut PAS éditer une joueuse hors effectif (p1 = e1)
+r = editPlayerFields(() => asCoach(posteCoach), 'p1', { postes: [5] });
+ok('coach E2 NE peut PAS éditer p1 (hors effectif)', r.ok === false && r.reason === 'scope');
+// Validation taille hors bornes
+r = editPlayerFields(() => asCoach(posteCoach), 'p3', { postes: [2], tailleCm: 300 });
+ok('taille 300 rejetée', r.ok === false && r.reason === 'taille');
+// Postes dédupliqués + hors plage filtrés
+ok('_normPostes([5,5,3,9,0,1]) = [1,3,5]', JSON.stringify(_normPostes([5, 5, 3, 9, 0, 1])) === JSON.stringify([1, 3, 5]));
+// Joueuse édite SON profil (min 1 poste requis)
+reset();
+state.auth = { role: 'player', playerId: 'p2' };
+r = editPlayerFields(() => { state.auth = { role: 'player', playerId: 'p2' }; }, 'p2', { postes: [], tailleCm: 168 }, { requirePoste: true });
+ok('joueuse : 0 poste rejeté (min 1)', r.ok === false && r.reason === 'poste-required');
+r = editPlayerFields(() => { state.auth = { role: 'player', playerId: 'p2' }; }, 'p2', { postes: [4], tailleCm: 168, dateNaissance: '2005-01-01' }, { requirePoste: true });
+ok('joueuse édite son profil (≥1 poste)', r.ok === true && state.players.find(p => p.id === 'p2').tailleCm === 168);
+// Joueuse NE peut PAS éditer une autre joueuse
+r = editPlayerFields(() => { state.auth = { role: 'player', playerId: 'p2' }; }, 'p1', { postes: [1] });
+ok('joueuse NE peut PAS éditer une autre joueuse', r.ok === false && r.reason === 'scope');
+// Admin édite n'importe quelle joueuse
+r = editPlayerFields(() => asAdmin(), 'p1', { postes: [5], tailleCm: 190 });
+ok('admin édite n\'importe quelle joueuse', r.ok === true);
+// Calcul d'âge (cas connu, ref 2026-07-10)
+ok('âge 2004-05-20 au 2026-07-10 = 22 ans', _ageFromDob('2004-05-20', '2026-07-10') === 22);
+ok('âge 2004-08-01 au 2026-07-10 = 21 ans (anniv pas encore passé)', _ageFromDob('2004-08-01', '2026-07-10') === 21);
+ok('âge dob vide = null', _ageFromDob('', '2026-07-10') === null);
+// Bornes dob : max = ref - 8 ans
+ok('dobMax(2026-07-10) = 2018-07-10', _dobMaxRef('2026-07-10') === '2018-07-10');
+ok('dobMin = 1950-01-01', _dobMin() === '1950-01-01');
+
+console.log(`\n✓ ${passed} assertions passées — rôles multi-coach & multi-équipes + postes/taille/naissance OK`);
