@@ -98,6 +98,27 @@ Légende : ✅ autorisé · ❌ interdit / masqué · 👁 lecture seule · — 
 - **Golden path mono-coach** : tant qu'aucun coach non-admin n'existe, l'app est
   **strictement identique** à avant (pas de sélecteur de coach au login, admin implicite).
 
+## Champs profil : postes, taille, date de naissance
+
+Ajoutés dans la même PR (migrations `20260709_002` postes/taille, `20260709_003` date de naissance).
+
+| Champ | Table | Type | Édité par | Visible par |
+|---|---|---|---|---|
+| `postes` | players | `int[]` (valeurs 1–5) | joueuse (soi) + coach (ses joueuses) | coachs (leurs joueuses) |
+| `taille_cm` | players | `int` nullable | joueuse (soi) + coach (ses joueuses) | coachs (leurs joueuses) |
+| `date_naissance` | players **et** coaches | `date` nullable | soi-même | joueuse : soi ; coach : ses joueuses + lui-même ; admin : tout |
+
+- Postes 1–5 = **meneuse / arrière / ailière / ailière forte / pivot** (multi-valué, chips toggle `PLAYER_POSTES`, distinct du `POSTES` des compos/lineups).
+- **Âge calculé** (`_ageFromDob`) affiché « nn ans » sur la fiche + la liste roster ; date affichée en `JJ/MM/AAAA`.
+- **Filtre roster par poste** (bonus) : chips `Tous · 1..5` dans la liste des joueuses (coach).
+- Un coach non-admin voit/édite ces champs **uniquement sur ses joueuses** (`_playerVisibleToUser` + liste roster scopée) ; la gestion roster (ajout/retrait/attribution d'équipe) reste admin.
+
+### Décisions tranchées (postes/taille/naissance)
+- **Sélecteur postes** : chips toggle (plus rapide/lisible mobile) — retenu.
+- **Cardinalité** : min **1 poste** exigé dans le profil **joueuse** (self-edit) ; côté **coach**, postes **optionnels** (il ne connaît pas toujours → ne pas bloquer l'édition d'une joueuse legacy sans poste).
+- **Taille** : bornée **140–220 cm** côté UI (DB check permissif 100–260), nullable, placeholder « ex : 170 ».
+- **Date de naissance** : bornée **1950-01-01 .. aujourd'hui−8 ans** côté UI, nullable, dans le bloc identité (après nom/postes/taille).
+
 ## Décisions de design tranchées en autonomie
 
 - **Modèle d'identité coach** : entité synchronisée `coaches` (pas la table `profiles`,

@@ -3405,6 +3405,12 @@ window.PbStore = {
     // clear → on l'envoie comme {} qui = "pas de feedback"). Cf
     // migration 20260524_005.
     row.feedback = p.feedback || {};
+    // Postes (int[] 1..5) + taille (cm) + date de naissance — toujours envoyés
+    // (cf. migrations 20260709_002/_003, à appliquer AVANT ce build). Rétrocompat
+    // de lecture assurée par le fallback de fetchPlayers.
+    row.postes = Array.isArray(p.postes) ? p.postes.filter(n => n >= 1 && n <= 5) : [];
+    row.taille_cm = Number.isFinite(p.tailleCm) ? p.tailleCm : null;
+    row.date_naissance = p.dateNaissance || null;
     const { error } = await sb.from('players').upsert(row);
     if (error) throw error;
   },
@@ -3439,9 +3445,12 @@ window.PbStore = {
   async fetchPlayers() {
     // last_seen_at peut ne pas encore exister en base (migration 20260601_001) :
     // on tente le select enrichi, fallback legacy si la colonne manque.
-    let res = await sb.from('players').select('id,name,num,photo,feedback,last_seen_at').order('num');
+    let res = await sb.from('players').select('id,name,num,photo,feedback,last_seen_at,postes,taille_cm,date_naissance').order('num');
     if (res.error) {
-      res = await sb.from('players').select('id,name,num,photo,feedback').order('num');
+      // Fallback si postes/taille_cm/date_naissance (migrations 20260709_002/_003)
+      // pas encore appliquées → les nouveaux champs restent locaux (préservés au merge).
+      res = await sb.from('players').select('id,name,num,photo,feedback,last_seen_at').order('num');
+      if (res.error) res = await sb.from('players').select('id,name,num,photo,feedback').order('num');
     }
     return res.data || [];
   },
@@ -4595,6 +4604,7 @@ const ENTITIES = [
           coachRole: r.coach_role === 'admin_coach' ? 'admin_coach' : 'coach',
           teams: Array.isArray(r.teams) && r.teams.length ? r.teams.filter(t => t === 'e1' || t === 'e2') : ['e1'],
           code: r.code || null,
+          dateNaissance: r.date_naissance || null,
           createdAt: r.created_at ? Date.parse(r.created_at) : null,
           updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null)
         };
@@ -4655,6 +4665,7 @@ function _dumpCoachRow(c) {
     teams: (Array.isArray(c.teams) ? c.teams.filter(t => t === 'e1' || t === 'e2') : []).length
       ? c.teams.filter(t => t === 'e1' || t === 'e2') : ['e1'],
     code: c.code || null,
+    date_naissance: c.dateNaissance || null,
     updated_at: c.updatedAt ? new Date(c.updatedAt).toISOString() : (c.createdAt ? new Date(c.createdAt).toISOString() : null)
   };
 }
@@ -6813,6 +6824,14 @@ function visiblePlayersForUser(players) {
     return tag === 'both' || teams.includes(tag);
   });
 }
+// Une joueuse (par id) est-elle dans la portée du user courant ? Admin/joueuse/
+// stat → toujours true ; coach non-admin → uniquement ses joueuses.
+function _playerVisibleToUser(pid) {
+  if (!isScopedCoach()) return true;
+  const sid = state.currentSeasonId;
+  const pool = (_seasonsLoaded() && sid) ? getSeasonPlayers(sid, { team: 'all' }) : (state.players || []);
+  return visiblePlayersForUser(pool).some(p => p.id === pid);
+}
 
 // Garde-fou "action réservée à l'admin" : true (bloqué) si l'utilisateur est un
 // coach non-admin → toast + on interrompt l'action. Utilisé pour le playbook, la
@@ -6825,6 +6844,78 @@ function _denyIfScopedCoach() {
 // Raccourci lisible pour les gabarits : le playbook & la prépa physique ne sont
 // éditables que par l'admin (ressources communes aux deux équipes).
 function canEditSharedLibrary() { return !isScopedCoach(); }
+
+// ============================================================
+// POSTES DE BASKET · TAILLE · ÂGE (cf. migrations 20260709_002/_003)
+// ============================================================
+// Postes 1..5 = meneuse / arrière / ailière / ailière forte / pivot. Multi-valué.
+// (Distinct de POSTES ~l.16332 qui sert aux compos/lineups, id pg/sg/sf/pf/c.)
+const PLAYER_POSTES = [
+  { n: 1, label: 'Meneuse', short: 'MEN' },
+  { n: 2, label: 'Arrière', short: 'ARR' },
+  { n: 3, label: 'Ailière', short: 'AIL' },
+  { n: 4, label: 'Ailière forte', short: 'AF' },
+  { n: 5, label: 'Pivot', short: 'PIV' }
+];
+function _posteLabel(n) { const p = PLAYER_POSTES.find(x => x.n === n); return p ? p.label : ('#' + n); }
+function _posteShort(n) { const p = PLAYER_POSTES.find(x => x.n === n); return p ? p.short : ('#' + n); }
+function _normPostes(arr) { return (Array.isArray(arr) ? arr : []).map(Number).filter(n => n >= 1 && n <= 5).filter((n, i, a) => a.indexOf(n) === i).sort((a, b) => a - b); }
+function _postesLabel(arr) { const a = _normPostes(arr); return a.length ? a.map(n => n + ' ' + _posteLabel(n)).join(' · ') : ''; }
+// Badges compacts « 1 · 4 » (numéros de poste) pour listes/fiches.
+function _postesBadges(arr) {
+  const a = _normPostes(arr);
+  if (!a.length) return '';
+  return a.map(n => `<span title="${esc(_posteLabel(n))}" style="display:inline-block;min-width:18px;text-align:center;font-size:10px;font-family:'JetBrains Mono';font-weight:700;color:var(--orange);background:rgba(255,107,0,0.13);border-radius:4px;padding:1px 5px;margin-right:3px">${n}</span>`).join('');
+}
+// Chips toggle 1..5 pour l'édition (id-préfixé pour cohabiter dans un même DOM).
+function _postesChipsEditor(selected, idPrefix) {
+  const s = new Set(_normPostes(selected));
+  return `<div id="${idPrefix}-postes" data-postes="${_normPostes(selected).join(',')}" style="display:flex;flex-wrap:wrap;gap:6px">
+    ${PLAYER_POSTES.map(p => {
+      const on = s.has(p.n);
+      return `<button type="button" data-poste="${p.n}" onclick="_togglePosteChip('${idPrefix}',${p.n})" class="btn ${on ? 'btn-primary' : 'btn-secondary'}" style="min-height:40px;padding:0 12px;font-size:12px" aria-pressed="${on}">${p.n} · ${esc(p.label)}</button>`;
+    }).join('')}
+  </div>`;
+}
+function _togglePosteChip(idPrefix, n) {
+  const host = document.getElementById(idPrefix + '-postes'); if (!host) return;
+  const cur = new Set((host.dataset.postes || '').split(',').filter(Boolean).map(Number));
+  if (cur.has(n)) cur.delete(n); else cur.add(n);
+  host.dataset.postes = [...cur].sort((a, b) => a - b).join(',');
+  const btn = host.querySelector(`[data-poste="${n}"]`);
+  if (btn) {
+    const on = cur.has(n);
+    btn.classList.toggle('btn-primary', on); btn.classList.toggle('btn-secondary', !on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
+}
+function _readPostesChips(idPrefix) {
+  const host = document.getElementById(idPrefix + '-postes'); if (!host) return [];
+  return _normPostes((host.dataset.postes || '').split(',').filter(Boolean).map(Number));
+}
+// Bornes de saisie date de naissance : 1950-01-01 .. aujourd'hui - 8 ans.
+function _dobMin() { return '1950-01-01'; }
+function _dobMax() { const d = new Date(); d.setFullYear(d.getFullYear() - 8); return isoDate(d); }
+// Âge en années révolues à partir d'une date ISO 'YYYY-MM-DD'. null si invalide.
+function _ageFromDob(dob) {
+  if (!dob) return null;
+  const b = new Date(dob + 'T00:00:00');
+  if (isNaN(b.getTime())) return null;
+  const now = new Date();
+  let age = now.getFullYear() - b.getFullYear();
+  const m = now.getMonth() - b.getMonth();
+  if (m < 0 || (m === 0 && now.getDate() < b.getDate())) age--;
+  return (age >= 0 && age < 120) ? age : null;
+}
+// Affichage localisé fr d'une date ISO → 'JJ/MM/AAAA' (+ '· nn ans' si withAge).
+function _fmtDob(dob, withAge) {
+  if (!dob) return '';
+  const parts = String(dob).slice(0, 10).split('-');
+  if (parts.length !== 3) return esc(dob);
+  const txt = parts[2] + '/' + parts[1] + '/' + parts[0];
+  const age = withAge ? _ageFromDob(dob) : null;
+  return txt + (age != null ? ' · ' + age + ' ans' : '');
+}
 
 // ============================================================
 // AUTH
@@ -8155,6 +8246,103 @@ function deleteCoach(id) {
   return true;
 }
 
+// ---- Profil JOUEUSE (self-edit : postes / taille / date de naissance) ----
+function openMyProfile() {
+  const p = currentPlayer(); if (!p) return;
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">👤 Mon profil</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="fld">
+        <label class="fld-label">Poste(s)</label>
+        ${_postesChipsEditor(p.postes, 'myp')}
+        <div style="margin-top:6px;font-size:10px;color:var(--ink-3)">Sélectionne au moins un poste.</div>
+      </div>
+      <div class="fld-row" style="margin-top:12px">
+        <div class="fld" style="max-width:130px">
+          <label class="fld-label">Taille</label>
+          <div style="display:flex;align-items:center;gap:6px">
+            <input id="myp-taille" type="number" min="140" max="220" value="${Number.isFinite(p.tailleCm) ? p.tailleCm : ''}" placeholder="ex : 170" style="width:90px">
+            <span style="font-size:12px;color:var(--ink-3)">cm</span>
+          </div>
+        </div>
+        <div class="fld">
+          <label class="fld-label">Date de naissance</label>
+          <input id="myp-dob" type="date" min="${_dobMin()}" max="${_dobMax()}" value="${esc(p.dateNaissance || '')}">
+          ${p.dateNaissance && _ageFromDob(p.dateNaissance) != null ? `<div style="margin-top:4px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">${_ageFromDob(p.dateNaissance)} ans</div>` : ''}
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Annuler</button>
+      <button class="btn btn-primary" onclick="saveMyProfile()">Enregistrer</button>
+    </div>
+  `);
+}
+function saveMyProfile() {
+  const p = currentPlayer(); if (!p) return;
+  const postes = _readPostesChips('myp');
+  if (!postes.length) { try { alert('Choisis au moins un poste.'); } catch (e) {} return; }
+  const tEl = document.getElementById('myp-taille');
+  const traw = tEl ? tEl.value.trim() : '';
+  let taille = null;
+  if (traw !== '') { const t = parseInt(traw, 10); if (!Number.isFinite(t) || t < 140 || t > 220) { alert('Taille invalide (140–220 cm) ou laisse vide.'); return; } taille = t; }
+  const dobEl = document.getElementById('myp-dob');
+  const dob = dobEl ? dobEl.value : '';
+  if (dob && (dob < _dobMin() || dob > _dobMax())) { alert('Date de naissance hors bornes plausibles.'); return; }
+  p.postes = postes; p.tailleCm = taille; p.dateNaissance = dob || null;
+  persist();
+  if (window.PbStore) PbStore.upsertPlayer(p).catch(e => console.warn('[sync] upsertPlayer:', e.message));
+  closeModal();
+  if (typeof showToast === 'function') showToast('✓ Profil mis à jour');
+}
+
+// ---- Profil COACH (self-edit : prénom + date de naissance ; admin & non-admin) ----
+function openCoachProfile() {
+  const c = currentCoach(); if (!c) return;
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">👤 Mon profil</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="fld">
+        <label class="fld-label">Prénom</label>
+        <input id="cpf-name" value="${esc(c.name || '')}" maxlength="40" placeholder="Ton prénom">
+      </div>
+      <div class="fld" style="margin-top:10px">
+        <label class="fld-label">Date de naissance</label>
+        <input id="cpf-dob" type="date" min="${_dobMin()}" max="${_dobMax()}" value="${esc(c.dateNaissance || '')}">
+        ${c.dateNaissance && _ageFromDob(c.dateNaissance) != null ? `<div style="margin-top:4px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">${_ageFromDob(c.dateNaissance)} ans</div>` : ''}
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Annuler</button>
+      <button class="btn btn-primary" onclick="saveCoachProfile()">Enregistrer</button>
+    </div>
+  `);
+}
+function saveCoachProfile() {
+  const c = currentCoach(); if (!c) return;
+  let stored = _coachById(c.id);
+  if (!stored && c.coachRole === 'admin_coach') stored = _seedAdminCoach();
+  if (!stored) return;
+  const name = (document.getElementById('cpf-name') || {}).value || '';
+  const dobEl = document.getElementById('cpf-dob');
+  const dob = dobEl ? dobEl.value : '';
+  if (dob && (dob < _dobMin() || dob > _dobMax())) { alert('Date de naissance hors bornes plausibles.'); return; }
+  stored.name = name.trim().slice(0, 40) || 'Coach';
+  stored.dateNaissance = dob || null;
+  stored.updatedAt = Date.now();
+  if (state.auth) state.auth.coachName = stored.name;
+  persist(); _coachFlush();
+  if (typeof render === 'function') render();
+  closeModal();
+  if (typeof showToast === 'function') showToast('✓ Profil mis à jour');
+}
+
 // Panneau admin : profil, coachs, effectifs, modération gages.
 function openAdminPanel() {
   if (!isAdminCoach()) return;
@@ -8372,6 +8560,9 @@ function openSettings() {
       </button>
 
       ${role === 'player' ? `
+        <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openMyProfile(),50)">
+          👤 Mon profil (postes, taille, naissance)
+        </button>
         <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>editMyPhoto(),50)">
           📷 ${player && player.photo ? 'Changer ma photo de profil' : 'Ajouter une photo de profil'}
         </button>
@@ -8383,6 +8574,11 @@ function openSettings() {
         </button>
       ` : ''}
 
+      ${role === 'coach' ? `
+        <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openCoachProfile(),50)">
+          👤 Mon profil (prénom, date de naissance)
+        </button>
+      ` : ''}
       ${role === 'coach' && admin ? `
         <button class="btn btn-primary btn-block mb-2" onclick="closeModal();setTimeout(()=>openAdminPanel(),50)">
           ⚙️ Admin (coachs, effectifs, modération)
@@ -26109,12 +26305,27 @@ function _effectifRosterBody() {
   const cur = getCurrentSeason();
   const archived = !!(cur && cur.status === 'archived');
   const editable = !!sid && !archived; // saison courante modifiable ?
+  // Coach non-admin : liste scopée à SES joueuses ; pas de gestion roster
+  // (ajout / rattachement / retrait = admin), mais édition postes/taille/dob/feedback OK.
+  const scoped = isScopedCoach();
+  const _visIds = scoped ? new Set(visiblePlayersForUser(
+    (_seasonsLoaded() && sid) ? getSeasonPlayers(sid, { team: 'all' }) : (state.players || [])
+  ).map(p => p.id)) : null;
+  let _rosterList = scoped ? (state.players || []).filter(p => _visIds.has(p.id)) : (state.players || []);
+  // Filtre par poste (ex : trouver les pivots = 5). 0 = tous.
+  const _pf = state._rosterPosteFilter || 0;
+  if (_pf) _rosterList = _rosterList.filter(p => _normPostes(p.postes).includes(_pf));
+  const _posteFilterBar = `<div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:14px">
+    <button class="btn ${_pf === 0 ? 'btn-primary' : 'btn-secondary'}" style="min-height:34px;padding:0 10px;font-size:11px" onclick="setRosterPosteFilter(0)">Tous</button>
+    ${PLAYER_POSTES.map(pp => `<button class="btn ${_pf === pp.n ? 'btn-primary' : 'btn-secondary'}" style="min-height:34px;padding:0 10px;font-size:11px" title="${esc(pp.label)}" onclick="setRosterPosteFilter(${pp.n})">${pp.n}</button>`).join('')}
+  </div>`;
   const inSeason = pid => !!sid && (state.seasonPlayers || []).some(sp => sp.seasonId === sid && sp.playerId === pid && !sp.leftAt);
   const hasLeftLink = pid => !!sid && (state.seasonPlayers || []).some(sp => sp.seasonId === sid && sp.playerId === pid && sp.leftAt);
   // Bouton de rattachement pour une joueuse hors de l'effectif de la saison :
   // « ↺ Réintégrer » si elle était partie (leftAt), sinon « + Ajouter ». Grisé
   // si saison archivée / absente (avec tooltip explicatif).
   const attachBtn = p => {
+    if (scoped) return ''; // rattachement = action roster admin only
     if (inSeason(p.id)) return ''; // déjà dans l'effectif → pas de bouton
     const label = hasLeftLink(p.id) ? '↺ Réintégrer' : '+ Ajouter';
     if (!editable) {
@@ -26124,14 +26335,16 @@ function _effectifRosterBody() {
     return `<button class="btn btn-primary" style="font-size:10px;padding:6px 9px;flex-shrink:0" onclick="event.stopPropagation();attachPlayerToCurrentSeason('${esc(p.id)}')" title="Ajouter à la saison en cours">${label}</button>`;
   };
   return `
-      <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em;margin-bottom:14px">Roster global (toutes saisons). Une nouvelle joueuse est aussi ajoutée à la saison en cours.</div>
-      <div class="fld-row" style="margin-bottom:14px">
+      <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em;margin-bottom:14px">${scoped ? 'Tes joueuses. Ouvre une fiche pour ajuster postes, taille, date de naissance, points forts/faibles.' : 'Roster global (toutes saisons). Une nouvelle joueuse est aussi ajoutée à la saison en cours.'}</div>
+      ${scoped ? '' : `<div class="fld-row" style="margin-bottom:14px">
         <input id="pl-new-name" placeholder="Prénom" onkeydown="if(event.key==='Enter')addNewPlayer()">
         <input id="pl-new-num" type="number" placeholder="N°" min="0" max="99" onkeydown="if(event.key==='Enter')addNewPlayer()">
       </div>
-      <button class="btn btn-primary btn-block" onclick="addNewPlayer()">+ Ajouter</button>
-      <div style="margin-top:18px;display:flex;flex-direction:column;gap:6px">
-        ${state.players.map(p => {
+      <button class="btn btn-primary btn-block" onclick="addNewPlayer()">+ Ajouter</button>`}
+      <div style="margin-top:${scoped ? '4' : '18'}px">${_posteFilterBar}</div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        ${_rosterList.length === 0 ? `<div style="padding:16px;text-align:center;color:var(--ink-3);font-size:12px;font-style:italic">${_pf ? 'Aucune joueuse à ce poste.' : 'Aucune joueuse.'}</div>` : ''}
+        ${_rosterList.map(p => {
           const ls = _lastSeenBadge(p.lastSeenAt);
           const sTag = inSeason(p.id)
             ? '<span style="font-size:8px;font-family:\'JetBrains Mono\';color:#22c55e;background:rgba(34,197,94,0.10);padding:2px 5px;border-radius:4px;text-transform:uppercase;letter-spacing:0.04em">✓ saison</span>'
@@ -26142,6 +26355,7 @@ function _effectifRosterBody() {
             <div style="font-family:'Anton';font-size:18px;color:var(--orange);min-width:32px">#${p.num}</div>
             <div style="flex:1;min-width:0">
               <div style="display:flex;align-items:center;gap:6px"><div style="font-family:'Anton';text-transform:uppercase;font-size:13px">${esc(p.name)}</div>${sTag}</div>
+              ${(_normPostes(p.postes).length || _ageFromDob(p.dateNaissance) != null || Number.isFinite(p.tailleCm)) ? `<div style="margin-top:3px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">${_postesBadges(p.postes)}${Number.isFinite(p.tailleCm) ? `<span style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono'">${p.tailleCm}cm</span>` : ''}${_ageFromDob(p.dateNaissance) != null ? `<span style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono'">${_ageFromDob(p.dateNaissance)} ans</span>` : ''}</div>` : ''}
               <div style="font-size:9px;color:${ls.color};font-family:'JetBrains Mono';margin-top:2px"${ls.exact ? ` title="Dernière connexion : ${ls.exact}"` : ''}><span style="font-size:7px;vertical-align:middle">${ls.dot}</span> ${ls.label}</div>
             </div>
             <div style="font-size:9px;color:${p.pin === '0000' ? 'var(--red)' : 'var(--ink-3)'};font-family:'JetBrains Mono';text-transform:uppercase">${p.pin === '0000' ? '⚠ pin 0000' : '✎ ouvrir'}</div>
@@ -26151,25 +26365,36 @@ function _effectifRosterBody() {
       </div>`;
 }
 
+// Filtre poste de la liste roster (ex : « 5 » = pivots). Toggle → re-render.
+function setRosterPosteFilter(n) {
+  n = Number(n) || 0;
+  state._rosterPosteFilter = (n === (state._rosterPosteFilter || 0)) ? 0 : n;
+  openEffectif('roster');
+}
+
 // ÉCRAN EFFECTIF UNIFIÉ — 2 onglets : [Saison en cours] / [Roster global].
 // Remplace les 2 anciennes portes ⚙ (« Effectif de la saison » + « Gérer les
 // joueuses »). Tous les call-sites existants (openSeasonRosterEditor /
 // managePlayers) y sont redirigés.
 function openEffectif(tab) {
   tab = (tab === 'roster') ? 'roster' : 'season';
+  // Coach non-admin : la gestion de saison (attribution d'équipe, roster) est
+  // admin only → il reste sur l'onglet « Mes joueuses » (roster scopé).
+  const scoped = isScopedCoach();
+  if (scoped) tab = 'roster';
   state._effectifOpen = true;
   state._effectifTab = tab;
   openModal(`
     <div class="modal-header">
-      <div class="modal-title">👥 Effectif</div>
+      <div class="modal-title">👥 ${scoped ? 'Mes joueuses' : 'Effectif'}</div>
       <button class="modal-close" onclick="state._effectifOpen=false;closeModal()">✕</button>
     </div>
-    <div style="padding:14px 16px 0">
+    ${scoped ? '' : `<div style="padding:14px 16px 0">
       <div class="segmented" style="margin:0">
         <button class="segmented-btn ${tab === 'season' ? 'active' : ''}" onclick="openEffectif('season')">Saison en cours</button>
         <button class="segmented-btn ${tab === 'roster' ? 'active' : ''}" onclick="openEffectif('roster')">Roster global</button>
       </div>
-    </div>
+    </div>`}
     <div class="modal-body" ${tab === 'roster' ? _modalScrollAttr('players') : ''}>
       ${tab === 'roster' ? _effectifRosterBody() : _effectifSeasonBody()}
     </div>
@@ -26196,6 +26421,7 @@ function addNewPlayer() {
   managePlayers();
 }
 function removePlayer(pid) {
+  if (_denyIfScopedCoach()) return; // gestion roster = admin only
   const p = state.players.find(x => x.id === pid);
   if (!p || !confirm('Supprimer définitivement ' + p.name + ' ?\n\nLa joueuse est retirée du roster global et de toutes les saisons. Ses présences, stats et défis associés sont effacés. Cette action est définitive.')) return;
   state.players = state.players.filter(x => x.id !== pid);
@@ -26212,6 +26438,8 @@ function removePlayer(pid) {
 function editPlayer(pid) {
   const p = state.players.find(x => x.id === pid);
   if (!p) return;
+  if (!_playerVisibleToUser(pid)) { _denyIfScopedCoach(); return; } // coach non-admin : ses joueuses only
+  const canRoster = !isScopedCoach(); // retrait d'effectif = admin only
   openModal(`
     <div class="modal-header">
       <div class="modal-title">Modifier · ${esc(p.name)}</div>
@@ -26238,6 +26466,25 @@ function editPlayer(pid) {
         <div class="fld" style="max-width:90px">
           <label class="fld-label">N°</label>
           <input id="edp-num" type="number" value="${p.num}" min="0" max="99">
+        </div>
+      </div>
+
+      <div class="fld">
+        <label class="fld-label">Poste(s)</label>
+        ${_postesChipsEditor(p.postes, 'edp')}
+      </div>
+      <div class="fld-row" style="margin-top:10px">
+        <div class="fld" style="max-width:130px">
+          <label class="fld-label">Taille</label>
+          <div style="display:flex;align-items:center;gap:6px">
+            <input id="edp-taille" type="number" min="140" max="220" value="${Number.isFinite(p.tailleCm) ? p.tailleCm : ''}" placeholder="ex : 170" style="width:90px">
+            <span style="font-size:12px;color:var(--ink-3)">cm</span>
+          </div>
+        </div>
+        <div class="fld">
+          <label class="fld-label">Date de naissance</label>
+          <input id="edp-dob" type="date" min="${_dobMin()}" max="${_dobMax()}" value="${esc(p.dateNaissance || '')}">
+          ${p.dateNaissance && _ageFromDob(p.dateNaissance) != null ? `<div style="margin-top:4px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">${_ageFromDob(p.dateNaissance)} ans</div>` : ''}
         </div>
       </div>
 
@@ -26304,7 +26551,7 @@ function editPlayer(pid) {
         <button class="btn btn-secondary btn-block" onclick="closeModal();setTimeout(()=>managePlayers(),50)">Annuler</button>
         <button class="btn btn-primary btn-block" onclick="savePlayerEdit('${pid}')">Enregistrer</button>
       </div>
-      <button class="btn btn-ghost btn-block" style="color:var(--red);font-size:11px" onclick="removePlayer('${pid}')">🗑 Retirer cette joueuse de l'effectif</button>
+      ${canRoster ? `<button class="btn btn-ghost btn-block" style="color:var(--red);font-size:11px" onclick="removePlayer('${pid}')">🗑 Retirer cette joueuse de l'effectif</button>` : ''}
     </div>
   `);
   setTimeout(() => document.getElementById('edp-name')?.focus(), 100);
@@ -26313,15 +26560,32 @@ function editPlayer(pid) {
 function savePlayerEdit(pid) {
   const p = state.players.find(x => x.id === pid);
   if (!p) return;
+  if (!_playerVisibleToUser(pid)) { _denyIfScopedCoach(); return; }
   const name = document.getElementById('edp-name').value.trim();
   const num = parseInt(document.getElementById('edp-num').value) || 0;
   const pin = document.getElementById('edp-pin').value.trim();
   if (!name) { alert('Le nom est requis'); return; }
   if (!/^\d{4}$/.test(pin)) { alert('Le PIN doit être 4 chiffres'); return; }
+  // Postes (optionnel côté coach : il ne connaît pas forcément) / taille / dob.
+  const postes = _readPostesChips('edp');
+  const tailleEl = document.getElementById('edp-taille');
+  const tailleRaw = tailleEl ? tailleEl.value.trim() : '';
+  let tailleCm = null;
+  if (tailleRaw !== '') {
+    const t = parseInt(tailleRaw, 10);
+    if (!Number.isFinite(t) || t < 140 || t > 220) { alert('Taille invalide (140–220 cm) ou laisse vide.'); return; }
+    tailleCm = t;
+  }
+  const dobEl = document.getElementById('edp-dob');
+  const dob = dobEl ? dobEl.value : '';
+  if (dob && (dob < _dobMin() || dob > _dobMax())) { alert('Date de naissance hors bornes plausibles.'); return; }
   const pinChanged = (p.pin !== pin);
   p.name = name;
   p.num = num;
   p.pin = pin;
+  p.postes = postes;
+  p.tailleCm = tailleCm;
+  p.dateNaissance = dob || null;
   persist();
   if (window.PbStore) {
     PbStore.upsertPlayer(p).catch(e => console.warn('[sync] upsertPlayer:', e.message));
@@ -28578,7 +28842,12 @@ function _initPlayersSync() {
           photo: rp.photo || lp.photo || null,
           pin: lp.pin || '0000',
           feedback: rp.feedback || lp.feedback || {},
-          lastSeenAt: rp.last_seen_at ? Date.parse(rp.last_seen_at) : (lp.lastSeenAt || null) };
+          lastSeenAt: rp.last_seen_at ? Date.parse(rp.last_seen_at) : (lp.lastSeenAt || null),
+          // Postes / taille / date de naissance : si la colonne manque (fallback
+          // select), rp.xxx = undefined → on garde la valeur locale.
+          postes: Array.isArray(rp.postes) ? rp.postes : (lp.postes || []),
+          tailleCm: (rp.taille_cm != null) ? rp.taille_cm : (lp.tailleCm != null ? lp.tailleCm : null),
+          dateNaissance: (rp.date_naissance !== undefined) ? (rp.date_naissance || null) : (lp.dateNaissance || null) };
       });
       const remoteIds = new Set(remote.map(r => r.id));
       const localOnly = state.players.filter(p => !remoteIds.has(p.id));
@@ -28702,7 +28971,10 @@ function _initPlayersSync() {
         photo: row.photo || lp.photo || null,
         pin: lp.pin || '0000',
         feedback: row.feedback || lp.feedback || {},
-        lastSeenAt: row.last_seen_at ? Date.parse(row.last_seen_at) : (lp.lastSeenAt || null) };
+        lastSeenAt: row.last_seen_at ? Date.parse(row.last_seen_at) : (lp.lastSeenAt || null),
+        postes: Array.isArray(row.postes) ? row.postes : (lp.postes || []),
+        tailleCm: (row.taille_cm != null) ? row.taille_cm : (lp.tailleCm != null ? lp.tailleCm : null),
+        dateNaissance: (row.date_naissance !== undefined) ? (row.date_naissance || null) : (lp.dateNaissance || null) };
       if (i >= 0) state.players[i] = patched;
       else state.players.push(patched);
     } else if (event === 'DELETE' && old) {
@@ -29421,7 +29693,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-10.56';
+const APP_VERSION = '2026-07-10.57';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
