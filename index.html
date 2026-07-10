@@ -4504,6 +4504,8 @@ const ENTITIES = [
       const fromRemote = rows.map(r => {
         const mapped = {
           id: r.id, text: r.text || '', authorId: r.author_id || null,
+          proposedBy: r.proposed_by || null,
+          moderatedBy: r.moderated_by || null,
           status: r.status || 'pending',
           assignedTo: r.assigned_to || null,
           assignedAt: r.assigned_at ? Date.parse(r.assigned_at) : null,
@@ -4615,6 +4617,8 @@ const ENTITIES = [
 function _dumpGageRow(g) {
   return {
     id: g.id, text: g.text || '', author_id: g.authorId || null,
+    proposed_by: g.proposedBy || null,   // 'coach:<id>' | 'player:<id>' (traçabilité modération)
+    moderated_by: g.moderatedBy || null, // '<admin coach id>'
     status: ['pending', 'approved', 'assigned', 'accepted', 'skipped', 'rejected'].includes(g.status) ? g.status : 'pending',
     assigned_to: g.assignedTo || null,
     assigned_at: g.assignedAt ? new Date(g.assignedAt).toISOString() : null,
@@ -15405,22 +15409,91 @@ function submitGageFromModal() {
   if (typeof showToast === 'function') showToast('🎁 Proposition envoyée à la coach');
 }
 
+// --- PROPOSITION D'UN COACH NON-ADMIN ---
+// Un coach non-admin ne garnit PAS le pool directement (contrairement à l'admin
+// via submitCoachGage) : sa proposition part en 'pending' et l'admin la modère.
+function _coachGageAuthorId() {
+  const c = currentCoach();
+  return 'coach:' + (c ? c.id : ((state.auth && state.auth.coachId) || 'admin'));
+}
+function submitCoachProposal(text) {
+  text = (text || '').trim().slice(0, GAGE_TEXT_MAX);
+  if (!text) return false;
+  const now = Date.now();
+  const author = _coachGageAuthorId();
+  state.gages = state.gages || [];
+  state.gages.unshift({
+    id: uid(), text, authorId: author, proposedBy: author, moderatedBy: null,
+    status: 'pending', assignedTo: null, assignedAt: null, revealedAt: null,
+    completedAt: null, rejectedReason: null, seasonId: getActiveSeasonId() || null,
+    gageType: 'standard', timeLimitHours: null, deletedAt: null,
+    createdAt: now, updatedAt: now
+  });
+  persist(); _gageFlush();
+  // PUSH : prévient l'admin qu'une proposition coach est à modérer.
+  try { notifyPush([_pushCoachKey()], { title: '🎁 Proposition de gage', body: 'Un coach a proposé un gage à modérer', url: '/', tag: 'gage-propose', type: 'gage_proposal' }); } catch (e) {}
+  return true;
+}
+function openCoachProposeGage() {
+  const author = _coachGageAuthorId();
+  const mine = (state.gages || []).filter(g => g.authorId === author)
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 8);
+  const statusLabel = s => s === 'pending' ? '⏳ En attente de validation (admin)'
+    : s === 'approved' ? '✅ Validé · dans le pool de tirage'
+    : s === 'rejected' ? '❌ Refusé' : s;
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">🎁 Proposer un gage</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:12px;color:var(--ink-3);line-height:1.5;margin-bottom:10px">
+        Ta proposition part <strong>en modération</strong> : l'admin la validera avant qu'elle entre dans le pool de tirage.
+      </div>
+      <textarea id="coach-propose-text" maxlength="${GAGE_TEXT_MAX}" rows="3" placeholder="Ex : porter le maillot à l'envers tout l'entraînement…" style="width:100%"></textarea>
+      <div style="display:flex;justify-content:flex-end;margin-top:10px">
+        <button class="btn btn-primary" onclick="submitCoachProposeFromModal()">Envoyer à l'admin</button>
+      </div>
+      ${mine.length ? `
+        <div style="margin-top:16px;border-top:1px solid var(--border-soft);padding-top:12px">
+          <div class="eyebrow-muted" style="margin-bottom:8px">Mes propositions</div>
+          ${mine.map(g => `
+            <div style="padding:8px 10px;background:var(--bg-3);border-radius:8px;margin-bottom:6px">
+              <div style="font-size:13px;color:var(--ink);line-height:1.4">${esc(g.text)}</div>
+              <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;text-transform:uppercase">${statusLabel(g.status)}${g.rejectedReason ? ' · ' + esc(g.rejectedReason) : ''}</div>
+            </div>`).join('')}
+        </div>` : ''}
+    </div>
+  `);
+  setTimeout(() => { const el = document.getElementById('coach-propose-text'); if (el) el.focus(); }, 80);
+}
+function submitCoachProposeFromModal() {
+  const el = document.getElementById('coach-propose-text');
+  if (!el || !el.value.trim()) return;
+  submitCoachProposal(el.value);
+  closeModal(); render();
+  if (typeof showToast === 'function') showToast('🎁 Proposition envoyée à l\'admin');
+}
+
 // --- Modération + assignation (coach) ---
 function approveGage(id) {
+  if (_denyIfScopedCoach()) return; // modération = admin only
   const g = _gageById(id); if (!g || g.status !== 'pending') return;
-  g.status = 'approved'; _gageTouch(g); persist(); _gageFlush(); render();
+  g.status = 'approved'; g.moderatedBy = (currentCoach() || {}).id || 'admin'; _gageTouch(g); persist(); _gageFlush(); render();
 }
 function rejectGage(id) {
+  if (_denyIfScopedCoach()) return; // modération = admin only
   const g = _gageById(id); if (!g || g.status !== 'pending') return;
   let reason = ''; try { reason = prompt('Raison du refus (optionnel) :') || ''; } catch (e) {}
   g.status = 'rejected'; g.rejectedReason = reason.trim() || null; g.completedAt = Date.now();
+  g.moderatedBy = (currentCoach() || {}).id || 'admin';
   _gageTouch(g); persist(); _gageFlush(); render();
 }
 // "➕ Faire tirer un gage à…" : le coach choisit QUI tire (et combien via dette),
 // pas QUEL gage. La joueuse piochera elle-même dans le pool à l'ouverture.
 function openAssignDraw() {
-  const pool = (_seasonsLoaded() && getActiveSeasonId())
-    ? getSeasonPlayers(getActiveSeasonId(), { team: 'all' }) : (state.players || []);
+  const pool = visiblePlayersForUser((_seasonsLoaded() && getActiveSeasonId())
+    ? getSeasonPlayers(getActiveSeasonId(), { team: 'all' }) : (state.players || []));
   const sorted = pool.slice().sort((a, b) => (a.num || 0) - (b.num || 0));
   const poolCount = currentSeasonGages().filter(_gageTirable).length;
   openModal(`
@@ -15470,6 +15543,7 @@ function cancelOwedDraws(pid) {
 // --- Coach : ajoute un gage DIRECTEMENT au pool (auto-validé, sans modération). ---
 // Flux parallèle à la proposition joueuse : le coach crée un gage déjà 'approved'.
 function submitCoachGage(text, type, hours) {
+  if (_denyIfScopedCoach()) return false; // ajout direct au pool = admin only
   text = (text || '').trim().slice(0, GAGE_TEXT_MAX);
   if (!text) return false;
   const now = Date.now();
@@ -15518,6 +15592,7 @@ function submitCoachGageFromModal() {
 // (deleted_at) : le gage sort du pool/tirage mais reste résolvable par id pour
 // l'historique des tirages passés qui le référencent (gageDraws.gageId).
 function openEditGage(id) {
+  if (_denyIfScopedCoach()) return; // édition du pool = admin only
   const g = _gageById(id); if (!g) return;
   openModal(`
     <div class="modal-header">
@@ -15549,6 +15624,7 @@ function saveGageEdit(id) {
   if (typeof showToast === 'function') showToast('✏️ Gage modifié');
 }
 function deleteGage(id) {
+  if (_denyIfScopedCoach()) return; // suppression du pool = admin only
   const g = _gageById(id); if (!g || g.deletedAt) return;
   const drawn = (state.gageDraws || []).filter(d => d.gageId === id).length;
   const msg = drawn
@@ -15565,8 +15641,8 @@ function deleteGage(id) {
 // et permet +1 / −1 / remise à zéro. La dette pilote le nb de tirages ajoutés
 // automatiquement à la prochaine assignation (cf. assignDrawsToPlayer).
 function _gageDebtManagerBody() {
-  const pool = (_seasonsLoaded() && getActiveSeasonId())
-    ? getSeasonPlayers(getActiveSeasonId(), { team: 'all' }) : (state.players || []);
+  const pool = visiblePlayersForUser((_seasonsLoaded() && getActiveSeasonId())
+    ? getSeasonPlayers(getActiveSeasonId(), { team: 'all' }) : (state.players || []));
   const sorted = pool.slice().sort((a, b) => (a.num || 0) - (b.num || 0));
   if (!sorted.length) return '<div style="color:var(--ink-3);font-size:13px">Aucune joueuse dans la saison.</div>';
   return `
@@ -15641,9 +15717,16 @@ function renderGageCoachHomeCard() {
     </div>`;
 }
 function renderGagesCoach() {
+  const admin = isAdminCoach(); // modération + garnissage pool = admin only
+  // Coach non-admin : ne voit/gère que les tirages de SES joueuses.
+  const active0 = getActiveSeasonId();
+  const visIds = admin ? null : new Set(visiblePlayersForUser(
+    (_seasonsLoaded() && active0) ? getSeasonPlayers(active0, { team: 'all' }) : (state.players || [])
+  ).map(p => p.id));
+  const mineDraw = d => admin || (visIds && visIds.has(d.playerId));
   const all = currentSeasonGages();
   const active = getActiveSeasonId();
-  const inSeasonDraw = d => !_seasonsLoaded() || !active || (d.seasonId ? d.seasonId === active : true);
+  const inSeasonDraw = d => (!_seasonsLoaded() || !active || (d.seasonId ? d.seasonId === active : true)) && mineDraw(d);
   const pending = all.filter(g => g.status === 'pending').sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   const pool = all.filter(_gageTirable).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   const draws = (state.gageDraws || []).filter(inSeasonDraw);
@@ -15668,14 +15751,15 @@ function renderGagesCoach() {
       <button class="detail-back" onclick="state.view=null;render()">← Équipe</button>
       <div class="px" style="padding-top:6px">
         <div class="display-lg" style="margin-bottom:2px">🎁 Boîte à gages</div>
-        <div style="font-size:12px;color:var(--ink-3);margin-bottom:14px">Modère les propositions, garnis le pool, puis fais <strong>tirer au sort</strong> un gage à une joueuse (elle découvre lequel au tirage).</div>
+        <div style="font-size:12px;color:var(--ink-3);margin-bottom:14px">${admin ? 'Modère les propositions, garnis le pool, puis fais <strong>tirer au sort</strong> un gage à une joueuse (elle découvre lequel au tirage).' : 'Fais <strong>tirer au sort</strong> un gage du pool à une de tes joueuses. Tu peux aussi proposer des idées (validées par l\'admin).'}</div>
         <button class="btn btn-primary btn-block" onclick="openAssignDraw()" style="margin-bottom:6px">➕ Faire tirer un gage à…</button>
         <div style="display:flex;gap:6px">
-          <button class="btn btn-secondary" style="flex:1" onclick="openCoachAddGage()">🎁 Ajouter un gage</button>
+          <button class="btn btn-secondary" style="flex:1" onclick="${admin ? 'openCoachAddGage()' : 'openCoachProposeGage()'}">🎁 ${admin ? 'Ajouter un gage' : 'Proposer un gage'}</button>
           <button class="btn btn-secondary" style="flex:1" onclick="openGageDebtManager()">🎛️ Gérer les dettes</button>
         </div>
       </div>
 
+      ${admin ? `
       <div class="section-header"><div><div class="eyebrow" style="color:var(--orange)">À modérer</div><h2 class="display-md mt-2">En attente (${pending.length})</h2></div></div>
       <div class="px">
         ${pending.length ? pending.map(g => card(`
@@ -15684,17 +15768,17 @@ function renderGagesCoach() {
             <button class="btn btn-primary" style="flex:1" onclick="approveGage('${g.id}')">✅ Approuver</button>
             <button class="btn btn-secondary" style="flex:1" onclick="rejectGage('${g.id}')">❌ Rejeter</button>
           </div>`)).join('') : '<div style="color:var(--ink-3);font-size:13px;font-style:italic;padding-bottom:8px">Rien à modérer.</div>'}
-      </div>
+      </div>` : ''}
 
       <div class="section-header"><div><div class="eyebrow">Pool (réservoir de tirage)</div><h2 class="display-md mt-2">Approuvés (${pool.length})</h2></div></div>
       <div class="px">
         ${pool.length ? pool.map(g => { const drawn = (state.gageDraws || []).filter(d => d.gageId === g.id).length; const meta = _gageTypeMeta(g); const sub = [meta.label + (_gageTypeOf(g) === 'time_limited' && g.timeLimitHours ? ' · ' + _fmtDuration(g.timeLimitHours) : ''), drawn ? 'tiré ' + drawn + ' fois' : ''].filter(Boolean).join(' · '); return card(`
           <div style="display:flex;align-items:flex-start;gap:8px">
             <div style="flex:1;min-width:0;font-size:14px;color:var(--ink);line-height:1.45">${meta.icon} ${esc(g.text)}<span style="display:block;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;margin-top:3px">${esc(sub)}</span></div>
-            <div style="display:flex;gap:4px;flex:0 0 auto">
+            ${admin ? `<div style="display:flex;gap:4px;flex:0 0 auto">
               <button class="btn btn-ghost" style="padding:5px 9px;font-size:14px;line-height:1" title="Modifier le texte" onclick="openEditGage('${g.id}')">✏️</button>
               <button class="btn btn-ghost" style="padding:5px 9px;font-size:14px;line-height:1" title="Supprimer du pool" onclick="deleteGage('${g.id}')">🗑️</button>
-            </div>
+            </div>` : ''}
           </div>`); }).join('') : '<div style="color:var(--ink-3);font-size:13px;font-style:italic;padding-bottom:8px">Pool vide. Approuve des propositions pour alimenter les tirages.</div>'}
       </div>
 
