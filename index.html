@@ -593,18 +593,18 @@
   .drill-fab:active { transform: scale(0.92); }
   @media (min-width: 768px) { .drill-fab { right: calc(50% - 360px + 16px); } }
   @media (min-width: 1024px) { .drill-fab { right: calc(50% - 470px + 16px); } }
-  /* ========== DRILL RÉACTION — écran de jeu plein écran ========== */
-  #drill-overlay { position: fixed; inset: 0; background: #000; z-index: 10001;
+  /* ========== DRILL RÉACTION — écran de jeu plein écran (2 orientations) ========== */
+  #drill-overlay { position: fixed; inset: 0; width: 100vw; height: 100vh; background: #000; z-index: 10001;
     display: flex; align-items: center; justify-content: center; overflow: hidden; }
   .drill-cue { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
   .drill-stop { position: fixed; top: calc(10px + env(safe-area-inset-top)); right: 12px; z-index: 10003;
     width: 46px; height: 46px; border-radius: 50%; border: none; cursor: pointer;
     background: rgba(255,255,255,0.16); color: #fff; font-size: 20px; line-height: 1;
     display: flex; align-items: center; justify-content: center; -webkit-tap-highlight-color: transparent; }
-  .drill-portrait-warn { display: none; position: fixed; inset: 0; z-index: 10002;
-    background: #000; color: #fff; text-align: center; padding: 24px;
-    align-items: center; justify-content: center; font-size: 20px; line-height: 1.5; }
-  @media (orientation: portrait) { .drill-portrait-warn { display: flex; } }
+  /* Horloge d'anticipation : décompte discret en haut-centre pendant le delay. */
+  .drill-antic { position: fixed; top: calc(10px + env(safe-area-inset-top)); left: 0; right: 0; z-index: 10002;
+    text-align: center; color: rgba(255,255,255,0.82); font-family: 'JetBrains Mono', monospace;
+    font-size: 8vmin; line-height: 1; pointer-events: none; }
 
   /* ========== ENRICHISSEMENTS TABLETTE (≥768px, mobile inchangé) ========== */
   @media (min-width: 768px) {
@@ -4747,6 +4747,11 @@ function _dumpDrillRow(d) {
     length_ms: Number.isFinite(d.lengthMs) ? d.lengthMs : 7000,
     delay_ms: Number.isFinite(d.delayMs) ? d.delayMs : 500,
     audio_beep: d.audioBeep !== false,
+    // Transitions avancées (accélération XOR randomize, horloge anticipation).
+    length_end_ms: Number.isFinite(d.lengthEndMs) ? d.lengthEndMs : null,
+    length_min_ms: Number.isFinite(d.lengthMinMs) ? d.lengthMinMs : null,
+    length_max_ms: Number.isFinite(d.lengthMaxMs) ? d.lengthMaxMs : null,
+    anticipation_clock: !!d.anticipationClock,
     duration_mode: d.durationMode === 'countdown' ? 'countdown' : 'rounds',
     duration_value: Number.isFinite(d.durationValue) ? d.durationValue : 10,
     deleted_at: d.deletedAt ? new Date(d.deletedAt).toISOString() : null,
@@ -4760,6 +4765,10 @@ function _drillFromRow(r) {
     lengthMs: Number.isFinite(r.length_ms) ? r.length_ms : 7000,
     delayMs: Number.isFinite(r.delay_ms) ? r.delay_ms : 500,
     audioBeep: r.audio_beep !== false,
+    lengthEndMs: Number.isFinite(r.length_end_ms) ? r.length_end_ms : null,
+    lengthMinMs: Number.isFinite(r.length_min_ms) ? r.length_min_ms : null,
+    lengthMaxMs: Number.isFinite(r.length_max_ms) ? r.length_max_ms : null,
+    anticipationClock: !!r.anticipation_clock,
     durationMode: r.duration_mode === 'countdown' ? 'countdown' : 'rounds',
     durationValue: Number.isFinite(r.duration_value) ? r.duration_value : 10,
     createdAt: r.created_at ? Date.parse(r.created_at) : null,
@@ -17958,7 +17967,7 @@ function _drillStimuliSummary(s) {
 // ---- Rendu d'un cue plein écran (SVG géants pour flèches/formes) ----
 function _drillArrowSvg(dir) {
   const deg = DRILL_ARROW_DEG[dir] || 0;
-  return `<svg viewBox="0 0 100 100" style="width:70vmin;height:70vmin;transform:rotate(${deg}deg)"><path d="M50 6 L90 54 L64 54 L64 94 L36 94 L36 54 L10 54 Z" fill="#fff"/></svg>`;
+  return `<svg viewBox="0 0 100 100" style="width:84vmin;height:84vmin;transform:rotate(${deg}deg)"><path d="M50 6 L90 54 L64 54 L64 94 L36 94 L36 54 L10 54 Z" fill="#fff"/></svg>`;
 }
 function _drillShapeSvg(shape) {
   const poly = {
@@ -17967,17 +17976,17 @@ function _drillShapeSvg(shape) {
     hexagon: '25,6 75,6 97,50 75,94 25,94 3,50', octagon: '31,4 69,4 96,31 96,69 69,96 31,96 4,69 4,31',
     star: '50,3 61,38 98,38 68,60 79,96 50,73 21,96 32,60 2,38 39,38'
   }[shape];
-  if (shape === 'circle') return `<svg viewBox="0 0 100 100" style="width:70vmin;height:70vmin"><circle cx="50" cy="50" r="46" fill="#fff"/></svg>`;
-  return `<svg viewBox="0 0 100 100" style="width:70vmin;height:70vmin"><polygon points="${poly}" fill="#fff"/></svg>`;
+  if (shape === 'circle') return `<svg viewBox="0 0 100 100" style="width:84vmin;height:84vmin"><circle cx="50" cy="50" r="46" fill="#fff"/></svg>`;
+  return `<svg viewBox="0 0 100 100" style="width:84vmin;height:84vmin"><polygon points="${poly}" fill="#fff"/></svg>`;
 }
 function _drillCueHtml(cue) {
   if (!cue) return '';
   switch (cue.type) {
-    case 'color': return `<div style="width:74vmin;height:74vmin;border-radius:50%;background:${cue.hex};box-shadow:0 0 60px ${cue.hex}55"></div>`;
+    case 'color': return `<div style="width:86vmin;height:86vmin;border-radius:50%;background:${cue.hex};box-shadow:0 0 60px ${cue.hex}55"></div>`;
     case 'arrow': return _drillArrowSvg(cue.value);
     case 'shape': return _drillShapeSvg(cue.value);
     case 'number':
-    case 'letter': return `<div style="font-family:'Anton',sans-serif;font-weight:900;color:#fff;font-size:62vmin;line-height:1">${esc(String(cue.value))}</div>`;
+    case 'letter': return `<div style="font-family:'Anton',sans-serif;font-weight:900;color:#fff;font-size:min(72vh,68vw);line-height:1">${esc(String(cue.value))}</div>`;
     case 'image': return cue.url ? `<img src="${esc(cue.url)}" style="max-width:94vw;max-height:90vh;object-fit:contain" alt="">` : '';
     default: return '';
   }
@@ -18008,30 +18017,55 @@ function _drillBeep() {
 }
 
 // ============================================================
-// DRILL — écran de jeu (plein écran paysage, boucle setTimeout)
+// DRILL — écran de jeu (plein écran 2 orientations, boucle setTimeout)
 // ============================================================
+// Durée du cue #i : randomize (aléatoire [min,max]) PRIME sur accélération
+// (interpolation linéaire length_ms → length_end_ms), sinon durée fixe. Pure.
+function _drillCueLengthPure(cfg, i, total) {
+  let ms;
+  if (Number.isFinite(cfg.lengthMinMs) && Number.isFinite(cfg.lengthMaxMs)) {
+    const lo = Math.min(cfg.lengthMinMs, cfg.lengthMaxMs), hi = Math.max(cfg.lengthMinMs, cfg.lengthMaxMs);
+    ms = lo + Math.random() * (hi - lo);
+  } else if (Number.isFinite(cfg.lengthEndMs) && total > 1) {
+    const frac = Math.min(1, Math.max(0, i / (total - 1)));
+    ms = cfg.lengthMs + (cfg.lengthEndMs - cfg.lengthMs) * frac;
+  } else { ms = cfg.lengthMs; }
+  return Math.max(200, Math.min(15000, ms));
+}
+// Estimation du nombre total de cues (pour l'interpolation d'accélération).
+function _drillTotalEstimate(cfg) {
+  const avg = (Number.isFinite(cfg.lengthMinMs) && Number.isFinite(cfg.lengthMaxMs)) ? (cfg.lengthMinMs + cfg.lengthMaxMs) / 2
+    : (Number.isFinite(cfg.lengthEndMs)) ? (cfg.lengthMs + cfg.lengthEndMs) / 2 : cfg.lengthMs;
+  if (cfg.durationMode === 'countdown') return Math.max(1, Math.round((Math.max(1, cfg.durationValue | 0) * 60000) / Math.max(200, avg)));
+  return Math.max(1, cfg.durationValue | 0);
+}
 function startDrillGame(config) {
   const pool = (config && config.pool) || [];
   if (!pool.length) { try { alert('Aucun stimulus jouable.'); } catch (e) {} return; }
   let host = document.getElementById('drill-overlay');
   if (!host) { host = document.createElement('div'); host.id = 'drill-overlay'; document.body.appendChild(host); }
   host.innerHTML = `
-    <div class="drill-portrait-warn">📱<br>Tourne ton téléphone<br>en mode paysage</div>
+    <div id="drill-antic" class="drill-antic"></div>
     <button class="drill-stop" onclick="stopDrillGame()" aria-label="Arrêter le drill">✕</button>
     <div id="drill-cue" class="drill-cue"></div>`;
   document.body.style.overflow = 'hidden';
   _drillUnlockAudio();
   const now = Date.now();
   window._drillGame = {
-    running: true, timer: null, count: 0, pool,
+    running: true, timer: null, anticTimer: null, count: 0, pool,
     lengthMs: config.lengthMs, delayMs: config.delayMs, audioBeep: !!config.audioBeep,
+    lengthEndMs: Number.isFinite(config.lengthEndMs) ? config.lengthEndMs : null,
+    lengthMinMs: Number.isFinite(config.lengthMinMs) ? config.lengthMinMs : null,
+    lengthMaxMs: Number.isFinite(config.lengthMaxMs) ? config.lengthMaxMs : null,
+    anticipationClock: !!config.anticipationClock,
+    total: _drillTotalEstimate(config),
+    durationMode: config.durationMode,
     mode: config.durationMode === 'countdown' ? 'countdown' : 'rounds',
     rounds: config.durationMode === 'countdown' ? Infinity : Math.max(1, config.durationValue | 0),
     endAt: config.durationMode === 'countdown' ? now + Math.max(1, config.durationValue | 0) * 60000 : Infinity
   };
-  // Plein écran + verrou paysage (best-effort ; sinon bannière portrait).
+  // Plein écran (les 2 orientations). Pas de verrou d'orientation.
   try { if (host.requestFullscreen) host.requestFullscreen().catch(() => {}); } catch (e) {}
-  try { if (screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(() => {}); } catch (e) {}
   try { if (navigator.wakeLock && navigator.wakeLock.request) navigator.wakeLock.request('screen').then(s => { window._drillWakeLock = s; }).catch(() => {}); } catch (e) {}
   _drillNextCue();
 }
@@ -18041,20 +18075,43 @@ function _drillNextCue() {
   if (g.mode === 'countdown' && Date.now() >= g.endAt) return _drillFinish();
   const cue = _drillPickCue(g.pool);
   if (!cue) return _drillFinish();
+  const i = g.count; // 0-indexé pour l'interpolation d'accélération
   g.count++;
+  const dur = _drillCueLengthPure(g, i, g.total);
   const el = document.getElementById('drill-cue'); if (el) el.innerHTML = _drillCueHtml(cue);
+  _drillClearAnticipation();
   if (g.audioBeep) _drillBeep();
   g.timer = setTimeout(() => {
     if (!g.running) return;
     if (g.delayMs > 0) {
       const e2 = document.getElementById('drill-cue'); if (e2) e2.innerHTML = '';
-      g.timer = setTimeout(_drillNextCue, g.delayMs);
+      if (g.anticipationClock && g.delayMs >= 1000) _drillStartAnticipation(g.delayMs);
+      g.timer = setTimeout(() => { _drillClearAnticipation(); _drillNextCue(); }, g.delayMs);
     } else { _drillNextCue(); }
-  }, g.lengthMs);
+  }, dur);
+}
+// Horloge d'anticipation : décompte visuel pendant le `delay` (>= 1s).
+function _drillStartAnticipation(delayMs) {
+  const g = window._drillGame; if (!g) return;
+  const el = document.getElementById('drill-antic'); if (!el) return;
+  const endAt = Date.now() + delayMs;
+  if (g.anticTimer) clearInterval(g.anticTimer);
+  const upd = () => {
+    const rem = Math.max(0, endAt - Date.now());
+    el.textContent = rem > 0 ? String(Math.ceil(rem / 1000)) : '';
+    if (rem <= 0 && g.anticTimer) { clearInterval(g.anticTimer); g.anticTimer = null; }
+  };
+  upd(); g.anticTimer = setInterval(upd, 100);
+}
+function _drillClearAnticipation() {
+  const g = window._drillGame;
+  if (g && g.anticTimer) { clearInterval(g.anticTimer); g.anticTimer = null; }
+  const el = document.getElementById('drill-antic'); if (el) el.textContent = '';
 }
 function _drillFinish() {
   const g = window._drillGame; if (!g) return;
   g.running = false; if (g.timer) clearTimeout(g.timer);
+  _drillClearAnticipation();
   const el = document.getElementById('drill-cue');
   if (el) el.innerHTML = `<div style="text-align:center;color:#fff">
     <div style="font-size:18vmin;line-height:1">✓</div>
@@ -18064,12 +18121,11 @@ function _drillFinish() {
 }
 function stopDrillGame() {
   const g = window._drillGame;
-  if (g) { g.running = false; if (g.timer) clearTimeout(g.timer); }
+  if (g) { g.running = false; if (g.timer) clearTimeout(g.timer); if (g.anticTimer) clearInterval(g.anticTimer); }
   window._drillGame = null;
   const host = document.getElementById('drill-overlay'); if (host) host.remove();
   document.body.style.overflow = '';
   try { if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {}); } catch (e) {}
-  try { if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); } catch (e) {}
   try { if (window._drillWakeLock) { window._drillWakeLock.release().catch(() => {}); window._drillWakeLock = null; } } catch (e) {}
   try { render(); } catch (e) {}
 }
@@ -18082,6 +18138,12 @@ function _drillLaunchConfig(d, o) {
     lengthMs: Number.isFinite(o.lengthMs) ? o.lengthMs : d.lengthMs,
     delayMs: Number.isFinite(o.delayMs) ? o.delayMs : d.delayMs,
     audioBeep: (typeof o.audioBeep === 'boolean') ? o.audioBeep : d.audioBeep,
+    // Modes de durée de cue (accélération / randomize) + horloge d'anticipation.
+    // undefined = l'override n'y touche pas → on garde la valeur du drill (null inclus).
+    lengthEndMs: (o.lengthEndMs !== undefined) ? o.lengthEndMs : (d.lengthEndMs != null ? d.lengthEndMs : null),
+    lengthMinMs: (o.lengthMinMs !== undefined) ? o.lengthMinMs : (d.lengthMinMs != null ? d.lengthMinMs : null),
+    lengthMaxMs: (o.lengthMaxMs !== undefined) ? o.lengthMaxMs : (d.lengthMaxMs != null ? d.lengthMaxMs : null),
+    anticipationClock: (typeof o.anticipationClock === 'boolean') ? o.anticipationClock : !!d.anticipationClock,
     durationMode: o.durationMode || d.durationMode,
     durationValue: Number.isFinite(o.durationValue) ? o.durationValue : d.durationValue
   };
@@ -18093,7 +18155,7 @@ function launchDrill(id, overrides) {
   const pool = _drillExpandPool(cfg.stimuli);
   if (!pool.length) { try { alert('Ce drill n\'a aucun stimulus jouable.'); } catch (e) {} return; }
   try { closeModal(); } catch (e) {}
-  startDrillGame({ pool, lengthMs: cfg.lengthMs, delayMs: cfg.delayMs, audioBeep: cfg.audioBeep, durationMode: cfg.durationMode, durationValue: cfg.durationValue });
+  startDrillGame({ pool, lengthMs: cfg.lengthMs, delayMs: cfg.delayMs, audioBeep: cfg.audioBeep, durationMode: cfg.durationMode, durationValue: cfg.durationValue, lengthEndMs: cfg.lengthEndMs, lengthMinMs: cfg.lengthMinMs, lengthMaxMs: cfg.lengthMaxMs, anticipationClock: cfg.anticipationClock });
 }
 
 // ============================================================
@@ -18119,7 +18181,10 @@ function openDrillLibrary() {
 }
 function _drillCardHtml(d, isCoach) {
   const dur = d.durationMode === 'countdown' ? (d.durationValue + ' min') : (d.durationValue + ' cues');
-  const timing = (d.lengthMs / 1000) + 's' + (d.delayMs ? (' / ' + (d.delayMs / 1000) + 's') : '') + (d.audioBeep ? ' · 🔊' : '');
+  const mode = Number.isFinite(d.lengthMinMs) ? ('🎲 ' + (d.lengthMinMs / 1000) + '–' + (d.lengthMaxMs / 1000) + 's')
+    : Number.isFinite(d.lengthEndMs) ? ('📉 ' + (d.lengthMs / 1000) + '→' + (d.lengthEndMs / 1000) + 's')
+    : ((d.lengthMs / 1000) + 's');
+  const timing = mode + (d.delayMs ? (' / ' + (d.delayMs / 1000) + 's') : '') + (d.anticipationClock ? ' · ⏳' : '') + (d.audioBeep ? ' · 🔊' : '');
   return `
     <div style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;margin-bottom:10px;background:var(--surface)">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start">
@@ -18157,11 +18222,18 @@ function openDrillWizard(editId) {
     step: 1, editingId: src.id, name: src.name || '',
     stimuli: JSON.parse(JSON.stringify(src.stimuli || {})),
     lengthMs: src.lengthMs, delayMs: src.delayMs, audioBeep: src.audioBeep,
-    durationMode: src.durationMode, durationValue: src.durationValue
+    durationMode: src.durationMode, durationValue: src.durationValue,
+    // Modes de durée dérivés du drill.
+    accel: Number.isFinite(src.lengthEndMs), lengthEndMs: Number.isFinite(src.lengthEndMs) ? src.lengthEndMs : 2000,
+    randomize: Number.isFinite(src.lengthMinMs) && Number.isFinite(src.lengthMaxMs),
+    lengthMinMs: Number.isFinite(src.lengthMinMs) ? src.lengthMinMs : 1000,
+    lengthMaxMs: Number.isFinite(src.lengthMaxMs) ? src.lengthMaxMs : 5000,
+    anticipationClock: !!src.anticipationClock
   } : {
     step: 1, editingId: null, name: '',
     stimuli: { colors: [], arrows: [], numbers: null, letters: null, shapes: [], imageIds: [] },
-    lengthMs: 7000, delayMs: 500, audioBeep: true, durationMode: 'rounds', durationValue: 10
+    lengthMs: 7000, delayMs: 500, audioBeep: true, durationMode: 'rounds', durationValue: 10,
+    accel: false, lengthEndMs: 2000, randomize: false, lengthMinMs: 1000, lengthMaxMs: 5000, anticipationClock: false
   };
   renderDrillWizard();
 }
@@ -18184,6 +18256,12 @@ function _drillWizRange(kind, val) {
   else { w.delayMs = Math.max(DRILL_DELAY_MIN, Math.min(DRILL_DELAY_MAX, v)); const s = document.getElementById('dw-delay-val'); if (s) s.textContent = (w.delayMs / 1000) + 's'; }
 }
 function _drillWizBeep(on) { const w = _dw(); if (w) w.audioBeep = !!on; }
+// Accélération XOR Randomize (mutuellement exclusifs) + horloge d'anticipation.
+function _drillWizAccel(on) { const w = _dw(); if (!w) return; w.accel = !!on; if (w.accel) w.randomize = false; renderDrillWizard(); }
+function _drillWizRandomize(on) { const w = _dw(); if (!w) return; w.randomize = !!on; if (w.randomize) w.accel = false; renderDrillWizard(); }
+function _drillWizAntic(on) { const w = _dw(); if (w) w.anticipationClock = !!on; }
+// Champs en SECONDES → stockés en ms (bornés 0.2–15s).
+function _drillWizSec(field, val) { const w = _dw(); if (!w) return; let ms = Math.round(parseFloat(val) * 1000); if (!Number.isFinite(ms)) return; w[field] = Math.max(200, Math.min(15000, ms)); }
 function _drillWizMode(mode) { const w = _dw(); if (!w) return; w.durationMode = mode === 'countdown' ? 'countdown' : 'rounds'; if (w.durationValue == null) w.durationValue = w.durationMode === 'countdown' ? 3 : 10; renderDrillWizard(); }
 function _drillWizDurationValue(val) { const w = _dw(); if (!w) return; const v = parseInt(val, 10); if (Number.isFinite(v)) w.durationValue = Math.max(1, Math.min(999, v)); }
 
@@ -18245,21 +18323,45 @@ function renderDrillWizard() {
         }).join('') : '<div style="font-size:11px;color:var(--ink-3);font-style:italic">Aucune image — importe des photos de plays, moves, exos…</div>'}
       </div>`;
   } else if (w.step === 2) {
+    const toggleRow = (checked, disabled, onchange, label, tip) => `
+      <label style="display:flex;align-items:center;gap:10px;padding:11px 12px;background:var(--bg-3);border-radius:8px;cursor:${disabled ? 'not-allowed' : 'pointer'};opacity:${disabled ? '0.5' : '1'}"${tip ? ` title="${esc(tip)}"` : ''}>
+        <input type="checkbox" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''} onchange="${onchange}" style="width:20px;height:20px;flex:none">
+        <span>${label}</span>
+      </label>`;
     body = `
-      <div class="fld" style="margin-bottom:18px">
+      <div class="fld" style="margin-bottom:16px">
         <label class="fld-label">Durée d'affichage — <span id="dw-length-val" style="color:var(--orange)">${(w.lengthMs / 1000)}s</span></label>
         <input type="range" min="${DRILL_LEN_MIN}" max="${DRILL_LEN_MAX}" step="250" value="${w.lengthMs}" oninput="_drillWizRange('length',this.value)" style="width:100%">
         <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono'"><span>0.5s</span><span>15s</span></div>
       </div>
-      <div class="fld" style="margin-bottom:18px">
+
+      <!-- ACCÉLÉRATION -->
+      ${toggleRow(w.accel, w.randomize, '_drillWizAccel(this.checked)', '📉 Accélération (durée dégressive)', w.randomize ? 'Désactive « Randomize » pour utiliser l\'accélération' : '')}
+      ${w.accel ? `<div class="fld" style="margin:8px 0 16px">
+        <label class="fld-label">Vitesse finale (s) — durée du dernier cue</label>
+        <input type="number" step="0.1" min="0.2" max="${(w.lengthMs / 1000)}" value="${(w.lengthEndMs / 1000)}" onchange="_drillWizSec('lengthEndMs',this.value)">
+        <div style="margin-top:4px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">Interpole ${(w.lengthMs / 1000)}s → cette valeur sur la session (≤ départ, ≥ 0.2s).</div>
+      </div>` : '<div style="margin-bottom:10px"></div>'}
+
+      <!-- RANDOMIZE LENGTH -->
+      ${toggleRow(w.randomize, w.accel, '_drillWizRandomize(this.checked)', '🎲 Randomize Length (durée aléatoire)', w.accel ? 'Désactive « Accélération » pour randomiser' : '')}
+      ${w.randomize ? `<div class="fld-row" style="margin:8px 0 16px">
+        <div class="fld"><label class="fld-label">Min (s)</label><input type="number" step="0.1" min="0.2" max="15" value="${(w.lengthMinMs / 1000)}" onchange="_drillWizSec('lengthMinMs',this.value)"></div>
+        <div class="fld"><label class="fld-label">Max (s)</label><input type="number" step="0.1" min="0.2" max="15" value="${(w.lengthMaxMs / 1000)}" onchange="_drillWizSec('lengthMaxMs',this.value)"></div>
+      </div>` : '<div style="margin-bottom:10px"></div>'}
+
+      <div class="fld" style="margin-bottom:16px">
         <label class="fld-label">Délai noir entre 2 cues — <span id="dw-delay-val" style="color:var(--orange)">${(w.delayMs / 1000)}s</span></label>
         <input type="range" min="${DRILL_DELAY_MIN}" max="${DRILL_DELAY_MAX}" step="250" value="${w.delayMs}" oninput="_drillWizRange('delay',this.value)" style="width:100%">
         <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono'"><span>0s</span><span>5s</span></div>
       </div>
-      <label style="display:flex;align-items:center;gap:10px;padding:12px;background:var(--bg-3);border-radius:8px;cursor:pointer">
-        <input type="checkbox" ${w.audioBeep ? 'checked' : ''} onchange="_drillWizBeep(this.checked)" style="width:20px;height:20px;flex:none">
-        <span>🔊 Bip audio à chaque nouveau cue</span>
-      </label>`;
+
+      <!-- HORLOGE D'ANTICIPATION -->
+      ${toggleRow(w.anticipationClock, false, '_drillWizAntic(this.checked)', '⏳ Horloge d\'anticipation (décompte pendant le délai)', '')}
+      ${w.anticipationClock && w.delayMs < 1000 ? `<div style="margin:6px 0 12px;font-size:10px;color:var(--orange);font-family:'JetBrains Mono';line-height:1.4">⚠ Nécessite un délai ≥ 1s pour s'afficher.</div>` : '<div style="margin-bottom:10px"></div>'}
+
+      <!-- BIP -->
+      ${toggleRow(w.audioBeep, false, '_drillWizBeep(this.checked)', '🔊 Bip audio à chaque nouveau cue', '')}`;
   } else {
     body = `
       <div class="eyebrow-muted" style="margin-bottom:8px">Mode</div>
@@ -18297,15 +18399,26 @@ function saveDrill(launchAfter) {
   const w = _dw(); if (!w || !_drillIsCoach()) return;
   const stimuli = _drillCleanStimuli(w.stimuli);
   if (!_drillExpandPool(stimuli).length) { try { alert('Sélectionne au moins un stimulus.'); } catch (e) {} return; }
+  // Modes de durée : randomize XOR accélération (mutuellement exclusifs).
+  let lengthEndMs = null, lengthMinMs = null, lengthMaxMs = null;
+  if (w.randomize) {
+    lengthMinMs = w.lengthMinMs; lengthMaxMs = w.lengthMaxMs;
+    if (!(lengthMinMs >= 200 && lengthMaxMs <= 15000 && lengthMinMs < lengthMaxMs)) { try { alert('Randomize : min ≥ 0.2s, max ≤ 15s, et min < max.'); } catch (e) {} return; }
+  } else if (w.accel) {
+    lengthEndMs = w.lengthEndMs;
+    if (!(lengthEndMs >= 200 && lengthEndMs <= w.lengthMs)) { try { alert('Accélération : la vitesse finale doit être entre 0.2s et la durée de départ (' + (w.lengthMs / 1000) + 's).'); } catch (e) {} return; }
+  }
+  const anticipationClock = !!w.anticipationClock;
   const name = (w.name || '').trim().slice(0, 60) || 'Drill';
   const now = Date.now();
+  const extra = { lengthEndMs, lengthMinMs, lengthMaxMs, anticipationClock };
   let d;
   if (w.editingId) {
     d = (state.drills || []).find(x => x.id === w.editingId);
     if (!d) { state._drillWizard = null; return; }
-    Object.assign(d, { name, stimuli, lengthMs: w.lengthMs, delayMs: w.delayMs, audioBeep: w.audioBeep, durationMode: w.durationMode, durationValue: w.durationValue, updatedAt: now });
+    Object.assign(d, { name, stimuli, lengthMs: w.lengthMs, delayMs: w.delayMs, audioBeep: w.audioBeep, durationMode: w.durationMode, durationValue: w.durationValue, ...extra, updatedAt: now });
   } else {
-    d = { id: uid(), name, createdBy: (currentCoach() || {}).id || null, stimuli, lengthMs: w.lengthMs, delayMs: w.delayMs, audioBeep: w.audioBeep, durationMode: w.durationMode, durationValue: w.durationValue, createdAt: now, updatedAt: now, deletedAt: null };
+    d = { id: uid(), name, createdBy: (currentCoach() || {}).id || null, stimuli, lengthMs: w.lengthMs, delayMs: w.delayMs, audioBeep: w.audioBeep, durationMode: w.durationMode, durationValue: w.durationValue, ...extra, createdAt: now, updatedAt: now, deletedAt: null };
     state.drills = state.drills || []; state.drills.unshift(d);
   }
   const id = d.id;
@@ -30507,7 +30620,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-10.62';
+const APP_VERSION = '2026-07-10.63';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {

@@ -178,4 +178,67 @@ const local2 = { drills: [{ ...edited, name: 'Local récent', updatedAt: 500 }] 
 applyDrills(local2, [rowOf(edited)]); // remote updatedAt 200 < local 500
 ok('LWW : écho remote ancien n\'écrase pas l\'édition locale récente', local2.drills[0].name === 'Local récent');
 
-console.log(`\n✓ ${passed} assertions passées — drill réaction (pool, bornes, overrides, sync, permissions, intégration) OK`);
+// === 8. Transitions : accélération / randomize / anticipation ===
+// Copie fidèle de _drillCueLengthPure + _drillTotalEstimate.
+function _drillCueLengthPure(cfg, i, total) {
+  let ms;
+  if (Number.isFinite(cfg.lengthMinMs) && Number.isFinite(cfg.lengthMaxMs)) {
+    const lo = Math.min(cfg.lengthMinMs, cfg.lengthMaxMs), hi = Math.max(cfg.lengthMinMs, cfg.lengthMaxMs);
+    ms = lo + Math.random() * (hi - lo);
+  } else if (Number.isFinite(cfg.lengthEndMs) && total > 1) {
+    const frac = Math.min(1, Math.max(0, i / (total - 1)));
+    ms = cfg.lengthMs + (cfg.lengthEndMs - cfg.lengthMs) * frac;
+  } else { ms = cfg.lengthMs; }
+  return Math.max(200, Math.min(15000, ms));
+}
+function _drillTotalEstimate(cfg) {
+  const avg = (Number.isFinite(cfg.lengthMinMs) && Number.isFinite(cfg.lengthMaxMs)) ? (cfg.lengthMinMs + cfg.lengthMaxMs) / 2
+    : (Number.isFinite(cfg.lengthEndMs)) ? (cfg.lengthMs + cfg.lengthEndMs) / 2 : cfg.lengthMs;
+  if (cfg.durationMode === 'countdown') return Math.max(1, Math.round((Math.max(1, cfg.durationValue | 0) * 60000) / Math.max(200, avg)));
+  return Math.max(1, cfg.durationValue | 0);
+}
+// Exclusion mutuelle (côté client) : activer l'un désactive l'autre.
+function applyLengthMode(w, mode, on) {
+  if (mode === 'accel') { w.accel = !!on; if (w.accel) w.randomize = false; }
+  else { w.randomize = !!on; if (w.randomize) w.accel = false; }
+  return w;
+}
+
+// -- Accélération : interpolation linéaire length_ms → length_end_ms sur total cues.
+const accel = { lengthMs: 5000, lengthEndMs: 1000, durationMode: 'rounds', durationValue: 5 };
+const totalA = _drillTotalEstimate(accel); // 5 (rounds)
+ok('accel : total = rounds (5)', totalA === 5);
+ok('accel : 1er cue = length_ms (5000)', _drillCueLengthPure(accel, 0, totalA) === 5000);
+ok('accel : dernier cue = length_end_ms (1000)', _drillCueLengthPure(accel, 4, totalA) === 1000);
+ok('accel : cue médian interpolé (i=2/4 → 3000)', _drillCueLengthPure(accel, 2, totalA) === 3000);
+ok('accel : monotone décroissant', _drillCueLengthPure(accel, 1, totalA) > _drillCueLengthPure(accel, 3, totalA));
+
+// -- Accélération en Countdown : total estimé via durée / durée moyenne.
+const accelCd = { lengthMs: 4000, lengthEndMs: 2000, durationMode: 'countdown', durationValue: 2 }; // 120000 / 3000 = 40
+ok('accel countdown : total estimé = 40', _drillTotalEstimate(accelCd) === 40);
+
+// -- Randomize : chaque durée dans [min,max], PRIME sur length fixe/accel.
+const rnd = { lengthMs: 9999, lengthMinMs: 1000, lengthMaxMs: 3000, lengthEndMs: null };
+let allInRange = true;
+for (let k = 0; k < 200; k++) { const v = _drillCueLengthPure(rnd, k, 10); if (v < 1000 || v > 3000) allInRange = false; }
+ok('randomize : 200 tirages tous dans [1000,3000]', allInRange);
+ok('randomize prime : n\'utilise pas length_ms fixe', _drillCueLengthPure(rnd, 0, 10) !== 9999);
+
+// -- Bornes : clamp 200..15000.
+ok('clamp bas ≥ 200ms', _drillCueLengthPure({ lengthMs: 50 }, 0, 1) === 200);
+ok('clamp haut ≤ 15000ms', _drillCueLengthPure({ lengthMs: 99999 }, 0, 1) === 15000);
+ok('durée fixe si ni accel ni randomize', _drillCueLengthPure({ lengthMs: 7000 }, 3, 10) === 7000);
+ok('accel ignoré si total ≤ 1', _drillCueLengthPure({ lengthMs: 5000, lengthEndMs: 1000 }, 0, 1) === 5000);
+
+// -- Exclusion mutuelle accel/randomize.
+let w = { accel: false, randomize: false };
+applyLengthMode(w, 'accel', true); ok('activer accel → randomize off', w.accel === true && w.randomize === false);
+applyLengthMode(w, 'randomize', true); ok('activer randomize → accel off', w.randomize === true && w.accel === false);
+
+// -- Anticipation clock : seuil delay ≥ 1000ms.
+function anticipationVisible(anticipationClock, delayMs) { return !!anticipationClock && delayMs >= 1000; }
+ok('anticipation OFF si delay < 1000', anticipationVisible(true, 500) === false);
+ok('anticipation ON si delay ≥ 1000 et activée', anticipationVisible(true, 1000) === true);
+ok('anticipation OFF si toggle off', anticipationVisible(false, 3000) === false);
+
+console.log(`\n✓ ${passed} assertions passées — drill réaction (pool, bornes, overrides, sync, permissions, intégration, transitions) OK`);
