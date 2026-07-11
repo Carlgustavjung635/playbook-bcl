@@ -6998,11 +6998,10 @@ function renderAuth() {
   }
 
   if (flow.stage === 'pickCoach') {
-    // Admin d'abord, puis les coachs non-admin (avec leurs équipes).
+    // Admin d'abord, puis les autres coachs. Affichage : seule la distinction
+    // admin / non-admin est montrée (jamais l'équipe ni un libellé de rôle).
     const admin = _adminCoach();
     const list = [admin, ..._nonAdminCoaches()];
-    const teamsLbl = (c) => (Array.isArray(c.teams) ? c.teams : ['e1'])
-      .map(t => teamLabel(t, true)).join(' · ');
     return `
       <div class="auth-screen" style="position:fixed;inset:0;justify-content:flex-start;padding-top:60px;overflow-y:auto;-webkit-overflow-scrolling:touch;padding-bottom:calc(96px + env(safe-area-inset-bottom))">
         <div class="auth-bg-glow"></div>
@@ -7014,8 +7013,8 @@ function renderAuth() {
             <button class="role-btn" onclick="pickCoach('${c.id}')">
               <div class="role-icon">${esc((c.name || 'C').trim().charAt(0).toUpperCase() || 'C')}</div>
               <div class="role-info">
-                <div class="role-name">${esc(c.name || (c.coachRole === 'admin_coach' ? 'Coach' : 'Coach'))}</div>
-                <div class="role-desc">${c.coachRole === 'admin_coach' ? 'Admin · toutes les équipes' : esc(teamsLbl(c))}</div>
+                <div class="role-name">${esc(c.name || 'Coach')}</div>
+                ${c.coachRole === 'admin_coach' ? `<div class="role-desc">Admin</div>` : ''}
               </div>
             </button>
           `).join('')}
@@ -8414,7 +8413,6 @@ function _adminPanelBody() {
   const admin = _adminCoach();
   const others = _nonAdminCoaches();
   const pendingGages = (state.gages || []).filter(g => g.status === 'pending' && !g.deletedAt).length;
-  const teamsLbl = (c) => (Array.isArray(c.teams) ? c.teams : ['e1']).map(t => teamLabel(t, true)).join(' · ');
   return `
     <!-- MON PROFIL -->
     <div class="eyebrow-muted" style="margin-bottom:6px">Mon profil (admin)</div>
@@ -8432,13 +8430,13 @@ function _adminPanelBody() {
     </div>
     <div style="margin-bottom:16px">
       <div class="btn btn-secondary btn-block mb-2" style="text-align:left;display:flex;justify-content:space-between;align-items:center;cursor:default">
-        <span>👑 ${esc(admin.name || 'Coach')} <span style="opacity:.6">· Admin · toutes les équipes</span></span>
+        <span>👑 ${esc(admin.name || 'Coach')} <span style="opacity:.6">· Admin</span></span>
       </div>
       ${others.length ? others.map(c => `
         <div class="btn btn-secondary btn-block mb-2" style="text-align:left;display:flex;justify-content:space-between;align-items:center;gap:8px;cursor:default">
           <span style="flex:1;min-width:0">
             <span style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.name || 'Coach')}</span>
-            <span style="font-size:10px;font-family:'JetBrains Mono';color:var(--ink-3)">${esc(teamsLbl(c))} · code ${esc(c.code || '····')}</span>
+            <span style="font-size:10px;font-family:'JetBrains Mono';color:var(--ink-3)">code ${esc(c.code || '····')}</span>
           </span>
           <span style="display:flex;gap:4px;flex:0 0 auto">
             <button class="btn btn-icon" title="Modifier" onclick="openEditCoach('${c.id}')">✎</button>
@@ -8584,8 +8582,10 @@ function openSettings() {
   const player = currentPlayer();
   const cc = role === 'coach' ? currentCoach() : null;
   const admin = role === 'coach' && isAdminCoach();
+  // Affichage : seule la mention « Admin » distingue les coachs. Aucun libellé
+  // d'équipe/rôle pour un coach non-admin (juste son prénom).
   const roleLabel = role === 'coach'
-    ? ((cc && cc.name ? cc.name : 'Coach') + (admin ? ' · Admin' : (cc ? ' · ' + coachTeams().map(t => teamLabel(t, true)).join('/') : '')))
+    ? ((cc && cc.name ? cc.name : 'Coach') + (admin ? ' · Admin' : ''))
     : role === 'stat' ? "Stat'man" : player ? ('Joueuse · #' + player.num + ' ' + player.name) : '';
   openModal(`
     <div class="modal-header">
@@ -29839,7 +29839,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-10.59';
+const APP_VERSION = '2026-07-10.61';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
