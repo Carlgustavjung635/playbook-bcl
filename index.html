@@ -4775,6 +4775,23 @@ window.PbSync = {
       } catch (e) { console.warn(`[sync] fetch ${entity.key}:`, e.message); }
     }
   },
+  // Fetch ciblé d'UNE entité (par key) + apply + seed cache. Utilisé pour
+  // rafraîchir `coaches` à la demande avant le sélecteur de coach au login,
+  // sans attendre le fetchAll complet (anti-course sur un nouveau device).
+  async fetchOne(state, key) {
+    if (!Pb.online) return false;
+    const entity = ENTITIES.find(e => e.key === key);
+    if (!entity) return false;
+    if (entity.auth === 'l2' && !Pb.user) return false;
+    try {
+      const { data, error } = await sb.from(entity.table).select('*');
+      if (error) { console.warn(`[sync] fetchOne ${entity.table}:`, error.message); return false; }
+      const rows = data || [];
+      if (rows.length > 0) { try { entity.apply(state, rows); } catch (e) {} }
+      _seedCacheFromRemote(entity, rows, state);
+      return true;
+    } catch (e) { console.warn(`[sync] fetchOne ${entity.key}:`, e.message); return false; }
+  },
   subscribeAll(state, onApplied) {
     ENTITIES.filter(e => e.realtime).forEach(entity => {
       const ch = sb.channel('sync-' + entity.table)
@@ -6965,6 +6982,21 @@ function renderAuth() {
     `;
   }
 
+  if (flow.stage === 'coachLoading') {
+    // Transitoire : on rafraîchit la liste des coachs depuis la base avant de
+    // décider (sélecteur vs admin direct). Évite qu'un nouveau device retombe
+    // sur le golden path admin alors qu'un coach existe en base (course fetch).
+    return `
+      <div class="auth-screen">
+        <div class="auth-bg-glow"></div>
+        <div class="auth-logo" style="width:60px;height:60px;font-size:32px"><img class="brand-logo" src="/assets/bcl-logo-256.png" alt="Basket Club Lislois"></div>
+        <div class="auth-title" style="font-size:24px">Coach</div>
+        <div class="auth-subtitle">Chargement…</div>
+        <div style="margin-top:20px;width:28px;height:28px;border:3px solid var(--border);border-top-color:var(--orange);border-radius:50%;animation:ptr-spin 0.8s linear infinite"></div>
+      </div>
+    `;
+  }
+
   if (flow.stage === 'pickCoach') {
     // Admin d'abord, puis les coachs non-admin (avec leurs équipes).
     const admin = _adminCoach();
@@ -7079,19 +7111,38 @@ function renderNoActiveSeasonScreen() {
   `;
 }
 
-function pickRole(role) {
+async function pickRole(role) {
   state.authFlow.role = role;
   state.authFlow.coachId = null;
   if (role === 'player') {
     state.authFlow.stage = 'pickPlayer';
-  } else if (role === 'coach' && _nonAdminCoaches().length > 0) {
-    // Plusieurs coachs enregistrés → sélecteur "Quel coach ?". Sinon (golden path
-    // mono-coach) : PIN direct, admin implicite → flux STRICTEMENT inchangé.
-    state.authFlow.stage = 'pickCoach';
-  } else {
-    state.authFlow.stage = 'pin';
-    state.authFlow.pinInput = '';
+    render();
+    return;
   }
+  if (role === 'coach') {
+    // ANTI-COURSE (fix sync coach) : la décision « sélecteur vs admin direct »
+    // dépend de state.coaches, peuplé de façon ASYNCHRONE par fetchAll. Sur un
+    // nouveau device (ou juste après un logout), l'utilisateur peut cliquer
+    // « Coach » avant la fin du fetch → _nonAdminCoaches() vide → on retombait à
+    // tort sur le golden path admin, masquant les coachs existants en base.
+    // Correctif : si aucun coach non-admin en local ET qu'on est en ligne, on
+    // force un fetch frais de `coaches` AVANT de trancher.
+    const online = !(window.Pb && window.Pb.online === false);
+    if (_nonAdminCoaches().length === 0 && online && window.PbSync && PbSync.fetchOne) {
+      state.authFlow.stage = 'coachLoading';
+      render();
+      try { await PbSync.fetchOne(state, 'coaches'); } catch (e) {}
+      // L'utilisateur a pu quitter l'écran entre-temps (back) → ne rien forcer.
+      if (!state.authFlow || state.authFlow.role !== 'coach' || state.authFlow.stage !== 'coachLoading') return;
+    }
+    state.authFlow.stage = _nonAdminCoaches().length > 0 ? 'pickCoach' : 'pin';
+    if (state.authFlow.stage === 'pin') state.authFlow.pinInput = '';
+    render();
+    return;
+  }
+  // stat (ou autre) : PIN direct.
+  state.authFlow.stage = 'pin';
+  state.authFlow.pinInput = '';
   render();
 }
 function pickPlayer(pid) {
@@ -29693,7 +29744,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-10.57';
+const APP_VERSION = '2026-07-10.58';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
