@@ -9008,6 +9008,96 @@ function goSection(id) {
 // ============================================================
 // HOME (Coach)
 // ============================================================
+// ============================================================
+// ANNIVERSAIRES À VENIR (admin_coach only) — cf. date_naissance
+// ============================================================
+// Personnes du club (joueuses + coachs) ayant une date de naissance renseignée.
+function _clubPeopleWithDob() {
+  const players = (state.players || []).filter(p => p && p.dateNaissance)
+    .map(p => ({ id: p.id, name: p.name, dateNaissance: p.dateNaissance, kind: 'player' }));
+  const coaches = (state.coaches || []).filter(c => c && c.dateNaissance)
+    .map(c => ({ id: c.id, name: c.name || 'Coach', dateNaissance: c.dateNaissance, kind: 'coach' }));
+  return [...players, ...coaches];
+}
+// Liste triée des anniversaires tombant dans [aujourd'hui, +daysAhead]. Chaque
+// entrée : { id, name, kind, dateNaissance, monthDay 'JJ/MM', daysUntil (0..N),
+// turningAge (âge fêté), nextBirthdayYear }. Pure + testable (ref injectable).
+function getUpcomingBirthdays(people, daysAhead = 7, ref) {
+  const today = ref ? new Date(ref) : new Date();
+  today.setHours(0, 0, 0, 0);
+  const out = [];
+  (people || []).forEach(person => {
+    const dob = person && person.dateNaissance;
+    if (!dob) return;
+    const b = new Date(String(dob).slice(0, 10) + 'T00:00:00');
+    if (isNaN(b.getTime())) return;
+    const bm = b.getMonth(), bd = b.getDate();
+    let next = new Date(today.getFullYear(), bm, bd); next.setHours(0, 0, 0, 0);
+    if (next < today) next = new Date(today.getFullYear() + 1, bm, bd);
+    const daysUntil = Math.round((next - today) / 86400000);
+    if (daysUntil < 0 || daysUntil > daysAhead) return;
+    out.push({
+      id: person.id, name: person.name, kind: person.kind || 'player',
+      dateNaissance: dob,
+      monthDay: String(bd).padStart(2, '0') + '/' + String(bm + 1).padStart(2, '0'),
+      daysUntil, turningAge: next.getFullYear() - b.getFullYear(),
+      nextBirthdayYear: next.getFullYear()
+    });
+  });
+  out.sort((a, b) => a.daysUntil - b.daysUntil || String(a.name).localeCompare(String(b.name)));
+  return out;
+}
+function _bdayWhen(d) { return d === 0 ? "aujourd'hui !" : d === 1 ? 'demain' : 'dans ' + d + ' jours'; }
+
+// Carte home admin. Masquée pour non-admin/joueuses et si aucun anniversaire J-7.
+function renderBirthdayCoachCard() {
+  if (!isAdminCoach()) return '';
+  const list = getUpcomingBirthdays(_clubPeopleWithDob(), 7);
+  if (!list.length) return '';
+  const row = (b, i) => `
+    <div style="display:flex;align-items:center;gap:10px;padding:8px 0;${i ? 'border-top:1px solid var(--border-soft)' : ''}">
+      <div style="font-size:20px;flex:0 0 auto">${b.daysUntil === 0 ? '🎉' : '🎂'}</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-family:'Anton';text-transform:uppercase;font-size:14px;letter-spacing:0.02em">${esc(b.name)}${b.kind === 'coach' ? ` <span style="font-size:9px;font-family:'JetBrains Mono';color:var(--ink-3);text-transform:uppercase">coach</span>` : ''}</div>
+        <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">${b.monthDay} · ${_bdayWhen(b.daysUntil)} · ${b.turningAge} ans</div>
+      </div>
+    </div>`;
+  return `
+    <div style="padding:0 18px;margin-bottom:18px">
+      <div style="border:1.5px solid rgba(var(--accent-rgb),0.35);border-radius:var(--radius);background:linear-gradient(135deg,rgba(var(--accent-rgb),0.10),var(--surface));padding:14px 16px">
+        <div style="font-family:'Anton';font-size:15px;text-transform:uppercase;letter-spacing:0.02em;margin-bottom:4px">🎂 Anniversaires à venir</div>
+        ${list.map((b, i) => row(b, i)).join('')}
+      </div>
+    </div>`;
+}
+
+// BONUS — notification locale J-7 (admin only), une seule fois par anniversaire
+// (dédup localStorage `pb8_bday_notified` keyée id:année). Aucune migration :
+// notification LOCALE (service worker showNotification), pas de push serveur.
+// Silencieux si permission non accordée (jamais de prompt ici).
+function _maybeNotifyBirthdays() {
+  if (!isAdminCoach()) return;
+  if (typeof Notification === 'undefined' || Notification.permission !== 'granted' || !navigator.serviceWorker) return;
+  const list = getUpcomingBirthdays(_clubPeopleWithDob(), 7);
+  if (!list.length) return;
+  let seen = {};
+  try { seen = JSON.parse(localStorage.getItem('pb8_bday_notified') || '{}') || {}; } catch (e) {}
+  const toNotify = list.filter(b => !seen[b.id + ':' + b.nextBirthdayYear]);
+  if (!toNotify.length) return;
+  navigator.serviceWorker.ready.then(reg => {
+    toNotify.forEach(b => {
+      try {
+        reg.showNotification('🎂 Anniversaire à venir', {
+          body: `${b.name} — ${_bdayWhen(b.daysUntil)} (${b.turningAge} ans)`,
+          tag: 'bday-' + b.id + '-' + b.nextBirthdayYear, icon: 'icon-192.png', badge: 'icon-192.png'
+        });
+      } catch (e) {}
+      seen[b.id + ':' + b.nextBirthdayYear] = Date.now();
+    });
+    try { localStorage.setItem('pb8_bday_notified', JSON.stringify(seen)); } catch (e) {}
+  }).catch(() => {});
+}
+
 function renderHomeCoach() {
   const today = new Date(); today.setHours(0,0,0,0);
   const todayStr = isoDate(today);
@@ -9030,6 +9120,7 @@ function renderHomeCoach() {
       ${renderOverdueTrainingsBanner()}
       ${renderBroadcastCoachCard()}
       ${renderGageCoachHomeCard()}
+      ${renderBirthdayCoachCard()}
       ${nextEvent ? heroCard(nextEvent) : ''}
 
       <div class="section-header">
@@ -28920,6 +29011,10 @@ function _initPlayersSync() {
         // RÔLES : seed de l'admin_coach pour une session coach déjà active (cas
         // mise à jour d'un coach historique) → il devient admin_coach sans effort.
         try { if (state.auth && state.auth.role === 'coach') _seedAdminCoach(); } catch(e) { console.warn('[roles] seed admin:', e.message); }
+        // ANNIVERSAIRES : notif locale J-7 (admin only, dédup localStorage), one-shot session.
+        try {
+          if (!window._bdayNotifChecked && isAdminCoach()) { window._bdayNotifChecked = true; setTimeout(() => { try { _maybeNotifyBirthdays(); } catch (e) {} }, 1200); }
+        } catch(e) {}
         // DÉFIS AUTO PAR SAISON : backfill legacy + init des défis manquants sur
         // la saison active. COACH UNIQUEMENT (jamais d'écriture défis depuis un
         // device joueuse — la joueuse lit ce que le coach a synchronisé).
@@ -29744,7 +29839,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-10.58';
+const APP_VERSION = '2026-07-10.59';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
