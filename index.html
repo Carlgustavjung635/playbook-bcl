@@ -576,6 +576,35 @@
   @media (min-width: 1024px) {
     .chrono-fab { right: calc(50% - 470px + 16px); }
   }
+  /* Bouton Drill Réaction — empilé au-dessus du chrono, même niveau. */
+  .drill-fab {
+    position: fixed; right: 16px;
+    bottom: calc(144px + env(safe-area-inset-bottom));
+    z-index: 8000;
+    width: 56px; height: 56px; border-radius: 50%;
+    border: none; cursor: pointer;
+    background: radial-gradient(circle at 30% 30%, #47b0ff, #1567d3);
+    box-shadow: 0 6px 20px rgba(21,103,211,0.5), 0 2px 6px rgba(0,0,0,0.4);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 24px; line-height: 1;
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .drill-fab:active { transform: scale(0.92); }
+  @media (min-width: 768px) { .drill-fab { right: calc(50% - 360px + 16px); } }
+  @media (min-width: 1024px) { .drill-fab { right: calc(50% - 470px + 16px); } }
+  /* ========== DRILL RÉACTION — écran de jeu plein écran (2 orientations) ========== */
+  #drill-overlay { position: fixed; inset: 0; width: 100vw; height: 100vh; background: #000; z-index: 10001;
+    display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  .drill-cue { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
+  .drill-stop { position: fixed; top: calc(10px + env(safe-area-inset-top)); right: 12px; z-index: 10003;
+    width: 46px; height: 46px; border-radius: 50%; border: none; cursor: pointer;
+    background: rgba(255,255,255,0.16); color: #fff; font-size: 20px; line-height: 1;
+    display: flex; align-items: center; justify-content: center; -webkit-tap-highlight-color: transparent; }
+  /* Horloge d'anticipation : décompte discret en haut-centre pendant le delay. */
+  .drill-antic { position: fixed; top: calc(10px + env(safe-area-inset-top)); left: 0; right: 0; z-index: 10002;
+    text-align: center; color: rgba(255,255,255,0.82); font-family: 'JetBrains Mono', monospace;
+    font-size: 8vmin; line-height: 1; pointer-events: none; }
 
   /* ========== ENRICHISSEMENTS TABLETTE (≥768px, mobile inchangé) ========== */
   @media (min-width: 768px) {
@@ -802,6 +831,7 @@
   /* Masquer le FAB ⏱ dès qu'une modale est ouverte (sinon son z-8000 passe
      AU-DESSUS de la modale z-100). :has() est supporté par Safari iOS 15.4+. */
   body:has(#modal-root .modal) .chrono-fab { display: none; }
+  body:has(#modal-root .modal) .drill-fab { display: none; }
 
   /* ========== TYPOGRAPHY ========== */
   .display-xl {
@@ -4619,6 +4649,46 @@ const ENTITIES = [
       state.coaches = [...pendingLocal, ...fromRemote];
       if (ahead.length) _reassertRows('coaches', ahead.map(_dumpCoachRow));
     }
+  },
+  // ==========================================================================
+  // DRILLS (cf. migration 20260710_001) — builder de drills de réaction.
+  // Bibliothèque commune : CRUD coach (front), lecture joueuse. LWW par updatedAt.
+  // ==========================================================================
+  {
+    key: 'drills', table: 'drills', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.drills || []).map(d => [d.id, _dumpDrillRow(d)])),
+    apply: (state, rows) => {
+      const local = state.drills || [];
+      const localById = Object.fromEntries(local.map(d => [d.id, d]));
+      const remoteIds = new Set(rows.map(r => r.id));
+      const ahead = [];
+      const fromRemote = rows.map(r => {
+        const mapped = _drillFromRow(r);
+        const loc = localById[r.id];
+        if (loc && (loc.updatedAt || 0) > (mapped.updatedAt || 0)) { ahead.push(loc); return loc; }
+        return mapped;
+      });
+      const pendingLocal = local.filter(d => !remoteIds.has(d.id) && typeof d.id === 'string' && d.id.startsWith('x'));
+      state.drills = [...pendingLocal, ...fromRemote];
+      if (ahead.length) _reassertRows('drills', ahead.map(_dumpDrillRow));
+    }
+  },
+  // Métadonnées d'images custom (le binaire vit dans le bucket Storage drill-images).
+  {
+    key: 'drillImages', table: 'drill_images', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.drillImages || []).map(m => [m.id, _dumpDrillImageRow(m)])),
+    apply: (state, rows) => {
+      const local = state.drillImages || [];
+      const remoteIds = new Set(rows.map(r => r.id));
+      const fromRemote = rows.map(r => ({
+        id: r.id, uploadedBy: r.uploaded_by || null, storagePath: r.storage_path || '',
+        label: r.label || '', url: _drillImageUrl(r.storage_path),
+        createdAt: r.created_at ? Date.parse(r.created_at) : null,
+        deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
+      }));
+      const pendingLocal = local.filter(m => !remoteIds.has(m.id) && typeof m.id === 'string' && m.id.startsWith('x'));
+      state.drillImages = [...pendingLocal, ...fromRemote];
+    }
   }
 ];
 
@@ -4668,6 +4738,56 @@ function _dumpCoachRow(c) {
     date_naissance: c.dateNaissance || null,
     updated_at: c.updatedAt ? new Date(c.updatedAt).toISOString() : (c.createdAt ? new Date(c.createdAt).toISOString() : null)
   };
+}
+// --- DRILLS : sérialisation (module) ---------------------------------------
+function _dumpDrillRow(d) {
+  return {
+    id: d.id, name: d.name || '', created_by: d.createdBy || null,
+    stimuli_json: (d.stimuli && typeof d.stimuli === 'object' && !Array.isArray(d.stimuli)) ? d.stimuli : {},
+    length_ms: Number.isFinite(d.lengthMs) ? d.lengthMs : 7000,
+    delay_ms: Number.isFinite(d.delayMs) ? d.delayMs : 500,
+    audio_beep: d.audioBeep !== false,
+    // Transitions avancées (accélération XOR randomize, horloge anticipation).
+    length_end_ms: Number.isFinite(d.lengthEndMs) ? d.lengthEndMs : null,
+    length_min_ms: Number.isFinite(d.lengthMinMs) ? d.lengthMinMs : null,
+    length_max_ms: Number.isFinite(d.lengthMaxMs) ? d.lengthMaxMs : null,
+    anticipation_clock: !!d.anticipationClock,
+    duration_mode: d.durationMode === 'countdown' ? 'countdown' : 'rounds',
+    duration_value: Number.isFinite(d.durationValue) ? d.durationValue : 10,
+    deleted_at: d.deletedAt ? new Date(d.deletedAt).toISOString() : null,
+    updated_at: d.updatedAt ? new Date(d.updatedAt).toISOString() : (d.createdAt ? new Date(d.createdAt).toISOString() : null)
+  };
+}
+function _drillFromRow(r) {
+  return {
+    id: r.id, name: r.name || '', createdBy: r.created_by || null,
+    stimuli: (r.stimuli_json && typeof r.stimuli_json === 'object' && !Array.isArray(r.stimuli_json)) ? r.stimuli_json : {},
+    lengthMs: Number.isFinite(r.length_ms) ? r.length_ms : 7000,
+    delayMs: Number.isFinite(r.delay_ms) ? r.delay_ms : 500,
+    audioBeep: r.audio_beep !== false,
+    lengthEndMs: Number.isFinite(r.length_end_ms) ? r.length_end_ms : null,
+    lengthMinMs: Number.isFinite(r.length_min_ms) ? r.length_min_ms : null,
+    lengthMaxMs: Number.isFinite(r.length_max_ms) ? r.length_max_ms : null,
+    anticipationClock: !!r.anticipation_clock,
+    durationMode: r.duration_mode === 'countdown' ? 'countdown' : 'rounds',
+    durationValue: Number.isFinite(r.duration_value) ? r.duration_value : 10,
+    createdAt: r.created_at ? Date.parse(r.created_at) : null,
+    updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
+    deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
+  };
+}
+function _dumpDrillImageRow(m) {
+  return {
+    id: m.id, uploaded_by: m.uploadedBy || null,
+    storage_path: m.storagePath || '', label: m.label || null,
+    deleted_at: m.deletedAt ? new Date(m.deletedAt).toISOString() : null
+  };
+}
+// URL publique d'une image de drill (bucket Storage). '' si indisponible.
+function _drillImageUrl(path) {
+  if (!path || !window.sb) return '';
+  try { const { data } = sb.storage.from('drill-images').getPublicUrl(path); return (data && data.publicUrl) || ''; }
+  catch (e) { return ''; }
 }
 // Re-pousse immédiatement (fire-and-forget, idempotent) des lignes locales
 // détectées PLUS RÉCENTES que le remote lors d'un apply : sans ça, un refetch
@@ -5109,6 +5229,8 @@ const K = {
   gages: 'pb8_gages',
   gageDraws: 'pb8_gage_draws',
   coaches: 'pb8_coaches', // [{ id, name, coachRole, teams[], code, createdAt, updatedAt }] — identités coach (rôles multi-équipes)
+  drills: 'pb8_drills', // [{ id, name, createdBy, stimuli, lengthMs, delayMs, audioBeep, durationMode, durationValue, ... }] — drills de réaction
+  drillImages: 'pb8_drill_images', // [{ id, uploadedBy, storagePath, label, url, ... }] — images custom (métadonnées ; binaire = Storage)
   theme: 'pb8_theme', // map { "<role>:<playerId|->": themeId } — préférence couleur par identité
   chronoSound: 'pb8_chrono_sound', // map { "<role>:<playerId|->": soundId } — ambiance sonore chrono
   chronoTension: 'pb8_chrono_tension', // map { "<role>:<playerId|->": bool } — mode tension 3-2-1
@@ -5524,6 +5646,13 @@ let state = {
   //  coach non-admin n'existe.
   coaches: load(K.coaches, []),
 
+  // === DRILL RÉACTION (cf. migration 20260710_001_drills) ===
+  // drills : bibliothèque commune de drills de réaction (CRUD coach, lecture
+  //   joueuse). drillImages : métadonnées des images custom (le binaire vit
+  //   dans le bucket Storage drill-images ; url dérivée à l'apply).
+  drills: load(K.drills, []),
+  drillImages: load(K.drillImages, []),
+
   // === JOUEUSES GUESTS (Phase 5 — cf. migration 20260524_009_guest_players) ===
   // guestPlayers : humains temporaires identifiés par leur nom (copine d'une
   //   joueuse, essayeuse). [{ id, name, note, promotedToPlayerId, firstSeenAt,
@@ -5625,6 +5754,8 @@ function persist() {
   save(K.gages, state.gages);
   save(K.gageDraws, state.gageDraws);
   save(K.coaches, state.coaches);
+  save(K.drills, state.drills);
+  save(K.drillImages, state.drillImages);
   // FIX Option B : pendant l'édition d'un plan, bumper updatedAt de l'entrée
   // courante AVANT le save → la garde anti-écho de l'apply() trainingPlans peut
   // distinguer une édition locale fraîche d'un écho realtime obsolète (qui
@@ -17753,6 +17884,655 @@ function renderChronoFab() {
   if (role !== 'coach' && role !== 'player') return '';
   return `<button class="chrono-fab" onclick="openChrono()" aria-label="Chronomètre" title="Chronomètre">⏱</button>`;
 }
+// Bouton Drill Réaction — même niveau que le chrono (coach + joueuse).
+function renderDrillFab() {
+  if (!state.auth) return '';
+  const role = state.auth.role;
+  if (role !== 'coach' && role !== 'player') return '';
+  return `<button class="drill-fab" onclick="openDrillLibrary()" aria-label="Drill réaction" title="Drill réaction">⚡</button>`;
+}
+
+// ============================================================
+// DRILL RÉACTION (builder façon ReaXing/BlazePod) — cf. migration 20260710_001
+// ============================================================
+// Permissions : coach (admin OU non-admin) = CRUD complet sur la biblio commune
+// (comme le chrono). Joueuse = lecture seule + ajustements ÉPHÉMÈRES avant
+// lancement (jamais persistés). Tout le monde partage la même bibliothèque.
+const DRILL_COLORS = [
+  { id: 'red', label: 'Rouge', hex: '#e5352b' }, { id: 'blue', label: 'Bleu', hex: '#2f7bf5' },
+  { id: 'green', label: 'Vert', hex: '#22a63a' }, { id: 'yellow', label: 'Jaune', hex: '#f4c020' },
+  { id: 'purple', label: 'Violet', hex: '#8b3fd6' }, { id: 'orange', label: 'Orange', hex: '#ec6a17' },
+  { id: 'black', label: 'Noir', hex: '#111111' }, { id: 'gray', label: 'Gris', hex: '#8a8f98' }
+];
+const DRILL_ARROWS = ['left', 'upleft', 'up', 'upright', 'right', 'downright', 'down', 'downleft'];
+const DRILL_ARROW_DEG = { up: 0, upright: 45, right: 90, downright: 135, down: 180, downleft: 225, left: 270, upleft: 315 };
+const DRILL_ARROW_GLYPH = { left: '←', upleft: '↖', up: '↑', upright: '↗', right: '→', downright: '↘', down: '↓', downleft: '↙' };
+const DRILL_SHAPES = ['circle', 'triangle', 'square', 'diamond', 'pentagon', 'hexagon', 'octagon', 'star'];
+const DRILL_SHAPE_LABEL = { circle: 'Rond', triangle: 'Triangle', square: 'Carré', diamond: 'Losange', pentagon: 'Pentagone', hexagon: 'Hexagone', octagon: 'Octogone', star: 'Étoile' };
+const DRILL_LEN_MIN = 500, DRILL_LEN_MAX = 15000, DRILL_DELAY_MIN = 0, DRILL_DELAY_MAX = 5000;
+
+function _drillIsCoach() { return !!(state.auth && state.auth.role === 'coach'); }
+function _drillFlush() { try { if (window.PbSync && PbSync.flushNow) PbSync.flushNow(state).catch(() => {}); } catch (e) {} }
+function activeDrills() { return (state.drills || []).filter(d => !d.deletedAt); }
+function activeDrillImages() { return (state.drillImages || []).filter(m => !m.deletedAt); }
+
+// Cœur testable : développe une spec de stimuli en un POOL de cues combinés.
+function _drillExpandPool(stimuli, images) {
+  const s = stimuli || {}, imgs = images || (state.drillImages || []);
+  const pool = [];
+  (s.colors || []).forEach(c => { const col = DRILL_COLORS.find(x => x.id === c); if (col) pool.push({ type: 'color', value: col.id, hex: col.hex }); });
+  (s.arrows || []).forEach(a => { if (DRILL_ARROW_DEG[a] != null) pool.push({ type: 'arrow', value: a }); });
+  if (s.numbers && Number.isFinite(s.numbers.min) && Number.isFinite(s.numbers.max)) {
+    const lo = Math.min(s.numbers.min, s.numbers.max), hi = Math.max(s.numbers.min, s.numbers.max);
+    for (let n = lo; n <= hi && pool.length < 3000; n++) pool.push({ type: 'number', value: n });
+  }
+  if (s.letters && s.letters.min && s.letters.max) {
+    let lo = String(s.letters.min).toUpperCase().charCodeAt(0), hi = String(s.letters.max).toUpperCase().charCodeAt(0);
+    if (lo > hi) { const t = lo; lo = hi; hi = t; }
+    for (let c = lo; c <= hi; c++) if (c >= 65 && c <= 90) pool.push({ type: 'letter', value: String.fromCharCode(c) });
+  }
+  (s.shapes || []).forEach(sh => { if (DRILL_SHAPES.includes(sh)) pool.push({ type: 'shape', value: sh }); });
+  (s.imageIds || []).forEach(id => { const img = imgs.find(m => m.id === id && !m.deletedAt); if (img) pool.push({ type: 'image', value: id, url: img.url }); });
+  return pool;
+}
+function _drillPickCue(pool) { return (pool && pool.length) ? pool[Math.floor(Math.random() * pool.length)] : null; }
+
+// Nettoyage/validation d'une spec de stimuli (bornes, ids valides).
+function _drillCleanStimuli(s) {
+  s = s || {}; const out = {};
+  const cols = (s.colors || []).filter(c => DRILL_COLORS.some(x => x.id === c)); if (cols.length) out.colors = cols;
+  const arr = (s.arrows || []).filter(a => DRILL_ARROW_DEG[a] != null); if (arr.length) out.arrows = arr;
+  if (s.numbers && Number.isFinite(s.numbers.min) && Number.isFinite(s.numbers.max)) {
+    out.numbers = { min: Math.max(0, Math.min(999, Math.min(s.numbers.min, s.numbers.max))), max: Math.max(0, Math.min(999, Math.max(s.numbers.min, s.numbers.max))) };
+  }
+  if (s.letters && s.letters.min && s.letters.max) {
+    let a = String(s.letters.min).toUpperCase().charAt(0), b = String(s.letters.max).toUpperCase().charAt(0);
+    if (/[A-Z]/.test(a) && /[A-Z]/.test(b)) { if (a > b) { const t = a; a = b; b = t; } out.letters = { min: a, max: b }; }
+  }
+  const sh = (s.shapes || []).filter(x => DRILL_SHAPES.includes(x)); if (sh.length) out.shapes = sh;
+  const imgs = (s.imageIds || []).filter(id => (state.drillImages || []).some(m => m.id === id && !m.deletedAt)); if (imgs.length) out.imageIds = imgs;
+  return out;
+}
+function _drillStimuliSummary(s) {
+  s = s || {}; const p = [];
+  if ((s.colors || []).length) p.push(s.colors.length + ' couleur' + (s.colors.length > 1 ? 's' : ''));
+  if ((s.arrows || []).length) p.push(s.arrows.length + ' flèche' + (s.arrows.length > 1 ? 's' : ''));
+  if (s.numbers) p.push('n° ' + s.numbers.min + '–' + s.numbers.max);
+  if (s.letters) p.push('lettres ' + s.letters.min + '–' + s.letters.max);
+  if ((s.shapes || []).length) p.push(s.shapes.length + ' forme' + (s.shapes.length > 1 ? 's' : ''));
+  if ((s.imageIds || []).length) p.push(s.imageIds.length + ' image' + (s.imageIds.length > 1 ? 's' : ''));
+  return p.length ? p.join(' · ') : 'aucun stimulus';
+}
+
+// ---- Rendu d'un cue plein écran (SVG géants pour flèches/formes) ----
+function _drillArrowSvg(dir) {
+  const deg = DRILL_ARROW_DEG[dir] || 0;
+  return `<svg viewBox="0 0 100 100" style="width:84vmin;height:84vmin;transform:rotate(${deg}deg)"><path d="M50 6 L90 54 L64 54 L64 94 L36 94 L36 54 L10 54 Z" fill="#fff"/></svg>`;
+}
+function _drillShapeSvg(shape) {
+  const poly = {
+    triangle: '50,6 94,90 6,90', square: '8,8 92,8 92,92 8,92',
+    diamond: '50,4 96,50 50,96 4,50', pentagon: '50,5 95,40 77,95 23,95 5,40',
+    hexagon: '25,6 75,6 97,50 75,94 25,94 3,50', octagon: '31,4 69,4 96,31 96,69 69,96 31,96 4,69 4,31',
+    star: '50,3 61,38 98,38 68,60 79,96 50,73 21,96 32,60 2,38 39,38'
+  }[shape];
+  if (shape === 'circle') return `<svg viewBox="0 0 100 100" style="width:84vmin;height:84vmin"><circle cx="50" cy="50" r="46" fill="#fff"/></svg>`;
+  return `<svg viewBox="0 0 100 100" style="width:84vmin;height:84vmin"><polygon points="${poly}" fill="#fff"/></svg>`;
+}
+function _drillCueHtml(cue) {
+  if (!cue) return '';
+  switch (cue.type) {
+    case 'color': return `<div style="width:86vmin;height:86vmin;border-radius:50%;background:${cue.hex};box-shadow:0 0 60px ${cue.hex}55"></div>`;
+    case 'arrow': return _drillArrowSvg(cue.value);
+    case 'shape': return _drillShapeSvg(cue.value);
+    case 'number':
+    case 'letter': return `<div style="font-family:'Anton',sans-serif;font-weight:900;color:#fff;font-size:min(72vh,68vw);line-height:1">${esc(String(cue.value))}</div>`;
+    case 'image': return cue.url ? `<img src="${esc(cue.url)}" style="max-width:94vw;max-height:90vh;object-fit:contain" alt="">` : '';
+    default: return '';
+  }
+}
+
+// ============================================================
+// DRILL — Web Audio (bip court, sans fichier externe)
+// ============================================================
+let _drillAudioCtx = null;
+function _drillUnlockAudio() {
+  try {
+    if (!_drillAudioCtx) _drillAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (_drillAudioCtx.state === 'suspended') _drillAudioCtx.resume();
+  } catch (e) {}
+}
+function _drillBeep() {
+  try {
+    if (!_drillAudioCtx) _drillUnlockAudio();
+    const ctx = _drillAudioCtx; if (!ctx) return;
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = 'square'; o.frequency.value = 880;
+    g.gain.setValueAtTime(0.0001, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.28, ctx.currentTime + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.12);
+    o.connect(g); g.connect(ctx.destination);
+    o.start(); o.stop(ctx.currentTime + 0.13);
+  } catch (e) {}
+}
+
+// ============================================================
+// DRILL — écran de jeu (plein écran 2 orientations, boucle setTimeout)
+// ============================================================
+// Durée du cue #i : randomize (aléatoire [min,max]) PRIME sur accélération
+// (interpolation linéaire length_ms → length_end_ms), sinon durée fixe. Pure.
+function _drillCueLengthPure(cfg, i, total) {
+  let ms;
+  if (Number.isFinite(cfg.lengthMinMs) && Number.isFinite(cfg.lengthMaxMs)) {
+    const lo = Math.min(cfg.lengthMinMs, cfg.lengthMaxMs), hi = Math.max(cfg.lengthMinMs, cfg.lengthMaxMs);
+    ms = lo + Math.random() * (hi - lo);
+  } else if (Number.isFinite(cfg.lengthEndMs) && total > 1) {
+    const frac = Math.min(1, Math.max(0, i / (total - 1)));
+    ms = cfg.lengthMs + (cfg.lengthEndMs - cfg.lengthMs) * frac;
+  } else { ms = cfg.lengthMs; }
+  return Math.max(200, Math.min(15000, ms));
+}
+// Estimation du nombre total de cues (pour l'interpolation d'accélération).
+function _drillTotalEstimate(cfg) {
+  const avg = (Number.isFinite(cfg.lengthMinMs) && Number.isFinite(cfg.lengthMaxMs)) ? (cfg.lengthMinMs + cfg.lengthMaxMs) / 2
+    : (Number.isFinite(cfg.lengthEndMs)) ? (cfg.lengthMs + cfg.lengthEndMs) / 2 : cfg.lengthMs;
+  if (cfg.durationMode === 'countdown') return Math.max(1, Math.round((Math.max(1, cfg.durationValue | 0) * 60000) / Math.max(200, avg)));
+  return Math.max(1, cfg.durationValue | 0);
+}
+function startDrillGame(config) {
+  const pool = (config && config.pool) || [];
+  if (!pool.length) { try { alert('Aucun stimulus jouable.'); } catch (e) {} return; }
+  let host = document.getElementById('drill-overlay');
+  if (!host) { host = document.createElement('div'); host.id = 'drill-overlay'; document.body.appendChild(host); }
+  host.innerHTML = `
+    <div id="drill-antic" class="drill-antic"></div>
+    <button class="drill-stop" onclick="stopDrillGame()" aria-label="Arrêter le drill">✕</button>
+    <div id="drill-cue" class="drill-cue"></div>`;
+  document.body.style.overflow = 'hidden';
+  _drillUnlockAudio();
+  const now = Date.now();
+  window._drillGame = {
+    running: true, timer: null, anticTimer: null, count: 0, pool,
+    lengthMs: config.lengthMs, delayMs: config.delayMs, audioBeep: !!config.audioBeep,
+    lengthEndMs: Number.isFinite(config.lengthEndMs) ? config.lengthEndMs : null,
+    lengthMinMs: Number.isFinite(config.lengthMinMs) ? config.lengthMinMs : null,
+    lengthMaxMs: Number.isFinite(config.lengthMaxMs) ? config.lengthMaxMs : null,
+    anticipationClock: !!config.anticipationClock,
+    total: _drillTotalEstimate(config),
+    durationMode: config.durationMode,
+    mode: config.durationMode === 'countdown' ? 'countdown' : 'rounds',
+    rounds: config.durationMode === 'countdown' ? Infinity : Math.max(1, config.durationValue | 0),
+    endAt: config.durationMode === 'countdown' ? now + Math.max(1, config.durationValue | 0) * 60000 : Infinity
+  };
+  // Plein écran (les 2 orientations). Pas de verrou d'orientation.
+  try { if (host.requestFullscreen) host.requestFullscreen().catch(() => {}); } catch (e) {}
+  try { if (navigator.wakeLock && navigator.wakeLock.request) navigator.wakeLock.request('screen').then(s => { window._drillWakeLock = s; }).catch(() => {}); } catch (e) {}
+  _drillNextCue();
+}
+function _drillNextCue() {
+  const g = window._drillGame; if (!g || !g.running) return;
+  if (g.mode === 'rounds' && g.count >= g.rounds) return _drillFinish();
+  if (g.mode === 'countdown' && Date.now() >= g.endAt) return _drillFinish();
+  const cue = _drillPickCue(g.pool);
+  if (!cue) return _drillFinish();
+  const i = g.count; // 0-indexé pour l'interpolation d'accélération
+  g.count++;
+  const dur = _drillCueLengthPure(g, i, g.total);
+  const el = document.getElementById('drill-cue'); if (el) el.innerHTML = _drillCueHtml(cue);
+  _drillClearAnticipation();
+  if (g.audioBeep) _drillBeep();
+  g.timer = setTimeout(() => {
+    if (!g.running) return;
+    if (g.delayMs > 0) {
+      const e2 = document.getElementById('drill-cue'); if (e2) e2.innerHTML = '';
+      if (g.anticipationClock && g.delayMs >= 1000) _drillStartAnticipation(g.delayMs);
+      g.timer = setTimeout(() => { _drillClearAnticipation(); _drillNextCue(); }, g.delayMs);
+    } else { _drillNextCue(); }
+  }, dur);
+}
+// Horloge d'anticipation : décompte visuel pendant le `delay` (>= 1s).
+function _drillStartAnticipation(delayMs) {
+  const g = window._drillGame; if (!g) return;
+  const el = document.getElementById('drill-antic'); if (!el) return;
+  const endAt = Date.now() + delayMs;
+  if (g.anticTimer) clearInterval(g.anticTimer);
+  const upd = () => {
+    const rem = Math.max(0, endAt - Date.now());
+    el.textContent = rem > 0 ? String(Math.ceil(rem / 1000)) : '';
+    if (rem <= 0 && g.anticTimer) { clearInterval(g.anticTimer); g.anticTimer = null; }
+  };
+  upd(); g.anticTimer = setInterval(upd, 100);
+}
+function _drillClearAnticipation() {
+  const g = window._drillGame;
+  if (g && g.anticTimer) { clearInterval(g.anticTimer); g.anticTimer = null; }
+  const el = document.getElementById('drill-antic'); if (el) el.textContent = '';
+}
+function _drillFinish() {
+  const g = window._drillGame; if (!g) return;
+  g.running = false; if (g.timer) clearTimeout(g.timer);
+  _drillClearAnticipation();
+  const el = document.getElementById('drill-cue');
+  if (el) el.innerHTML = `<div style="text-align:center;color:#fff">
+    <div style="font-size:18vmin;line-height:1">✓</div>
+    <div style="font-size:5vmin;font-family:'Anton',sans-serif;text-transform:uppercase;margin-top:8px">Terminé · ${g.count} cues</div>
+    <button class="btn btn-primary" style="margin-top:22px;font-size:16px" onclick="stopDrillGame()">Fermer</button>
+  </div>`;
+}
+function stopDrillGame() {
+  const g = window._drillGame;
+  if (g) { g.running = false; if (g.timer) clearTimeout(g.timer); if (g.anticTimer) clearInterval(g.anticTimer); }
+  window._drillGame = null;
+  const host = document.getElementById('drill-overlay'); if (host) host.remove();
+  document.body.style.overflow = '';
+  try { if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {}); } catch (e) {}
+  try { if (window._drillWakeLock) { window._drillWakeLock.release().catch(() => {}); window._drillWakeLock = null; } } catch (e) {}
+  try { render(); } catch (e) {}
+}
+
+// Config effective d'un lancement = drill + overrides éphémères (joueuse).
+function _drillLaunchConfig(d, o) {
+  o = o || {};
+  return {
+    stimuli: o.stimuli || d.stimuli,
+    lengthMs: Number.isFinite(o.lengthMs) ? o.lengthMs : d.lengthMs,
+    delayMs: Number.isFinite(o.delayMs) ? o.delayMs : d.delayMs,
+    audioBeep: (typeof o.audioBeep === 'boolean') ? o.audioBeep : d.audioBeep,
+    // Modes de durée de cue (accélération / randomize) + horloge d'anticipation.
+    // undefined = l'override n'y touche pas → on garde la valeur du drill (null inclus).
+    lengthEndMs: (o.lengthEndMs !== undefined) ? o.lengthEndMs : (d.lengthEndMs != null ? d.lengthEndMs : null),
+    lengthMinMs: (o.lengthMinMs !== undefined) ? o.lengthMinMs : (d.lengthMinMs != null ? d.lengthMinMs : null),
+    lengthMaxMs: (o.lengthMaxMs !== undefined) ? o.lengthMaxMs : (d.lengthMaxMs != null ? d.lengthMaxMs : null),
+    anticipationClock: (typeof o.anticipationClock === 'boolean') ? o.anticipationClock : !!d.anticipationClock,
+    durationMode: o.durationMode || d.durationMode,
+    durationValue: Number.isFinite(o.durationValue) ? o.durationValue : d.durationValue
+  };
+}
+function launchDrill(id, overrides) {
+  const d = (state.drills || []).find(x => x.id === id);
+  if (!d || d.deletedAt) return;
+  const cfg = _drillLaunchConfig(d, overrides);
+  const pool = _drillExpandPool(cfg.stimuli);
+  if (!pool.length) { try { alert('Ce drill n\'a aucun stimulus jouable.'); } catch (e) {} return; }
+  try { closeModal(); } catch (e) {}
+  startDrillGame({ pool, lengthMs: cfg.lengthMs, delayMs: cfg.delayMs, audioBeep: cfg.audioBeep, durationMode: cfg.durationMode, durationValue: cfg.durationValue, lengthEndMs: cfg.lengthEndMs, lengthMinMs: cfg.lengthMinMs, lengthMaxMs: cfg.lengthMaxMs, anticipationClock: cfg.anticipationClock });
+}
+
+// ============================================================
+// DRILL — bibliothèque (liste)
+// ============================================================
+function openDrillLibrary() {
+  const isCoach = _drillIsCoach();
+  const drills = activeDrills().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">⚡ Drills de réaction</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      ${isCoach
+        ? `<button class="btn btn-primary btn-block mb-3" onclick="openDrillWizard()">+ Nouveau drill</button>`
+        : `<div style="padding:8px 12px;background:var(--bg-3);border-radius:6px;margin-bottom:12px;font-size:11px;color:var(--ink-3);line-height:1.5">👁 Lance un drill. Tu peux <strong>ajuster les réglages avant de lancer</strong> (⚙) — sans les enregistrer.</div>`}
+      ${drills.length
+        ? drills.map(d => _drillCardHtml(d, isCoach)).join('')
+        : `<div style="padding:24px;text-align:center;color:var(--ink-3);font-size:13px;font-style:italic;border:1px dashed var(--border);border-radius:8px">Aucun drill${isCoach ? ' — crée le premier avec « + Nouveau drill »' : ' pour le moment'}.</div>`}
+    </div>
+  `);
+}
+function _drillCardHtml(d, isCoach) {
+  const dur = d.durationMode === 'countdown' ? (d.durationValue + ' min') : (d.durationValue + ' cues');
+  const mode = Number.isFinite(d.lengthMinMs) ? ('🎲 ' + (d.lengthMinMs / 1000) + '–' + (d.lengthMaxMs / 1000) + 's')
+    : Number.isFinite(d.lengthEndMs) ? ('📉 ' + (d.lengthMs / 1000) + '→' + (d.lengthEndMs / 1000) + 's')
+    : ((d.lengthMs / 1000) + 's');
+  const timing = mode + (d.delayMs ? (' / ' + (d.delayMs / 1000) + 's') : '') + (d.anticipationClock ? ' · ⏳' : '') + (d.audioBeep ? ' · 🔊' : '');
+  return `
+    <div style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;margin-bottom:10px;background:var(--surface)">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start">
+        <div style="flex:1;min-width:0">
+          <div style="font-family:'Anton';text-transform:uppercase;font-size:15px;letter-spacing:0.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(d.name || 'Drill')}</div>
+          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;line-height:1.5">${esc(_drillStimuliSummary(d.stimuli))}<br>${dur} · ${timing}</div>
+        </div>
+        ${isCoach ? `<div style="display:flex;gap:4px;flex:0 0 auto">
+          <button class="btn btn-icon" title="Modifier" onclick="openDrillWizard('${d.id}')">✎</button>
+          <button class="btn btn-icon" title="Supprimer" onclick="deleteDrill('${d.id}')">🗑</button>
+        </div>` : ''}
+      </div>
+      <div style="display:flex;gap:6px;margin-top:10px">
+        <button class="btn btn-primary" style="flex:1" onclick="launchDrill('${d.id}')">▶ Lancer</button>
+        <button class="btn btn-secondary" style="flex:0 0 auto" title="Ajuster puis lancer (temporaire)" onclick="openDrillAdjust('${d.id}')">⚙ Ajuster</button>
+      </div>
+    </div>`;
+}
+function deleteDrill(id) {
+  if (!_drillIsCoach()) return;
+  const d = (state.drills || []).find(x => x.id === id); if (!d) return;
+  let ok = false; try { ok = confirm('Supprimer le drill « ' + (d.name || '') + ' » ?'); } catch (e) { ok = true; }
+  if (!ok) return;
+  d.deletedAt = Date.now(); d.updatedAt = Date.now();
+  persist(); _drillFlush(); openDrillLibrary();
+}
+
+// ============================================================
+// DRILL — wizard 3 étapes (Stimuli / Transition / Durée) — coach only
+// ============================================================
+function openDrillWizard(editId) {
+  if (!_drillIsCoach()) return;
+  const src = editId ? (state.drills || []).find(d => d.id === editId && !d.deletedAt) : null;
+  state._drillWizard = src ? {
+    step: 1, editingId: src.id, name: src.name || '',
+    stimuli: JSON.parse(JSON.stringify(src.stimuli || {})),
+    lengthMs: src.lengthMs, delayMs: src.delayMs, audioBeep: src.audioBeep,
+    durationMode: src.durationMode, durationValue: src.durationValue,
+    // Modes de durée dérivés du drill.
+    accel: Number.isFinite(src.lengthEndMs), lengthEndMs: Number.isFinite(src.lengthEndMs) ? src.lengthEndMs : 2000,
+    randomize: Number.isFinite(src.lengthMinMs) && Number.isFinite(src.lengthMaxMs),
+    lengthMinMs: Number.isFinite(src.lengthMinMs) ? src.lengthMinMs : 1000,
+    lengthMaxMs: Number.isFinite(src.lengthMaxMs) ? src.lengthMaxMs : 5000,
+    anticipationClock: !!src.anticipationClock
+  } : {
+    step: 1, editingId: null, name: '',
+    stimuli: { colors: [], arrows: [], numbers: null, letters: null, shapes: [], imageIds: [] },
+    lengthMs: 7000, delayMs: 500, audioBeep: true, durationMode: 'rounds', durationValue: 10,
+    accel: false, lengthEndMs: 2000, randomize: false, lengthMinMs: 1000, lengthMaxMs: 5000, anticipationClock: false
+  };
+  renderDrillWizard();
+}
+function _dw() { return state._drillWizard; }
+function _drillWizGo(step) { const w = _dw(); if (!w) return; w.step = step; renderDrillWizard(); }
+function _drillWizToggle(cat, id) {
+  const w = _dw(); if (!w) return;
+  const arr = w.stimuli[cat] = w.stimuli[cat] || [];
+  const i = arr.indexOf(id); if (i >= 0) arr.splice(i, 1); else arr.push(id);
+  renderDrillWizard();
+}
+function _drillWizToggleNumbers() { const w = _dw(); if (!w) return; w.stimuli.numbers = w.stimuli.numbers ? null : { min: 1, max: 10 }; renderDrillWizard(); }
+function _drillWizToggleLetters() { const w = _dw(); if (!w) return; w.stimuli.letters = w.stimuli.letters ? null : { min: 'A', max: 'H' }; renderDrillWizard(); }
+function _drillWizNum(field, val) { const w = _dw(); if (!w || !w.stimuli.numbers) return; const v = parseInt(val, 10); if (Number.isFinite(v)) w.stimuli.numbers[field] = Math.max(0, Math.min(999, v)); }
+function _drillWizLetter(field, val) { const w = _dw(); if (!w || !w.stimuli.letters) return; const c = String(val || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 1); if (c) w.stimuli.letters[field] = c; }
+function _drillWizName(val) { const w = _dw(); if (w) w.name = String(val || '').slice(0, 60); }
+function _drillWizRange(kind, val) {
+  const w = _dw(); if (!w) return; const v = parseInt(val, 10); if (!Number.isFinite(v)) return;
+  if (kind === 'length') { w.lengthMs = Math.max(DRILL_LEN_MIN, Math.min(DRILL_LEN_MAX, v)); const s = document.getElementById('dw-length-val'); if (s) s.textContent = (w.lengthMs / 1000) + 's'; }
+  else { w.delayMs = Math.max(DRILL_DELAY_MIN, Math.min(DRILL_DELAY_MAX, v)); const s = document.getElementById('dw-delay-val'); if (s) s.textContent = (w.delayMs / 1000) + 's'; }
+}
+function _drillWizBeep(on) { const w = _dw(); if (w) w.audioBeep = !!on; }
+// Accélération XOR Randomize (mutuellement exclusifs) + horloge d'anticipation.
+function _drillWizAccel(on) { const w = _dw(); if (!w) return; w.accel = !!on; if (w.accel) w.randomize = false; renderDrillWizard(); }
+function _drillWizRandomize(on) { const w = _dw(); if (!w) return; w.randomize = !!on; if (w.randomize) w.accel = false; renderDrillWizard(); }
+function _drillWizAntic(on) { const w = _dw(); if (w) w.anticipationClock = !!on; }
+// Champs en SECONDES → stockés en ms (bornés 0.2–15s).
+function _drillWizSec(field, val) { const w = _dw(); if (!w) return; let ms = Math.round(parseFloat(val) * 1000); if (!Number.isFinite(ms)) return; w[field] = Math.max(200, Math.min(15000, ms)); }
+function _drillWizMode(mode) { const w = _dw(); if (!w) return; w.durationMode = mode === 'countdown' ? 'countdown' : 'rounds'; if (w.durationValue == null) w.durationValue = w.durationMode === 'countdown' ? 3 : 10; renderDrillWizard(); }
+function _drillWizDurationValue(val) { const w = _dw(); if (!w) return; const v = parseInt(val, 10); if (Number.isFinite(v)) w.durationValue = Math.max(1, Math.min(999, v)); }
+
+function _drillChip(on, label, onclick, extraStyle) {
+  return `<button type="button" onclick="${onclick}" class="btn ${on ? 'btn-primary' : 'btn-secondary'}" style="min-height:40px;padding:0 10px;font-size:12px;${extraStyle || ''}" aria-pressed="${on}">${label}</button>`;
+}
+function renderDrillWizard() {
+  const w = _dw(); if (!w) return;
+  const s = w.stimuli;
+  const stepTitle = w.step === 1 ? 'Stimuli' : w.step === 2 ? 'Transition' : 'Durée';
+  const dot = n => `<span style="width:8px;height:8px;border-radius:50%;background:${n === w.step ? 'var(--orange)' : 'var(--border)'};display:inline-block"></span>`;
+  let body = '';
+  if (w.step === 1) {
+    const imgs = activeDrillImages();
+    body = `
+      <div class="fld" style="margin-bottom:14px">
+        <label class="fld-label">Nom du drill</label>
+        <input id="dw-name" value="${esc(w.name || '')}" placeholder="Ex : Réaction couleurs + flèches" maxlength="60" onchange="_drillWizName(this.value)">
+      </div>
+      <div class="eyebrow-muted" style="margin-bottom:6px">Couleurs</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px">
+        ${DRILL_COLORS.map(c => _drillChip((s.colors || []).includes(c.id), `<span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:${c.hex};margin-right:6px;vertical-align:middle;border:1px solid rgba(255,255,255,0.3)"></span>${esc(c.label)}`, `_drillWizToggle('colors','${c.id}')`)).join('')}
+      </div>
+      <div class="eyebrow-muted" style="margin-bottom:6px">Flèches</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px">
+        ${DRILL_ARROWS.map(a => _drillChip((s.arrows || []).includes(a), `<span style="font-size:16px">${DRILL_ARROW_GLYPH[a]}</span>`, `_drillWizToggle('arrows','${a}')`, 'min-width:44px')).join('')}
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <div class="eyebrow-muted">Chiffres</div>
+        ${_drillChip(!!s.numbers, s.numbers ? '✓ Activé' : '+ Activer', '_drillWizToggleNumbers()', 'min-height:32px;padding:0 10px;font-size:11px')}
+      </div>
+      ${s.numbers ? `<div class="fld-row" style="margin-bottom:14px">
+        <div class="fld"><label class="fld-label">Min</label><input type="number" min="0" max="999" value="${s.numbers.min}" onchange="_drillWizNum('min',this.value)"></div>
+        <div class="fld"><label class="fld-label">Max</label><input type="number" min="0" max="999" value="${s.numbers.max}" onchange="_drillWizNum('max',this.value)"></div>
+      </div>` : '<div style="margin-bottom:14px"></div>'}
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <div class="eyebrow-muted">Lettres</div>
+        ${_drillChip(!!s.letters, s.letters ? '✓ Activé' : '+ Activer', '_drillWizToggleLetters()', 'min-height:32px;padding:0 10px;font-size:11px')}
+      </div>
+      ${s.letters ? `<div class="fld-row" style="margin-bottom:14px">
+        <div class="fld"><label class="fld-label">De</label><input maxlength="1" value="${esc(s.letters.min)}" onchange="_drillWizLetter('min',this.value)" style="text-transform:uppercase"></div>
+        <div class="fld"><label class="fld-label">À</label><input maxlength="1" value="${esc(s.letters.max)}" onchange="_drillWizLetter('max',this.value)" style="text-transform:uppercase"></div>
+      </div>` : '<div style="margin-bottom:14px"></div>'}
+      <div class="eyebrow-muted" style="margin-bottom:6px">Formes</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px">
+        ${DRILL_SHAPES.map(sh => _drillChip((s.shapes || []).includes(sh), esc(DRILL_SHAPE_LABEL[sh]), `_drillWizToggle('shapes','${sh}')`)).join('')}
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <div class="eyebrow-muted">Images custom</div>
+        <label class="btn btn-secondary" style="min-height:32px;padding:0 10px;font-size:11px;cursor:pointer;display:inline-flex;align-items:center">+ Importer<input type="file" accept="image/*" multiple style="display:none" onchange="addDrillImages(event)"></label>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:6px">
+        ${imgs.length ? imgs.map(m => {
+          const on = (s.imageIds || []).includes(m.id);
+          return `<div onclick="_drillWizToggle('imageIds','${m.id}')" style="position:relative;width:64px;height:64px;border-radius:8px;overflow:hidden;cursor:pointer;border:3px solid ${on ? 'var(--orange)' : 'transparent'}">
+            <img src="${esc(m.url)}" style="width:100%;height:100%;object-fit:cover" alt="">
+            ${on ? '<div style="position:absolute;top:2px;right:2px;background:var(--orange);color:#fff;border-radius:50%;width:18px;height:18px;font-size:11px;display:flex;align-items:center;justify-content:center">✓</div>' : ''}
+          </div>`;
+        }).join('') : '<div style="font-size:11px;color:var(--ink-3);font-style:italic">Aucune image — importe des photos de plays, moves, exos…</div>'}
+      </div>`;
+  } else if (w.step === 2) {
+    const toggleRow = (checked, disabled, onchange, label, tip) => `
+      <label style="display:flex;align-items:center;gap:10px;padding:11px 12px;background:var(--bg-3);border-radius:8px;cursor:${disabled ? 'not-allowed' : 'pointer'};opacity:${disabled ? '0.5' : '1'}"${tip ? ` title="${esc(tip)}"` : ''}>
+        <input type="checkbox" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''} onchange="${onchange}" style="width:20px;height:20px;flex:none">
+        <span>${label}</span>
+      </label>`;
+    body = `
+      <div class="fld" style="margin-bottom:16px">
+        <label class="fld-label">Durée d'affichage — <span id="dw-length-val" style="color:var(--orange)">${(w.lengthMs / 1000)}s</span></label>
+        <input type="range" min="${DRILL_LEN_MIN}" max="${DRILL_LEN_MAX}" step="250" value="${w.lengthMs}" oninput="_drillWizRange('length',this.value)" style="width:100%">
+        <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono'"><span>0.5s</span><span>15s</span></div>
+      </div>
+
+      <!-- ACCÉLÉRATION -->
+      ${toggleRow(w.accel, w.randomize, '_drillWizAccel(this.checked)', '📉 Accélération (durée dégressive)', w.randomize ? 'Désactive « Randomize » pour utiliser l\'accélération' : '')}
+      ${w.accel ? `<div class="fld" style="margin:8px 0 16px">
+        <label class="fld-label">Vitesse finale (s) — durée du dernier cue</label>
+        <input type="number" step="0.1" min="0.2" max="${(w.lengthMs / 1000)}" value="${(w.lengthEndMs / 1000)}" onchange="_drillWizSec('lengthEndMs',this.value)">
+        <div style="margin-top:4px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">Interpole ${(w.lengthMs / 1000)}s → cette valeur sur la session (≤ départ, ≥ 0.2s).</div>
+      </div>` : '<div style="margin-bottom:10px"></div>'}
+
+      <!-- RANDOMIZE LENGTH -->
+      ${toggleRow(w.randomize, w.accel, '_drillWizRandomize(this.checked)', '🎲 Randomize Length (durée aléatoire)', w.accel ? 'Désactive « Accélération » pour randomiser' : '')}
+      ${w.randomize ? `<div class="fld-row" style="margin:8px 0 16px">
+        <div class="fld"><label class="fld-label">Min (s)</label><input type="number" step="0.1" min="0.2" max="15" value="${(w.lengthMinMs / 1000)}" onchange="_drillWizSec('lengthMinMs',this.value)"></div>
+        <div class="fld"><label class="fld-label">Max (s)</label><input type="number" step="0.1" min="0.2" max="15" value="${(w.lengthMaxMs / 1000)}" onchange="_drillWizSec('lengthMaxMs',this.value)"></div>
+      </div>` : '<div style="margin-bottom:10px"></div>'}
+
+      <div class="fld" style="margin-bottom:16px">
+        <label class="fld-label">Délai noir entre 2 cues — <span id="dw-delay-val" style="color:var(--orange)">${(w.delayMs / 1000)}s</span></label>
+        <input type="range" min="${DRILL_DELAY_MIN}" max="${DRILL_DELAY_MAX}" step="250" value="${w.delayMs}" oninput="_drillWizRange('delay',this.value)" style="width:100%">
+        <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono'"><span>0s</span><span>5s</span></div>
+      </div>
+
+      <!-- HORLOGE D'ANTICIPATION -->
+      ${toggleRow(w.anticipationClock, false, '_drillWizAntic(this.checked)', '⏳ Horloge d\'anticipation (décompte pendant le délai)', '')}
+      ${w.anticipationClock && w.delayMs < 1000 ? `<div style="margin:6px 0 12px;font-size:10px;color:var(--orange);font-family:'JetBrains Mono';line-height:1.4">⚠ Nécessite un délai ≥ 1s pour s'afficher.</div>` : '<div style="margin-bottom:10px"></div>'}
+
+      <!-- BIP -->
+      ${toggleRow(w.audioBeep, false, '_drillWizBeep(this.checked)', '🔊 Bip audio à chaque nouveau cue', '')}`;
+  } else {
+    body = `
+      <div class="eyebrow-muted" style="margin-bottom:8px">Mode</div>
+      <div class="segmented" style="margin-bottom:16px">
+        <button class="segmented-btn ${w.durationMode === 'rounds' ? 'active' : ''}" onclick="_drillWizMode('rounds')">🔁 Nombre de cues</button>
+        <button class="segmented-btn ${w.durationMode === 'countdown' ? 'active' : ''}" onclick="_drillWizMode('countdown')">⏱ Durée totale</button>
+      </div>
+      <div class="fld">
+        <label class="fld-label">${w.durationMode === 'countdown' ? 'Durée (minutes)' : 'Nombre de cues'}</label>
+        <input type="number" min="1" max="999" value="${w.durationValue}" onchange="_drillWizDurationValue(this.value)">
+      </div>
+      <div style="margin-top:16px;padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:11px;color:var(--ink-2);line-height:1.5">
+        ${esc(_drillStimuliSummary(_drillCleanStimuli(w.stimuli)))} · ${(w.lengthMs / 1000)}s${w.delayMs ? (' / ' + (w.delayMs / 1000) + 's') : ''}${w.audioBeep ? ' · 🔊' : ''}
+      </div>`;
+  }
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">Drill · ${w.editingId ? 'édition' : 'nouveau'} · étape ${w.step}/3</div>
+        <div class="modal-title">${stepTitle}</div>
+      </div>
+      <button class="modal-close" onclick="state._drillWizard=null;closeModal()">✕</button>
+    </div>
+    <div class="modal-body">${body}</div>
+    <div class="modal-footer" style="display:flex;gap:6px;align-items:center">
+      <div style="display:flex;gap:6px;flex:0 0 auto">${dot(1)}${dot(2)}${dot(3)}</div>
+      <div style="flex:1"></div>
+      ${w.step > 1 ? `<button class="btn btn-secondary" onclick="_drillWizGo(${w.step - 1})">← Retour</button>` : ''}
+      ${w.step < 3 ? `<button class="btn btn-primary" onclick="_drillWizGo(${w.step + 1})">Suivant →</button>`
+        : `<button class="btn btn-secondary" onclick="saveDrill(false)">Enregistrer</button><button class="btn btn-primary" onclick="saveDrill(true)">▶ Lancer</button>`}
+    </div>
+  `);
+}
+function saveDrill(launchAfter) {
+  const w = _dw(); if (!w || !_drillIsCoach()) return;
+  const stimuli = _drillCleanStimuli(w.stimuli);
+  if (!_drillExpandPool(stimuli).length) { try { alert('Sélectionne au moins un stimulus.'); } catch (e) {} return; }
+  // Modes de durée : randomize XOR accélération (mutuellement exclusifs).
+  let lengthEndMs = null, lengthMinMs = null, lengthMaxMs = null;
+  if (w.randomize) {
+    lengthMinMs = w.lengthMinMs; lengthMaxMs = w.lengthMaxMs;
+    if (!(lengthMinMs >= 200 && lengthMaxMs <= 15000 && lengthMinMs < lengthMaxMs)) { try { alert('Randomize : min ≥ 0.2s, max ≤ 15s, et min < max.'); } catch (e) {} return; }
+  } else if (w.accel) {
+    lengthEndMs = w.lengthEndMs;
+    if (!(lengthEndMs >= 200 && lengthEndMs <= w.lengthMs)) { try { alert('Accélération : la vitesse finale doit être entre 0.2s et la durée de départ (' + (w.lengthMs / 1000) + 's).'); } catch (e) {} return; }
+  }
+  const anticipationClock = !!w.anticipationClock;
+  const name = (w.name || '').trim().slice(0, 60) || 'Drill';
+  const now = Date.now();
+  const extra = { lengthEndMs, lengthMinMs, lengthMaxMs, anticipationClock };
+  let d;
+  if (w.editingId) {
+    d = (state.drills || []).find(x => x.id === w.editingId);
+    if (!d) { state._drillWizard = null; return; }
+    Object.assign(d, { name, stimuli, lengthMs: w.lengthMs, delayMs: w.delayMs, audioBeep: w.audioBeep, durationMode: w.durationMode, durationValue: w.durationValue, ...extra, updatedAt: now });
+  } else {
+    d = { id: uid(), name, createdBy: (currentCoach() || {}).id || null, stimuli, lengthMs: w.lengthMs, delayMs: w.delayMs, audioBeep: w.audioBeep, durationMode: w.durationMode, durationValue: w.durationValue, ...extra, createdAt: now, updatedAt: now, deletedAt: null };
+    state.drills = state.drills || []; state.drills.unshift(d);
+  }
+  const id = d.id;
+  persist(); _drillFlush();
+  state._drillWizard = null;
+  closeModal();
+  if (launchAfter) launchDrill(id); else openDrillLibrary();
+}
+
+// ============================================================
+// DRILL — ajustement ÉPHÉMÈRE avant lancement (coach + joueuse ; jamais persisté)
+// ============================================================
+function openDrillAdjust(id) {
+  const d = (state.drills || []).find(x => x.id === id && !x.deletedAt); if (!d) return;
+  state._drillAdjust = {
+    drillId: id,
+    stimuli: JSON.parse(JSON.stringify(d.stimuli || {})),
+    lengthMs: d.lengthMs, delayMs: d.delayMs, audioBeep: d.audioBeep,
+    durationMode: d.durationMode, durationValue: d.durationValue
+  };
+  renderDrillAdjust();
+}
+function _da() { return state._drillAdjust; }
+function _drillAdjToggle(cat, id) { const a = _da(); if (!a) return; const arr = a.stimuli[cat] = a.stimuli[cat] || []; const i = arr.indexOf(id); if (i >= 0) arr.splice(i, 1); else arr.push(id); renderDrillAdjust(); }
+function _drillAdjNum(field, val) { const a = _da(); if (!a || !a.stimuli.numbers) return; const v = parseInt(val, 10); if (Number.isFinite(v)) a.stimuli.numbers[field] = Math.max(0, Math.min(999, v)); }
+function _drillAdjLetter(field, val) { const a = _da(); if (!a || !a.stimuli.letters) return; const c = String(val || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 1); if (c) a.stimuli.letters[field] = c; }
+function _drillAdjRange(kind, val) { const a = _da(); if (!a) return; const v = parseInt(val, 10); if (!Number.isFinite(v)) return; if (kind === 'length') { a.lengthMs = Math.max(DRILL_LEN_MIN, Math.min(DRILL_LEN_MAX, v)); const s = document.getElementById('da-length-val'); if (s) s.textContent = (a.lengthMs / 1000) + 's'; } else { a.delayMs = Math.max(DRILL_DELAY_MIN, Math.min(DRILL_DELAY_MAX, v)); const s = document.getElementById('da-delay-val'); if (s) s.textContent = (a.delayMs / 1000) + 's'; } }
+function _drillAdjBeep(on) { const a = _da(); if (a) a.audioBeep = !!on; }
+function _drillAdjMode(m) { const a = _da(); if (!a) return; a.durationMode = m === 'countdown' ? 'countdown' : 'rounds'; renderDrillAdjust(); }
+function _drillAdjDurationValue(val) { const a = _da(); if (!a) return; const v = parseInt(val, 10); if (Number.isFinite(v)) a.durationValue = Math.max(1, Math.min(999, v)); }
+function launchDrillAdjusted() {
+  const a = _da(); if (!a) return;
+  const id = a.drillId;
+  const overrides = { stimuli: _drillCleanStimuli(a.stimuli), lengthMs: a.lengthMs, delayMs: a.delayMs, audioBeep: a.audioBeep, durationMode: a.durationMode, durationValue: a.durationValue };
+  state._drillAdjust = null; // éphémère : rien n'est persisté
+  launchDrill(id, overrides);
+}
+function renderDrillAdjust() {
+  const a = _da(); if (!a) return;
+  const s = a.stimuli;
+  // Seules les catégories présentes dans le drill sont ajustables (on/off + plages).
+  const hasCol = Array.isArray(s.colors), hasArr = Array.isArray(s.arrows), hasSh = Array.isArray(s.shapes), hasImg = Array.isArray(s.imageIds);
+  openModal(`
+    <div class="modal-header">
+      <div><div class="eyebrow">Réglages temporaires · non enregistrés</div><div class="modal-title">⚙ Ajuster & lancer</div></div>
+      <button class="modal-close" onclick="state._drillAdjust=null;closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="padding:8px 12px;background:var(--bg-3);border-radius:6px;margin-bottom:14px;font-size:11px;color:var(--ink-3);line-height:1.5">Ces réglages ne modifient <strong>pas</strong> le drill enregistré — ils ne valent que pour ce lancement.</div>
+      ${s.numbers ? `<div class="eyebrow-muted" style="margin-bottom:6px">Plage de chiffres</div>
+      <div class="fld-row" style="margin-bottom:14px">
+        <div class="fld"><label class="fld-label">Min</label><input type="number" min="0" max="999" value="${s.numbers.min}" onchange="_drillAdjNum('min',this.value)"></div>
+        <div class="fld"><label class="fld-label">Max</label><input type="number" min="0" max="999" value="${s.numbers.max}" onchange="_drillAdjNum('max',this.value)"></div>
+      </div>` : ''}
+      ${s.letters ? `<div class="eyebrow-muted" style="margin-bottom:6px">Plage de lettres</div>
+      <div class="fld-row" style="margin-bottom:14px">
+        <div class="fld"><label class="fld-label">De</label><input maxlength="1" value="${esc(s.letters.min)}" onchange="_drillAdjLetter('min',this.value)" style="text-transform:uppercase"></div>
+        <div class="fld"><label class="fld-label">À</label><input maxlength="1" value="${esc(s.letters.max)}" onchange="_drillAdjLetter('max',this.value)" style="text-transform:uppercase"></div>
+      </div>` : ''}
+      ${hasCol && s.colors.length ? `<div class="eyebrow-muted" style="margin-bottom:6px">Couleurs</div><div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px">${DRILL_COLORS.filter(c => a.stimuli.colors.includes(c.id) || (state.drills.find(d => d.id === a.drillId).stimuli.colors || []).includes(c.id)).map(c => _drillChip(s.colors.includes(c.id), `<span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:${c.hex};margin-right:6px;vertical-align:middle"></span>${esc(c.label)}`, `_drillAdjToggle('colors','${c.id}')`)).join('')}</div>` : ''}
+      ${hasArr && s.arrows.length ? `<div class="eyebrow-muted" style="margin-bottom:6px">Flèches</div><div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px">${DRILL_ARROWS.filter(x => (state.drills.find(d => d.id === a.drillId).stimuli.arrows || []).includes(x)).map(x => _drillChip(s.arrows.includes(x), `<span style="font-size:16px">${DRILL_ARROW_GLYPH[x]}</span>`, `_drillAdjToggle('arrows','${x}')`, 'min-width:44px')).join('')}</div>` : ''}
+      ${hasSh && s.shapes.length ? `<div class="eyebrow-muted" style="margin-bottom:6px">Formes</div><div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px">${DRILL_SHAPES.filter(x => (state.drills.find(d => d.id === a.drillId).stimuli.shapes || []).includes(x)).map(x => _drillChip(s.shapes.includes(x), esc(DRILL_SHAPE_LABEL[x]), `_drillAdjToggle('shapes','${x}')`)).join('')}</div>` : ''}
+      <div class="fld" style="margin-bottom:16px">
+        <label class="fld-label">Durée d'affichage — <span id="da-length-val" style="color:var(--orange)">${(a.lengthMs / 1000)}s</span></label>
+        <input type="range" min="${DRILL_LEN_MIN}" max="${DRILL_LEN_MAX}" step="250" value="${a.lengthMs}" oninput="_drillAdjRange('length',this.value)" style="width:100%">
+      </div>
+      <div class="fld" style="margin-bottom:16px">
+        <label class="fld-label">Délai noir — <span id="da-delay-val" style="color:var(--orange)">${(a.delayMs / 1000)}s</span></label>
+        <input type="range" min="${DRILL_DELAY_MIN}" max="${DRILL_DELAY_MAX}" step="250" value="${a.delayMs}" oninput="_drillAdjRange('delay',this.value)" style="width:100%">
+      </div>
+      <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--bg-3);border-radius:8px;cursor:pointer;margin-bottom:14px">
+        <input type="checkbox" ${a.audioBeep ? 'checked' : ''} onchange="_drillAdjBeep(this.checked)" style="width:20px;height:20px;flex:none"><span>🔊 Bip audio</span>
+      </label>
+      <div class="segmented" style="margin-bottom:12px">
+        <button class="segmented-btn ${a.durationMode === 'rounds' ? 'active' : ''}" onclick="_drillAdjMode('rounds')">🔁 Cues</button>
+        <button class="segmented-btn ${a.durationMode === 'countdown' ? 'active' : ''}" onclick="_drillAdjMode('countdown')">⏱ Minutes</button>
+      </div>
+      <div class="fld">
+        <label class="fld-label">${a.durationMode === 'countdown' ? 'Durée (minutes)' : 'Nombre de cues'}</label>
+        <input type="number" min="1" max="999" value="${a.durationValue}" onchange="_drillAdjDurationValue(this.value)">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="state._drillAdjust=null;closeModal()">Annuler</button>
+      <button class="btn btn-primary" onclick="launchDrillAdjusted()">▶ Lancer</button>
+    </div>
+  `);
+}
+
+// ============================================================
+// DRILL — images custom (upload Storage + métadonnées drill_images)
+// ============================================================
+async function addDrillImages(event) {
+  if (!_drillIsCoach()) { event.target.value = ''; return; }
+  const files = Array.from(event.target.files || []); event.target.value = '';
+  if (!files.length || !window.sb) return;
+  const errors = [];
+  for (const file of files.slice(0, 10)) {
+    try {
+      const blob = (typeof compressImageBlob === 'function') ? await compressImageBlob(file, 1000, 0.78) : file;
+      const fname = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`;
+      const { error: upErr } = await sb.storage.from('drill-images').upload(fname, blob, { contentType: 'image/jpeg', cacheControl: '31536000', upsert: false });
+      if (upErr) throw upErr;
+      const { data: pub } = sb.storage.from('drill-images').getPublicUrl(fname);
+      const now = Date.now();
+      const m = { id: uid(), uploadedBy: (currentCoach() || {}).id || null, storagePath: fname, label: file.name.replace(/\.[^.]+$/, '').slice(0, 40), url: (pub && pub.publicUrl) || '', createdAt: now, deletedAt: null };
+      state.drillImages = state.drillImages || []; state.drillImages.unshift(m);
+      if (state._drillWizard) { const w = state._drillWizard; w.stimuli.imageIds = w.stimuli.imageIds || []; w.stimuli.imageIds.push(m.id); }
+    } catch (e) { console.error('[addDrillImages]', file.name, e && e.message ? e.message : e); errors.push(file.name); }
+  }
+  persist(); _drillFlush();
+  if (errors.length) { try { alert('⚠ Échec sur ' + errors.length + ' image(s).'); } catch (e) {} }
+  if (state._drillWizard) renderDrillWizard();
+}
 
 // --- Audio (Web Audio API) : créé/repris sur geste utilisateur pour débloquer
 // iOS Safari, puis le bip de fin peut sonner même hors geste (contexte déjà
@@ -29671,6 +30451,7 @@ function _renderBody() {
     </div>
     ${renderNav()}
     ${renderChronoFab()}
+    ${renderDrillFab()}
   `;
 
   // CHANTIER D : filet pour la joueuse qui se connecte EN COURS de session
@@ -29839,7 +30620,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-10.61';
+const APP_VERSION = '2026-07-10.63';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
