@@ -129,4 +129,66 @@ ok('joueuse pour elle-même → entered_by null', _entryEnteredBy({ role: 'playe
 ok('joueuse A pour joueuse B → entered_by = A', _entryEnteredBy({ role: 'player', playerId: 'pa' }, 'pb') === 'pa');
 ok('coach pour joueuse → entered_by = coach id (tracé)', _entryEnteredBy({ role: 'coach', coachId: 'admin' }, 'pb') === 'admin');
 
-console.log(`\n✓ ${passed} assertions passées — défis series/timed/countdown + paliers + peer entry OK`);
+// === 12. Tags + favoris — filtre éphémère (extrait fidèle de index.html) ===
+function _currentActorId(auth) { return auth.role === 'player' ? auth.playerId : (auth.role === 'coach' ? (auth.coachId || 'coach') : null); }
+function _isChallengeFav(c, me) { return !!me && Array.isArray(c.favoritedBy) && c.favoritedBy.includes(me); }
+function _matchesFilter(c, f, me) {
+  const q = (f.query || '').trim().toLowerCase();
+  if (q) {
+    const hay = ((c.title || '') + ' ' + (c.desc || '') + ' ' + (c.tags || []).join(' ')).toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  if (f.tags && f.tags.length) {
+    const ct = (c.tags || []).map(t => String(t).toLowerCase());
+    if (!f.tags.every(t => ct.includes(String(t).toLowerCase()))) return false; // AND
+  }
+  if (f.favOnly && !_isChallengeFav(c, me)) return false;
+  return true;
+}
+function _allTags(challenges) {
+  const set = new Set();
+  (challenges || []).forEach(c => (c.tags || []).forEach(t => { const s = String(t || '').trim(); if (s) set.add(s); }));
+  return [...set].sort((a, b) => a.localeCompare(b));
+}
+const chA = { id: 'a', title: 'Le contrat à 3 points', desc: 'shooting', tags: ['tir', '3pts'], favoritedBy: ['pa'] };
+const chB = { id: 'b', title: 'Sprint défense', desc: 'cardio', tags: ['physique'], favoritedBy: [] };
+const chC = { id: 'c', title: 'Lancers francs', desc: 'LF sous pression', tags: ['tir', 'mental'], favoritedBy: ['coach'] };
+const pool = [chA, chB, chC];
+
+// -- recherche texte (titre / desc / tags) --
+ok('query "contrat" → matche chA (titre)', _matchesFilter(chA, { query: 'contrat' }) === true);
+ok('query "cardio" → matche chB (desc)', _matchesFilter(chB, { query: 'cardio' }) === true);
+ok('query "3pts" → matche chA (tag)', _matchesFilter(chA, { query: '3pts' }) === true);
+ok('query "contrat" → ne matche pas chB', _matchesFilter(chB, { query: 'contrat' }) === false);
+ok('query insensible à la casse', _matchesFilter(chA, { query: 'CONTRAT' }) === true);
+
+// -- filtre tags (AND) --
+ok('tag "tir" → chA + chC', pool.filter(c => _matchesFilter(c, { tags: ['tir'] })).map(c => c.id).join('') === 'ac');
+ok('tags [tir, mental] AND → chC seul', pool.filter(c => _matchesFilter(c, { tags: ['tir', 'mental'] })).map(c => c.id).join('') === 'c');
+ok('tag "inexistant" → aucun', pool.filter(c => _matchesFilter(c, { tags: ['zzz'] })).length === 0);
+ok('tag insensible à la casse', _matchesFilter(chA, { tags: ['TIR'] }) === true);
+
+// -- favoris (par acteur) --
+ok('favOnly acteur pa → chA seul', pool.filter(c => _matchesFilter(c, { favOnly: true }, 'pa')).map(c => c.id).join('') === 'a');
+ok('favOnly acteur coach → chC seul', pool.filter(c => _matchesFilter(c, { favOnly: true }, 'coach')).map(c => c.id).join('') === 'c');
+ok('favOnly acteur inconnu → aucun', pool.filter(c => _matchesFilter(c, { favOnly: true }, 'px')).length === 0);
+ok('_isChallengeFav pa/chA = true', _isChallengeFav(chA, 'pa') === true);
+ok('_isChallengeFav pa/chB = false', _isChallengeFav(chB, 'pa') === false);
+
+// -- toggle favori (add/remove) --
+function toggleFav(c, me) { c.favoritedBy = Array.isArray(c.favoritedBy) ? c.favoritedBy : []; const i = c.favoritedBy.indexOf(me); if (i >= 0) c.favoritedBy.splice(i, 1); else c.favoritedBy.push(me); }
+const favT = { id: 't', favoritedBy: [] };
+toggleFav(favT, 'pa'); ok('toggle favori : ajoute pa', favT.favoritedBy.includes('pa'));
+toggleFav(favT, 'pb'); ok('toggle favori : ajoute pb (coexiste)', favT.favoritedBy.length === 2);
+toggleFav(favT, 'pa'); ok('toggle favori : retire pa', !favT.favoritedBy.includes('pa') && favT.favoritedBy.length === 1);
+
+// -- combinaison query + tag + favOnly --
+ok('query "tir" (desc/tag) + favOnly coach → chC', pool.filter(c => _matchesFilter(c, { query: 'tir', favOnly: true }, 'coach')).map(c => c.id).join('') === 'c');
+
+// -- _allChallengeTags : union triée + dédup + trim --
+ok('_allTags = union triée [3pts, mental, physique, tir]', _allTags(pool).join(',') === '3pts,mental,physique,tir');
+ok('_allTags dédup + trim', _allTags([{ tags: ['  tir ', 'tir', ''] }]).join(',') === 'tir');
+ok('_currentActorId joueuse', _currentActorId({ role: 'player', playerId: 'pa' }) === 'pa');
+ok('_currentActorId coach défaut', _currentActorId({ role: 'coach' }) === 'coach');
+
+console.log(`\n✓ ${passed} assertions passées — défis series/timed/countdown + paliers + peer entry + tags/favoris OK`);
