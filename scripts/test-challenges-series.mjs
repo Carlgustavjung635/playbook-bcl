@@ -86,4 +86,47 @@ ok('défi mode single explicite garde le scalaire', effectiveScore({ mode: 'sing
 // un défi series recompute (ignore un ancien scalaire résiduel)
 ok('défi series recompute (ignore scalaire résiduel)', effectiveScore({ mode: 'series', seriesSize: 25, aggregate: 'best', scores: { p1: 999 }, series: { p1: [{ id: 'z', made: 5, attempts: 25, createdAt: 1 }] } }, 'p1') === 5);
 
-console.log(`\n✓ ${passed} assertions passées — défis series/timed (agrégats, soft-delete, compat) OK`);
+// === 9. countdown_score : agrégat sur `made` (comme series sans normalisation) ===
+const cd = { mode: 'countdown_score', aggregate: 'best', series: { p1: [
+  { id: 'q1', made: 18, createdAt: 1 }, { id: 'q2', made: 22, createdAt: 2 }, { id: 'q3', made: 20, createdAt: 3 }
+] } };
+ok('countdown best = 22', _recomputeChallengeAggregate(cd, 'p1') === 22);
+cd.aggregate = 'average'; ok('countdown average = 20', _recomputeChallengeAggregate(cd, 'p1') === 20);
+cd.aggregate = 'sum'; ok('countdown sum = 60', _recomputeChallengeAggregate(cd, 'p1') === 60);
+cd.aggregate = 'last'; ok('countdown last = 20', _recomputeChallengeAggregate(cd, 'p1') === 20);
+
+// === 10. Paliers (tiers) — direction dérivée de lowerIsBetter ===
+function _challengeTierFor(tiers, value, lowerIsBetter) {
+  const t = (Array.isArray(tiers) ? tiers : []).filter(x => x && typeof x.threshold === 'number');
+  if (!t.length || value == null) return null;
+  if (lowerIsBetter) { const asc = t.slice().sort((a, b) => a.threshold - b.threshold); for (const tier of asc) if (value <= tier.threshold) return tier; return null; }
+  const desc = t.slice().sort((a, b) => b.threshold - a.threshold); for (const tier of desc) if (value >= tier.threshold) return tier; return null;
+}
+function _challengeNextTier(tiers, value, lowerIsBetter) {
+  const t = (Array.isArray(tiers) ? tiers : []).filter(x => x && typeof x.threshold === 'number');
+  if (!t.length) return null;
+  const v = (value == null) ? (lowerIsBetter ? Infinity : -Infinity) : value;
+  if (lowerIsBetter) return t.filter(x => v > x.threshold).sort((a, b) => b.threshold - a.threshold)[0] || null;
+  return t.filter(x => v < x.threshold).sort((a, b) => a.threshold - b.threshold)[0] || null;
+}
+const tiersHigh = [{ name: 'Bronze', threshold: 10 }, { name: 'Argent', threshold: 15 }, { name: 'Or', threshold: 20 }];
+ok('higher : 17 → Argent (≥15, pas Or)', _challengeTierFor(tiersHigh, 17, false).name === 'Argent');
+ok('higher : 20 → Or', _challengeTierFor(tiersHigh, 20, false).name === 'Or');
+ok('higher : 8 → aucun palier', _challengeTierFor(tiersHigh, 8, false) === null);
+ok('higher : prochain après 17 = Or (20)', _challengeNextTier(tiersHigh, 17, false).name === 'Or');
+const tiersLow = [{ name: 'Or', threshold: 20000 }, { name: 'Argent', threshold: 25000 }, { name: 'Bronze', threshold: 30000 }];
+ok('lower : 22000ms → Argent (≤25000, pas Or)', _challengeTierFor(tiersLow, 22000, true).name === 'Argent');
+ok('lower : 19000ms → Or (≤20000)', _challengeTierFor(tiersLow, 19000, true).name === 'Or');
+ok('lower : 31000ms → aucun palier', _challengeTierFor(tiersLow, 31000, true) === null);
+ok('lower : prochain après 22000 = Or (20000)', _challengeNextTier(tiersLow, 22000, true).name === 'Or');
+
+// === 11. Peer entry — entered_by (null si soi, sinon acteur) ===
+function _entryEnteredBy(auth, targetPid) {
+  const actor = auth.role === 'player' ? auth.playerId : (auth.role === 'coach' ? (auth.coachId || 'coach') : null);
+  return (auth.role === 'player' && actor === targetPid) ? null : actor;
+}
+ok('joueuse pour elle-même → entered_by null', _entryEnteredBy({ role: 'player', playerId: 'pa' }, 'pa') === null);
+ok('joueuse A pour joueuse B → entered_by = A', _entryEnteredBy({ role: 'player', playerId: 'pa' }, 'pb') === 'pa');
+ok('coach pour joueuse → entered_by = coach id (tracé)', _entryEnteredBy({ role: 'coach', coachId: 'admin' }, 'pb') === 'admin');
+
+console.log(`\n✓ ${passed} assertions passées — défis series/timed/countdown + paliers + peer entry OK`);
