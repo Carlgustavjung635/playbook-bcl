@@ -3822,7 +3822,9 @@ const ENTITIES = [
       target: Number.isFinite(c.target) ? c.target : null,
       team_score: Number.isFinite(c.teamScore) ? c.teamScore : null,
       countdown_ms: Number.isFinite(c.countdownMs) ? c.countdownMs : null,
-      tiers: Array.isArray(c.tiers) ? c.tiers.filter(t => t && typeof t.threshold === 'number').map(t => ({ name: String(t.name || ''), threshold: t.threshold })) : []
+      tiers: Array.isArray(c.tiers) ? c.tiers.filter(t => t && typeof t.threshold === 'number').map(t => ({ name: String(t.name || ''), threshold: t.threshold })) : [],
+      tags: Array.isArray(c.tags) ? c.tags.filter(t => typeof t === 'string' && t.trim()).map(t => t.trim()) : [],
+      favorited_by: Array.isArray(c.favoritedBy) ? c.favoritedBy.filter(Boolean) : []
     }])),
     apply: (state, rows) => {
       const byId = Object.fromEntries((state.challenges || []).map(c => [c.id, c]));
@@ -3838,6 +3840,8 @@ const ENTITIES = [
         aggregate: r.aggregate || 'average',
         countdownMs: Number.isFinite(r.countdown_ms) ? r.countdown_ms : null,
         tiers: Array.isArray(r.tiers) ? r.tiers.filter(t => t && typeof t.threshold === 'number') : [],
+        tags: Array.isArray(r.tags) ? r.tags.filter(t => typeof t === 'string') : [],
+        favoritedBy: Array.isArray(r.favorited_by) ? r.favorited_by.filter(Boolean) : [],
         target: (r.target != null) ? r.target : ((byId[r.id] || {}).target != null ? (byId[r.id] || {}).target : null),
         teamScore: (r.team_score != null) ? r.team_score : ((byId[r.id] || {}).teamScore != null ? (byId[r.id] || {}).teamScore : null),
         seasonId: r.season_id || (byId[r.id] || {}).seasonId || null,
@@ -9935,6 +9939,8 @@ function renderPlayerChallenges() {
   if (!p) return renderHomeCoach();
   const isAuto = c => !!c.autoCount || c.scope === 'season';
   const sortRecent = (a, b) => {
+    const favDiff = (_isChallengeFavorited(b) ? 1 : 0) - (_isChallengeFavorited(a) ? 1 : 0);
+    if (favDiff) return favDiff;
     if (a.endDate && b.endDate) return b.endDate.localeCompare(a.endDate);
     if (a.endDate) return -1;
     if (b.endDate) return 1;
@@ -9944,8 +9950,9 @@ function renderPlayerChallenges() {
   // saison active, cf. ensureCurrentSeasonId). currentSeasonChallenges()
   // gère le bypass legacy si seasons pas encore loadés.
   const seasonChallenges = currentSeasonChallenges();
+  const _f = _challengeFilter();
   // Cohérence vue coach : collectif + individuel manuel en haut, auto en bas
-  const activeAll = seasonChallenges.filter(c => !c.badgesAwarded);
+  const activeAll = seasonChallenges.filter(c => !c.badgesAwarded && _matchesChallengeFilter(c, _f));
   const collective = activeAll.filter(c => c.scope === 'collective' && !isAuto(c)).sort(sortRecent);
   const individual = activeAll.filter(c => c.scope === 'individual' && !isAuto(c)).sort(sortRecent);
   const auto       = activeAll.filter(isAuto).sort(sortRecent);
@@ -9961,6 +9968,8 @@ function renderPlayerChallenges() {
           <h2 class="display-lg mt-2">Défis</h2>
         </div>
       </div>
+      ${seasonChallenges.length ? renderChallengeFilterBar() : ''}
+      ${_challengeFilterActive() && orderedActive.length === 0 && finished.length === 0 ? `<div style="margin:0 18px 18px;padding:18px;text-align:center;color:var(--ink-3);font-size:13px;font-style:italic;border:1px dashed var(--border);border-radius:8px">Aucun défi ne correspond au filtre.</div>` : ''}
 
       ${collective.length > 0 ? `
         <div class="section-header"><div><div class="eyebrow" style="color:var(--orange)">🤝 Collectif</div><h2 class="display-md mt-2">Équipe</h2></div></div>
@@ -9984,7 +9993,7 @@ function renderPlayerChallenges() {
         </div>
       ` : ''}
 
-      ${orderedActive.length === 0 ? `
+      ${orderedActive.length === 0 && !_challengeFilterActive() ? `
         <div class="empty"><div class="empty-icon">🎯</div><div class="empty-title">Aucun défi actif</div><div class="empty-desc">Reviens plus tard, ton coach va en lancer.</div></div>
       ` : ''}
 
@@ -10577,7 +10586,7 @@ function playerChallengeRow(c, playerId) {
     <div class="player-challenge-row" onclick="${isAuto ? `openAllChallenges()` : manualEntry}">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:8px">
         <div style="flex:1;min-width:0">
-          <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;letter-spacing:0.02em;line-height:1.2">${medal} ${esc(c.title)}</div>
+          <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;letter-spacing:0.02em;line-height:1.2">${medal} ${esc(c.title)} <span onclick="event.stopPropagation();toggleChallengeFavorite('${c.id}')" style="cursor:pointer;font-size:13px" title="Favori">${_isChallengeFavorited(c) ? '⭐' : '☆'}</span></div>
           <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;margin-top:2px">${subLabel}</div>
           ${tierBadge ? `<div style="margin-top:4px">${tierBadge}</div>` : ''}
         </div>
@@ -10805,8 +10814,11 @@ function renderPlays() {
         <div class="plays-grid">
           ${items.map(p => playTile(p, {
             seasonActive: p._seasonActive,
-            dimmed: hasSeasonLinks && p._seasonActive === false,
-            seasonToggleBtn: _playbookToggleBtn(p.id, p._seasonActive !== false, isCoach && hasSeasonLinks && !readOnly && canEditSharedLibrary())
+            dimmed: hasSeasonLinks && p._seasonActive === false
+            // NB: pas de toggle « Dans le playbook » ici — il vivait en pied de
+            // carte et se faisait mis-tapper (désactivation accidentelle). Le
+            // statut saison se règle UNIQUEMENT depuis l'édition du play
+            // (renderPlayEditor → togglePlayEditorSeasonActive).
           })).join('')}
         </div>
       `}
@@ -23093,7 +23105,13 @@ function renderChallenges() {
   //   urgent en haut), puis par updatedAt desc en fallback.
   const isAuto = c => !!c.autoCount || c.scope === 'season';
   const isArchived = c => c.scope !== 'season' && c.endDate && c.endDate < todayStr;
+  // Filtre éphémère (recherche / tags / favoris).
+  const _f = _challengeFilter();
+  const filtered = seasonChallenges.filter(c => _matchesChallengeFilter(c, _f));
   const sortRecent = (a, b) => {
+    // Favoris de l'utilisateur d'abord (tri optionnel).
+    const favDiff = (_isChallengeFavorited(b) ? 1 : 0) - (_isChallengeFavorited(a) ? 1 : 0);
+    if (favDiff) return favDiff;
     if (a.endDate && b.endDate) return b.endDate.localeCompare(a.endDate);
     if (a.endDate) return -1;
     if (b.endDate) return 1;
@@ -23101,17 +23119,17 @@ function renderChallenges() {
   };
   // Manuels (non-auto) actifs : collectif d'abord, individuel ensuite — cohérent
   // avec la priorité produit (engagement collectif > perso > compteurs auto).
-  const collective = seasonChallenges
+  const collective = filtered
     .filter(c => c.scope === 'collective' && !isArchived(c) && !isAuto(c))
     .sort(sortRecent);
-  const individual = seasonChallenges
+  const individual = filtered
     .filter(c => c.scope === 'individual' && !isArchived(c) && !isAuto(c))
     .sort(sortRecent);
   // Auto (= season ou autoCount), en bas
-  const autoChallenges = seasonChallenges
+  const autoChallenges = filtered
     .filter(c => isAuto(c) && !isArchived(c))
     .sort(sortRecent);
-  const archived = seasonChallenges.filter(isArchived);
+  const archived = filtered.filter(isArchived);
 
   // Incitation : si coach et aucun challenge actif (individuel/collectif), on suggère
   const hasActive = individual.length > 0 || collective.length > 0;
@@ -23123,13 +23141,16 @@ function renderChallenges() {
     { scope: 'individual', icon: '🏀', title: 'Tirs à 3pts du mois', desc: 'Nombre de 3pts marqués', metric: '3pts' },
   ];
 
+  const _noResults = _challengeFilterActive() && (collective.length + individual.length + autoChallenges.length + archived.length) === 0;
   return `
     <div style="padding:0 18px 12px;display:flex;justify-content:space-between;align-items:center">
       <div style="font-size:12px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em">${seasonChallenges.length} défi${seasonChallenges.length>1?'s':''}</div>
       ${isCoach ? `<button class="btn btn-primary" onclick="editChallenge()">+ Challenge</button>` : ''}
     </div>
+    ${seasonChallenges.length ? renderChallengeFilterBar() : ''}
+    ${_noResults ? `<div style="margin:0 18px 18px;padding:18px;text-align:center;color:var(--ink-3);font-size:13px;font-style:italic;border:1px dashed var(--border);border-radius:8px">Aucun défi ne correspond au filtre.</div>` : ''}
 
-    ${isCoach && !hasActive ? `
+    ${isCoach && !hasActive && !_challengeFilterActive() ? `
       <div style="margin:0 18px 18px;padding:14px;background:linear-gradient(135deg,rgba(var(--accent-rgb),0.10),var(--surface));border:1.5px dashed var(--orange);border-radius:var(--radius)">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
           <span style="font-size:24px">💡</span>
@@ -23365,8 +23386,12 @@ function challengeCard(c, isCoach) {
           ${_derived ? `<span class="chip chip-blue">📅 ${esc(challengePeriodShortLabel(_period))} · lecture seule</span>` : ''}
           ${c.endDate ? `<span class="chip">Fin ${formatDate(c.endDate)}</span>` : ''}
         </div>
-        <div style="font-family:'Anton';font-size:18px;text-transform:uppercase;letter-spacing:0.02em;margin-bottom:4px">${esc(c.title)}</div>
+        <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:4px">
+          <div style="flex:1;min-width:0;font-family:'Anton';font-size:18px;text-transform:uppercase;letter-spacing:0.02em">${esc(c.title)}</div>
+          <button class="btn btn-icon" style="flex:0 0 auto;font-size:18px" title="${_isChallengeFavorited(c) ? 'Retirer des favoris' : 'Ajouter aux favoris'}" aria-label="Favori" onclick="event.stopPropagation();toggleChallengeFavorite('${c.id}')">${_isChallengeFavorited(c) ? '⭐' : '☆'}</button>
+        </div>
         <div style="font-size:12px;color:var(--ink-3);line-height:1.5">${esc(c.desc)}</div>
+        ${(c.tags && c.tags.length) ? `<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px">${c.tags.map(t => `<span style="font-size:9px;font-family:'JetBrains Mono';color:var(--ink-3);background:var(--bg-3);padding:2px 6px;border-radius:10px">#${esc(t)}</span>`).join('')}</div>` : ''}
         ${(c.tiers && c.tiers.length) ? `<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:5px;align-items:center">
           <span style="font-size:9px;color:var(--ink-4);font-family:'JetBrains Mono';text-transform:uppercase">Paliers ${c.lowerIsBetter ? '≤' : '≥'}</span>
           ${c.tiers.map(t => `<span style="font-size:9px;font-family:'JetBrains Mono';color:var(--ink-2);background:var(--bg-3);padding:2px 6px;border-radius:4px">${esc(t.name)} · ${esc(_fmtChallengeScore(c, t.threshold))}</span>`).join('')}
@@ -23776,6 +23801,80 @@ function _challengeTierBadge(c, value, withNext) {
   if (!tier && !next) return '';
   return `<span style="font-size:9px;font-family:'JetBrains Mono';color:${tier ? 'var(--orange)' : 'var(--ink-3)'};background:${tier ? 'rgba(255,107,0,0.13)' : 'var(--bg-3)'};padding:2px 6px;border-radius:4px" title="${nextTxt.replace(/^ · /, '')}">${tier ? '🏅 ' + label : (next ? 'à venir' : '')}${withNext && next ? nextTxt : ''}</span>`;
 }
+
+// ============================================================
+// DÉFIS — tags, recherche, favoris (cf. migration 20260710_005)
+// ============================================================
+// Tous les tags utilisés (uniques, triés) → autocomplete + chips de filtre.
+function _allChallengeTags() {
+  const set = new Set();
+  (state.challenges || []).forEach(c => (c.tags || []).forEach(t => { const s = String(t || '').trim(); if (s) set.add(s); }));
+  return [...set].sort((a, b) => a.localeCompare(b));
+}
+// Filtre éphémère courant (jamais persisté).
+function _challengeFilter() {
+  state.challengeFilter = state.challengeFilter || { query: '', tags: [], favOnly: false };
+  return state.challengeFilter;
+}
+function _challengeFilterActive() {
+  const f = _challengeFilter();
+  return !!(f.query && f.query.trim()) || (f.tags && f.tags.length) || f.favOnly;
+}
+// Un défi passe-t-il le filtre ? query matche titre/desc/tag ; tags = AND ; favOnly.
+function _matchesChallengeFilter(c, f) {
+  f = f || _challengeFilter();
+  const q = (f.query || '').trim().toLowerCase();
+  if (q) {
+    const hay = ((c.title || '') + ' ' + (c.desc || '') + ' ' + (c.tags || []).join(' ')).toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  if (f.tags && f.tags.length) {
+    const ct = (c.tags || []).map(t => String(t).toLowerCase());
+    if (!f.tags.every(t => ct.includes(String(t).toLowerCase()))) return false; // AND
+  }
+  if (f.favOnly && !_isChallengeFavorited(c)) return false;
+  return true;
+}
+function _isChallengeFavorited(c) {
+  const me = _currentActorId();
+  return !!me && Array.isArray(c.favoritedBy) && c.favoritedBy.includes(me);
+}
+function toggleChallengeFavorite(cid) {
+  const c = state.challenges.find(x => x.id === cid); if (!c) return;
+  const me = _currentActorId(); if (!me) return;
+  c.favoritedBy = Array.isArray(c.favoritedBy) ? c.favoritedBy : [];
+  const i = c.favoritedBy.indexOf(me);
+  if (i >= 0) c.favoritedBy.splice(i, 1); else c.favoritedBy.push(me);
+  c.updatedAt = Date.now();
+  persist(); if (window.PbSync && PbSync.flushNow) PbSync.flushNow(state).catch(() => {});
+  render();
+}
+function setChallengeQuery(v) { _challengeFilter().query = String(v || ''); render(); }
+function toggleChallengeTagFilter(tag) {
+  const f = _challengeFilter(); f.tags = f.tags || [];
+  const i = f.tags.indexOf(tag);
+  if (i >= 0) f.tags.splice(i, 1); else f.tags.push(tag);
+  render();
+}
+function toggleChallengeFavFilter() { const f = _challengeFilter(); f.favOnly = !f.favOnly; render(); }
+function clearChallengeFilter() { state.challengeFilter = { query: '', tags: [], favOnly: false }; render(); }
+// Barre recherche + chips tags + toggle favoris (coach & joueuse). '' si aucun défi.
+function renderChallengeFilterBar() {
+  const tags = _allChallengeTags();
+  const f = _challengeFilter();
+  const active = _challengeFilterActive();
+  return `
+    <div style="padding:0 18px 12px">
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">
+        <input id="ch-search" value="${esc(f.query || '')}" placeholder="🔍 Rechercher un défi…" oninput="setChallengeQuery(this.value)" style="flex:1">
+        <button class="btn ${f.favOnly ? 'btn-primary' : 'btn-secondary'}" style="min-height:40px;padding:0 12px;white-space:nowrap" onclick="toggleChallengeFavFilter()" title="Favoris uniquement">⭐</button>
+        ${active ? `<button class="btn btn-ghost" style="min-height:40px;padding:0 10px" onclick="clearChallengeFilter()" title="Réinitialiser">✕</button>` : ''}
+      </div>
+      ${tags.length ? `<div style="display:flex;flex-wrap:wrap;gap:5px">
+        ${tags.map(t => `<button class="btn ${(f.tags || []).includes(t) ? 'btn-primary' : 'btn-secondary'}" style="min-height:30px;padding:0 10px;font-size:11px" onclick="toggleChallengeTagFilter('${esc(t).replace(/'/g, "\\'")}')">#${esc(t)}</button>`).join('')}
+      </div>` : ''}
+    </div>`;
+}
 // Recalcule le score agrégé d'une joueuse depuis ses séries (window → appelable
 // aussi par l'apply de l'entité challengeSeries, cf. bloc module).
 function _recomputeChallengeAggregate(c, pid) {
@@ -24162,6 +24261,28 @@ function _addTierRow() {
   const wrap = document.createElement('div'); wrap.innerHTML = _tierRowHtml({}, sec);
   list.appendChild(wrap.firstElementChild);
 }
+// --- Tags : chips éditables dans la modale ---
+function _tagChipHtml(tag) {
+  const t = String(tag || '').trim(); if (!t) return '';
+  return `<span class="tag-chip" data-tag="${esc(t)}" style="display:inline-flex;align-items:center;gap:4px;font-size:11px;font-family:'JetBrains Mono';background:var(--bg-3);color:var(--ink-2);padding:3px 8px;border-radius:12px">#${esc(t)}<button type="button" onclick="this.closest('.tag-chip').remove()" style="border:none;background:none;color:var(--ink-3);cursor:pointer;font-size:13px;line-height:1;padding:0">×</button></span>`;
+}
+function _addTagFromInput() {
+  const input = document.getElementById('tag-input'); if (!input) return;
+  const t = (input.value || '').trim().replace(/^#/, '').slice(0, 24);
+  input.value = '';
+  if (!t) return;
+  const existing = Array.from(document.querySelectorAll('#tags-list .tag-chip')).map(x => (x.dataset.tag || '').toLowerCase());
+  if (existing.includes(t.toLowerCase())) return; // pas de doublon
+  const list = document.getElementById('tags-list'); if (!list) return;
+  const wrap = document.createElement('div'); wrap.innerHTML = _tagChipHtml(t);
+  list.appendChild(wrap.firstElementChild);
+  input.focus();
+}
+function _readChallengeTags() {
+  return Array.from(document.querySelectorAll('#tags-list .tag-chip'))
+    .map(x => (x.dataset.tag || '').trim()).filter(Boolean)
+    .filter((t, i, a) => a.findIndex(x => x.toLowerCase() === t.toLowerCase()) === i);
+}
 function _readChallengeTiers(lowerIsBetter, mode) {
   const rows = Array.from(document.querySelectorAll('#tiers-list .tier-row'));
   const sec = mode === 'timed';
@@ -24204,6 +24325,16 @@ function editChallenge(id) {
 
       <div class="fld"><label class="fld-label">Titre</label><input id="c-title" value="${esc(c.title)}" placeholder="Ex : Free Throw Streak / 100 paniers à 3pts"></div>
       <div class="fld"><label class="fld-label">Description</label><textarea id="c-desc" placeholder="Règle, contexte...">${esc(c.desc)}</textarea></div>
+
+      <div class="fld">
+        <label class="fld-label">Tags</label>
+        <div id="tags-list" style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:6px">${(c.tags || []).map(t => _tagChipHtml(t)).join('')}</div>
+        <div style="display:flex;gap:6px">
+          <input id="tag-input" list="tag-suggestions" placeholder="+ Ajouter un tag" onkeydown="if(event.key==='Enter'){event.preventDefault();_addTagFromInput();}" style="flex:1">
+          <button type="button" class="btn btn-secondary" style="min-height:40px;padding:0 12px" onclick="_addTagFromInput()">+</button>
+        </div>
+        <datalist id="tag-suggestions">${_allChallengeTags().map(t => `<option value="${esc(t)}"></option>`).join('')}</datalist>
+      </div>
 
       <div class="fld-row">
         <div class="fld"><label class="fld-label">Unité</label><input id="c-metric" value="${esc(c.metric)}" placeholder="Ex : LF, pompes, paniers"></div>
@@ -24334,6 +24465,9 @@ function saveChallenge(id, isNew) {
   }
   // Paliers (tiers) : liste éditable {name, threshold}, triée par seuil.
   obj.tiers = _readChallengeTiers(obj.lowerIsBetter, obj.mode);
+  // Tags (recherche/filtre) + préserve les favoris existants.
+  obj.tags = _readChallengeTags();
+  obj.favoritedBy = existing ? (existing.favoritedBy || []) : [];
   // Recalcule les agrégats depuis l'historique de tentatives (mode changé / édité).
   if (_challengeHasSeries(obj)) {
     obj.scores = {};
@@ -31201,7 +31335,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-10.65';
+const APP_VERSION = '2026-07-10.66';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
