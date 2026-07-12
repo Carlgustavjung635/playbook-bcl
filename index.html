@@ -3814,16 +3814,28 @@ const ENTITIES = [
       end_date: c.endDate || null, scope: c.scope || 'individual',
       auto_count: !!c.autoCount, lower_is_better: !!c.lowerIsBetter,
       season_id: c.seasonId || null,
-      team_tag: c.teamTag || 'e1'  // multi-effectif : e1 | e2 | both
+      team_tag: c.teamTag || 'e1',  // multi-effectif : e1 | e2 | both
+      // Modes single/series/timed + agrégat ; collectif : objectif + compteur (fix sync).
+      mode: ['single', 'series', 'timed'].includes(c.mode) ? c.mode : 'single',
+      series_size: Number.isFinite(c.seriesSize) ? c.seriesSize : null,
+      aggregate: ['average', 'best', 'sum', 'last'].includes(c.aggregate) ? c.aggregate : 'average',
+      target: Number.isFinite(c.target) ? c.target : null,
+      team_score: Number.isFinite(c.teamScore) ? c.teamScore : null
     }])),
     apply: (state, rows) => {
       const byId = Object.fromEntries((state.challenges || []).map(c => [c.id, c]));
       state.challenges = rows.map(r => ({
-        ...(byId[r.id] || {}), // préserve scores (entité séparée)
+        ...(byId[r.id] || {}), // préserve scores + series (entités séparées)
         id: r.id, title: r.title, desc: r.descr || '', type: r.type,
         metric: r.metric || '', endDate: r.end_date || '',
         scope: r.scope, autoCount: r.auto_count, lowerIsBetter: r.lower_is_better,
         scores: (byId[r.id] || {}).scores || {},
+        series: (byId[r.id] || {}).series || {},
+        mode: r.mode || 'single',
+        seriesSize: Number.isFinite(r.series_size) ? r.series_size : null,
+        aggregate: r.aggregate || 'average',
+        target: (r.target != null) ? r.target : ((byId[r.id] || {}).target != null ? (byId[r.id] || {}).target : null),
+        teamScore: (r.team_score != null) ? r.team_score : ((byId[r.id] || {}).teamScore != null ? (byId[r.id] || {}).teamScore : null),
         seasonId: r.season_id || (byId[r.id] || {}).seasonId || null,
         teamTag: r.team_tag || 'e1'  // rétrocompat : colonne absente → 'e1'
       }));
@@ -3847,6 +3859,52 @@ const ENTITIES = [
         byChallenge[r.challenge_id][r.player_id] = Number(r.score) || 0;
       });
       (state.challenges || []).forEach(c => { if (byChallenge[c.id]) c.scores = byChallenge[c.id]; });
+    }
+  },
+  // ==========================================================================
+  // CHALLENGE_SERIES (cf. migration 20260710_003) — historique des tentatives
+  // (1 ligne/série en mode 'series', 1 ligne/run en mode 'timed'). L'agrégat
+  // (challenge_scores.score) est recalculé côté front → pipeline classement
+  // inchangé. Soft-delete (deleted_at). Vit sur c.series = { pid: [rows] }.
+  // ==========================================================================
+  {
+    key: 'challengeSeries', table: 'challenge_series', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => {
+      const out = {};
+      (state.challenges || []).forEach(c => {
+        Object.entries(c.series || {}).forEach(([pid, arr]) => {
+          (arr || []).forEach(s => { out[s.id] = _dumpSeriesRow(c.id, pid, s); });
+        });
+      });
+      return out;
+    },
+    apply: (state, rows) => {
+      const remoteIds = new Set(rows.map(r => r.id));
+      const remote = {}; // challengeId → pid → [series]
+      rows.forEach(r => {
+        (remote[r.challenge_id] = remote[r.challenge_id] || {});
+        (remote[r.challenge_id][r.player_id] = remote[r.challenge_id][r.player_id] || []).push(_seriesFromRow(r));
+      });
+      (state.challenges || []).forEach(c => {
+        const rc = remote[c.id] || {};
+        // Anti-wipe : séries locales fraîches (id 'x…') pas encore flushées.
+        const pending = {};
+        Object.entries(c.series || {}).forEach(([pid, arr]) => {
+          (arr || []).forEach(s => { if (!remoteIds.has(s.id) && typeof s.id === 'string' && s.id.startsWith('x')) (pending[pid] = pending[pid] || []).push(s); });
+        });
+        const merged = {};
+        new Set([...Object.keys(rc), ...Object.keys(pending)]).forEach(pid => {
+          merged[pid] = [...(rc[pid] || []), ...(pending[pid] || [])].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+        });
+        c.series = merged;
+        // Recalcule l'agrégat dans c.scores pour les modes series/timed.
+        if (c.mode === 'series' || c.mode === 'timed') {
+          c.scores = c.scores || {};
+          Object.keys(merged).forEach(pid => {
+            try { if (window._recomputeChallengeAggregate) c.scores[pid] = window._recomputeChallengeAggregate(c, pid); } catch (e) {}
+          });
+        }
+      });
     }
   },
   {
@@ -4788,6 +4846,26 @@ function _drillImageUrl(path) {
   if (!path || !window.sb) return '';
   try { const { data } = sb.storage.from('drill-images').getPublicUrl(path); return (data && data.publicUrl) || ''; }
   catch (e) { return ''; }
+}
+// --- CHALLENGE_SERIES : sérialisation (module) ---
+function _dumpSeriesRow(challengeId, pid, s) {
+  return {
+    id: s.id, challenge_id: challengeId, player_id: pid,
+    made: Number.isFinite(s.made) ? s.made : null,
+    attempts: Number.isFinite(s.attempts) ? s.attempts : null,
+    duration_ms: Number.isFinite(s.durationMs) ? s.durationMs : null,
+    deleted_at: s.deletedAt ? new Date(s.deletedAt).toISOString() : null
+  };
+}
+function _seriesFromRow(r) {
+  return {
+    id: r.id,
+    made: Number.isFinite(r.made) ? r.made : null,
+    attempts: Number.isFinite(r.attempts) ? r.attempts : null,
+    durationMs: Number.isFinite(r.duration_ms) ? r.duration_ms : null,
+    createdAt: r.created_at ? Date.parse(r.created_at) : null,
+    deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
+  };
 }
 // Re-pousse immédiatement (fire-and-forget, idempotent) des lignes locales
 // détectées PLUS RÉCENTES que le remote lors d'un apply : sans ça, un refetch
@@ -10477,6 +10555,11 @@ function playerChallengeRow(c, playerId) {
   const total = _seasonPool.length;
   const max = Math.max(...sorted.map(s => s.score), 1);
   const isAuto = c.autoCount;
+  const isSeriesLike = c.mode === 'series' || c.mode === 'timed';
+  const nb = isSeriesLike ? _challengeSeriesOf(c, playerId).length : 0;
+  const subLabel = isSeriesLike
+    ? `${myRank}<sup>${myRank===1?'er':'ème'}</sup>/${total} · ${esc(_aggregateLabel(c).toLowerCase())} · ${nb} ${c.mode==='timed'?'run':'série'}${nb>1?'s':''}`
+    : `${myRank}<sup>${myRank===1?'er':'ème'}</sup>/${total} · ${esc(c.metric)}`;
   const pctOfMax = max > 0 ? (myScore / max) * 100 : 0;
   const medal = myRank === 1 ? '🥇' : myRank === 2 ? '🥈' : myRank === 3 ? '🥉' : '';
 
@@ -10485,13 +10568,15 @@ function playerChallengeRow(c, playerId) {
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:8px">
         <div style="flex:1;min-width:0">
           <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;letter-spacing:0.02em;line-height:1.2">${medal} ${esc(c.title)}</div>
-          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;margin-top:2px">${myRank}<sup>${myRank===1?'er':'ème'}</sup>/${total} · ${esc(c.metric)}</div>
+          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;margin-top:2px">${subLabel}</div>
         </div>
         <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
           <div style="text-align:right">
-            <div style="font-family:'Anton';font-size:22px;color:var(--orange);line-height:1">${myScore}</div>
+            <div style="font-family:'Anton';font-size:22px;color:var(--orange);line-height:1">${isSeriesLike ? esc(_fmtChallengeScore(c, myScore)) : myScore}</div>
           </div>
-          ${!isAuto ? `<button class="lb-quick-btn" onclick="event.stopPropagation();quickIncrementChallenge('${c.id}','${playerId}',1)">+1</button>` : `<span style="font-size:9px;color:var(--ink-4);font-family:'JetBrains Mono'">AUTO</span>`}
+          ${isAuto ? `<span style="font-size:9px;color:var(--ink-4);font-family:'JetBrains Mono'">AUTO</span>`
+            : isSeriesLike ? `<button class="lb-quick-btn" onclick="event.stopPropagation();updateChallengeScore('${c.id}','${playerId}')">${c.mode==='timed'?'⏱':'＋'}</button>`
+            : `<button class="lb-quick-btn" onclick="event.stopPropagation();quickIncrementChallenge('${c.id}','${playerId}',1)">+1</button>`}
         </div>
       </div>
       <div class="lb-progress"><div class="lb-progress-fill" style="width:${pctOfMax}%"></div></div>
@@ -23258,6 +23343,7 @@ function challengeCard(c, isCoach) {
     entries.sort((a,b) => b.score - a.score);
   }
   const max = Math.max(...entries.map(e => e.score), 1);
+  const _seriesLike = c.mode === 'series' || c.mode === 'timed';
 
   return `
     <div class="list-section">
@@ -23301,10 +23387,12 @@ function challengeCard(c, isCoach) {
               <div class="lb-progress"><div class="lb-progress-fill" style="width:${(e.score/max)*100}%"></div></div>
             </div>
             <div style="display:flex;align-items:center;gap:6px">
-              ${isMine && !isAuto ? `<button class="lb-quick-btn" onclick="event.stopPropagation();quickIncrementChallenge('${c.id}','${e.id}',1)" title="+1">+1</button>` : ''}
+              ${isMine && !isAuto ? (_seriesLike
+                ? `<button class="lb-quick-btn" onclick="event.stopPropagation();updateChallengeScore('${c.id}','${e.id}')" title="Ajouter">${c.mode==='timed'?'⏱':'＋'}</button>`
+                : `<button class="lb-quick-btn" onclick="event.stopPropagation();quickIncrementChallenge('${c.id}','${e.id}',1)" title="+1">+1</button>`) : ''}
               <div style="text-align:right">
-                <div style="font-family:'Anton';font-size:20px;color:${isMine?'var(--orange)':'var(--ink)'}">${e.score}</div>
-                <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">${esc(c.metric)}</div>
+                <div style="font-family:'Anton';font-size:20px;color:${isMine?'var(--orange)':'var(--ink)'}">${_seriesLike ? esc(_fmtChallengeScore(c, e.score)) : e.score}</div>
+                <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">${_seriesLike ? esc(_aggregateLabel(c)) : esc(c.metric)}</div>
               </div>
             </div>
           </div>
@@ -23628,6 +23716,179 @@ function resetCollective(cid) {
   render();
 }
 
+// ============================================================
+// DÉFIS — modes SERIES / TIMED : agrégat + historique de tentatives
+// (cf. migration 20260710_003). L'agrégat est écrit dans c.scores[pid] → tout
+// le pipeline classement/podium/badges/story reste inchangé.
+// ============================================================
+// Séries actives (non soft-delete) d'une joueuse, triées par date.
+function _challengeSeriesOf(c, pid) {
+  return ((((c || {}).series || {})[pid]) || []).filter(s => !s.deletedAt)
+    .slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+}
+// Recalcule le score agrégé d'une joueuse depuis ses séries (window → appelable
+// aussi par l'apply de l'entité challengeSeries, cf. bloc module).
+function _recomputeChallengeAggregate(c, pid) {
+  if (!c) return 0;
+  const arr = _challengeSeriesOf(c, pid);
+  if (!arr.length) return 0;
+  const agg = ['average', 'best', 'sum', 'last'].includes(c.aggregate) ? c.aggregate : 'average';
+  if (c.mode === 'timed') {
+    const durs = arr.map(s => Number(s.durationMs) || 0).filter(v => v > 0);
+    if (!durs.length) return 0;
+    if (agg === 'average') return Math.round(durs.reduce((a, b) => a + b, 0) / durs.length);
+    if (agg === 'sum') return durs.reduce((a, b) => a + b, 0);
+    if (agg === 'last') return durs[durs.length - 1];
+    return Math.min(...durs); // best = plus rapide (lowerIsBetter)
+  }
+  // series : valeur par série = réussis (normalisée à series_size si attempts diffère)
+  const size = Number.isFinite(c.seriesSize) && c.seriesSize > 0 ? c.seriesSize : null;
+  const vals = arr.map(s => {
+    const made = Number(s.made) || 0;
+    const att = Number.isFinite(s.attempts) && s.attempts > 0 ? s.attempts : size;
+    if (size && att && att !== size) return (made / att) * size;
+    return made;
+  });
+  if (agg === 'best') return Math.max(...vals);
+  if (agg === 'sum') return vals.reduce((a, b) => a + b, 0);
+  if (agg === 'last') return vals[vals.length - 1];
+  return Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 10) / 10; // moyenne, 1 déc.
+}
+function _aggregateLabel(c) {
+  return ({ average: 'Moyenne', best: (c.mode === 'timed' ? 'Record' : 'Meilleur'), sum: 'Total', last: 'Dernier' })[c.aggregate] || 'Score';
+}
+function _fmtChronoMs(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return '0.00s';
+  const totalCs = Math.round(ms / 10), cs = totalCs % 100, totalS = Math.floor(totalCs / 100), s = totalS % 60, m = Math.floor(totalS / 60);
+  return m > 0 ? `${m}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}` : `${s}.${String(cs).padStart(2, '0')}s`;
+}
+// Valeur agrégée formatée pour l'affichage (classement, en-têtes).
+function _fmtChallengeScore(c, val) {
+  if (!c || c.mode === 'single' || !c.mode) return String(val || 0);
+  if (c.mode === 'timed') return _fmtChronoMs(val);
+  const size = Number.isFinite(c.seriesSize) ? c.seriesSize : null;
+  if (c.aggregate === 'sum') return String(Math.round(val));
+  return (Math.round((val || 0) * 10) / 10) + (size ? (' / ' + size) : '');
+}
+// Ajoute une tentative (série ou run timed) + recalcule l'agrégat + sync.
+function _addChallengeSeries(cid, pid, payload) {
+  const c = state.challenges.find(x => x.id === cid); if (!c || c.autoCount) return;
+  if (state.auth.role === 'player' && state.auth.playerId !== pid) return;
+  c.series = c.series || {}; c.series[pid] = c.series[pid] || [];
+  const now = Date.now();
+  c.series[pid].push({
+    id: uid(),
+    made: Number.isFinite(payload.made) ? payload.made : null,
+    attempts: Number.isFinite(payload.attempts) ? payload.attempts : null,
+    durationMs: Number.isFinite(payload.durationMs) ? payload.durationMs : null,
+    createdAt: now, deletedAt: null
+  });
+  const before = (c.scores || {})[pid] || 0;
+  c.scores = c.scores || {}; c.scores[pid] = _recomputeChallengeAggregate(c, pid);
+  persist(); if (window.PbSync && PbSync.flushNow) PbSync.flushNow(state).catch(() => {});
+  render();
+  try { _notifyCoachChallengeData(c, pid, c.scores[pid] - before); } catch (e) {}
+}
+function _deleteChallengeSeries(cid, pid, sid) {
+  const c = state.challenges.find(x => x.id === cid); if (!c) return;
+  if (state.auth.role === 'player' && state.auth.playerId !== pid) return;
+  const s = (((c.series || {})[pid]) || []).find(x => x.id === sid); if (!s) return;
+  s.deletedAt = Date.now();
+  c.scores = c.scores || {}; c.scores[pid] = _recomputeChallengeAggregate(c, pid);
+  persist(); if (window.PbSync && PbSync.flushNow) PbSync.flushNow(state).catch(() => {});
+  render();
+}
+
+// ---- Écran de saisie SÉRIES ----
+function openChallengeSeriesEntry(cid, pid) {
+  const c = state.challenges.find(x => x.id === cid); if (!c) return;
+  const p = state.players.find(x => x.id === pid);
+  const isMine = state.auth.role === 'player';
+  const list = _challengeSeriesOf(c, pid);
+  const size = c.seriesSize || 0;
+  const agg = (c.scores || {})[pid] || 0;
+  openModal(`
+    <div class="modal-header"><div><div class="eyebrow">${esc(c.title)}</div><div class="modal-title">${isMine ? 'Mes séries' : esc(p ? p.name : '')}</div></div><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div style="text-align:center;padding:12px;background:var(--bg-2);border-radius:10px;margin-bottom:14px">
+        <div class="eyebrow-muted">${esc(_aggregateLabel(c))}</div>
+        <div style="font-family:'Anton';font-size:40px;color:var(--orange);line-height:1.1">${esc(_fmtChallengeScore(c, agg))}</div>
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">${list.length} série${list.length > 1 ? 's' : ''}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px">
+        <input id="cs-made" type="number" min="0" max="${size || 999}" placeholder="réussis" style="flex:1;text-align:center;font-family:'Anton';font-size:24px" onkeydown="if(event.key==='Enter')_submitChallengeSeries('${cid}','${pid}')">
+        <span style="font-family:'Anton';font-size:20px;color:var(--ink-3);white-space:nowrap">/ ${size || '?'}</span>
+        <button class="btn btn-primary" onclick="_submitChallengeSeries('${cid}','${pid}')">+ Série</button>
+      </div>
+      ${list.length ? `<div class="eyebrow-muted" style="margin-bottom:6px">Historique</div>${list.slice().reverse().map((s, i) => `
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--bg-3);border-radius:8px;margin-bottom:6px">
+          <span style="font-family:'JetBrains Mono';font-size:13px">Série ${list.length - i} · <strong>${s.made}${size ? (' / ' + size) : ''}</strong></span>
+          <button class="btn btn-icon" title="Supprimer" onclick="_removeChallengeSeries('${cid}','${pid}','${s.id}')">🗑</button>
+        </div>`).join('')}` : '<div style="font-size:12px;color:var(--ink-3);font-style:italic;text-align:center;padding:8px">Aucune série encore.</div>'}
+      ${isMine ? `<div style="margin-top:12px;padding:10px;background:rgba(var(--accent-rgb),0.08);border-left:3px solid var(--orange);border-radius:6px;font-size:11px;color:var(--ink-2);line-height:1.5">💪 Sois honnête ! Ton score est public dans le classement.</div>` : ''}
+    </div>
+  `);
+  setTimeout(() => { const i = document.getElementById('cs-made'); if (i) i.focus(); }, 100);
+}
+function _submitChallengeSeries(cid, pid) {
+  const el = document.getElementById('cs-made'); if (!el) return;
+  const c = state.challenges.find(x => x.id === cid); if (!c) return;
+  const size = c.seriesSize || null;
+  let made = parseInt(el.value, 10);
+  if (!Number.isFinite(made) || made < 0) { try { alert('Entre un nombre de réussis valide.'); } catch (e) {} return; }
+  if (size && made > size) made = size;
+  _addChallengeSeries(cid, pid, { made, attempts: size });
+  openChallengeSeriesEntry(cid, pid);
+}
+function _removeChallengeSeries(cid, pid, sid) { _deleteChallengeSeries(cid, pid, sid); openChallengeSeriesEntry(cid, pid); }
+
+// ---- Écran de saisie CHRONO (timed) ----
+function openChallengeTimedEntry(cid, pid) {
+  const c = state.challenges.find(x => x.id === cid); if (!c) return;
+  const p = state.players.find(x => x.id === pid);
+  const isMine = state.auth.role === 'player';
+  const list = _challengeSeriesOf(c, pid);
+  const best = list.length ? Math.min(...list.map(s => Number(s.durationMs) || Infinity)) : null;
+  const agg = (c.scores || {})[pid] || 0;
+  window._timedChrono = { cid, pid, running: false, startAt: 0, elapsed: 0, timer: null };
+  openModal(`
+    <div class="modal-header"><div><div class="eyebrow">${esc(c.title)}</div><div class="modal-title">${isMine ? 'Mon chrono' : esc(p ? p.name : '')}</div></div><button class="modal-close" onclick="_closeTimedChrono()">✕</button></div>
+    <div class="modal-body" style="text-align:center">
+      <div id="tc-display" style="font-family:'Anton';font-size:56px;color:var(--orange);line-height:1.1;margin:10px 0">0.00s</div>
+      <div style="display:flex;gap:8px;justify-content:center;margin-bottom:16px">
+        <button class="btn btn-primary" id="tc-start" style="min-width:120px" onclick="_timedChronoStart()">▶ Start</button>
+        <button class="btn btn-danger" id="tc-stop" style="min-width:120px;display:none" onclick="_timedChronoStop()">■ Stop</button>
+      </div>
+      <div style="padding:10px;background:var(--bg-2);border-radius:10px;margin-bottom:14px">
+        <div class="eyebrow-muted">${esc(_aggregateLabel(c))}</div>
+        <div style="font-family:'Anton';font-size:28px;color:var(--ink)">${esc(_fmtChronoMs(agg))}</div>
+      </div>
+      ${list.length ? `<div class="eyebrow-muted" style="margin-bottom:6px;text-align:left">Runs</div>${list.slice().reverse().map((s, i) => `
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--bg-3);border-radius:8px;margin-bottom:6px">
+          <span style="font-family:'JetBrains Mono';font-size:13px">Run ${list.length - i} · <strong>${_fmtChronoMs(s.durationMs)}</strong>${best != null && Number(s.durationMs) === best ? ' 🏆' : ''}</span>
+          <button class="btn btn-icon" title="Supprimer" onclick="_removeTimedRun('${cid}','${pid}','${s.id}')">🗑</button>
+        </div>`).join('')}` : '<div style="font-size:12px;color:var(--ink-3);font-style:italic">Aucun run encore.</div>'}
+    </div>
+  `);
+}
+function _timedChronoStart() {
+  const t = window._timedChrono; if (!t || t.running) return;
+  t.running = true; t.startAt = Date.now() - t.elapsed;
+  const sb = document.getElementById('tc-start'), st = document.getElementById('tc-stop');
+  if (sb) sb.style.display = 'none'; if (st) st.style.display = '';
+  t.timer = setInterval(() => { const el = document.getElementById('tc-display'); if (el) el.textContent = _fmtChronoMs(Date.now() - t.startAt); }, 31);
+}
+function _timedChronoStop() {
+  const t = window._timedChrono; if (!t || !t.running) return;
+  t.running = false; if (t.timer) { clearInterval(t.timer); t.timer = null; }
+  const dur = Date.now() - t.startAt;
+  const cid = t.cid, pid = t.pid;
+  _addChallengeSeries(cid, pid, { durationMs: dur });
+  openChallengeTimedEntry(cid, pid);
+}
+function _removeTimedRun(cid, pid, sid) { _deleteChallengeSeries(cid, pid, sid); openChallengeTimedEntry(cid, pid); }
+function _closeTimedChrono() { const t = window._timedChrono; if (t && t.timer) clearInterval(t.timer); window._timedChrono = null; closeModal(); }
+
 function updateChallengeScore(cid, pid) {
   const c = state.challenges.find(x => x.id === cid);
   const p = state.players.find(x => x.id === pid);
@@ -23636,6 +23897,9 @@ function updateChallengeScore(cid, pid) {
     return; // safety
   }
   if (c.autoCount) return; // auto : non éditable
+  // Branche par mode : séries / chrono ont leur propre écran de saisie.
+  if (c.mode === 'series') return openChallengeSeriesEntry(cid, pid);
+  if (c.mode === 'timed') return openChallengeTimedEntry(cid, pid);
   const current = (c.scores || {})[pid] || 0;
   const isMine = state.auth.role === 'player';
   openModal(`
@@ -23683,9 +23947,17 @@ function saveChallengeScore(cid, pid) {
   _notifyCoachChallengeData(c, pid, c.scores[pid] - before); // Type B (saisie perf perso)
 }
 
+function _editChallengeMode(m, btn) {
+  const el = document.getElementById('c-mode'); if (el) el.value = m;
+  const wrap = document.getElementById('individual-mode-fields');
+  if (wrap) wrap.querySelectorAll('.segmented-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  const sf = document.getElementById('mode-series-fields'); if (sf) sf.style.display = m === 'series' ? 'block' : 'none';
+  const tf = document.getElementById('mode-timed-fields'); if (tf) tf.style.display = m === 'timed' ? 'block' : 'none';
+}
 function editChallenge(id) {
   const isNew = !id;
-  const c = isNew ? { id: uid(), title: '', desc: '', scope: 'individual', type: 'skill', metric: 'points', endDate: '', target: 0, teamScore: 0, scores: {} } : state.challenges.find(x => x.id === id);
+  const c = isNew ? { id: uid(), title: '', desc: '', scope: 'individual', type: 'skill', metric: 'points', endDate: '', target: 0, teamScore: 0, scores: {}, mode: 'single', aggregate: 'average' } : state.challenges.find(x => x.id === id);
   openModal(`
     <div class="modal-header">
       <div class="modal-title">${isNew ? 'Nouveau challenge' : 'Modifier le challenge'}</div>
@@ -23695,12 +23967,12 @@ function editChallenge(id) {
       <div class="fld">
         <label class="fld-label">Catégorie</label>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
-          <button type="button" class="scope-btn ${c.scope==='individual'?'active':''}" onclick="document.querySelectorAll('.scope-btn').forEach(b=>b.classList.remove('active'));this.classList.add('active');document.getElementById('c-scope').value='individual';document.getElementById('collective-fields').style.display='none'">
+          <button type="button" class="scope-btn ${c.scope==='individual'?'active':''}" onclick="document.querySelectorAll('.scope-btn').forEach(b=>b.classList.remove('active'));this.classList.add('active');document.getElementById('c-scope').value='individual';document.getElementById('collective-fields').style.display='none';document.getElementById('individual-mode-fields').style.display='block'">
             <div style="font-size:18px;margin-bottom:2px">🎯</div>
             <div style="font-family:'Anton';font-size:11px;text-transform:uppercase">Individuel</div>
             <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">Classement entre joueuses</div>
           </button>
-          <button type="button" class="scope-btn ${c.scope==='collective'?'active':''}" onclick="document.querySelectorAll('.scope-btn').forEach(b=>b.classList.remove('active'));this.classList.add('active');document.getElementById('c-scope').value='collective';document.getElementById('collective-fields').style.display='block'">
+          <button type="button" class="scope-btn ${c.scope==='collective'?'active':''}" onclick="document.querySelectorAll('.scope-btn').forEach(b=>b.classList.remove('active'));this.classList.add('active');document.getElementById('c-scope').value='collective';document.getElementById('collective-fields').style.display='block';document.getElementById('individual-mode-fields').style.display='none'">
             <div style="font-size:18px;margin-bottom:2px">🤝</div>
             <div style="font-family:'Anton';font-size:11px;text-transform:uppercase">Collectif</div>
             <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">Objectif équipe à atteindre</div>
@@ -23715,6 +23987,37 @@ function editChallenge(id) {
       <div class="fld-row">
         <div class="fld"><label class="fld-label">Unité</label><input id="c-metric" value="${esc(c.metric)}" placeholder="Ex : LF, pompes, paniers"></div>
         <div class="fld"><label class="fld-label">Date de fin</label><input id="c-end" type="date" value="${c.endDate || ''}"></div>
+      </div>
+
+      <!-- MODE (individuel) : score simple / séries / chrono -->
+      <div id="individual-mode-fields" style="display:${c.scope!=='collective'?'block':'none'};padding-top:8px;border-top:1px solid var(--border-soft);margin-top:8px">
+        <label class="fld-label">Mode de score</label>
+        <div class="segmented" style="margin-bottom:10px">
+          <button type="button" class="segmented-btn ${(c.mode||'single')==='single'?'active':''}" onclick="_editChallengeMode('single',this)">Score simple</button>
+          <button type="button" class="segmented-btn ${c.mode==='series'?'active':''}" onclick="_editChallengeMode('series',this)">Séries</button>
+          <button type="button" class="segmented-btn ${c.mode==='timed'?'active':''}" onclick="_editChallengeMode('timed',this)">Chrono</button>
+        </div>
+        <input type="hidden" id="c-mode" value="${c.mode || 'single'}">
+        <div id="mode-series-fields" style="display:${c.mode==='series'?'block':'none'}">
+          <div class="fld-row">
+            <div class="fld"><label class="fld-label">Essais / série</label><input id="c-series-size" type="number" min="1" max="999" value="${c.seriesSize || 25}"></div>
+            <div class="fld"><label class="fld-label">Agrégat</label><select id="c-agg-series">
+              <option value="average" ${c.aggregate==='average'?'selected':''}>Moyenne</option>
+              <option value="best" ${c.aggregate==='best'?'selected':''}>Meilleur</option>
+              <option value="sum" ${c.aggregate==='sum'?'selected':''}>Total</option>
+              <option value="last" ${c.aggregate==='last'?'selected':''}>Dernier</option>
+            </select></div>
+          </div>
+          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';line-height:1.5">Ex : tir à 3pts, 25 tirs/série, moyenne des séries.</div>
+        </div>
+        <div id="mode-timed-fields" style="display:${c.mode==='timed'?'block':'none'}">
+          <div class="fld"><label class="fld-label">Agrégat</label><select id="c-agg-timed">
+            <option value="best" ${(c.mode==='timed'?c.aggregate:'best')==='best'?'selected':''}>Record (plus rapide)</option>
+            <option value="average" ${c.mode==='timed'&&c.aggregate==='average'?'selected':''}>Moyenne</option>
+            <option value="last" ${c.mode==='timed'&&c.aggregate==='last'?'selected':''}>Dernier</option>
+          </select></div>
+          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';line-height:1.5">Chrono Start/Stop. Le plus rapide gagne (classement inversé auto).</div>
+        </div>
       </div>
 
       ${renderTeamTagField('c-team', isNew ? defaultEventTag() : (c.teamTag || 'e1'), true)}
@@ -23750,6 +24053,7 @@ function saveChallenge(id, isNew) {
     metric: document.getElementById('c-metric').value.trim() || 'points',
     desc: document.getElementById('c-desc').value.trim(),
     scores: existing ? existing.scores : {},
+    series: existing ? (existing.series || {}) : {},
     seasonId: existing ? (existing.seasonId || state.currentSeasonId || null) : (state.currentSeasonId || null),
     // Multi-effectif : tag équipe (e1/e2/both). Absent → préserve / 'e1'.
     teamTag: (() => {
@@ -23758,6 +24062,29 @@ function saveChallenge(id, isNew) {
       return existing ? (existing.teamTag || 'e1') : 'e1';
     })(),
   };
+  // Mode de score (individuel) : single / series / timed.
+  const mode = scope === 'collective' ? 'single' : ((document.getElementById('c-mode') || {}).value || 'single');
+  obj.mode = ['single', 'series', 'timed'].includes(mode) ? mode : 'single';
+  if (obj.mode === 'series') {
+    obj.seriesSize = Math.max(1, Math.min(999, parseInt((document.getElementById('c-series-size') || {}).value) || 25));
+    const a = (document.getElementById('c-agg-series') || {}).value;
+    obj.aggregate = ['average', 'best', 'sum', 'last'].includes(a) ? a : 'average';
+    obj.lowerIsBetter = existing ? !!existing.lowerIsBetter : false;
+  } else if (obj.mode === 'timed') {
+    obj.seriesSize = null;
+    const a = (document.getElementById('c-agg-timed') || {}).value;
+    obj.aggregate = ['best', 'average', 'last'].includes(a) ? a : 'best';
+    obj.lowerIsBetter = true; // chrono : plus rapide = mieux
+  } else {
+    obj.seriesSize = existing ? (existing.seriesSize || null) : null;
+    obj.aggregate = existing ? (existing.aggregate || 'average') : 'average';
+    obj.lowerIsBetter = existing ? !!existing.lowerIsBetter : false;
+  }
+  // Recalcule les agrégats depuis l'historique de séries (mode changé / édité).
+  if (obj.mode === 'series' || obj.mode === 'timed') {
+    obj.scores = {};
+    Object.keys(obj.series || {}).forEach(pid => { obj.scores[pid] = _recomputeChallengeAggregate(obj, pid); });
+  }
   if (scope === 'collective') {
     obj.target = parseInt(document.getElementById('c-target').value) || 0;
     obj.teamScore = existing && existing.teamScore ? existing.teamScore : 0;
@@ -30620,7 +30947,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-10.63';
+const APP_VERSION = '2026-07-10.64';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
