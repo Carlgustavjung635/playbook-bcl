@@ -84,6 +84,14 @@ function _circuitAdvanceReached(stage, ctx, advanceMode) {
 function _circuitShouldRest(stage, curIdx, total) {
   return (Number(stage && stage.rest_after_ms) || 0) > 0 && (curIdx + 1) < total;
 }
+// Résumé compact « ce qui t'attend » (écran repos) — counter=cap reps / countdown=Ns / stimulus.
+function _circuitStagePreviewText(st) {
+  if (!st) return '';
+  if (st.type === 'counter') { const cap = Number((st.counter || {}).cap); return Number.isFinite(cap) ? (cap + ' reps') : 'compteur'; }
+  if (st.type === 'countdown') return Math.round((Number((st.countdown || {}).duration_ms) || 0) / 1000) + 's';
+  if (st.type === 'stimulus') return 'stimulus';
+  return '';
+}
 
 // TTS : doit-on parler ? Respecte les toggles + support navigateur (simulé).
 function _ttsShouldSpeak(cfg, event, hasSpeech) {
@@ -206,4 +214,13 @@ ok('repos après la DERNIÈRE étape → jamais (idx 2 sur 3)', _circuitShouldRe
 ok('repos après avant-dernière (idx 1 sur 3) → true', _circuitShouldRest({ rest_after_ms: 5000 }, 1, 3) === true);
 ok('repos négatif traité comme 0', _circuitShouldRest({ rest_after_ms: -5 }, 0, 3) === false);
 
-console.log(`\n✓ ${passed} assertions passées — drill circuit (step modes + advance + manual + repos + TTS + backward-compat) OK`);
+// ============================================================================
+// 11. ÉCRAN REPOS — preview de la prochaine étape
+// ============================================================================
+eq('preview counter → « 20 reps » (cible = cap)', _circuitStagePreviewText({ type: 'counter', counter: { start: 0, cap: 20 } }), '20 reps');
+eq('preview countdown → « 30s »', _circuitStagePreviewText({ type: 'countdown', countdown: { duration_ms: 30000 } }), '30s');
+eq('preview stimulus → « stimulus »', _circuitStagePreviewText({ type: 'stimulus', stimulus: {} }), 'stimulus');
+eq('preview étape absente (backward-compat) → chaîne vide', _circuitStagePreviewText(null), '');
+eq('preview counter sans cap → « compteur »', _circuitStagePreviewText({ type: 'counter', counter: {} }), 'compteur');
+
+console.log(`\n✓ ${passed} assertions passées — drill circuit (step modes + advance + manual + repos + preview + TTS + backward-compat) OK`);

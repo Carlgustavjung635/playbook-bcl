@@ -18384,6 +18384,27 @@ function _circuitStageSummary(st) {
   return lbl || '—';
 }
 function _circuitStageTypeLabel(t) { return t === 'counter' ? '🔢 Compteur' : t === 'countdown' ? '⏱ Countdown' : t === 'stimulus' ? '⚡ Stimulus' : t; }
+function _circuitStageIcon(t) { return t === 'counter' ? '🔢' : t === 'countdown' ? '⏱' : t === 'stimulus' ? '⚡' : '▸'; }
+// Résumé compact « ce qui t'attend » pour l'écran de repos (LOGIQUE PURE).
+// counter → « 20 reps » (cible = cap) ; countdown → « 30s » ; stimulus → résumé stimuli.
+function _circuitStagePreviewText(st) {
+  if (!st) return '';
+  if (st.type === 'counter') { const cap = Number((st.counter || {}).cap); return Number.isFinite(cap) ? (cap + ' reps') : 'compteur'; }
+  if (st.type === 'countdown') return Math.round((Number((st.countdown || {}).duration_ms) || 0) / 1000) + 's';
+  if (st.type === 'stimulus') { const s = _drillStimuliSummary((st.stimulus || {}).categories || {}); return s || 'réaction'; }
+  return '';
+}
+// Bloc HTML « SUIVANT : LABEL » + résumé, affiché en bas de l'écran de repos.
+function _circuitNextPreviewHtml(nextStage) {
+  if (!nextStage) return ''; // pas de prochaine étape → pas de preview (garde-fou)
+  const lbl = (nextStage.label || '').trim() || _circuitStageTypeLabel(nextStage.type).replace(/^\S+\s/, '');
+  const summary = _circuitStagePreviewText(nextStage);
+  return `<div style="margin-top:6vmin;opacity:0.9">
+    <div style="font-size:3vmin;font-family:'JetBrains Mono';letter-spacing:0.08em;text-transform:uppercase;opacity:0.6">Suivant</div>
+    <div style="font-size:6vmin;font-family:'Anton',sans-serif;text-transform:uppercase;letter-spacing:0.03em;margin-top:0.4vmin">${_circuitStageIcon(nextStage.type)} ${esc(lbl)}</div>
+    ${summary ? `<div style="font-size:3.4vmin;font-family:'JetBrains Mono';opacity:0.8;margin-top:0.6vmin">${esc(summary)}</div>` : ''}
+  </div>`;
+}
 
 // ---- Runtime d'exécution du circuit (plein écran, réutilise #drill-overlay) ----
 function launchCircuit(id) {
@@ -18550,8 +18571,9 @@ function _circuitEnterRest(restMs, nextIdx) {
   const pauseBtn = document.getElementById('circuit-pause'); if (pauseBtn) pauseBtn.textContent = '⏸ Pause';
   const el = document.getElementById('drill-cue');
   if (el) { el.style.opacity = '1'; el.innerHTML = `<div style="text-align:center;color:#fff">
-    <div style="font-size:8vmin;font-family:'Anton',sans-serif;text-transform:uppercase;letter-spacing:0.06em;opacity:0.92;margin-bottom:2vmin">💤 Repos</div>
-    <div id="circuit-cd" style="font-size:30vmin;line-height:0.9;font-family:'Anton',sans-serif">${_fmtChronoMs(c.restMs)}</div>
+    <div style="font-size:7vmin;font-family:'Anton',sans-serif;text-transform:uppercase;letter-spacing:0.06em;opacity:0.92;margin-bottom:1.5vmin">💤 Repos</div>
+    <div id="circuit-cd" style="font-size:26vmin;line-height:0.9;font-family:'Anton',sans-serif">${_fmtChronoMs(c.restMs)}</div>
+    ${_circuitNextPreviewHtml(c.stages[nextIdx])}
   </div>`; }
 }
 function _circuitEndRest() {
