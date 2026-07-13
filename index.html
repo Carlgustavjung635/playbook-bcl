@@ -4820,6 +4820,9 @@ function _dumpDrillRow(d) {
     anticipation_clock: !!d.anticipationClock,
     duration_mode: d.durationMode === 'countdown' ? 'countdown' : 'rounds',
     duration_value: Number.isFinite(d.durationValue) ? d.durationValue : 10,
+    // Circuit training (migration 20260713_001) : mode + séquence d'étapes.
+    mode: d.mode === 'circuit' ? 'circuit' : 'stimulus',
+    stages: Array.isArray(d.stages) ? d.stages : null,
     deleted_at: d.deletedAt ? new Date(d.deletedAt).toISOString() : null,
     updated_at: d.updatedAt ? new Date(d.updatedAt).toISOString() : (d.createdAt ? new Date(d.createdAt).toISOString() : null)
   };
@@ -4837,6 +4840,8 @@ function _drillFromRow(r) {
     anticipationClock: !!r.anticipation_clock,
     durationMode: r.duration_mode === 'countdown' ? 'countdown' : 'rounds',
     durationValue: Number.isFinite(r.duration_value) ? r.duration_value : 10,
+    mode: r.mode === 'circuit' ? 'circuit' : 'stimulus',
+    stages: Array.isArray(r.stages) ? r.stages : null,
     createdAt: r.created_at ? Date.parse(r.created_at) : null,
     updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
     deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
@@ -18267,6 +18272,283 @@ function launchDrill(id, overrides) {
 }
 
 // ============================================================
+// DRILL CIRCUIT — mode « circuit training » (migration 20260713_001)
+// Un circuit = N étapes séquentielles (counter / countdown / stimulus).
+// ============================================================
+
+// ---- TTS (Web Speech API — cross-browser, dégradation silencieuse) ----
+function _ttsSupported() { return typeof window !== 'undefined' && 'speechSynthesis' in window && typeof SpeechSynthesisUtterance !== 'undefined'; }
+function _ttsVoices() { try { return window.speechSynthesis.getVoices() || []; } catch (e) { return []; } }
+// Choisit une voix pour `lang` (ex 'fr'). Fallback silencieux : voix par défaut.
+function _ttsPickVoice(lang) {
+  const want = String(lang || 'fr').toLowerCase().slice(0, 2);
+  const vs = _ttsVoices();
+  return vs.find(v => (v.lang || '').toLowerCase().startsWith(want)) || null;
+}
+function _ttsSpeak(text, lang) {
+  if (!_ttsSupported() || !text) return;
+  try {
+    const u = new SpeechSynthesisUtterance(String(text));
+    const v = _ttsPickVoice(lang); if (v) { u.voice = v; u.lang = v.lang; } else { u.lang = (String(lang || 'fr').length === 2 ? (lang + '-FR') : (lang || 'fr-FR')); }
+    u.rate = 1.0; u.pitch = 1.0; u.volume = 1.0;
+    window.speechSynthesis.cancel(); // évite l'empilement si ticks rapprochés
+    window.speechSynthesis.speak(u);
+  } catch (e) {}
+}
+// Doit-on parler pour cet event ('start'|'tick') ? Respecte les toggles + support.
+function _ttsShouldSpeak(cfg, event, hasSpeech) {
+  if (!hasSpeech || !cfg) return false;
+  if (event === 'start') return !!cfg.tts_on_start;
+  if (event === 'tick') return !!cfg.tts_on_tick;
+  return false;
+}
+
+// ---- Moteur de compteur (LOGIQUE PURE — testée hors navigateur) ----
+// Pas appliqué au tick `tickIndex` (1 = premier incrément), survenant à `elapsedMs`.
+function _circuitStepAt(counter, tickIndex, elapsedMs) {
+  const mode = (counter && counter.step_mode) || 'fixed';
+  if (mode === 'fixed') return Number(counter.step_fixed) || 0;
+  if (mode === 'tiers') {
+    const tiers = Array.isArray(counter.step_tiers) ? counter.step_tiers : [];
+    const es = elapsedMs / 1000;
+    for (const t of tiers) { if (t.until_s == null || es <= t.until_s) return Number(t.step) || 0; }
+    return tiers.length ? (Number(tiers[tiers.length - 1].step) || 0) : 0;
+  }
+  if (mode === 'multiplier') {
+    const m = counter.step_multiplier || {};
+    const init = Number(m.initial_step) || 0, factor = Number(m.factor) || 1, every = Math.max(1, Number(m.every_ticks) || 1);
+    return init * Math.pow(factor, Math.floor((tickIndex - 1) / every));
+  }
+  if (mode === 'interpolate') {
+    const ip = counter.step_interp || {};
+    const s0 = Number(ip.start_step) || 0, s1 = Number(ip.end_step) || 0, over = Math.max(0.001, Number(ip.over_s) || 1);
+    return s0 + (s1 - s0) * Math.min(1, (elapsedMs / 1000) / over);
+  }
+  return 0;
+}
+// Valeur affichée après `ticks` incréments (départ `start`, clampée à `cap`).
+function _circuitValueAfter(counter, ticks) {
+  const start = Number(counter.start) || 0, cap = Number(counter.cap);
+  const interval = Number(counter.interval_ms) || 1000, down = counter.direction === 'down';
+  let v = start;
+  for (let k = 1; k <= ticks; k++) v += (down ? -1 : 1) * _circuitStepAt(counter, k, k * interval);
+  v = Math.round(v);
+  if (Number.isFinite(cap)) v = down ? Math.max(cap, v) : Math.min(cap, v);
+  return v;
+}
+function _circuitCapReached(counter, ticks) {
+  const cap = Number(counter.cap);
+  if (!Number.isFinite(cap)) return false;
+  return _circuitValueAfter(counter, ticks) === cap;
+}
+// Règle d'avancement : true = passe à l'étape suivante.
+function _circuitAdvanceReached(stage, ctx) {
+  const adv = stage.advance || 'tap_next';
+  if (adv === 'auto_time') return ctx.elapsedMs >= (Number(stage.advance_after_ms) || 0);
+  if (adv === 'auto_cap') {
+    if (stage.type === 'counter') return _circuitCapReached(stage.counter || {}, ctx.ticks || 0);
+    if (stage.type === 'countdown') return ctx.elapsedMs >= (Number((stage.countdown || {}).duration_ms) || 0);
+    return false;
+  }
+  return false; // tap_next : skip manuel seulement
+}
+// Aperçu texte du pas (pour le panneau de config du wizard).
+function _circuitStepPreview(counter) {
+  const mode = (counter && counter.step_mode) || 'fixed';
+  const samples = mode === 'multiplier'
+    ? [1, 4, 7].map(k => ({ lbl: 'tick ' + k, v: _circuitStepAt(counter, k, k * (Number(counter.interval_ms) || 1000)) }))
+    : [0, 10, 20, 40].map(s => ({ lbl: 't=' + s + 's', v: _circuitStepAt(counter, 1, s * 1000) }));
+  return samples.map(x => `${x.lbl} → +${Math.round(x.v * 100) / 100}`).join(' · ');
+}
+// Résumé court d'une étape (carte du wizard).
+function _circuitStageSummary(st) {
+  const lbl = (st.label || '').trim();
+  if (st.type === 'counter') {
+    const c = st.counter || {}; const dir = c.direction === 'down' ? '↓' : '↑';
+    const iv = ((Number(c.interval_ms) || 1000) / 1000);
+    const stepTxt = c.step_mode === 'fixed' ? ('+' + (c.step_fixed || 0)) : c.step_mode === 'tiers' ? 'paliers' : c.step_mode === 'multiplier' ? '×' + ((c.step_multiplier || {}).factor || 1) : 'interp';
+    return `Compteur • ${lbl || '—'} • ${c.start || 0}${dir}${c.cap || 0}, ${stepTxt}/${iv}s`;
+  }
+  if (st.type === 'countdown') return `Countdown • ${lbl || '—'} • ${Math.round((((st.countdown || {}).duration_ms) || 0) / 1000)}s`;
+  if (st.type === 'stimulus') return `Stimulus • ${lbl || '—'} • ${esc(_drillStimuliSummary((st.stimulus || {}).categories || {}))}`;
+  return lbl || '—';
+}
+function _circuitStageTypeLabel(t) { return t === 'counter' ? '🔢 Compteur' : t === 'countdown' ? '⏱ Countdown' : t === 'stimulus' ? '⚡ Stimulus' : t; }
+
+// ---- Runtime d'exécution du circuit (plein écran, réutilise #drill-overlay) ----
+function launchCircuit(id) {
+  const d = (state.drills || []).find(x => x.id === id && !x.deletedAt);
+  if (!d) return;
+  const stages = Array.isArray(d.stages) ? d.stages.filter(Boolean) : [];
+  if (!stages.length) { try { alert('Ce circuit n\'a aucune étape.'); } catch (e) {} return; }
+  try { closeModal(); } catch (e) {}
+  let host = document.getElementById('drill-overlay');
+  if (!host) { host = document.createElement('div'); host.id = 'drill-overlay'; document.body.appendChild(host); }
+  host.innerHTML = `
+    <div id="circuit-bar" style="position:fixed;top:calc(env(safe-area-inset-top, 0px) + 10px);left:12px;right:12px;text-align:center;color:#fff;font-family:'JetBrains Mono';font-size:12px;letter-spacing:0.04em;z-index:10002;text-transform:uppercase"></div>
+    <button class="drill-stop" onclick="stopCircuit()" aria-label="Arrêter le circuit">✕</button>
+    <div id="drill-cue" class="drill-cue"></div>
+    <div id="circuit-ctrl" style="position:fixed;bottom:calc(env(safe-area-inset-bottom, 0px) + 18px);left:0;right:0;display:flex;gap:10px;justify-content:center;z-index:10002">
+      <button class="btn btn-secondary" id="circuit-pause" style="font-size:15px;min-width:130px" onclick="_circuitPauseToggle()">⏸ Pause</button>
+      <button class="btn btn-primary" style="font-size:15px;min-width:130px" onclick="_circuitSkip()">Suivant →</button>
+    </div>`;
+  document.body.style.overflow = 'hidden';
+  _drillUnlockAudio();
+  try { _ttsVoices(); } catch (e) {} // amorce le chargement des voix
+  window._circuit = { drillId: id, name: d.name || 'Circuit', stages, idx: -1, paused: false, done: false,
+    elapsedMs: 0, ticks: 0, _lastFrame: Date.now(), _driver: null, _cueTimer: null, _pool: null, _bipSecLeft: null, startedAt: Date.now() };
+  try { if (host.requestFullscreen) host.requestFullscreen().catch(() => {}); } catch (e) {}
+  try { if (navigator.wakeLock && navigator.wakeLock.request) navigator.wakeLock.request('screen').then(s => { window._drillWakeLock = s; }).catch(() => {}); } catch (e) {}
+  window._circuit._driver = setInterval(_circuitTick, 100);
+  _circuitEnterStage(0);
+}
+function _circuitBar() {
+  const c = window._circuit; if (!c) return;
+  const el = document.getElementById('circuit-bar'); if (!el) return;
+  const st = c.stages[c.idx] || {};
+  el.textContent = `${c.name} · Étape ${c.idx + 1}/${c.stages.length}${st.label ? ' · ' + st.label : ''}`;
+}
+function _circuitEnterStage(idx) {
+  const c = window._circuit; if (!c) return;
+  c.idx = idx; c.elapsedMs = 0; c.ticks = 0; c.paused = false; c._lastFrame = Date.now(); c._bipSecLeft = null;
+  if (c._cueTimer) { clearTimeout(c._cueTimer); c._cueTimer = null; }
+  const st = c.stages[idx]; if (!st) return _circuitFinish();
+  _circuitBar();
+  const pauseBtn = document.getElementById('circuit-pause'); if (pauseBtn) pauseBtn.textContent = '⏸ Pause';
+  // TTS + bip de démarrage d'étape.
+  const cfg = st.type === 'counter' ? (st.counter || {}) : st.type === 'countdown' ? (st.countdown || {}) : (st.stimulus || {});
+  if (_ttsShouldSpeak(cfg, 'start', _ttsSupported())) {
+    const spoken = st.type === 'counter' ? ((st.label || '') + ', ' + (Number((st.counter || {}).start) || 0)) : (st.label || _circuitStageTypeLabel(st.type));
+    _ttsSpeak(spoken, st.ttsLang || 'fr');
+  }
+  if (st.type === 'counter') {
+    if ((st.counter || {}).audio_bip_on_tick !== false) { /* pas de bip au tick 0 */ }
+    _circuitRenderCounter(st, _circuitValueAfter(st.counter || {}, 0));
+  } else if (st.type === 'countdown') {
+    if ((st.countdown || {}).audio_bip_on_start) { try { _drillBeep(); } catch (e) {} }
+    _circuitRenderCountdown(st, Number((st.countdown || {}).duration_ms) || 0);
+  } else if (st.type === 'stimulus') {
+    _circuitStimulusStart(st);
+  }
+}
+function _circuitRenderCounter(st, val) {
+  const el = document.getElementById('drill-cue'); if (!el) return;
+  el.innerHTML = `<div style="text-align:center;color:#fff">
+    <div style="font-size:6vmin;font-family:'Anton',sans-serif;text-transform:uppercase;letter-spacing:0.04em;opacity:0.85;margin-bottom:1vmin">${esc(st.label || '')}</div>
+    <div style="font-size:38vmin;line-height:0.9;font-family:'Anton',sans-serif">${val}</div>
+  </div>`;
+}
+function _circuitRenderCountdown(st, remMs) {
+  const el = document.getElementById('drill-cue'); if (!el) return;
+  el.innerHTML = `<div style="text-align:center;color:#fff">
+    <div style="font-size:6vmin;font-family:'Anton',sans-serif;text-transform:uppercase;letter-spacing:0.04em;opacity:0.85;margin-bottom:1vmin">${esc(st.label || '')}</div>
+    <div id="circuit-cd" style="font-size:30vmin;line-height:0.9;font-family:'Anton',sans-serif">${_fmtChronoMs(Math.max(0, remMs))}</div>
+  </div>`;
+}
+// Boucle maîtresse 100ms : accumule le temps (hors pause), pilote counter/countdown, vérifie l'avancement.
+function _circuitTick() {
+  const c = window._circuit; if (!c || c.done) return;
+  const now = Date.now(); const dt = now - c._lastFrame; c._lastFrame = now;
+  if (c.paused) return;
+  c.elapsedMs += dt;
+  const st = c.stages[c.idx]; if (!st) return;
+  if (st.type === 'counter') {
+    const cfg = st.counter || {}; const interval = Number(cfg.interval_ms) || 1000;
+    const newTicks = Math.floor(c.elapsedMs / interval);
+    if (newTicks > c.ticks) {
+      c.ticks = newTicks;
+      const val = _circuitValueAfter(cfg, c.ticks);
+      _circuitRenderCounter(st, val);
+      if (cfg.audio_bip_on_tick) { try { _drillBeep(); } catch (e) {} }
+      if (_ttsShouldSpeak(cfg, 'tick', _ttsSupported())) _ttsSpeak('' + val, st.ttsLang || 'fr');
+    }
+  } else if (st.type === 'countdown') {
+    const dur = Number((st.countdown || {}).duration_ms) || 0;
+    const rem = Math.max(0, dur - c.elapsedMs);
+    const el = document.getElementById('circuit-cd'); if (el) el.textContent = _fmtChronoMs(rem);
+    if ((st.countdown || {}).audio_bip_last_3s) {
+      const secLeft = Math.ceil(rem / 1000);
+      if (secLeft <= 3 && secLeft >= 1 && secLeft !== c._bipSecLeft) { c._bipSecLeft = secLeft; try { _drillBeep(); } catch (e) {} }
+    }
+  }
+  // Avancement (garde : au moins un tick de temps écoulé pour éviter un double-saut).
+  if (c.elapsedMs > 0 && _circuitAdvanceReached(st, { elapsedMs: c.elapsedMs, ticks: c.ticks })) _circuitAdvance();
+}
+// ---- Étape stimulus dans un circuit (réutilise le pool + le rendu de cue du drill) ----
+function _circuitStimulusStart(st) {
+  const c = window._circuit; if (!c) return;
+  const cfg = st.stimulus || {};
+  const pool = _drillExpandPool(cfg.categories || {});
+  c._pool = pool.length ? pool : null;
+  if (!c._pool) {
+    const el = document.getElementById('drill-cue');
+    if (el) el.innerHTML = `<div style="text-align:center;color:#fff"><div style="font-size:8vmin;font-family:'Anton'">${esc(st.label || 'STIMULUS')}</div><div style="font-size:3vmin;opacity:0.7;margin-top:2vmin">Aucun stimulus configuré</div></div>`;
+    return;
+  }
+  _circuitStimulusNextCue(st);
+}
+function _circuitStimulusNextCue(st) {
+  const c = window._circuit; if (!c || c.paused || c.stages[c.idx] !== st) return;
+  const cue = _drillPickCue(c._pool); if (!cue) return;
+  const el = document.getElementById('drill-cue'); if (el) el.innerHTML = _drillCueHtml(cue);
+  const cfg = st.stimulus || {};
+  if (cfg.audio_beep !== false) { try { _drillBeep(); } catch (e) {} }
+  const len = Math.max(200, Math.min(15000, Number(cfg.length_ms) || 7000));
+  const delay = Math.max(0, Math.min(5000, Number(cfg.delay_ms) || 500));
+  c._cueTimer = setTimeout(() => {
+    if (!c || c.paused || c.stages[c.idx] !== st) return;
+    if (delay > 0) { const e2 = document.getElementById('drill-cue'); if (e2) e2.innerHTML = ''; c._cueTimer = setTimeout(() => _circuitStimulusNextCue(st), delay); }
+    else _circuitStimulusNextCue(st);
+  }, len);
+}
+function _circuitAdvance() {
+  const c = window._circuit; if (!c || c.done) return;
+  if (c._cueTimer) { clearTimeout(c._cueTimer); c._cueTimer = null; }
+  const next = c.idx + 1;
+  if (next >= c.stages.length) return _circuitFinish();
+  try { _drillBeep(); } catch (e) {}
+  // Petite transition visuelle (fade) avant l'étape suivante.
+  const el = document.getElementById('drill-cue');
+  if (el) { el.style.transition = 'opacity 0.18s'; el.style.opacity = '0.2'; setTimeout(() => { if (el) el.style.opacity = '1'; }, 180); }
+  _circuitEnterStage(next);
+}
+function _circuitSkip() { _circuitAdvance(); }
+function _circuitPauseToggle() {
+  const c = window._circuit; if (!c || c.done) return;
+  c.paused = !c.paused; c._lastFrame = Date.now();
+  const btn = document.getElementById('circuit-pause'); if (btn) btn.textContent = c.paused ? '▶ Reprendre' : '⏸ Pause';
+  const st = c.stages[c.idx];
+  if (!c.paused && st && st.type === 'stimulus') _circuitStimulusNextCue(st); // relance la boucle de cues
+}
+function _circuitFinish() {
+  const c = window._circuit; if (!c) return;
+  c.done = true; if (c._driver) { clearInterval(c._driver); c._driver = null; }
+  if (c._cueTimer) { clearTimeout(c._cueTimer); c._cueTimer = null; }
+  const totalS = Math.round((Date.now() - c.startedAt) / 1000);
+  const mm = Math.floor(totalS / 60), ss = totalS % 60;
+  const ctrl = document.getElementById('circuit-ctrl'); if (ctrl) ctrl.style.display = 'none';
+  const bar = document.getElementById('circuit-bar'); if (bar) bar.textContent = '';
+  const el = document.getElementById('drill-cue');
+  if (el) el.innerHTML = `<div style="text-align:center;color:#fff">
+    <div style="font-size:18vmin;line-height:1">🏁</div>
+    <div style="font-size:5vmin;font-family:'Anton',sans-serif;text-transform:uppercase;margin-top:8px">Circuit terminé</div>
+    <div style="font-size:3.4vmin;font-family:'JetBrains Mono';opacity:0.85;margin-top:10px">${c.stages.length} étapes · ${mm}:${String(ss).padStart(2, '0')}</div>
+    <button class="btn btn-primary" style="margin-top:22px;font-size:16px" onclick="stopCircuit()">Fermer</button>
+  </div>`;
+}
+function stopCircuit() {
+  const c = window._circuit;
+  if (c) { c.done = true; if (c._driver) clearInterval(c._driver); if (c._cueTimer) clearTimeout(c._cueTimer); }
+  window._circuit = null;
+  try { if (_ttsSupported()) window.speechSynthesis.cancel(); } catch (e) {}
+  const host = document.getElementById('drill-overlay'); if (host) host.remove();
+  document.body.style.overflow = '';
+  try { if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {}); } catch (e) {}
+  try { if (window._drillWakeLock) { window._drillWakeLock.release().catch(() => {}); window._drillWakeLock = null; } } catch (e) {}
+  try { render(); } catch (e) {}
+}
+
+// ============================================================
 // DRILL — bibliothèque (liste)
 // ============================================================
 function openDrillLibrary() {
@@ -18279,7 +18561,10 @@ function openDrillLibrary() {
     </div>
     <div class="modal-body">
       ${isCoach
-        ? `<button class="btn btn-primary btn-block mb-3" onclick="openDrillWizard()">+ Nouveau drill</button>`
+        ? `<div style="display:flex;gap:6px;margin-bottom:12px">
+             <button class="btn btn-primary" style="flex:1" onclick="openDrillWizard()">+ Réaction</button>
+             <button class="btn btn-primary" style="flex:1" onclick="openCircuitWizard()">+ Circuit</button>
+           </div>`
         : `<div style="padding:8px 12px;background:var(--bg-3);border-radius:6px;margin-bottom:12px;font-size:11px;color:var(--ink-3);line-height:1.5">👁 Lance un drill. Tu peux <strong>ajuster les réglages avant de lancer</strong> (⚙) — sans les enregistrer.</div>`}
       ${drills.length
         ? drills.map(d => _drillCardHtml(d, isCoach)).join('')
@@ -18288,6 +18573,30 @@ function openDrillLibrary() {
   `);
 }
 function _drillCardHtml(d, isCoach) {
+  // Circuit training : carte dédiée (badge + résumé étapes ; pas d'ajustement éphémère).
+  if (d.mode === 'circuit') {
+    const stages = Array.isArray(d.stages) ? d.stages.filter(Boolean) : [];
+    const types = stages.map(s => _circuitStageTypeLabel(s.type).replace(/^\S+\s/, '')).join(' → ');
+    return `
+      <div style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;margin-bottom:10px;background:var(--surface)">
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start">
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;align-items:center;gap:6px">
+              <span style="font-size:9px;font-family:'JetBrains Mono';background:rgba(var(--accent-rgb),0.18);color:var(--orange);padding:2px 6px;border-radius:4px;text-transform:uppercase;letter-spacing:0.05em;flex:0 0 auto">🔁 Circuit</span>
+              <span style="font-family:'Anton';text-transform:uppercase;font-size:15px;letter-spacing:0.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(d.name || 'Circuit')}</span>
+            </div>
+            <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px;line-height:1.5">${stages.length} étape${stages.length > 1 ? 's' : ''}${types ? ' · ' + esc(types) : ''}</div>
+          </div>
+          ${isCoach ? `<div style="display:flex;gap:4px;flex:0 0 auto">
+            <button class="btn btn-icon" title="Modifier" onclick="openCircuitWizard('${d.id}')">✎</button>
+            <button class="btn btn-icon" title="Supprimer" onclick="deleteDrill('${d.id}')">🗑</button>
+          </div>` : ''}
+        </div>
+        <div style="display:flex;gap:6px;margin-top:10px">
+          <button class="btn btn-primary" style="flex:1" onclick="launchCircuit('${d.id}')">▶ Lancer le circuit</button>
+        </div>
+      </div>`;
+  }
   const dur = d.durationMode === 'countdown' ? (d.durationValue + ' min') : (d.durationValue + ' cues');
   const mode = Number.isFinite(d.lengthMinMs) ? ('🎲 ' + (d.lengthMinMs / 1000) + '–' + (d.lengthMaxMs / 1000) + 's')
     : Number.isFinite(d.lengthEndMs) ? ('📉 ' + (d.lengthMs / 1000) + '→' + (d.lengthEndMs / 1000) + 's')
@@ -18534,6 +18843,294 @@ function saveDrill(launchAfter) {
   state._drillWizard = null;
   closeModal();
   if (launchAfter) launchDrill(id); else openDrillLibrary();
+}
+
+// ============================================================
+// DRILL CIRCUIT — wizard (étapes + config par type) — coach only
+// ============================================================
+function _circuitDefaultStage(type) {
+  const base = { id: uid(), type, label: '', advance: type === 'stimulus' ? 'auto_time' : 'auto_cap', advance_after_ms: 30000, ttsLang: 'fr' };
+  if (type === 'counter') base.counter = { start: 5, cap: 30, direction: 'up', interval_ms: 8000, step_mode: 'fixed', step_fixed: 1,
+    step_tiers: [{ until_s: 10, step: 1 }, { until_s: 30, step: 2 }, { step: 5 }],
+    step_multiplier: { initial_step: 1, factor: 1.5, every_ticks: 3 },
+    step_interp: { start_step: 1, end_step: 5, over_s: 60 },
+    audio_bip_on_tick: true, tts_on_start: true, tts_on_tick: false };
+  if (type === 'countdown') base.countdown = { duration_ms: 30000, audio_bip_on_start: true, audio_bip_last_3s: true, tts_on_start: true };
+  if (type === 'stimulus') base.stimulus = { categories: { colors: [], arrows: [], numbers: null, letters: null, shapes: [], imageIds: [] }, length_ms: 7000, delay_ms: 500, audio_beep: true, tts_on_start: false };
+  return base;
+}
+function openCircuitWizard(editId) {
+  if (!_drillIsCoach()) return;
+  const src = editId ? (state.drills || []).find(d => d.id === editId && !d.deletedAt) : null;
+  state._circuitWizard = {
+    editingId: src ? src.id : null,
+    name: src ? (src.name || '') : '',
+    ttsLang: src && src.stages && src.stages[0] && src.stages[0].ttsLang ? src.stages[0].ttsLang : 'fr',
+    defaultBeep: true,
+    stages: src && Array.isArray(src.stages) ? JSON.parse(JSON.stringify(src.stages)) : [_circuitDefaultStage('counter')],
+    openId: null
+  };
+  renderCircuitWizard();
+}
+function _cw() { return state._circuitWizard; }
+function _cwStage() { const w = _cw(); if (!w) return null; return (w.stages || []).find(s => s.id === w.openId) || null; }
+function _cwGetPath(obj, path) { return path.split('.').reduce((o, k) => (o == null ? o : o[k]), obj); }
+function _cwSetPath(obj, path, val) { const ks = path.split('.'); let o = obj; for (let i = 0; i < ks.length - 1; i++) { if (o[ks[i]] == null) o[ks[i]] = {}; o = o[ks[i]]; } o[ks[ks.length - 1]] = val; }
+function _cwName(v) { const w = _cw(); if (w) w.name = String(v || '').slice(0, 60); }
+function _cwNum(path, val) { const st = _cwStage(); if (!st) return; const v = parseFloat(val); if (Number.isFinite(v)) _cwSetPath(st, path, v); _cwRefreshPreview(); }
+function _cwInt(path, val) { const st = _cwStage(); if (!st) return; const v = parseInt(val, 10); if (Number.isFinite(v)) _cwSetPath(st, path, v); _cwRefreshPreview(); }
+function _cwMs(path, secVal) { const st = _cwStage(); if (!st) return; const v = Math.round(parseFloat(secVal) * 1000); if (Number.isFinite(v)) _cwSetPath(st, path, Math.max(0, v)); _cwRefreshPreview(); }
+function _cwStr(path, val) { const st = _cwStage(); if (!st) return; _cwSetPath(st, path, String(val || '')); }
+function _cwBool(path, on) { const st = _cwStage(); if (!st) return; _cwSetPath(st, path, !!on); }
+function _cwLabel(v) { const st = _cwStage(); if (st) st.label = String(v || '').slice(0, 40); }
+// Durée countdown en min:sec → ms.
+function _cwCdDuration() { const st = _cwStage(); if (!st || !st.countdown) return; const mn = parseInt((document.getElementById('cw-cd-min') || {}).value, 10) || 0; const sc = parseInt((document.getElementById('cw-cd-sec') || {}).value, 10) || 0; st.countdown.duration_ms = Math.max(1000, (mn * 60 + sc) * 1000); }
+function _cwType(t) { const st = _cwStage(); if (!st) return; st.type = t; if (t === 'counter' && !st.counter) st.counter = _circuitDefaultStage('counter').counter; if (t === 'countdown' && !st.countdown) st.countdown = _circuitDefaultStage('countdown').countdown; if (t === 'stimulus' && !st.stimulus) st.stimulus = _circuitDefaultStage('stimulus').stimulus; if (t === 'stimulus' && st.advance === 'auto_cap') st.advance = 'auto_time'; renderCircuitWizard(); }
+function _cwStepMode(m) { const st = _cwStage(); if (st && st.counter) st.counter.step_mode = m; renderCircuitWizard(); }
+function _cwAdvance(a) { const st = _cwStage(); if (st) st.advance = a; renderCircuitWizard(); }
+function _cwDir(d) { const st = _cwStage(); if (st && st.counter) st.counter.direction = d; renderCircuitWizard(); }
+function _cwRefreshPreview() { const st = _cwStage(); const el = document.getElementById('cw-step-preview'); if (el && st && st.type === 'counter') el.textContent = _circuitStepPreview(st.counter || {}); }
+// Paliers : tableau [{until_s,step}...,{step}] — le dernier (sans until_s) = palier final.
+function _cwTiers() { const st = _cwStage(); if (!st || !st.counter) return []; if (!Array.isArray(st.counter.step_tiers) || !st.counter.step_tiers.length) st.counter.step_tiers = [{ step: 1 }]; return st.counter.step_tiers; }
+function _cwTierAdd() { const t = _cwTiers(); t.splice(Math.max(0, t.length - 1), 0, { until_s: 10, step: 1 }); renderCircuitWizard(); }
+function _cwTierDel(i) { const t = _cwTiers(); if (i >= 0 && i < t.length - 1) { t.splice(i, 1); renderCircuitWizard(); } }
+function _cwTierSet(i, field, val) { const t = _cwTiers(); if (!t[i]) return; const v = parseFloat(val); if (Number.isFinite(v)) t[i][field] = v; _cwRefreshPreview(); }
+function _cwTierFinal(val) { const t = _cwTiers(); const v = parseFloat(val); if (Number.isFinite(v) && t.length) t[t.length - 1].step = v; _cwRefreshPreview(); }
+// Stimulus (config compacte) : toggles catégories.
+function _cwStimToggle(cat, id) { const st = _cwStage(); if (!st || !st.stimulus) return; const cats = st.stimulus.categories = st.stimulus.categories || {}; const arr = cats[cat] = cats[cat] || []; const i = arr.indexOf(id); if (i >= 0) arr.splice(i, 1); else arr.push(id); renderCircuitWizard(); }
+function _cwStimNumbers() { const st = _cwStage(); if (!st || !st.stimulus) return; const cats = st.stimulus.categories = st.stimulus.categories || {}; cats.numbers = cats.numbers ? null : { min: 1, max: 10 }; renderCircuitWizard(); }
+function _cwStimLetters() { const st = _cwStage(); if (!st || !st.stimulus) return; const cats = st.stimulus.categories = st.stimulus.categories || {}; cats.letters = cats.letters ? null : { min: 'A', max: 'H' }; renderCircuitWizard(); }
+// Étapes : CRUD + réordonnancement (▲▼, cohérent avec moveOffseasonStep).
+function _circuitAddStage(type) { const w = _cw(); if (!w) return; w.stages = w.stages || []; w.stages.push(_circuitDefaultStage(type)); renderCircuitWizard(); }
+function _circuitDeleteStage(id) { const w = _cw(); if (!w) return; w.stages = (w.stages || []).filter(s => s.id !== id); if (w.openId === id) w.openId = null; renderCircuitWizard(); }
+function _circuitMoveStage(id, dir) { const w = _cw(); if (!w) return; const a = w.stages || []; const i = a.findIndex(s => s.id === id); const j = i + dir; if (i < 0 || j < 0 || j >= a.length) return; const t = a[i]; a[i] = a[j]; a[j] = t; renderCircuitWizard(); }
+function _circuitOpenStage(id) { const w = _cw(); if (!w) return; w.openId = id; renderCircuitWizard(); }
+function _circuitCloseStage() { const w = _cw(); if (!w) return; w.openId = null; renderCircuitWizard(); }
+function _cwLang(v) { const w = _cw(); if (w) w.ttsLang = String(v || 'fr'); }
+// Applique le bip par défaut à TOUTES les étapes (bouton de commodité).
+function _cwGlobalBeep(on) {
+  const w = _cw(); if (!w) return; w.defaultBeep = !!on;
+  (w.stages || []).forEach(st => {
+    if (st.type === 'counter' && st.counter) st.counter.audio_bip_on_tick = !!on;
+    if (st.type === 'countdown' && st.countdown) { st.countdown.audio_bip_on_start = !!on; st.countdown.audio_bip_last_3s = !!on; }
+    if (st.type === 'stimulus' && st.stimulus) st.stimulus.audio_beep = !!on;
+  });
+  renderCircuitWizard();
+}
+
+function renderCircuitWizard() {
+  const w = _cw(); if (!w) return;
+  const ttsWarn = !_ttsSupported() ? `<div style="font-size:10px;color:var(--orange);font-family:'JetBrains Mono';margin-top:4px">⚠ Ce navigateur ne supporte pas la synthèse vocale — la voix TTS sera ignorée (le reste fonctionne).</div>` : '';
+  const st = _cwStage();
+  let body;
+  if (st) {
+    body = _circuitStageConfigHtml(st);
+  } else {
+    const stagesHtml = (w.stages || []).length ? (w.stages || []).map((s, i) => `
+      <div style="border:1px solid var(--border-soft);border-radius:9px;padding:10px 12px;margin-bottom:8px;background:var(--surface)">
+        <div style="display:flex;align-items:center;gap:8px">
+          <div style="flex:1;min-width:0;cursor:pointer" onclick="_circuitOpenStage('${s.id}')">
+            <div style="font-family:'Anton';text-transform:uppercase;font-size:13px;letter-spacing:0.02em">${i + 1}. ${_circuitStageTypeLabel(s.type)}</div>
+            <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(_circuitStageSummary(s))}</div>
+          </div>
+          <div style="display:flex;gap:3px;flex:0 0 auto">
+            <button class="btn btn-icon" title="Monter" onclick="_circuitMoveStage('${s.id}',-1)" ${i === 0 ? 'disabled' : ''}>▲</button>
+            <button class="btn btn-icon" title="Descendre" onclick="_circuitMoveStage('${s.id}',1)" ${i === w.stages.length - 1 ? 'disabled' : ''}>▼</button>
+            <button class="btn btn-icon" title="Configurer" onclick="_circuitOpenStage('${s.id}')">⚙</button>
+            <button class="btn btn-icon" title="Supprimer" onclick="_circuitDeleteStage('${s.id}')">🗑</button>
+          </div>
+        </div>
+      </div>`).join('') : `<div style="padding:18px;text-align:center;color:var(--ink-3);font-size:12px;font-style:italic;border:1px dashed var(--border);border-radius:8px;margin-bottom:10px">Aucune étape — ajoute-en une ci-dessous.</div>`;
+    body = `
+      <div class="fld" style="margin-bottom:14px">
+        <label class="fld-label">Nom du circuit</label>
+        <input id="cw-name" value="${esc(w.name || '')}" placeholder="Ex : Aller-retour + burpees + gainage" maxlength="60" onchange="_cwName(this.value)">
+      </div>
+      <div class="eyebrow-muted" style="margin-bottom:6px">Étapes (dans l'ordre)</div>
+      ${stagesHtml}
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 18px">
+        <button class="btn btn-secondary" style="flex:1;min-width:100px;font-size:12px" onclick="_circuitAddStage('counter')">+ 🔢 Compteur</button>
+        <button class="btn btn-secondary" style="flex:1;min-width:100px;font-size:12px" onclick="_circuitAddStage('countdown')">+ ⏱ Countdown</button>
+        <button class="btn btn-secondary" style="flex:1;min-width:100px;font-size:12px" onclick="_circuitAddStage('stimulus')">+ ⚡ Stimulus</button>
+      </div>
+      <div class="eyebrow-muted" style="margin-bottom:6px">Réglages globaux</div>
+      <label style="display:flex;align-items:center;gap:10px;padding:11px 12px;background:var(--bg-3);border-radius:8px;cursor:pointer;margin-bottom:8px">
+        <input type="checkbox" ${w.defaultBeep ? 'checked' : ''} onchange="_cwGlobalBeep(this.checked)" style="width:20px;height:20px;flex:none">
+        <span>🔊 Bip audio par défaut sur toutes les étapes</span>
+      </label>
+      <div class="fld">
+        <label class="fld-label">🗣 Voix TTS</label>
+        <select onchange="_cwLang(this.value)">
+          <option value="fr" ${w.ttsLang === 'fr' ? 'selected' : ''}>Français</option>
+          <option value="en" ${w.ttsLang === 'en' ? 'selected' : ''}>English</option>
+          <option value="es" ${w.ttsLang === 'es' ? 'selected' : ''}>Español</option>
+        </select>
+        ${ttsWarn}
+      </div>`;
+  }
+  const inConfig = !!st;
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">Circuit · ${w.editingId ? 'édition' : 'nouveau'}${inConfig ? ' · étape' : ''}</div>
+        <div class="modal-title">${inConfig ? 'Configurer l\'étape' : 'Circuit training'}</div>
+      </div>
+      <button class="modal-close" onclick="state._circuitWizard=null;closeModal()">✕</button>
+    </div>
+    <div class="modal-body">${body}</div>
+    <div class="modal-footer" style="display:flex;gap:6px;align-items:center">
+      ${inConfig
+        ? `<button class="btn btn-primary btn-block" onclick="_circuitCloseStage()">✓ Valider l'étape</button>`
+        : `<div style="flex:1"></div><button class="btn btn-secondary" onclick="saveCircuit(false)">Enregistrer</button><button class="btn btn-primary" onclick="saveCircuit(true)">▶ Lancer</button>`}
+    </div>
+  `);
+}
+function _circuitStageConfigHtml(st) {
+  const seg = (active, val, label, fn) => `<button class="segmented-btn ${active ? 'active' : ''}" onclick="${fn}('${val}')">${label}</button>`;
+  let typePanel = '';
+  if (st.type === 'counter') {
+    const c = st.counter || {};
+    const modeBtn = (m, lbl) => `<button type="button" class="btn ${c.step_mode === m ? 'btn-primary' : 'btn-secondary'}" style="min-height:38px;padding:0 10px;font-size:12px" onclick="_cwStepMode('${m}')">${lbl}</button>`;
+    let stepPanel = '';
+    if (c.step_mode === 'fixed') {
+      stepPanel = `<div class="fld"><label class="fld-label">Pas (constant)</label><input type="number" step="0.5" value="${c.step_fixed != null ? c.step_fixed : 1}" onchange="_cwNum('counter.step_fixed',this.value)"></div>`;
+    } else if (c.step_mode === 'tiers') {
+      const t = Array.isArray(c.step_tiers) && c.step_tiers.length ? c.step_tiers : [{ step: 1 }];
+      const rows = t.map((tier, i) => i < t.length - 1
+        ? `<div class="fld-row" style="margin-bottom:6px;align-items:flex-end">
+             <div class="fld"><label class="fld-label">Jusqu'à (s)</label><input type="number" min="1" value="${tier.until_s != null ? tier.until_s : 10}" onchange="_cwTierSet(${i},'until_s',this.value)"></div>
+             <div class="fld"><label class="fld-label">Pas</label><input type="number" step="0.5" value="${tier.step != null ? tier.step : 1}" onchange="_cwTierSet(${i},'step',this.value)"></div>
+             <button class="btn btn-icon" title="Retirer" onclick="_cwTierDel(${i})" style="margin-bottom:2px">🗑</button>
+           </div>`
+        : `<div class="fld" style="margin-bottom:6px"><label class="fld-label">Pas final (au-delà)</label><input type="number" step="0.5" value="${tier.step != null ? tier.step : 5}" onchange="_cwTierFinal(this.value)"></div>`).join('');
+      stepPanel = `${rows}<button class="btn btn-secondary" style="font-size:11px;min-height:34px" onclick="_cwTierAdd()">+ Ajouter un palier</button>`;
+    } else if (c.step_mode === 'multiplier') {
+      const m = c.step_multiplier || {};
+      stepPanel = `<div class="fld-row">
+        <div class="fld"><label class="fld-label">Pas initial</label><input type="number" step="0.5" value="${m.initial_step != null ? m.initial_step : 1}" onchange="_cwNum('counter.step_multiplier.initial_step',this.value)"></div>
+        <div class="fld"><label class="fld-label">Facteur ×</label><input type="number" step="0.1" value="${m.factor != null ? m.factor : 1.5}" onchange="_cwNum('counter.step_multiplier.factor',this.value)"></div>
+        <div class="fld"><label class="fld-label">Tous les N ticks</label><input type="number" min="1" value="${m.every_ticks != null ? m.every_ticks : 3}" onchange="_cwInt('counter.step_multiplier.every_ticks',this.value)"></div>
+      </div>`;
+    } else if (c.step_mode === 'interpolate') {
+      const ip = c.step_interp || {};
+      stepPanel = `<div class="fld-row">
+        <div class="fld"><label class="fld-label">Pas début</label><input type="number" step="0.5" value="${ip.start_step != null ? ip.start_step : 1}" onchange="_cwNum('counter.step_interp.start_step',this.value)"></div>
+        <div class="fld"><label class="fld-label">Pas fin</label><input type="number" step="0.5" value="${ip.end_step != null ? ip.end_step : 5}" onchange="_cwNum('counter.step_interp.end_step',this.value)"></div>
+        <div class="fld"><label class="fld-label">Sur (s)</label><input type="number" min="1" value="${ip.over_s != null ? ip.over_s : 60}" onchange="_cwNum('counter.step_interp.over_s',this.value)"></div>
+      </div>`;
+    }
+    typePanel = `
+      <div class="fld-row">
+        <div class="fld"><label class="fld-label">Valeur initiale</label><input type="number" value="${c.start != null ? c.start : 0}" onchange="_cwNum('counter.start',this.value)"></div>
+        <div class="fld"><label class="fld-label">Cap (limite)</label><input type="number" value="${c.cap != null ? c.cap : 30}" onchange="_cwNum('counter.cap',this.value)"></div>
+      </div>
+      <div class="eyebrow-muted" style="margin:8px 0 6px">Direction</div>
+      <div class="segmented" style="margin-bottom:12px">
+        ${seg(c.direction !== 'down', 'up', '↑ Montant', '_cwDir')}
+        ${seg(c.direction === 'down', 'down', '↓ Descendant', '_cwDir')}
+      </div>
+      <div class="fld"><label class="fld-label">Intervalle (s) entre 2 incréments</label><input type="number" step="0.5" min="0.5" value="${((c.interval_ms != null ? c.interval_ms : 8000) / 1000)}" onchange="_cwMs('counter.interval_ms',this.value)"></div>
+      <div class="eyebrow-muted" style="margin:10px 0 6px">Pas d'incrément</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">${modeBtn('fixed', 'Fixe')}${modeBtn('tiers', 'Paliers')}${modeBtn('multiplier', '× Multi')}${modeBtn('interpolate', 'Interp')}</div>
+      ${stepPanel}
+      <div id="cw-step-preview" style="margin-top:10px;padding:8px 10px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:10px;color:var(--ink-2);font-family:'JetBrains Mono';line-height:1.6">${esc(_circuitStepPreview(c))}</div>
+      <div style="margin-top:12px">
+        ${_cwToggleRow(c.audio_bip_on_tick !== false, '_cwBool(\'counter.audio_bip_on_tick\',this.checked)', '🔊 Bip à chaque incrément')}
+        ${_cwToggleRow(!!c.tts_on_start, '_cwBool(\'counter.tts_on_start\',this.checked)', '🗣 Voix au démarrage (« ' + esc(st.label || 'Étape') + ', ' + (c.start != null ? c.start : 0) + ' »)')}
+        ${_cwToggleRow(!!c.tts_on_tick, '_cwBool(\'counter.tts_on_tick\',this.checked)', '🗣 Voix à chaque incrément (le nombre)')}
+      </div>`;
+  } else if (st.type === 'countdown') {
+    const cd = st.countdown || {};
+    const totalS = Math.round((cd.duration_ms || 0) / 1000);
+    typePanel = `
+      <div class="eyebrow-muted" style="margin-bottom:6px">Durée</div>
+      <div class="fld-row" style="margin-bottom:12px">
+        <div class="fld"><label class="fld-label">Minutes</label><input id="cw-cd-min" type="number" min="0" max="59" value="${Math.floor(totalS / 60)}" onchange="_cwCdDuration()"></div>
+        <div class="fld"><label class="fld-label">Secondes</label><input id="cw-cd-sec" type="number" min="0" max="59" value="${totalS % 60}" onchange="_cwCdDuration()"></div>
+      </div>
+      ${_cwToggleRow(!!cd.audio_bip_on_start, '_cwBool(\'countdown.audio_bip_on_start\',this.checked)', '🔊 Bip au démarrage')}
+      ${_cwToggleRow(!!cd.audio_bip_last_3s, '_cwBool(\'countdown.audio_bip_last_3s\',this.checked)', '🔊 Bip sur les 3 dernières secondes')}
+      ${_cwToggleRow(!!cd.tts_on_start, '_cwBool(\'countdown.tts_on_start\',this.checked)', '🗣 Voix au démarrage')}`;
+  } else if (st.type === 'stimulus') {
+    const s = (st.stimulus || {}).categories || {};
+    typePanel = `
+      <div class="eyebrow-muted" style="margin-bottom:6px">Couleurs</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">
+        ${DRILL_COLORS.map(c => _drillChip((s.colors || []).includes(c.id), `<span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:${c.hex};margin-right:6px;vertical-align:middle;border:1px solid rgba(255,255,255,0.3)"></span>${esc(c.label)}`, `_cwStimToggle('colors','${c.id}')`)).join('')}
+      </div>
+      <div class="eyebrow-muted" style="margin-bottom:6px">Flèches</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">
+        ${DRILL_ARROWS.map(a => _drillChip((s.arrows || []).includes(a), `<span style="font-size:16px">${DRILL_ARROW_GLYPH[a]}</span>`, `_cwStimToggle('arrows','${a}')`, 'min-width:44px')).join('')}
+      </div>
+      <div class="eyebrow-muted" style="margin-bottom:6px">Formes</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">
+        ${DRILL_SHAPES.map(sh => _drillChip((s.shapes || []).includes(sh), esc(DRILL_SHAPE_LABEL[sh]), `_cwStimToggle('shapes','${sh}')`)).join('')}
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        ${_drillChip(!!s.numbers, s.numbers ? '✓ Chiffres' : '+ Chiffres', '_cwStimNumbers()', 'min-height:36px;font-size:11px')}
+        ${_drillChip(!!s.letters, s.letters ? '✓ Lettres' : '+ Lettres', '_cwStimLetters()', 'min-height:36px;font-size:11px')}
+      </div>
+      <div class="fld-row">
+        <div class="fld"><label class="fld-label">Durée cue (s)</label><input type="number" step="0.5" min="0.2" value="${(((st.stimulus || {}).length_ms) || 7000) / 1000}" onchange="_cwMs('stimulus.length_ms',this.value)"></div>
+        <div class="fld"><label class="fld-label">Délai noir (s)</label><input type="number" step="0.1" min="0" value="${(((st.stimulus || {}).delay_ms) || 500) / 1000}" onchange="_cwMs('stimulus.delay_ms',this.value)"></div>
+      </div>`;
+  }
+  // Advance rules communes.
+  const advSeg = (val, lbl) => `<button class="segmented-btn ${st.advance === val ? 'active' : ''}" onclick="_cwAdvance('${val}')">${lbl}</button>`;
+  return `
+    <div class="eyebrow-muted" style="margin-bottom:6px">Type d'étape</div>
+    <div class="segmented" style="margin-bottom:14px">
+      ${seg(st.type === 'counter', 'counter', '🔢 Compteur', '_cwType')}
+      ${seg(st.type === 'countdown', 'countdown', '⏱ Countdown', '_cwType')}
+      ${seg(st.type === 'stimulus', 'stimulus', '⚡ Stimulus', '_cwType')}
+    </div>
+    <div class="fld" style="margin-bottom:14px">
+      <label class="fld-label">Label (affiché en grand)</label>
+      <input value="${esc(st.label || '')}" placeholder="Ex : BURPEES" maxlength="40" onchange="_cwLabel(this.value)">
+    </div>
+    ${typePanel}
+    <div class="eyebrow-muted" style="margin:14px 0 6px">Passage à l'étape suivante</div>
+    <div class="segmented" style="margin-bottom:10px">
+      ${st.type !== 'stimulus' ? advSeg('auto_cap', st.type === 'countdown' ? '⏱ Fin du temps' : '🎯 Cap atteint') : ''}
+      ${advSeg('auto_time', '⏲ Temps écoulé')}
+      ${advSeg('tap_next', '👆 Manuel')}
+    </div>
+    ${st.advance === 'auto_time' ? `<div class="fld"><label class="fld-label">Après (s)</label><input type="number" min="1" value="${((st.advance_after_ms || 30000) / 1000)}" onchange="_cwMs('advance_after_ms',this.value)"></div>` : ''}`;
+}
+function _cwToggleRow(checked, onchange, label) {
+  return `<label style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--bg-3);border-radius:8px;cursor:pointer;margin-bottom:7px">
+    <input type="checkbox" ${checked ? 'checked' : ''} onchange="${onchange}" style="width:20px;height:20px;flex:none">
+    <span style="font-size:13px">${label}</span>
+  </label>`;
+}
+function saveCircuit(launchAfter) {
+  const w = _cw(); if (!w || !_drillIsCoach()) return;
+  const stages = (w.stages || []).filter(Boolean);
+  if (!stages.length) { try { alert('Ajoute au moins une étape au circuit.'); } catch (e) {} return; }
+  // Normalisation + application de la langue TTS globale.
+  stages.forEach(st => {
+    st.ttsLang = w.ttsLang || 'fr';
+    if (st.type === 'counter' && st.counter) { st.counter.interval_ms = Math.max(500, Number(st.counter.interval_ms) || 8000); }
+    if (st.type === 'countdown' && st.countdown) { st.countdown.duration_ms = Math.max(1000, Number(st.countdown.duration_ms) || 30000); }
+    st.advance_after_ms = Math.max(1000, Number(st.advance_after_ms) || 30000);
+  });
+  const name = (w.name || '').trim().slice(0, 60) || 'Circuit';
+  const now = Date.now(); let d;
+  if (w.editingId) {
+    d = (state.drills || []).find(x => x.id === w.editingId);
+    if (!d) { state._circuitWizard = null; return; }
+    Object.assign(d, { name, mode: 'circuit', stages, updatedAt: now });
+  } else {
+    d = { id: uid(), name, createdBy: (currentCoach() || {}).id || null, mode: 'circuit', stages,
+      stimuli: {}, lengthMs: 7000, delayMs: 500, audioBeep: true, durationMode: 'rounds', durationValue: 10,
+      createdAt: now, updatedAt: now, deletedAt: null };
+    state.drills = state.drills || []; state.drills.unshift(d);
+  }
+  const id = d.id;
+  persist(); _drillFlush();
+  state._circuitWizard = null;
+  closeModal();
+  if (launchAfter) launchCircuit(id); else openDrillLibrary();
 }
 
 // ============================================================
@@ -31335,7 +31932,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-10.66';
+const APP_VERSION = '2026-07-10.67';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
