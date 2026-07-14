@@ -4821,10 +4821,13 @@ function _dumpDrillRow(d) {
     duration_mode: d.durationMode === 'countdown' ? 'countdown' : 'rounds',
     duration_value: Number.isFinite(d.durationValue) ? d.durationValue : 10,
     // Circuit training (migration 20260713_001) : mode + séquence d'étapes.
-    mode: d.mode === 'circuit' ? 'circuit' : 'stimulus',
+    mode: (d.mode === 'circuit' || d.mode === 'interval') ? d.mode : 'stimulus',
     stages: Array.isArray(d.stages) ? d.stages : null,
     // Passage entre étapes (migration 20260713_002) : null = auto (backward-compat).
     advance_mode: (d.advanceMode === 'manual' || d.advanceMode === 'auto') ? d.advanceMode : null,
+    // Mode interval / fractionné (migration 20260713_003).
+    interval_config: (d.intervalConfig && typeof d.intervalConfig === 'object' && !Array.isArray(d.intervalConfig)) ? d.intervalConfig : null,
+    is_preset: !!d.isPreset,
     deleted_at: d.deletedAt ? new Date(d.deletedAt).toISOString() : null,
     updated_at: d.updatedAt ? new Date(d.updatedAt).toISOString() : (d.createdAt ? new Date(d.createdAt).toISOString() : null)
   };
@@ -4842,9 +4845,11 @@ function _drillFromRow(r) {
     anticipationClock: !!r.anticipation_clock,
     durationMode: r.duration_mode === 'countdown' ? 'countdown' : 'rounds',
     durationValue: Number.isFinite(r.duration_value) ? r.duration_value : 10,
-    mode: r.mode === 'circuit' ? 'circuit' : 'stimulus',
+    mode: (r.mode === 'circuit' || r.mode === 'interval') ? r.mode : 'stimulus',
     stages: Array.isArray(r.stages) ? r.stages : null,
     advanceMode: r.advance_mode === 'manual' ? 'manual' : 'auto',
+    intervalConfig: (r.interval_config && typeof r.interval_config === 'object' && !Array.isArray(r.interval_config)) ? r.interval_config : null,
+    isPreset: !!r.is_preset,
     createdAt: r.created_at ? Date.parse(r.created_at) : null,
     updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
     deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
@@ -18635,11 +18640,252 @@ function stopCircuit() {
 }
 
 // ============================================================
+// DRILL INTERVAL — mode « fractionné » (HIIT / Tabata) — migration 20260713_003
+// Structure : Échauffement (opt) + Cycles Work/Rest + Cool-down (opt).
+// ============================================================
+// Config par défaut (template « Personnalisé »).
+function _intervalDefaultConfig() {
+  return {
+    preset_name: 'Custom',
+    warmup: { enabled: false, duration_ms: 180000 },
+    cycles: { work_ms: 45000, rest_ms: 30000, count_mode: 'n_cycles', n_cycles: 10, total_duration_ms: 1200000, work_label: 'WORK', rest_label: 'REST' },
+    cooldown: { enabled: false, duration_ms: 120000 },
+    progression: { mode: 'none', linear: { work_delta_ms: 5000, rest_delta_ms: -5000 }, pyramid: { work_start_ms: 30000, work_peak_ms: 60000, rest_start_ms: 60000, rest_peak_ms: 15000 }, custom_cycles: [] },
+    audio: { bip_start: true, bip_end_countdown: true, tts_enabled: false, tts_lang: 'fr' },
+    next_preview: true
+  };
+}
+// Construit un preset depuis le template + overrides.
+function _intervalMakePreset(name, warmup, work_ms, rest_ms, n_cycles, cooldown) {
+  const c = _intervalDefaultConfig();
+  c.preset_name = name;
+  c.warmup = { enabled: warmup > 0, duration_ms: warmup };
+  c.cycles.work_ms = work_ms; c.cycles.rest_ms = rest_ms; c.cycles.count_mode = 'n_cycles'; c.cycles.n_cycles = n_cycles;
+  c.cooldown = { enabled: cooldown > 0, duration_ms: cooldown };
+  return c;
+}
+// 6 presets built-in (constants JS, jamais en DB).
+const INTERVAL_PRESETS = [
+  { key: 'tabata', icon: '🔥', name: 'Tabata', config: _intervalMakePreset('Tabata', 0, 20000, 10000, 8, 0) },
+  { key: 'hiit_court', icon: '⚡', name: 'HIIT court', config: _intervalMakePreset('HIIT_court', 180000, 30000, 30000, 10, 120000) },
+  { key: 'hiit_long', icon: '💪', name: 'HIIT long', config: _intervalMakePreset('HIIT_long', 300000, 60000, 60000, 8, 180000) },
+  { key: 'sprint_basket', icon: '🏀', name: 'Sprint basket', config: _intervalMakePreset('Sprint_basket', 300000, 15000, 45000, 12, 180000) },
+  { key: 'fractionne_long', icon: '🏃', name: 'Fractionné long', config: _intervalMakePreset('Fractionne_long', 300000, 90000, 30000, 10, 300000) },
+  { key: 'custom', icon: '⚙️', name: 'Personnalisé', config: _intervalDefaultConfig() }
+];
+function _intervalPresetByKey(k) { const p = INTERVAL_PRESETS.find(x => x.key === k); return p ? JSON.parse(JSON.stringify(p.config)) : _intervalDefaultConfig(); }
+
+// ---- LOGIQUE PURE (testée hors navigateur) ----
+// Nombre de cycles à générer selon count_mode.
+function _intervalCycleCount(config) {
+  const cy = (config && config.cycles) || {};
+  const prog = (config && config.progression) || {};
+  if ((prog.mode || 'none') === 'custom') return (Array.isArray(prog.custom_cycles) ? prog.custom_cycles : []).length;
+  if (cy.count_mode === 'total_duration') {
+    const total = Number(cy.total_duration_ms) || 0;
+    const per = (Number(cy.work_ms) || 0) + (Number(cy.rest_ms) || 0);
+    return per > 0 ? Math.max(1, Math.floor(total / per)) : 1;
+  }
+  return Math.max(1, Number(cy.n_cycles) || 1);
+}
+// Valeur pyramidale à l'index i (0..N-1) : start aux extrémités, peak au milieu.
+function _intervalPyramidVal(start, peak, i, N) {
+  if (N <= 1) return peak;
+  const mid = (N - 1) / 2;
+  const frac = mid > 0 ? (1 - Math.abs(i - mid) / mid) : 1;
+  return start + (peak - start) * frac;
+}
+// Génère la liste des cycles {work_ms, rest_ms} selon la progression.
+function _intervalGenerateCycles(config) {
+  const cy = (config && config.cycles) || {};
+  const prog = (config && config.progression) || {};
+  const mode = prog.mode || 'none';
+  if (mode === 'custom') {
+    return (Array.isArray(prog.custom_cycles) ? prog.custom_cycles : []).map(c => ({ work_ms: Math.max(0, Number(c.work_ms) || 0), rest_ms: Math.max(0, Number(c.rest_ms) || 0) }));
+  }
+  const N = _intervalCycleCount(config);
+  const workBase = Number(cy.work_ms) || 0, restBase = Number(cy.rest_ms) || 0;
+  const out = [];
+  for (let i = 0; i < N; i++) {
+    let w = workBase, r = restBase;
+    if (mode === 'linear') {
+      const l = prog.linear || {};
+      w = workBase + i * (Number(l.work_delta_ms) || 0);
+      r = restBase + i * (Number(l.rest_delta_ms) || 0);
+    } else if (mode === 'pyramid') {
+      const p = prog.pyramid || {};
+      w = _intervalPyramidVal(Number(p.work_start_ms) || 0, Number(p.work_peak_ms) || 0, i, N);
+      r = _intervalPyramidVal(Number(p.rest_start_ms) || 0, Number(p.rest_peak_ms) || 0, i, N);
+    }
+    out.push({ work_ms: Math.max(0, Math.round(w)), rest_ms: Math.max(0, Math.round(r)) });
+  }
+  return out;
+}
+// Séquence de phases exécutables : warmup? → (work,rest)×N → cooldown?
+function _intervalBuildTimeline(config) {
+  const phases = [];
+  const w = (config && config.warmup) || {}, cd = (config && config.cooldown) || {}, cy = (config && config.cycles) || {};
+  if (w.enabled && (Number(w.duration_ms) || 0) > 0) phases.push({ type: 'warmup', label: 'ÉCHAUFFEMENT', duration_ms: Number(w.duration_ms) });
+  const cycles = _intervalGenerateCycles(config);
+  const total = cycles.length;
+  cycles.forEach((c, i) => {
+    if ((Number(c.work_ms) || 0) > 0) phases.push({ type: 'work', label: cy.work_label || 'WORK', duration_ms: c.work_ms, cycleIndex: i + 1, cycleTotal: total });
+    if ((Number(c.rest_ms) || 0) > 0) phases.push({ type: 'rest', label: cy.rest_label || 'REST', duration_ms: c.rest_ms, cycleIndex: i + 1, cycleTotal: total });
+  });
+  if (cd.enabled && (Number(cd.duration_ms) || 0) > 0) phases.push({ type: 'cooldown', label: 'RETOUR AU CALME', duration_ms: Number(cd.duration_ms) });
+  return phases;
+}
+function _intervalTotalMs(config) { return _intervalBuildTimeline(config).reduce((a, p) => a + (Number(p.duration_ms) || 0), 0); }
+function _intervalFmtShort(ms) { const s = Math.round((Number(ms) || 0) / 1000); if (s < 60) return s + 's'; const m = Math.floor(s / 60), r = s % 60; return r ? (m + ' min ' + r + 's') : (m + ' min'); }
+function _intervalPhaseBg(type) { return type === 'work' ? '#FF6B35' : type === 'rest' ? '#0074D9' : '#5a6472'; }
+function _intervalPhaseIcon(type) { return type === 'work' ? '🔥' : type === 'rest' ? '💤' : type === 'warmup' ? '🌡' : '🧊'; }
+// Timeline mini-viz SVG (barres proportionnelles : warmup/cooldown gris, work rouge, rest bleu).
+function _intervalTimelineSvg(config) {
+  const phases = _intervalBuildTimeline(config);
+  const total = phases.reduce((a, p) => a + (Number(p.duration_ms) || 0), 0) || 1;
+  const W = 300, H = 16; let x = 0, rects = '';
+  phases.forEach(p => {
+    const w = (Number(p.duration_ms) || 0) / total * W;
+    rects += `<rect x="${x.toFixed(2)}" y="0" width="${Math.max(0.5, w).toFixed(2)}" height="${H}" fill="${_intervalPhaseBg(p.type)}"/>`;
+    x += w;
+  });
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg" style="border-radius:4px;overflow:hidden">${rects}</svg>`;
+}
+// Résumé « prochaine phase » (preview pendant le rest).
+function _intervalNextText(phase) {
+  if (!phase) return '';
+  return `${_intervalPhaseIcon(phase.type)} ${phase.label} ${_intervalFmtShort(phase.duration_ms)}`;
+}
+
+// ---- Runtime plein écran (réutilise #drill-overlay + Wake Lock) ----
+function launchInterval(drillId) {
+  const d = (state.drills || []).find(x => x.id === drillId && !x.deletedAt);
+  if (!d) return;
+  const config = (d.intervalConfig && typeof d.intervalConfig === 'object') ? d.intervalConfig : _intervalDefaultConfig();
+  const phases = _intervalBuildTimeline(config);
+  if (!phases.length) { try { alert('Ce fractionné n\'a aucune phase (vérifie les cycles).'); } catch (e) {} return; }
+  try { closeModal(); } catch (e) {}
+  let host = document.getElementById('drill-overlay');
+  if (!host) { host = document.createElement('div'); host.id = 'drill-overlay'; document.body.appendChild(host); }
+  host.innerHTML = `
+    <div id="itv-bar" style="position:fixed;top:calc(env(safe-area-inset-top, 0px) + 10px);left:12px;right:12px;display:flex;justify-content:space-between;color:#fff;font-family:'JetBrains Mono';font-size:12px;letter-spacing:0.04em;z-index:10002;text-transform:uppercase"><span id="itv-cycle"></span><span id="itv-total"></span></div>
+    <button class="drill-stop" onclick="stopInterval()" aria-label="Arrêter le fractionné">✕</button>
+    <div id="drill-cue" class="drill-cue"></div>
+    <div id="itv-ctrl" style="position:fixed;bottom:calc(env(safe-area-inset-bottom, 0px) + 18px);left:0;right:0;display:flex;gap:10px;justify-content:center;z-index:10002">
+      <button class="btn btn-secondary" id="itv-pause" style="font-size:15px;min-width:130px" onclick="_intervalPauseToggle()">⏸ Pause</button>
+      <button class="btn btn-primary" style="font-size:15px;min-width:130px" onclick="_intervalSkip()">⏭ Suivant</button>
+    </div>`;
+  document.body.style.overflow = 'hidden';
+  _drillUnlockAudio();
+  try { _ttsVoices(); } catch (e) {}
+  const audio = config.audio || {};
+  window._interval = {
+    drillId, name: d.name || 'Fractionné', config, phases, idx: -1, paused: false, done: false,
+    elapsedMs: 0, priorMs: 0, totalMs: _intervalTotalMs(config), _lastFrame: Date.now(), _driver: null, _bipSecLeft: null,
+    ttsEnabled: !!audio.tts_enabled, ttsLang: audio.tts_lang || 'fr', bipStart: audio.bip_start !== false, bipCountdown: audio.bip_end_countdown !== false,
+    nextPreview: config.next_preview !== false, startedAt: Date.now()
+  };
+  try { if (host.requestFullscreen) host.requestFullscreen().catch(() => {}); } catch (e) {}
+  try { if (navigator.wakeLock && navigator.wakeLock.request) navigator.wakeLock.request('screen').then(s => { window._drillWakeLock = s; }).catch(() => {}); } catch (e) {}
+  window._interval._driver = setInterval(_intervalTick, 100);
+  _intervalEnterPhase(0);
+}
+function _intervalEnterPhase(idx) {
+  const c = window._interval; if (!c) return;
+  const ph = c.phases[idx]; if (!ph) return _intervalFinish();
+  // priorMs = somme des durées des phases précédentes (pour le « temps total restant »).
+  c.priorMs = c.phases.slice(0, idx).reduce((a, p) => a + (Number(p.duration_ms) || 0), 0);
+  c.idx = idx; c.elapsedMs = 0; c.paused = false; c._lastFrame = Date.now(); c._bipSecLeft = null;
+  const host = document.getElementById('drill-overlay'); if (host) host.style.background = _intervalPhaseBg(ph.type);
+  const pauseBtn = document.getElementById('itv-pause'); if (pauseBtn) pauseBtn.textContent = '⏸ Pause';
+  // Audio : bip fort au démarrage d'un WORK ; TTS label (+ cycle).
+  if (ph.type === 'work' && c.bipStart) { try { _drillBeep(); } catch (e) {} }
+  if (c.ttsEnabled && _ttsSupported()) { const say = ph.label + (ph.type === 'work' && ph.cycleTotal ? (', cycle ' + ph.cycleIndex + ' sur ' + ph.cycleTotal) : ''); _ttsSpeak(say, c.ttsLang); }
+  _intervalRenderPhase(ph, Number(ph.duration_ms) || 0);
+}
+function _intervalRenderPhase(ph, remMs) {
+  const c = window._interval; if (!c) return;
+  const cycleEl = document.getElementById('itv-cycle');
+  if (cycleEl) cycleEl.textContent = (ph.type === 'work' || ph.type === 'rest') ? ('Cycle ' + ph.cycleIndex + '/' + ph.cycleTotal) : ph.label;
+  const nextPh = c.phases[c.idx + 1];
+  const previewHtml = (c.nextPreview && nextPh) ? `<div style="margin-top:5vmin;font-size:3.4vmin;font-family:'JetBrains Mono';opacity:0.85">Prochain : ${esc(_intervalNextText(nextPh))}</div>` : '';
+  const el = document.getElementById('drill-cue');
+  if (el) el.innerHTML = `<div style="text-align:center;color:#fff">
+    <div style="font-size:9vmin;font-family:'Anton',sans-serif;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:1vmin">${_intervalPhaseIcon(ph.type)} ${esc(ph.label)}</div>
+    <div id="itv-cd" style="font-size:30vmin;line-height:0.9;font-family:'Anton',sans-serif">${_fmtChronoMs(Math.max(0, remMs))}</div>
+    ${previewHtml}
+  </div>`;
+}
+function _intervalTick() {
+  const c = window._interval; if (!c || c.done) return;
+  const now = Date.now(); const dt = now - c._lastFrame; c._lastFrame = now;
+  if (c.paused) return;
+  c.elapsedMs += dt;
+  const ph = c.phases[c.idx]; if (!ph) return;
+  const dur = Number(ph.duration_ms) || 0;
+  const rem = Math.max(0, dur - c.elapsedMs);
+  const cd = document.getElementById('itv-cd'); if (cd) cd.textContent = _fmtChronoMs(rem);
+  const totalRem = Math.max(0, c.totalMs - (c.priorMs + c.elapsedMs));
+  const totEl = document.getElementById('itv-total'); if (totEl) totEl.textContent = 'Reste ' + _fmtChronoMs(totalRem);
+  if (c.bipCountdown) { const secLeft = Math.ceil(rem / 1000); if (secLeft <= 3 && secLeft >= 1 && secLeft !== c._bipSecLeft) { c._bipSecLeft = secLeft; try { _drillBeep(); } catch (e) {} } }
+  if (rem <= 0) _intervalAdvance();
+}
+function _intervalAdvance() {
+  const c = window._interval; if (!c || c.done) return;
+  const next = c.idx + 1;
+  if (next >= c.phases.length) return _intervalFinish();
+  _intervalEnterPhase(next);
+}
+function _intervalSkip() { _intervalAdvance(); }
+function _intervalPauseToggle() {
+  const c = window._interval; if (!c || c.done) return;
+  c.paused = !c.paused; c._lastFrame = Date.now();
+  const btn = document.getElementById('itv-pause'); if (btn) btn.textContent = c.paused ? '▶ Reprendre' : '⏸ Pause';
+}
+function _intervalFinish() {
+  const c = window._interval; if (!c) return;
+  c.done = true; if (c._driver) { clearInterval(c._driver); c._driver = null; }
+  const totalS = Math.round((Date.now() - c.startedAt) / 1000), mm = Math.floor(totalS / 60), ss = totalS % 60;
+  const nCycles = (c.config.progression && c.config.progression.mode === 'custom') ? (c.config.progression.custom_cycles || []).length : _intervalCycleCount(c.config);
+  const ctrl = document.getElementById('itv-ctrl'); if (ctrl) ctrl.style.display = 'none';
+  const bar = document.getElementById('itv-bar'); if (bar) bar.style.display = 'none';
+  const host = document.getElementById('drill-overlay'); if (host) host.style.background = '#0f1420';
+  const el = document.getElementById('drill-cue');
+  if (el) el.innerHTML = `<div style="text-align:center;color:#fff">
+    <div style="font-size:14vmin;line-height:1">🏁</div>
+    <div style="font-size:5vmin;font-family:'Anton',sans-serif;text-transform:uppercase;margin-top:6px">Fractionné terminé</div>
+    <div style="font-size:3.4vmin;font-family:'JetBrains Mono';opacity:0.85;margin-top:8px">${nCycles} cycle${nCycles > 1 ? 's' : ''} · ${mm}:${String(ss).padStart(2, '0')}</div>
+    <button class="btn btn-primary" style="margin-top:26px;font-size:7vmin;font-family:'Anton',sans-serif;text-transform:uppercase;letter-spacing:0.05em;padding:3vmin 8vmin;line-height:1" onclick="_intervalRestart()">🔁 Rejouer</button>
+    <div style="margin-top:16px"><button class="btn btn-ghost" style="font-size:13px;opacity:0.7" onclick="stopInterval()">Fermer</button></div>
+  </div>`;
+}
+function _intervalRestart() {
+  const c = window._interval; if (!c) return;
+  c.done = false; c.idx = -1; c.elapsedMs = 0; c.priorMs = 0; c.paused = false; c._bipSecLeft = null; c._lastFrame = Date.now(); c.startedAt = Date.now();
+  const ctrl = document.getElementById('itv-ctrl'); if (ctrl) ctrl.style.display = 'flex';
+  const bar = document.getElementById('itv-bar'); if (bar) bar.style.display = 'flex';
+  if (!c._driver) c._driver = setInterval(_intervalTick, 100);
+  _intervalEnterPhase(0);
+}
+function stopInterval() {
+  const c = window._interval;
+  if (c) { c.done = true; if (c._driver) clearInterval(c._driver); }
+  window._interval = null;
+  try { if (_ttsSupported()) window.speechSynthesis.cancel(); } catch (e) {}
+  const host = document.getElementById('drill-overlay'); if (host) host.remove();
+  document.body.style.overflow = '';
+  try { if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {}); } catch (e) {}
+  try { if (window._drillWakeLock) { window._drillWakeLock.release().catch(() => {}); window._drillWakeLock = null; } } catch (e) {}
+  try { render(); } catch (e) {}
+}
+
+// ============================================================
 // DRILL — bibliothèque (liste)
 // ============================================================
 function openDrillLibrary() {
   const isCoach = _drillIsCoach();
-  const drills = activeDrills().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  // Les presets perso (is_preset) sont des modèles → listés dans le picker Niveau 1, pas ici.
+  const drills = activeDrills().filter(d => !d.isPreset).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
   openModal(`
     <div class="modal-header">
       <div class="modal-title">⚡ Drills de réaction</div>
@@ -18647,9 +18893,10 @@ function openDrillLibrary() {
     </div>
     <div class="modal-body">
       ${isCoach
-        ? `<div style="display:flex;gap:6px;margin-bottom:12px">
-             <button class="btn btn-primary" style="flex:1" onclick="openDrillWizard()">+ Réaction</button>
-             <button class="btn btn-primary" style="flex:1" onclick="openCircuitWizard()">+ Circuit</button>
+        ? `<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:12px">
+             <button class="btn btn-primary" style="font-size:12px" onclick="openDrillWizard()">+ Réaction</button>
+             <button class="btn btn-primary" style="font-size:12px" onclick="openCircuitWizard()">+ Circuit</button>
+             <button class="btn btn-primary" style="font-size:12px" onclick="openIntervalWizard()">+ Interval</button>
            </div>`
         : `<div style="padding:8px 12px;background:var(--bg-3);border-radius:6px;margin-bottom:12px;font-size:11px;color:var(--ink-3);line-height:1.5">👁 Lance un drill. Tu peux <strong>ajuster les réglages avant de lancer</strong> (⚙) — sans les enregistrer.</div>`}
       ${drills.length
@@ -18659,6 +18906,33 @@ function openDrillLibrary() {
   `);
 }
 function _drillCardHtml(d, isCoach) {
+  // Interval (fractionné) : carte dédiée (badge + résumé cycles + durée totale).
+  if (d.mode === 'interval') {
+    const cfg = d.intervalConfig || _intervalDefaultConfig();
+    const cy = cfg.cycles || {};
+    const n = _intervalCycleCount(cfg);
+    const summary = `${cfg.warmup && cfg.warmup.enabled ? '🌡 ' : ''}${n}×(${Math.round((cy.work_ms || 0) / 1000)}s/${Math.round((cy.rest_ms || 0) / 1000)}s)${cfg.cooldown && cfg.cooldown.enabled ? ' 🧊' : ''}`;
+    return `
+      <div style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;margin-bottom:10px;background:var(--surface)">
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start">
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;align-items:center;gap:6px">
+              <span style="font-size:9px;font-family:'JetBrains Mono';background:rgba(255,107,53,0.18);color:#FF6B35;padding:2px 6px;border-radius:4px;text-transform:uppercase;letter-spacing:0.05em;flex:0 0 auto">⏱ Interval</span>
+              <span style="font-family:'Anton';text-transform:uppercase;font-size:15px;letter-spacing:0.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(d.name || 'Fractionné')}</span>
+            </div>
+            <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px;line-height:1.5">${esc(summary)} · ⏱ ${esc(_intervalFmtShort(_intervalTotalMs(cfg)))}</div>
+            <div style="margin-top:8px">${_intervalTimelineSvg(cfg)}</div>
+          </div>
+          ${isCoach ? `<div style="display:flex;gap:4px;flex:0 0 auto">
+            <button class="btn btn-icon" title="Modifier" onclick="openIntervalWizard('${d.id}')">✎</button>
+            <button class="btn btn-icon" title="Supprimer" onclick="deleteDrill('${d.id}')">🗑</button>
+          </div>` : ''}
+        </div>
+        <div style="display:flex;gap:6px;margin-top:10px">
+          <button class="btn btn-primary" style="flex:1" onclick="launchInterval('${d.id}')">▶ Lancer le fractionné</button>
+        </div>
+      </div>`;
+  }
   // Circuit training : carte dédiée (badge + résumé étapes ; pas d'ajustement éphémère).
   if (d.mode === 'circuit') {
     const stages = Array.isArray(d.stages) ? d.stages.filter(Boolean) : [];
@@ -19247,6 +19521,260 @@ function saveCircuit(launchAfter) {
   state._circuitWizard = null;
   closeModal();
   if (launchAfter) launchCircuit(id); else openDrillLibrary();
+}
+
+// ============================================================
+// DRILL INTERVAL — wizard 3 niveaux (preset picker / summary / avancé) — coach only
+// ============================================================
+function openIntervalWizard(editId) {
+  if (!_drillIsCoach()) return;
+  const src = editId ? (state.drills || []).find(d => d.id === editId && !d.deletedAt) : null;
+  const hasCfg = src && src.intervalConfig && typeof src.intervalConfig === 'object';
+  state._intervalWizard = {
+    editingId: src ? src.id : null,
+    name: src ? (src.name || '') : '',
+    config: hasCfg ? JSON.parse(JSON.stringify(src.intervalConfig)) : null,
+    level: hasCfg ? 2 : 1,
+    advancedOpen: false, editing: null
+  };
+  renderIntervalWizard();
+}
+function _iw() { return state._intervalWizard; }
+function _iwSetPath(obj, path, val) { const ks = path.split('.'); let o = obj; for (let i = 0; i < ks.length - 1; i++) { if (o[ks[i]] == null) o[ks[i]] = {}; o = o[ks[i]]; } o[ks[ks.length - 1]] = val; }
+function _iwName(v) { const w = _iw(); if (w) w.name = String(v || '').slice(0, 60); }
+function _iwNumMs(path, secVal) { const w = _iw(); if (!w) return; const v = Math.round(parseFloat(secVal) * 1000); if (Number.isFinite(v)) _iwSetPath(w.config, path, Math.max(0, v)); }
+function _iwNumMin(path, minVal) { const w = _iw(); if (!w) return; const v = Math.round(parseFloat(minVal) * 60000); if (Number.isFinite(v)) _iwSetPath(w.config, path, Math.max(0, v)); }
+function _iwInt(path, val) { const w = _iw(); if (!w) return; const v = parseInt(val, 10); if (Number.isFinite(v)) _iwSetPath(w.config, path, Math.max(1, v)); }
+function _iwNum(path, val) { const w = _iw(); if (!w) return; const v = parseFloat(val); if (Number.isFinite(v)) _iwSetPath(w.config, path, v); }
+function _iwStr(path, val) { const w = _iw(); if (!w) return; _iwSetPath(w.config, path, String(val || '').slice(0, 20)); }
+function _iwBool(path, on) { const w = _iw(); if (!w) return; _iwSetPath(w.config, path, !!on); }
+// Niveau 1 : appliquer un preset built-in → Niveau 2.
+function _intervalApplyPreset(key) { const w = _iw(); if (!w) return; w.config = _intervalPresetByKey(key); w.level = 2; w.editing = null; w.advancedOpen = false; if (!w.name) w.name = (INTERVAL_PRESETS.find(p => p.key === key) || {}).name || 'Fractionné'; renderIntervalWizard(); }
+function _intervalApplyPresetFromDrill(id) { const w = _iw(); if (!w) return; const d = (state.drills || []).find(x => x.id === id); if (!d || !d.intervalConfig) return; w.config = JSON.parse(JSON.stringify(d.intervalConfig)); w.level = 2; w.editing = null; renderIntervalWizard(); }
+function _intervalGoPicker() { const w = _iw(); if (w) { w.level = 1; renderIntervalWizard(); } }
+function _iwEditPill(which) { const w = _iw(); if (w) { w.editing = which; renderIntervalWizard(); } }
+function _iwClosePill() { const w = _iw(); if (w) { w.editing = null; renderIntervalWizard(); } }
+function _iwToggleAdvanced() { const w = _iw(); if (w) { w.advancedOpen = !w.advancedOpen; renderIntervalWizard(); } }
+function _iwCountMode(m) { const w = _iw(); if (!w) return; w.config.cycles.count_mode = m === 'total_duration' ? 'total_duration' : 'n_cycles'; renderIntervalWizard(); }
+function _iwProgMode(m) { const w = _iw(); if (!w) return; w.config.progression.mode = ['none', 'linear', 'pyramid', 'custom'].includes(m) ? m : 'none'; renderIntervalWizard(); }
+// Cycles variables (custom) : CRUD.
+function _iwCustomList() { const w = _iw(); if (!w) return []; w.config.progression.custom_cycles = Array.isArray(w.config.progression.custom_cycles) ? w.config.progression.custom_cycles : []; return w.config.progression.custom_cycles; }
+function _iwCustomAdd() { const l = _iwCustomList(); const last = l[l.length - 1] || { work_ms: 45000, rest_ms: 30000 }; l.push({ work_ms: last.work_ms, rest_ms: last.rest_ms }); renderIntervalWizard(); }
+function _iwCustomDel(i) { const l = _iwCustomList(); if (i >= 0 && i < l.length) { l.splice(i, 1); renderIntervalWizard(); } }
+function _iwCustomSet(i, field, secVal) { const l = _iwCustomList(); if (!l[i]) return; const v = Math.round(parseFloat(secVal) * 1000); if (Number.isFinite(v)) l[i][field] = Math.max(0, v); }
+// ⚡ Générer auto : remplit custom_cycles depuis le nombre de cycles + base work/rest.
+function _iwCustomGen() { const w = _iw(); if (!w) return; const cy = w.config.cycles || {}; const n = Math.max(1, Number(cy.n_cycles) || 8); const arr = []; for (let i = 0; i < n; i++) arr.push({ work_ms: Number(cy.work_ms) || 45000, rest_ms: Number(cy.rest_ms) || 30000 }); w.config.progression.custom_cycles = arr; renderIntervalWizard(); }
+
+function renderIntervalWizard() {
+  const w = _iw(); if (!w) return;
+  let body, title, footer;
+  if (w.level === 1) {
+    title = 'Choisis un modèle';
+    body = _intervalPresetPickerHtml();
+    footer = `<div style="flex:1"></div>${w.editingId || w.config ? `<button class="btn btn-secondary" onclick="_iw().level=2;renderIntervalWizard()">← Retour</button>` : ''}`;
+  } else if (w.editing) {
+    title = w.editing === 'warmup' ? 'Échauffement' : w.editing === 'cooldown' ? 'Retour au calme' : 'Cycles Work / Rest';
+    body = _intervalPillEditorHtml(w.editing);
+    footer = `<button class="btn btn-primary btn-block" onclick="_iwClosePill()">✓ OK</button>`;
+  } else {
+    title = 'Fractionné';
+    body = _intervalSummaryHtml();
+    footer = `<div style="flex:1"></div><button class="btn btn-secondary" onclick="saveIntervalDrill('save')">Enregistrer</button><button class="btn btn-primary" onclick="saveIntervalDrill('launch')">▶ Lancer</button>`;
+  }
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">Fractionné · ${w.editingId ? 'édition' : 'nouveau'}${w.level === 1 ? ' · modèles' : ''}</div>
+        <div class="modal-title">${title}</div>
+      </div>
+      <button class="modal-close" onclick="state._intervalWizard=null;closeModal()">✕</button>
+    </div>
+    <div class="modal-body">${body}</div>
+    <div class="modal-footer" style="display:flex;gap:6px;align-items:center">${footer}</div>
+  `);
+}
+// ---- NIVEAU 1 : preset picker ----
+function _intervalPresetSummaryLine(cfg) {
+  const cy = cfg.cycles || {};
+  const n = _intervalCycleCount(cfg);
+  const wk = Math.round((Number(cy.work_ms) || 0) / 1000), rs = Math.round((Number(cy.rest_ms) || 0) / 1000);
+  return `${cfg.warmup && cfg.warmup.enabled ? '🌡 ' : ''}${n}×(${wk}s/${rs}s)${cfg.cooldown && cfg.cooldown.enabled ? ' 🧊' : ''}`;
+}
+function _intervalPresetCardHtml(icon, name, cfg, onclick) {
+  return `<button type="button" onclick="${onclick}" style="text-align:left;border:1px solid var(--border-soft);border-radius:10px;padding:12px;background:var(--surface);cursor:pointer;display:flex;flex-direction:column;gap:3px">
+    <div style="font-size:22px">${icon}</div>
+    <div style="font-family:'Anton';text-transform:uppercase;font-size:14px;letter-spacing:0.02em">${esc(name)}</div>
+    <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';line-height:1.4">${esc(_intervalPresetSummaryLine(cfg))}</div>
+    <div style="font-size:11px;color:var(--orange);font-family:'JetBrains Mono';margin-top:2px">⏱ ${esc(_intervalFmtShort(_intervalTotalMs(cfg)))}</div>
+  </button>`;
+}
+function _intervalPresetPickerHtml() {
+  const perso = (state.drills || []).filter(d => !d.deletedAt && d.mode === 'interval' && d.isPreset && d.intervalConfig);
+  return `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:6px">
+      ${INTERVAL_PRESETS.map(p => _intervalPresetCardHtml(p.icon, p.name, p.config, `_intervalApplyPreset('${p.key}')`)).join('')}
+    </div>
+    ${perso.length ? `
+      <div class="eyebrow-muted" style="margin:14px 0 6px">Mes presets</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        ${perso.map(d => _intervalPresetCardHtml('⭐', d.name || 'Preset', d.intervalConfig, `_intervalApplyPresetFromDrill('${d.id}')`)).join('')}
+      </div>` : ''}`;
+}
+// ---- NIVEAU 2 : summary + pilules + timeline ----
+function _intervalSummaryHtml() {
+  const w = _iw(); const cfg = w.config; const cy = cfg.cycles || {};
+  const n = _intervalCycleCount(cfg);
+  const pill = (label, onclick) => `<button type="button" onclick="${onclick}" class="btn" style="background:var(--bg-3);border:1px solid var(--border);border-radius:999px;padding:8px 14px;font-size:12px;font-family:'JetBrains Mono'">${label}</button>`;
+  const warmPill = cfg.warmup && cfg.warmup.enabled ? `🌡 Échauf. ${_intervalFmtShort(cfg.warmup.duration_ms)}` : '🌡 Échauf. off';
+  const coolPill = cfg.cooldown && cfg.cooldown.enabled ? `🧊 Cool ${_intervalFmtShort(cfg.cooldown.duration_ms)}` : '🧊 Cool off';
+  const cyclePill = `🔁 ${n}×(${Math.round((cy.work_ms || 0) / 1000)}s/${Math.round((cy.rest_ms || 0) / 1000)}s)`;
+  return `
+    <div class="fld" style="margin-bottom:12px">
+      <label class="fld-label">Nom du fractionné</label>
+      <div style="display:flex;gap:6px">
+        <input id="iw-name" value="${esc(w.name || '')}" placeholder="Ex : HIIT jambes" maxlength="60" onchange="_iwName(this.value)" style="flex:1">
+        <button class="btn btn-secondary" style="flex:0 0 auto;font-size:11px" onclick="_intervalGoPicker()" title="Charger un modèle">↻ Modèle</button>
+      </div>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px">
+      ${pill(warmPill, `_iwEditPill('warmup')`)}
+      ${pill(cyclePill, `_iwEditPill('cycles')`)}
+      ${pill(coolPill, `_iwEditPill('cooldown')`)}
+    </div>
+    <div style="border-top:1px solid var(--border-soft);padding-top:12px;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
+        <span class="eyebrow-muted">Timeline</span>
+        <span style="font-family:'Anton';font-size:18px;color:var(--orange)">Total ${esc(_intervalFmtShort(_intervalTotalMs(cfg)))}</span>
+      </div>
+      ${_intervalTimelineSvg(cfg)}
+      <div style="display:flex;gap:12px;margin-top:6px;font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono'">
+        <span><span style="color:#FF6B35">■</span> Work</span><span><span style="color:#0074D9">■</span> Rest</span><span><span style="color:#5a6472">■</span> Échauf/Cool</span>
+      </div>
+    </div>
+    <button class="btn btn-ghost btn-block" style="font-size:12px;justify-content:space-between;display:flex" onclick="_iwToggleAdvanced()">
+      <span>⚙ Options avancées</span><span>${w.advancedOpen ? '▴' : '▾'}</span>
+    </button>
+    ${w.advancedOpen ? _intervalAdvancedHtml() : ''}
+    <div style="margin-top:14px">
+      <button class="btn btn-secondary btn-block" style="font-size:12px" onclick="saveIntervalDrill('preset')">💾 Sauvegarder comme preset perso</button>
+    </div>`;
+}
+// ---- Pilule éditeur (warmup / cycles / cooldown) ----
+function _intervalPillEditorHtml(which) {
+  const cfg = _iw().config;
+  if (which === 'warmup' || which === 'cooldown') {
+    const seg = cfg[which] || {};
+    const path = which;
+    return `
+      <label style="display:flex;align-items:center;gap:10px;padding:11px 12px;background:var(--bg-3);border-radius:8px;cursor:pointer;margin-bottom:12px">
+        <input type="checkbox" ${seg.enabled ? 'checked' : ''} onchange="_iwBool('${path}.enabled',this.checked);renderIntervalWizard()" style="width:20px;height:20px;flex:none">
+        <span>${which === 'warmup' ? '🌡 Activer l\'échauffement' : '🧊 Activer le retour au calme'}</span>
+      </label>
+      ${seg.enabled ? `<div class="fld"><label class="fld-label">Durée (minutes)</label><input type="number" step="0.5" min="0" value="${((seg.duration_ms || 0) / 60000)}" onchange="_iwNumMin('${path}.duration_ms',this.value)"></div>` : ''}`;
+  }
+  // cycles
+  const cy = cfg.cycles || {};
+  return `
+    <div class="fld-row" style="margin-bottom:12px">
+      <div class="fld"><label class="fld-label">Work (s)</label><input type="number" min="1" value="${Math.round((cy.work_ms || 0) / 1000)}" onchange="_iwNumMs('cycles.work_ms',this.value)"></div>
+      <div class="fld"><label class="fld-label">Rest (s)</label><input type="number" min="0" value="${Math.round((cy.rest_ms || 0) / 1000)}" onchange="_iwNumMs('cycles.rest_ms',this.value)"></div>
+    </div>
+    <div class="fld-row" style="margin-bottom:12px">
+      <div class="fld"><label class="fld-label">Label work</label><input value="${esc(cy.work_label || 'WORK')}" maxlength="20" onchange="_iwStr('cycles.work_label',this.value)"></div>
+      <div class="fld"><label class="fld-label">Label rest</label><input value="${esc(cy.rest_label || 'REST')}" maxlength="20" onchange="_iwStr('cycles.rest_label',this.value)"></div>
+    </div>
+    <div class="eyebrow-muted" style="margin-bottom:6px">Nombre de cycles</div>
+    <div class="segmented" style="margin-bottom:10px">
+      <button class="segmented-btn ${cy.count_mode !== 'total_duration' ? 'active' : ''}" onclick="_iwCountMode('n_cycles')">Nombre fixe</button>
+      <button class="segmented-btn ${cy.count_mode === 'total_duration' ? 'active' : ''}" onclick="_iwCountMode('total_duration')">Durée totale</button>
+    </div>
+    ${cy.count_mode === 'total_duration'
+      ? `<div class="fld"><label class="fld-label">Durée totale des cycles (minutes)</label><input type="number" step="0.5" min="1" value="${((cy.total_duration_ms || 0) / 60000)}" onchange="_iwNumMin('cycles.total_duration_ms',this.value)"><div style="margin-top:4px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">≈ ${_intervalCycleCount(cfg)} cycles générés.</div></div>`
+      : `<div class="fld"><label class="fld-label">Nombre de cycles</label><input type="number" min="1" max="99" value="${cy.n_cycles || 8}" onchange="_iwInt('cycles.n_cycles',this.value)"></div>`}`;
+}
+// ---- NIVEAU 3 : options avancées ----
+function _intervalAdvancedHtml() {
+  const cfg = _iw().config; const prog = cfg.progression || {}; const au = cfg.audio || {};
+  const progSeg = (val, lbl) => `<button class="segmented-btn ${(prog.mode || 'none') === val ? 'active' : ''}" onclick="_iwProgMode('${val}')">${lbl}</button>`;
+  let progPanel = '';
+  if (prog.mode === 'linear') {
+    const l = prog.linear || {};
+    progPanel = `<div class="fld-row">
+      <div class="fld"><label class="fld-label">Δ Work / cycle (s)</label><input type="number" step="1" value="${((l.work_delta_ms || 0) / 1000)}" onchange="_iwNumMs('progression.linear.work_delta_ms',this.value)"></div>
+      <div class="fld"><label class="fld-label">Δ Rest / cycle (s)</label><input type="number" step="1" value="${((l.rest_delta_ms || 0) / 1000)}" onchange="_iwNumMs('progression.linear.rest_delta_ms',this.value)"></div>
+    </div><div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px">Peut être négatif. Appliqué depuis le work/rest de base.</div>`;
+  } else if (prog.mode === 'pyramid') {
+    const p = prog.pyramid || {};
+    progPanel = `<div class="fld-row" style="margin-bottom:8px">
+      <div class="fld"><label class="fld-label">Work début (s)</label><input type="number" min="0" value="${((p.work_start_ms || 0) / 1000)}" onchange="_iwNumMs('progression.pyramid.work_start_ms',this.value)"></div>
+      <div class="fld"><label class="fld-label">Work pic (s)</label><input type="number" min="0" value="${((p.work_peak_ms || 0) / 1000)}" onchange="_iwNumMs('progression.pyramid.work_peak_ms',this.value)"></div>
+    </div><div class="fld-row">
+      <div class="fld"><label class="fld-label">Rest début (s)</label><input type="number" min="0" value="${((p.rest_start_ms || 0) / 1000)}" onchange="_iwNumMs('progression.pyramid.rest_start_ms',this.value)"></div>
+      <div class="fld"><label class="fld-label">Rest pic (s)</label><input type="number" min="0" value="${((p.rest_peak_ms || 0) / 1000)}" onchange="_iwNumMs('progression.pyramid.rest_peak_ms',this.value)"></div>
+    </div>`;
+  } else if (prog.mode === 'custom') {
+    progPanel = _intervalCustomCyclesHtml();
+  }
+  return `
+    <div style="border-top:1px solid var(--border-soft);margin-top:10px;padding-top:12px">
+      <div class="eyebrow-muted" style="margin-bottom:6px">Progression sur les cycles</div>
+      <div class="segmented" style="margin-bottom:10px;flex-wrap:wrap">
+        ${progSeg('none', 'Aucune')}${progSeg('linear', 'Linéaire')}${progSeg('pyramid', 'Pyramide')}${progSeg('custom', 'Variables')}
+      </div>
+      ${progPanel}
+      <div class="eyebrow-muted" style="margin:14px 0 6px">Audio</div>
+      ${_cwToggleRow(au.bip_start !== false, "_iwBool('audio.bip_start',this.checked)", '🔊 Bip au démarrage')}
+      ${_cwToggleRow(au.bip_end_countdown !== false, "_iwBool('audio.bip_end_countdown',this.checked)", '🔊 Bip compte à rebours (3 dernières s)')}
+      ${_cwToggleRow(!!au.tts_enabled, "_iwBool('audio.tts_enabled',this.checked);renderIntervalWizard()", '🗣 Voix TTS')}
+      ${au.tts_enabled ? `<div class="fld" style="margin-bottom:7px"><label class="fld-label">Langue</label><select onchange="_iwStr('audio.tts_lang',this.value)"><option value="fr" ${au.tts_lang === 'fr' ? 'selected' : ''}>Français</option><option value="en" ${au.tts_lang === 'en' ? 'selected' : ''}>English</option><option value="es" ${au.tts_lang === 'es' ? 'selected' : ''}>Español</option></select></div>` : ''}
+      <div class="eyebrow-muted" style="margin:8px 0 6px">Affichage</div>
+      ${_cwToggleRow(cfg.next_preview !== false, "_iwBool('next_preview',this.checked)", '👁 Afficher la prochaine phase pendant le rest')}
+    </div>`;
+}
+function _intervalCustomCyclesHtml() {
+  const l = _iwCustomList();
+  const rows = l.map((c, i) => `<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+    <span style="font-size:10px;font-family:'JetBrains Mono';color:var(--ink-3);flex:0 0 auto;width:54px">Cycle ${i + 1}</span>
+    <input type="number" min="0" value="${Math.round((c.work_ms || 0) / 1000)}" onchange="_iwCustomSet(${i},'work_ms',this.value)" style="flex:1" title="Work (s)">
+    <input type="number" min="0" value="${Math.round((c.rest_ms || 0) / 1000)}" onchange="_iwCustomSet(${i},'rest_ms',this.value)" style="flex:1" title="Rest (s)">
+    <button class="btn btn-icon" onclick="_iwCustomDel(${i})" title="Retirer">🗑</button>
+  </div>`).join('');
+  return `
+    <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-bottom:6px">Work (s) · Rest (s) par cycle</div>
+    ${rows || '<div style="font-size:11px;color:var(--ink-3);font-style:italic;margin-bottom:6px">Aucun cycle — ajoute-en ou génère.</div>'}
+    <div style="display:flex;gap:6px;margin-top:4px">
+      <button class="btn btn-secondary" style="flex:1;font-size:11px" onclick="_iwCustomAdd()">+ Ajouter un cycle</button>
+      <button class="btn btn-secondary" style="flex:1;font-size:11px" onclick="_iwCustomGen()">⚡ Générer auto</button>
+    </div>`;
+}
+// ---- Sauvegarde ----
+function saveIntervalDrill(action) {
+  const w = _iw(); if (!w || !_drillIsCoach() || !w.config) return;
+  if (!_intervalBuildTimeline(w.config).length) { try { alert('Configure au moins un cycle (work > 0).'); } catch (e) {} return; }
+  const isPreset = action === 'preset';
+  let name = (w.name || '').trim().slice(0, 60);
+  if (isPreset) {
+    let pn = null; try { pn = prompt('Nom du preset :', name || (w.config.preset_name || 'Mon preset')); } catch (e) { pn = name; }
+    if (pn == null) return; // annulé
+    name = (pn || '').trim().slice(0, 60) || 'Preset';
+  }
+  if (!name) name = 'Fractionné';
+  const now = Date.now(); let d;
+  const payload = { name, mode: 'interval', intervalConfig: w.config, isPreset };
+  if (w.editingId && !isPreset) {
+    d = (state.drills || []).find(x => x.id === w.editingId);
+    if (!d) { state._intervalWizard = null; return; }
+    Object.assign(d, payload, { updatedAt: now });
+  } else {
+    // Un "save as preset" crée toujours un nouveau drill-preset (ne modifie pas l'original).
+    d = Object.assign({ id: uid(), createdBy: (currentCoach() || {}).id || null, stimuli: {}, lengthMs: 7000, delayMs: 500, audioBeep: true, durationMode: 'rounds', durationValue: 10, createdAt: now, updatedAt: now, deletedAt: null }, payload);
+    state.drills = state.drills || []; state.drills.unshift(d);
+  }
+  const id = d.id;
+  persist(); _drillFlush();
+  if (isPreset) { try { showToast && showToast('Preset « ' + name + ' » sauvegardé'); } catch (e) {} renderIntervalWizard(); return; }
+  state._intervalWizard = null; closeModal();
+  if (action === 'launch') launchInterval(id); else openDrillLibrary();
 }
 
 // ============================================================
@@ -32048,7 +32576,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-10.68';
+const APP_VERSION = '2026-07-10.69';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
