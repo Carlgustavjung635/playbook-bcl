@@ -66,9 +66,11 @@ function _circuitCapReached(counter, ticks) {
 }
 
 // Règle d'avancement d'étape : true = on passe à l'étape suivante.
+// advanceMode='manual' (circuit-level) force tap_next partout (jamais d'auto).
 // advance='auto_cap' → dès cap atteint ; 'auto_time' → elapsed >= advance_after_ms ;
 // 'tap_next' → jamais auto (skip manuel seulement).
-function _circuitAdvanceReached(stage, ctx) {
+function _circuitAdvanceReached(stage, ctx, advanceMode) {
+  if (advanceMode === 'manual') return false;
   const adv = stage.advance || 'tap_next';
   if (adv === 'auto_time') return ctx.elapsedMs >= (Number(stage.advance_after_ms) || 0);
   if (adv === 'auto_cap') {
@@ -77,6 +79,18 @@ function _circuitAdvanceReached(stage, ctx) {
     return false; // stimulus : pas de cap → skip manuel / auto_time
   }
   return false; // tap_next
+}
+// Faut-il une phase de repos après l'étape curIdx ? (repos > 0 ET pas la dernière)
+function _circuitShouldRest(stage, curIdx, total) {
+  return (Number(stage && stage.rest_after_ms) || 0) > 0 && (curIdx + 1) < total;
+}
+// Résumé compact « ce qui t'attend » (écran repos) — counter=cap reps / countdown=Ns / stimulus.
+function _circuitStagePreviewText(st) {
+  if (!st) return '';
+  if (st.type === 'counter') { const cap = Number((st.counter || {}).cap); return Number.isFinite(cap) ? (cap + ' reps') : 'compteur'; }
+  if (st.type === 'countdown') return Math.round((Number((st.countdown || {}).duration_ms) || 0) / 1000) + 's';
+  if (st.type === 'stimulus') return 'stimulus';
+  return '';
 }
 
 // TTS : doit-on parler ? Respecte les toggles + support navigateur (simulé).
@@ -178,4 +192,35 @@ eq('drill mode stimulus explicite → stimulus', _drillMode({ mode: 'stimulus' }
 eq('drill mode circuit → circuit', _drillMode({ mode: 'circuit', stages: [] }), 'circuit');
 eq('drill null → stimulus (garde-fou)', _drillMode(null), 'stimulus');
 
-console.log(`\n✓ ${passed} assertions passées — drill circuit (step modes + advance + TTS + backward-compat) OK`);
+// ============================================================================
+// 9. ADVANCE MODE MANUAL (circuit-level) — force tap_next partout
+// ============================================================================
+// Une étape qui avancerait en auto (cap atteint / temps écoulé) NE doit PAS
+// avancer quand le circuit est en mode manuel.
+ok('manual : counter cap atteint → PAS d\'avancement auto', _circuitAdvanceReached(stCap, { ticks: 9, elapsedMs: 0 }, 'manual') === false);
+ok('manual : auto_time échu → PAS d\'avancement auto', _circuitAdvanceReached(stTime, { ticks: 0, elapsedMs: 999999 }, 'manual') === false);
+ok('manual : countdown fini → PAS d\'avancement auto', _circuitAdvanceReached(stCd, { elapsedMs: 999999 }, 'manual') === false);
+ok('auto (défaut) : counter cap atteint → avance', _circuitAdvanceReached(stCap, { ticks: 9, elapsedMs: 0 }, 'auto') === true);
+ok('auto explicite : auto_time échu → avance', _circuitAdvanceReached(stTime, { ticks: 0, elapsedMs: 30000 }, 'auto') === true);
+ok('advanceMode undefined = auto (backward-compat)', _circuitAdvanceReached(stCap, { ticks: 9, elapsedMs: 0 }) === true);
+
+// ============================================================================
+// 10. REPOS entre étapes — _circuitShouldRest
+// ============================================================================
+ok('repos 10s après étape 0 sur 3 → true', _circuitShouldRest({ rest_after_ms: 10000 }, 0, 3) === true);
+ok('repos 0 → pas de repos', _circuitShouldRest({ rest_after_ms: 0 }, 0, 3) === false);
+ok('repos absent (undefined) → pas de repos (backward-compat)', _circuitShouldRest({}, 0, 3) === false);
+ok('repos après la DERNIÈRE étape → jamais (idx 2 sur 3)', _circuitShouldRest({ rest_after_ms: 10000 }, 2, 3) === false);
+ok('repos après avant-dernière (idx 1 sur 3) → true', _circuitShouldRest({ rest_after_ms: 5000 }, 1, 3) === true);
+ok('repos négatif traité comme 0', _circuitShouldRest({ rest_after_ms: -5 }, 0, 3) === false);
+
+// ============================================================================
+// 11. ÉCRAN REPOS — preview de la prochaine étape
+// ============================================================================
+eq('preview counter → « 20 reps » (cible = cap)', _circuitStagePreviewText({ type: 'counter', counter: { start: 0, cap: 20 } }), '20 reps');
+eq('preview countdown → « 30s »', _circuitStagePreviewText({ type: 'countdown', countdown: { duration_ms: 30000 } }), '30s');
+eq('preview stimulus → « stimulus »', _circuitStagePreviewText({ type: 'stimulus', stimulus: {} }), 'stimulus');
+eq('preview étape absente (backward-compat) → chaîne vide', _circuitStagePreviewText(null), '');
+eq('preview counter sans cap → « compteur »', _circuitStagePreviewText({ type: 'counter', counter: {} }), 'compteur');
+
+console.log(`\n✓ ${passed} assertions passées — drill circuit (step modes + advance + manual + repos + preview + TTS + backward-compat) OK`);
