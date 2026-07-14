@@ -18038,8 +18038,9 @@ function activeDrills() { return (state.drills || []).filter(d => !d.deletedAt);
 function activeDrillImages() { return (state.drillImages || []).filter(m => !m.deletedAt); }
 
 // Cœur testable : développe une spec de stimuli en un POOL de cues combinés.
-function _drillExpandPool(stimuli, images) {
-  const s = stimuli || {}, imgs = images || (state.drillImages || []);
+// players (3e arg) défaut state.players → cues joueuses résolus au rendu (prénom/photo).
+function _drillExpandPool(stimuli, images, players) {
+  const s = stimuli || {}, imgs = images || (state.drillImages || []), plrs = players || (state.players || []);
   const pool = [];
   (s.colors || []).forEach(c => { const col = DRILL_COLORS.find(x => x.id === c); if (col) pool.push({ type: 'color', value: col.id, hex: col.hex }); });
   (s.arrows || []).forEach(a => { if (DRILL_ARROW_DEG[a] != null) pool.push({ type: 'arrow', value: a }); });
@@ -18047,13 +18048,20 @@ function _drillExpandPool(stimuli, images) {
     const lo = Math.min(s.numbers.min, s.numbers.max), hi = Math.max(s.numbers.min, s.numbers.max);
     for (let n = lo; n <= hi && pool.length < 3000; n++) pool.push({ type: 'number', value: n });
   }
-  if (s.letters && s.letters.min && s.letters.max) {
-    let lo = String(s.letters.min).toUpperCase().charCodeAt(0), hi = String(s.letters.max).toUpperCase().charCodeAt(0);
-    if (lo > hi) { const t = lo; lo = hi; hi = t; }
-    for (let c = lo; c <= hi; c++) if (c >= 65 && c <= 90) pool.push({ type: 'letter', value: String.fromCharCode(c) });
+  // Lettres : mode 'select' (liste précise) OU 'range'/défaut (plage min→max, backward-compat).
+  if (s.letters) {
+    if (s.letters.mode === 'select') {
+      (s.letters.selected || []).forEach(ch => { const c = String(ch || '').toUpperCase().charAt(0); if (/[A-Z]/.test(c)) pool.push({ type: 'letter', value: c }); });
+    } else if (s.letters.min && s.letters.max) {
+      let lo = String(s.letters.min).toUpperCase().charCodeAt(0), hi = String(s.letters.max).toUpperCase().charCodeAt(0);
+      if (lo > hi) { const t = lo; lo = hi; hi = t; }
+      for (let c = lo; c <= hi; c++) if (c >= 65 && c <= 90) pool.push({ type: 'letter', value: String.fromCharCode(c) });
+    }
   }
   (s.shapes || []).forEach(sh => { if (DRILL_SHAPES.includes(sh)) pool.push({ type: 'shape', value: sh }); });
   (s.imageIds || []).forEach(id => { const img = imgs.find(m => m.id === id && !m.deletedAt); if (img) pool.push({ type: 'image', value: id, url: img.url }); });
+  // Joueuses : 1 à la fois (comme chiffres/couleurs). Filtrées sur le roster valide.
+  (s.players || []).forEach(id => { if (plrs.some(p => p && p.id === id && !p.deletedAt)) pool.push({ type: 'player', value: id }); });
   return pool;
 }
 function _drillPickCue(pool) { return (pool && pool.length) ? pool[Math.floor(Math.random() * pool.length)] : null; }
@@ -18066,12 +18074,18 @@ function _drillCleanStimuli(s) {
   if (s.numbers && Number.isFinite(s.numbers.min) && Number.isFinite(s.numbers.max)) {
     out.numbers = { min: Math.max(0, Math.min(999, Math.min(s.numbers.min, s.numbers.max))), max: Math.max(0, Math.min(999, Math.max(s.numbers.min, s.numbers.max))) };
   }
-  if (s.letters && s.letters.min && s.letters.max) {
-    let a = String(s.letters.min).toUpperCase().charAt(0), b = String(s.letters.max).toUpperCase().charAt(0);
-    if (/[A-Z]/.test(a) && /[A-Z]/.test(b)) { if (a > b) { const t = a; a = b; b = t; } out.letters = { min: a, max: b }; }
+  if (s.letters) {
+    if (s.letters.mode === 'select') {
+      const sel = (s.letters.selected || []).map(x => String(x).toUpperCase().charAt(0)).filter(x => /[A-Z]/.test(x)).filter((x, i, a) => a.indexOf(x) === i);
+      if (sel.length) out.letters = { mode: 'select', selected: sel };
+    } else if (s.letters.min && s.letters.max) {
+      let a = String(s.letters.min).toUpperCase().charAt(0), b = String(s.letters.max).toUpperCase().charAt(0);
+      if (/[A-Z]/.test(a) && /[A-Z]/.test(b)) { if (a > b) { const t = a; a = b; b = t; } out.letters = { mode: 'range', min: a, max: b }; }
+    }
   }
   const sh = (s.shapes || []).filter(x => DRILL_SHAPES.includes(x)); if (sh.length) out.shapes = sh;
   const imgs = (s.imageIds || []).filter(id => (state.drillImages || []).some(m => m.id === id && !m.deletedAt)); if (imgs.length) out.imageIds = imgs;
+  const plrs = (s.players || []).filter(id => (state.players || []).some(p => p && p.id === id && !p.deletedAt)).filter((x, i, a) => a.indexOf(x) === i); if (plrs.length) out.players = plrs;
   return out;
 }
 function _drillStimuliSummary(s) {
@@ -18079,9 +18093,10 @@ function _drillStimuliSummary(s) {
   if ((s.colors || []).length) p.push(s.colors.length + ' couleur' + (s.colors.length > 1 ? 's' : ''));
   if ((s.arrows || []).length) p.push(s.arrows.length + ' flèche' + (s.arrows.length > 1 ? 's' : ''));
   if (s.numbers) p.push('n° ' + s.numbers.min + '–' + s.numbers.max);
-  if (s.letters) p.push('lettres ' + s.letters.min + '–' + s.letters.max);
+  if (s.letters) p.push(s.letters.mode === 'select' ? ((s.letters.selected || []).length + ' lettre' + ((s.letters.selected || []).length > 1 ? 's' : '')) : ('lettres ' + s.letters.min + '–' + s.letters.max));
   if ((s.shapes || []).length) p.push(s.shapes.length + ' forme' + (s.shapes.length > 1 ? 's' : ''));
   if ((s.imageIds || []).length) p.push(s.imageIds.length + ' image' + (s.imageIds.length > 1 ? 's' : ''));
+  if ((s.players || []).length) p.push(s.players.length + ' joueuse' + (s.players.length > 1 ? 's' : ''));
   return p.length ? p.join(' · ') : 'aucun stimulus';
 }
 
@@ -18109,6 +18124,16 @@ function _drillCueHtml(cue) {
     case 'number':
     case 'letter': return `<div style="font-family:'Anton',sans-serif;font-weight:900;color:#fff;font-size:min(72vh,68vw);line-height:1">${esc(String(cue.value))}</div>`;
     case 'image': return cue.url ? `<img src="${esc(cue.url)}" style="max-width:94vw;max-height:90vh;object-fit:contain" alt="">` : '';
+    case 'player': {
+      // Résout prénom + photo (optionnelle) au rendu depuis le roster courant.
+      const p = (state.players || []).find(x => x && x.id === cue.value);
+      const name = p ? (p.name || 'Joueuse') : 'Joueuse';
+      const photo = p ? (p.photo || null) : null;
+      return `<div style="text-align:center;color:#fff;display:flex;flex-direction:column;align-items:center">
+        ${photo ? `<img src="${esc(photo)}" style="width:52vmin;height:52vmin;object-fit:cover;border-radius:50%;margin-bottom:3vmin;border:0.7vmin solid #fff" alt="">` : ''}
+        <div style="font-family:'Anton',sans-serif;font-weight:900;text-transform:uppercase;line-height:1;font-size:${photo ? '13vmin' : 'min(34vh,20vw)'}">${esc(name)}</div>
+      </div>`;
+    }
     default: return '';
   }
 }
@@ -19023,9 +19048,48 @@ function _drillWizToggle(cat, id) {
   renderDrillWizard();
 }
 function _drillWizToggleNumbers() { const w = _dw(); if (!w) return; w.stimuli.numbers = w.stimuli.numbers ? null : { min: 1, max: 10 }; renderDrillWizard(); }
-function _drillWizToggleLetters() { const w = _dw(); if (!w) return; w.stimuli.letters = w.stimuli.letters ? null : { min: 'A', max: 'H' }; renderDrillWizard(); }
+function _drillWizToggleLetters() { const w = _dw(); if (!w) return; w.stimuli.letters = w.stimuli.letters ? null : { mode: 'range', min: 'A', max: 'H', selected: [] }; renderDrillWizard(); }
 function _drillWizNum(field, val) { const w = _dw(); if (!w || !w.stimuli.numbers) return; const v = parseInt(val, 10); if (Number.isFinite(v)) w.stimuli.numbers[field] = Math.max(0, Math.min(999, v)); }
 function _drillWizLetter(field, val) { const w = _dw(); if (!w || !w.stimuli.letters) return; const c = String(val || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 1); if (c) w.stimuli.letters[field] = c; }
+// Lettres : bascule plage / sélection.
+const DRILL_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+function _stimLetterMode(letters, mode) { if (!letters) return; letters.mode = mode === 'select' ? 'select' : 'range'; if (letters.mode === 'select' && !Array.isArray(letters.selected)) letters.selected = []; if (letters.mode === 'range') { letters.min = letters.min || 'A'; letters.max = letters.max || 'H'; } }
+function _stimLetterToggleSel(letters, ch) { if (!letters) return; letters.selected = Array.isArray(letters.selected) ? letters.selected : []; const c = String(ch).toUpperCase(); const i = letters.selected.indexOf(c); if (i >= 0) letters.selected.splice(i, 1); else letters.selected.push(c); }
+function _drillWizLetterMode(mode) { const w = _dw(); if (!w || !w.stimuli.letters) return; _stimLetterMode(w.stimuli.letters, mode); renderDrillWizard(); }
+function _drillWizLetterSel(ch) { const w = _dw(); if (!w || !w.stimuli.letters) return; _stimLetterToggleSel(w.stimuli.letters, ch); renderDrillWizard(); }
+// Joueuses : catégorie stimulus (array de player ids ; présence = section active).
+function _stimPlayersRoster() { return (state.players || []).filter(p => p && !p.deletedAt); }
+function _drillWizTogglePlayers() { const w = _dw(); if (!w) return; if (Array.isArray(w.stimuli.players)) delete w.stimuli.players; else w.stimuli.players = []; renderDrillWizard(); }
+function _drillWizPlayer(id) { const w = _dw(); if (!w) return; w.stimuli.players = Array.isArray(w.stimuli.players) ? w.stimuli.players : []; const i = w.stimuli.players.indexOf(id); if (i >= 0) w.stimuli.players.splice(i, 1); else w.stimuli.players.push(id); renderDrillWizard(); }
+function _drillWizPlayersAll(on) { const w = _dw(); if (!w) return; w.stimuli.players = on ? _stimPlayersRoster().map(p => p.id) : []; renderDrillWizard(); }
+// Bloc HTML réutilisable : grille A-Z sélectionnable (lettres mode select).
+function _stimLetterSelectGrid(letters, onclickFn) {
+  const sel = (letters.selected || []).map(x => String(x).toUpperCase());
+  return `<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px">
+    ${DRILL_ALPHABET.map(ch => `<button type="button" onclick="${onclickFn}('${ch}')" class="btn ${sel.includes(ch) ? 'btn-primary' : 'btn-secondary'}" style="min-height:34px;padding:0;font-size:13px;font-family:'Anton'">${ch}</button>`).join('')}
+  </div>`;
+}
+// Bloc HTML réutilisable : liste joueuses (checkboxes) + tout sél/désél.
+function _stimPlayersPickerHtml(selectedIds, toggleFn, allFn) {
+  const roster = _stimPlayersRoster();
+  if (!roster.length) return `<div style="font-size:11px;color:var(--ink-3);font-style:italic">Aucune joueuse dans l'effectif.</div>`;
+  const sel = selectedIds || [];
+  return `
+    <div style="display:flex;gap:6px;margin-bottom:8px">
+      <button class="btn btn-secondary" style="flex:1;font-size:11px;min-height:32px" onclick="${allFn}(true)">Tout sélectionner</button>
+      <button class="btn btn-secondary" style="flex:1;font-size:11px;min-height:32px" onclick="${allFn}(false)">Tout désélectionner</button>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:4px;max-height:200px;overflow-y:auto">
+      ${roster.map(p => {
+        const on = sel.includes(p.id);
+        return `<label style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--bg-3);border-radius:8px;cursor:pointer;border:1px solid ${on ? 'var(--orange)' : 'transparent'}">
+          <input type="checkbox" ${on ? 'checked' : ''} onchange="${toggleFn}('${p.id}')" style="width:18px;height:18px;flex:none">
+          ${p.photo ? `<img src="${esc(p.photo)}" style="width:28px;height:28px;border-radius:50%;object-fit:cover;flex:none" alt="">` : `<div style="width:28px;height:28px;border-radius:50%;background:var(--bg-2);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:12px;color:var(--orange);flex:none">${esc((p.name || '?').charAt(0).toUpperCase())}</div>`}
+          <span style="font-size:13px">${esc(p.name || 'Joueuse')}</span>
+        </label>`;
+      }).join('')}
+    </div>`;
+}
 function _drillWizName(val) { const w = _dw(); if (w) w.name = String(val || '').slice(0, 60); }
 function _drillWizRange(kind, val) {
   const w = _dw(); if (!w) return; const v = parseInt(val, 10); if (!Number.isFinite(v)) return;
@@ -19078,10 +19142,23 @@ function renderDrillWizard() {
         <div class="eyebrow-muted">Lettres</div>
         ${_drillChip(!!s.letters, s.letters ? '✓ Activé' : '+ Activer', '_drillWizToggleLetters()', 'min-height:32px;padding:0 10px;font-size:11px')}
       </div>
-      ${s.letters ? `<div class="fld-row" style="margin-bottom:14px">
-        <div class="fld"><label class="fld-label">De</label><input maxlength="1" value="${esc(s.letters.min)}" onchange="_drillWizLetter('min',this.value)" style="text-transform:uppercase"></div>
-        <div class="fld"><label class="fld-label">À</label><input maxlength="1" value="${esc(s.letters.max)}" onchange="_drillWizLetter('max',this.value)" style="text-transform:uppercase"></div>
-      </div>` : '<div style="margin-bottom:14px"></div>'}
+      ${s.letters ? `
+        <div class="segmented" style="margin-bottom:8px">
+          <button class="segmented-btn ${s.letters.mode !== 'select' ? 'active' : ''}" onclick="_drillWizLetterMode('range')">Plage</button>
+          <button class="segmented-btn ${s.letters.mode === 'select' ? 'active' : ''}" onclick="_drillWizLetterMode('select')">Sélection</button>
+        </div>
+        ${s.letters.mode === 'select'
+          ? `<div style="margin-bottom:14px">${_stimLetterSelectGrid(s.letters, '_drillWizLetterSel')}</div>`
+          : `<div class="fld-row" style="margin-bottom:14px">
+              <div class="fld"><label class="fld-label">De</label><input maxlength="1" value="${esc(s.letters.min || 'A')}" onchange="_drillWizLetter('min',this.value)" style="text-transform:uppercase"></div>
+              <div class="fld"><label class="fld-label">À</label><input maxlength="1" value="${esc(s.letters.max || 'H')}" onchange="_drillWizLetter('max',this.value)" style="text-transform:uppercase"></div>
+            </div>`}
+      ` : '<div style="margin-bottom:14px"></div>'}
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <div class="eyebrow-muted">Joueuses</div>
+        ${_drillChip(Array.isArray(s.players), Array.isArray(s.players) ? '✓ Activé' : '+ Activer', '_drillWizTogglePlayers()', 'min-height:32px;padding:0 10px;font-size:11px')}
+      </div>
+      ${Array.isArray(s.players) ? `<div style="margin-bottom:14px">${_stimPlayersPickerHtml(s.players, '_drillWizPlayer', '_drillWizPlayersAll')}</div>` : '<div style="margin-bottom:14px"></div>'}
       <div class="eyebrow-muted" style="margin-bottom:6px">Formes</div>
       <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px">
         ${DRILL_SHAPES.map(sh => _drillChip((s.shapes || []).includes(sh), esc(DRILL_SHAPE_LABEL[sh]), `_drillWizToggle('shapes','${sh}')`)).join('')}
@@ -19260,7 +19337,14 @@ function _cwTierFinal(val) { const t = _cwTiers(); const v = parseFloat(val); if
 // Stimulus (config compacte) : toggles catégories.
 function _cwStimToggle(cat, id) { const st = _cwStage(); if (!st || !st.stimulus) return; const cats = st.stimulus.categories = st.stimulus.categories || {}; const arr = cats[cat] = cats[cat] || []; const i = arr.indexOf(id); if (i >= 0) arr.splice(i, 1); else arr.push(id); renderCircuitWizard(); }
 function _cwStimNumbers() { const st = _cwStage(); if (!st || !st.stimulus) return; const cats = st.stimulus.categories = st.stimulus.categories || {}; cats.numbers = cats.numbers ? null : { min: 1, max: 10 }; renderCircuitWizard(); }
-function _cwStimLetters() { const st = _cwStage(); if (!st || !st.stimulus) return; const cats = st.stimulus.categories = st.stimulus.categories || {}; cats.letters = cats.letters ? null : { min: 'A', max: 'H' }; renderCircuitWizard(); }
+function _cwStimLetters() { const st = _cwStage(); if (!st || !st.stimulus) return; const cats = st.stimulus.categories = st.stimulus.categories || {}; cats.letters = cats.letters ? null : { mode: 'range', min: 'A', max: 'H', selected: [] }; renderCircuitWizard(); }
+function _cwStimCats() { const st = _cwStage(); return (st && st.stimulus) ? (st.stimulus.categories = st.stimulus.categories || {}) : {}; }
+function _cwStimLetterMode(mode) { const st = _cwStage(); if (!st || !st.stimulus || !st.stimulus.categories || !st.stimulus.categories.letters) return; _stimLetterMode(st.stimulus.categories.letters, mode); renderCircuitWizard(); }
+function _cwStimLetterSel(ch) { const c = _cwStimCats(); if (!c.letters) return; _stimLetterToggleSel(c.letters, ch); renderCircuitWizard(); }
+function _cwStimLetterRange(field, val) { const c = _cwStimCats(); if (!c.letters) return; const ch = String(val || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 1); if (ch) c.letters[field] = ch; }
+function _cwStimTogglePlayers() { const c = _cwStimCats(); if (Array.isArray(c.players)) delete c.players; else c.players = []; renderCircuitWizard(); }
+function _cwStimPlayer(id) { const c = _cwStimCats(); c.players = Array.isArray(c.players) ? c.players : []; const i = c.players.indexOf(id); if (i >= 0) c.players.splice(i, 1); else c.players.push(id); renderCircuitWizard(); }
+function _cwStimPlayersAll(on) { const c = _cwStimCats(); c.players = on ? _stimPlayersRoster().map(p => p.id) : []; renderCircuitWizard(); }
 // Étapes : CRUD + réordonnancement (▲▼, cohérent avec moveOffseasonStep).
 function _circuitAddStage(type) { const w = _cw(); if (!w) return; w.stages = w.stages || []; w.stages.push(_circuitDefaultStage(type)); renderCircuitWizard(); }
 function _circuitDeleteStage(id) { const w = _cw(); if (!w) return; w.stages = (w.stages || []).filter(s => s.id !== id); if (w.openId === id) w.openId = null; renderCircuitWizard(); }
@@ -19442,7 +19526,18 @@ function _circuitStageConfigHtml(st) {
       <div style="display:flex;gap:8px;margin-bottom:12px">
         ${_drillChip(!!s.numbers, s.numbers ? '✓ Chiffres' : '+ Chiffres', '_cwStimNumbers()', 'min-height:36px;font-size:11px')}
         ${_drillChip(!!s.letters, s.letters ? '✓ Lettres' : '+ Lettres', '_cwStimLetters()', 'min-height:36px;font-size:11px')}
+        ${_drillChip(Array.isArray(s.players), Array.isArray(s.players) ? '✓ Joueuses' : '+ Joueuses', '_cwStimTogglePlayers()', 'min-height:36px;font-size:11px')}
       </div>
+      ${s.letters ? `<div style="margin-bottom:12px">
+        <div class="segmented" style="margin-bottom:8px">
+          <button class="segmented-btn ${s.letters.mode !== 'select' ? 'active' : ''}" onclick="_cwStimLetterMode('range')">Lettres : plage</button>
+          <button class="segmented-btn ${s.letters.mode === 'select' ? 'active' : ''}" onclick="_cwStimLetterMode('select')">Sélection</button>
+        </div>
+        ${s.letters.mode === 'select'
+          ? _stimLetterSelectGrid(s.letters, '_cwStimLetterSel')
+          : `<div class="fld-row"><div class="fld"><label class="fld-label">De</label><input maxlength="1" value="${esc(s.letters.min || 'A')}" onchange="_cwStimLetterRange('min',this.value)" style="text-transform:uppercase"></div><div class="fld"><label class="fld-label">À</label><input maxlength="1" value="${esc(s.letters.max || 'H')}" onchange="_cwStimLetterRange('max',this.value)" style="text-transform:uppercase"></div></div>`}
+      </div>` : ''}
+      ${Array.isArray(s.players) ? `<div style="margin-bottom:12px"><div class="eyebrow-muted" style="margin-bottom:6px">Joueuses</div>${_stimPlayersPickerHtml(s.players, '_cwStimPlayer', '_cwStimPlayersAll')}</div>` : ''}
       <div class="fld-row">
         <div class="fld"><label class="fld-label">Durée cue (s)</label><input type="number" step="0.5" min="0.2" value="${(((st.stimulus || {}).length_ms) || 7000) / 1000}" onchange="_cwMs('stimulus.length_ms',this.value)"></div>
         <div class="fld"><label class="fld-label">Délai noir (s)</label><input type="number" step="0.1" min="0" value="${(((st.stimulus || {}).delay_ms) || 500) / 1000}" onchange="_cwMs('stimulus.delay_ms',this.value)"></div>
@@ -32576,7 +32671,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-10.69';
+const APP_VERSION = '2026-07-10.70';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
