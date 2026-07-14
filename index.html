@@ -32220,21 +32220,36 @@ async function disablePush() {
     if (typeof showToast === 'function') showToast('🔕 Notifications désactivées');
   } catch (e) { console.warn('[push] disable:', e && e.message); }
 }
+// FIX notifs en double : UNE SEULE souscription VIVE par navigateur.
+// iOS/Safari (et Chrome/FCM) rotationnent périodiquement l'endpoint push. Sans
+// nettoyage, l'ANCIEN endpoint survit en base → push-send envoie au nouveau ET
+// à l'ancien → 2 notifications sur le MÊME appareil. On trace l'endpoint courant
+// de CE navigateur en localStorage et on supprime le précédent à la rotation.
+// Surgical : ne touche QUE l'endpoint que ce navigateur avait posé (safe même
+// avec owner_key partagé « coach:- »).
+const PUSH_ENDPOINT_LS = 'pb8_push_endpoint';
+function _pushStaleEndpoint(prev, next) { return (prev && next && prev !== next) ? prev : null; }
 async function _pushStoreSubscription(sub) {
   if (!window.sb) return;
   const j = sub.toJSON ? sub.toJSON() : sub; const keys = j.keys || {};
+  let prev = null; try { prev = localStorage.getItem(PUSH_ENDPOINT_LS); } catch (e) {}
   try {
     await sb.from('push_subscriptions').upsert({
       id: uid(), owner_key: pushOwnerKey(), endpoint: j.endpoint,
       p256dh_key: keys.p256dh, auth_key: keys.auth,
       ua: (navigator.userAgent || '').slice(0, 180), last_seen_at: new Date().toISOString()
     }, { onConflict: 'endpoint' });
+    // Purge l'ancien endpoint de ce navigateur (rotation) → plus de doublon.
+    const stale = _pushStaleEndpoint(prev, j.endpoint);
+    if (stale) { try { await sb.from('push_subscriptions').delete().eq('endpoint', stale); } catch (e) {} }
+    try { localStorage.setItem(PUSH_ENDPOINT_LS, j.endpoint); } catch (e) {}
   } catch (e) { console.warn('[push] store:', e && e.message); }
 }
 async function _pushDeleteSubscription(sub) {
   if (!window.sb) return;
   const j = sub.toJSON ? sub.toJSON() : sub;
   try { await sb.from('push_subscriptions').delete().eq('endpoint', j.endpoint); } catch (e) {}
+  try { localStorage.removeItem(PUSH_ENDPOINT_LS); } catch (e) {}
 }
 // Helpers cibles (ownerKey "role:playerId").
 function _pushPlayerKeys(pids) { return (pids || []).filter(Boolean).map(p => 'player:' + p); }
@@ -32671,7 +32686,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-10.70';
+const APP_VERSION = '2026-07-10.71';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {

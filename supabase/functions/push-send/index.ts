@@ -42,11 +42,27 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ error: 'bad request' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } });
     }
     const sb = createClient(SUPABASE_URL, SERVICE_ROLE);
-    const { data: subs, error } = await sb
+    const { data: allSubs, error } = await sb
       .from('push_subscriptions')
-      .select('id, endpoint, p256dh_key, auth_key')
+      .select('id, endpoint, p256dh_key, auth_key, owner_key, ua, last_seen_at')
       .in('owner_key', ownerKeys);
     if (error) throw error;
+
+    // Anti-doublon : au plus 1 envoi par (owner_key, appareil=ua) — on garde la
+    // souscription au last_seen_at le plus récent. iOS/Safari rotationnent
+    // l'endpoint push ; une ancienne ligne orpheline (même appareil, endpoint
+    // différent) survivait et provoquait 2 notifs sur le même appareil. On ne
+    // supprime rien ici (non destructif) : on n'envoie juste pas deux fois.
+    const seen = new Set<string>();
+    const subs = (allSubs || [])
+      .slice()
+      .sort((a: any, b: any) => String(b.last_seen_at || '').localeCompare(String(a.last_seen_at || '')))
+      .filter((s: any) => {
+        const key = String(s.owner_key || '') + '|' + String(s.ua || '');
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
 
     const body = JSON.stringify({
       title: String(payload.title).slice(0, 80),
@@ -69,7 +85,7 @@ Deno.serve(async (req) => {
     }));
     if (stale.length) await sb.from('push_subscriptions').delete().in('id', stale);
 
-    return new Response(JSON.stringify({ ok: true, sent, pruned: stale.length, total: (subs || []).length }),
+    return new Response(JSON.stringify({ ok: true, sent, pruned: stale.length, targeted: subs.length, total: (allSubs || []).length }),
       { headers: { ...CORS, 'Content-Type': 'application/json' } });
   } catch (e: any) {
     return new Response(JSON.stringify({ error: String(e && e.message || e) }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } });
