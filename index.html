@@ -4755,6 +4755,72 @@ const ENTITIES = [
       const pendingLocal = local.filter(m => !remoteIds.has(m.id) && typeof m.id === 'string' && m.id.startsWith('x'));
       state.drillImages = [...pendingLocal, ...fromRemote];
     }
+  },
+  // ==========================================================================
+  // PRÉPA « FULL PACKAGE » (cf. migration 20260713_004_training_programs).
+  // 3 entités, même contrat que `drills` : LWW sur updatedAt, anti-wipe sur les
+  // ids locaux 'x…' (pas encore flushés), _reassertRows quand le local est
+  // devant. CRUD coach-only appliqué CÔTÉ FRONT (RLS = anon sandbox équipe).
+  //
+  // ATTENTION — ne PAS confondre avec l'entité `programs` (module offseason,
+  // table `programs`) définie plus haut : tables et schémas disjoints.
+  // ==========================================================================
+  {
+    key: 'trainingPrograms', table: 'training_programs', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.trainingPrograms || []).map(p => [p.id, _dumpTrainingProgramRow(p)])),
+    apply: (state, rows) => {
+      const local = state.trainingPrograms || [];
+      const localById = Object.fromEntries(local.map(p => [p.id, p]));
+      const remoteIds = new Set(rows.map(r => r.id));
+      const ahead = [];
+      const fromRemote = rows.map(r => {
+        const mapped = _trainingProgramFromRow(r);
+        const loc = localById[r.id];
+        if (loc && (loc.updatedAt || 0) > (mapped.updatedAt || 0)) { ahead.push(loc); return loc; }
+        return mapped;
+      });
+      const pendingLocal = local.filter(p => !remoteIds.has(p.id) && typeof p.id === 'string' && p.id.startsWith('x'));
+      state.trainingPrograms = [...pendingLocal, ...fromRemote];
+      if (ahead.length) _reassertRows('training_programs', ahead.map(_dumpTrainingProgramRow));
+    }
+  },
+  {
+    key: 'trainingSessions', table: 'training_sessions', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.trainingSessions || []).map(s => [s.id, _dumpTrainingSessionRow(s)])),
+    apply: (state, rows) => {
+      const local = state.trainingSessions || [];
+      const localById = Object.fromEntries(local.map(s => [s.id, s]));
+      const remoteIds = new Set(rows.map(r => r.id));
+      const ahead = [];
+      const fromRemote = rows.map(r => {
+        const mapped = _trainingSessionFromRow(r);
+        const loc = localById[r.id];
+        if (loc && (loc.updatedAt || 0) > (mapped.updatedAt || 0)) { ahead.push(loc); return loc; }
+        return mapped;
+      });
+      const pendingLocal = local.filter(s => !remoteIds.has(s.id) && typeof s.id === 'string' && s.id.startsWith('x'));
+      state.trainingSessions = [...pendingLocal, ...fromRemote];
+      if (ahead.length) _reassertRows('training_sessions', ahead.map(_dumpTrainingSessionRow));
+    }
+  },
+  {
+    key: 'trainingCompletions', table: 'training_completions', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.trainingCompletions || []).map(c => [c.id, _dumpTrainingCompletionRow(c)])),
+    apply: (state, rows) => {
+      const local = state.trainingCompletions || [];
+      const localById = Object.fromEntries(local.map(c => [c.id, c]));
+      const remoteIds = new Set(rows.map(r => r.id));
+      const ahead = [];
+      const fromRemote = rows.map(r => {
+        const mapped = _trainingCompletionFromRow(r);
+        const loc = localById[r.id];
+        if (loc && (loc.updatedAt || 0) > (mapped.updatedAt || 0)) { ahead.push(loc); return loc; }
+        return mapped;
+      });
+      const pendingLocal = local.filter(c => !remoteIds.has(c.id) && typeof c.id === 'string' && c.id.startsWith('x'));
+      state.trainingCompletions = [...pendingLocal, ...fromRemote];
+      if (ahead.length) _reassertRows('training_completions', ahead.map(_dumpTrainingCompletionRow));
+    }
   }
 ];
 
@@ -4867,6 +4933,116 @@ function _drillImageUrl(path) {
   if (!path || !window.sb) return '';
   try { const { data } = sb.storage.from('drill-images').getPublicUrl(path); return (data && data.publicUrl) || ''; }
   catch (e) { return ''; }
+}
+// --- PRÉPA « FULL PACKAGE » : sérialisation (module) -------------------------
+// cf. migration 20260713_004_training_programs.
+// Conventions de types côté état front (et pourquoi) :
+//   startDate/endDate/datePlanned : STRING 'YYYY-MM-DD' (colonnes `date`), jamais
+//     un ms epoch — un fuseau négatif décalerait le jour (cf. isoDate()).
+//   dateCompleted/createdAt/updatedAt/deletedAt : ms epoch (colonnes timestamptz).
+//   daysActive : int[] ISO 1=lundi … 7=dimanche.
+//   scoringConfig / blocks : jsonb passthrough (aucun schéma imposé en base).
+function _dumpTrainingProgramRow(p) {
+  return {
+    id: p.id, name: p.name || '', description: p.description || null,
+    start_date: p.startDate || null, end_date: p.endDate || null,
+    days_active: _trainingCleanDays(p.daysActive),
+    scoring_config: (p.scoringConfig && typeof p.scoringConfig === 'object' && !Array.isArray(p.scoringConfig)) ? p.scoringConfig : {},
+    created_by: p.createdBy || null,
+    team_tag: p.teamTag || null,
+    is_active: p.isActive !== false,
+    deleted_at: p.deletedAt ? new Date(p.deletedAt).toISOString() : null,
+    updated_at: p.updatedAt ? new Date(p.updatedAt).toISOString() : (p.createdAt ? new Date(p.createdAt).toISOString() : null)
+  };
+}
+function _trainingProgramFromRow(r) {
+  return {
+    id: r.id, name: r.name || '', description: r.description || '',
+    startDate: r.start_date || null, endDate: r.end_date || null,
+    daysActive: _trainingCleanDays(r.days_active),
+    scoringConfig: (r.scoring_config && typeof r.scoring_config === 'object' && !Array.isArray(r.scoring_config)) ? r.scoring_config : {},
+    createdBy: r.created_by || null,
+    teamTag: r.team_tag || null,
+    isActive: r.is_active !== false,
+    createdAt: r.created_at ? Date.parse(r.created_at) : null,
+    updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
+    deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
+  };
+}
+function _dumpTrainingSessionRow(s) {
+  return {
+    id: s.id, program_id: s.programId || null,
+    day_of_week: (Number.isFinite(s.dayOfWeek) && s.dayOfWeek >= 1 && s.dayOfWeek <= 7) ? s.dayOfWeek : null,
+    name: s.name || '', format_label: s.formatLabel || null,
+    intro_text: s.introText || null, notes_recovery: s.notesRecovery || null,
+    blocks: Array.isArray(s.blocks) ? s.blocks : [],
+    is_template: !!s.isTemplate,
+    position: Number.isFinite(s.position) ? s.position : 0,
+    deleted_at: s.deletedAt ? new Date(s.deletedAt).toISOString() : null,
+    updated_at: s.updatedAt ? new Date(s.updatedAt).toISOString() : (s.createdAt ? new Date(s.createdAt).toISOString() : null)
+  };
+}
+function _trainingSessionFromRow(r) {
+  return {
+    id: r.id, programId: r.program_id || null,
+    dayOfWeek: (Number.isFinite(r.day_of_week) && r.day_of_week >= 1 && r.day_of_week <= 7) ? r.day_of_week : null,
+    name: r.name || '', formatLabel: r.format_label || '',
+    introText: r.intro_text || '', notesRecovery: r.notes_recovery || '',
+    blocks: Array.isArray(r.blocks) ? r.blocks : [],
+    isTemplate: !!r.is_template,
+    position: Number.isFinite(r.position) ? r.position : 0,
+    createdAt: r.created_at ? Date.parse(r.created_at) : null,
+    updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
+    deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
+  };
+}
+function _dumpTrainingCompletionRow(c) {
+  return {
+    id: c.id, program_id: c.programId || null, session_id: c.sessionId || null,
+    player_id: c.playerId || null,
+    date_planned: c.datePlanned || null,
+    date_completed: c.dateCompleted ? new Date(c.dateCompleted).toISOString() : null,
+    contract_level: ['min', 'med', 'ultra'].includes(c.contractLevel) ? c.contractLevel : 'min',
+    base_points: Number.isFinite(c.basePoints) ? c.basePoints : 0,
+    squad_teammate_id: c.squadTeammateId || null,
+    squad_photo_url: c.squadPhotoUrl || null,
+    post_photo_url: c.postPhotoUrl || null,
+    post_message: c.postMessage || null,
+    running_distance_km: Number.isFinite(c.runningDistanceKm) ? c.runningDistanceKm : null,
+    points_total: Number.isFinite(c.pointsTotal) ? c.pointsTotal : 0,
+    notes: c.notes || null,
+    deleted_at: c.deletedAt ? new Date(c.deletedAt).toISOString() : null,
+    updated_at: c.updatedAt ? new Date(c.updatedAt).toISOString() : (c.createdAt ? new Date(c.createdAt).toISOString() : null)
+  };
+}
+function _trainingCompletionFromRow(r) {
+  // running_distance_km est `numeric`. MESURÉ sur ce stack (smoke PR #148) :
+  // PostgREST le renvoie en NUMBER (5.2), donc Number.isFinite suffirait. Mais
+  // `numeric` n'a aucune garantie de tenir dans un double — d'autres versions du
+  // driver (et les valeurs à forte précision) le sérialisent en STRING pour ne
+  // pas perdre de chiffres, et Number.isFinite('5.20') vaut false. Le Number()
+  // couvre les deux cas ; sans lui, un changement de driver perdrait la distance
+  // en silence à chaque aller-retour.
+  const km = (r.running_distance_km === null || r.running_distance_km === undefined || r.running_distance_km === '')
+    ? null : Number(r.running_distance_km);
+  return {
+    id: r.id, programId: r.program_id || null, sessionId: r.session_id || null,
+    playerId: r.player_id || null,
+    datePlanned: r.date_planned || null,
+    dateCompleted: r.date_completed ? Date.parse(r.date_completed) : null,
+    contractLevel: ['min', 'med', 'ultra'].includes(r.contract_level) ? r.contract_level : 'min',
+    basePoints: Number.isFinite(r.base_points) ? r.base_points : 0,
+    squadTeammateId: r.squad_teammate_id || null,
+    squadPhotoUrl: r.squad_photo_url || null,
+    postPhotoUrl: r.post_photo_url || null,
+    postMessage: r.post_message || '',
+    runningDistanceKm: Number.isFinite(km) ? km : null,
+    pointsTotal: Number.isFinite(r.points_total) ? r.points_total : 0,
+    notes: r.notes || '',
+    createdAt: r.created_at ? Date.parse(r.created_at) : null,
+    updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
+    deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
+  };
 }
 // --- CHALLENGE_SERIES : sérialisation (module) ---
 function _dumpSeriesRow(challengeId, pid, s) {
@@ -5087,7 +5263,11 @@ const SECTIONS_PLAYER = [
   { id: 'challenges', icon: 'T', label: 'Défis' },
   { id: 'match', icon: 'M', label: 'Match' },
   { id: 'calendrier', icon: 'D', label: 'Agenda' },
-  { id: 'programme', icon: 'F', label: 'Forme' },
+  // « Forme » (module offseason / prépa estivale) est RETIRÉ de la nav : il est
+  // remplacé par la prépa « full package » (training_programs), qui vit sur
+  // l'accueil. Le module reste ENTIER (renderPlayerProgramme, table `programs`,
+  // state.offseason) et sa route reste routable — cf. _PB_SECTIONS — pour
+  // l'audit et une éventuelle restauration : ne pas supprimer ces fonctions.
 ];
 
 const PLAY_CATEGORIES = [
@@ -5337,6 +5517,13 @@ const K = {
   chronoTension: 'pb8_chrono_tension', // map { "<role>:<playerId|->": bool } — mode tension 3-2-1
   sessionLogs: 'pb8_session_logs', // [] logs de session live d'entraînement (local, non sync, cap 50)
   guideSeen: 'pb8_guide_seen', // map { "<role>:<playerId|->": true } — mini-guide joueuse vu
+  // === PRÉPA « FULL PACKAGE » (cf. migration 20260713_004_training_programs) ===
+  // NE PAS confondre avec K.programs (module offseason, table `programs`) : autre
+  // schéma, autre table, autre module. Cf. l'en-tête de la migration.
+  trainingPrograms: 'pb8_training_programs', // [{ id, name, startDate, endDate, daysActive[], scoringConfig{}, ... }]
+  trainingSessions: 'pb8_training_sessions', // [{ id, programId, dayOfWeek, name, blocks[], isTemplate, ... }]
+  trainingCompletions: 'pb8_training_completions', // [{ id, programId, sessionId, playerId, datePlanned, contractLevel, pointsTotal, ... }]
+  trainingRemind: 'pb8_training_remind', // map { "<role>:<playerId|->": "YYYY-MM-DD" } — filigrane anti-doublon du rappel quotidien (local)
 };
 function load(k, d) { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : d; } catch { return d; } }
 // save() : sync localStorage avec gestion explicite du QuotaExceededError.
@@ -5754,6 +5941,16 @@ let state = {
   drills: load(K.drills, []),
   drillImages: load(K.drillImages, []),
 
+  // === PRÉPA « FULL PACKAGE » (cf. migration 20260713_004_training_programs) ===
+  // Programme individuel piloté par le coach : N sessions (1 par jour actif de la
+  // semaine), chaque session = N blocs déclinés en 3 niveaux (min/med/ultra). La
+  // joueuse choisit son niveau, exécute, valide → 1 trainingCompletion scorée.
+  // INDÉPENDANT de state.programs / state.offseason (module estival, retiré de la
+  // nav mais conservé en base) : ne jamais mélanger les deux.
+  trainingPrograms: load(K.trainingPrograms, []),
+  trainingSessions: load(K.trainingSessions, []),
+  trainingCompletions: load(K.trainingCompletions, []),
+
   // === JOUEUSES GUESTS (Phase 5 — cf. migration 20260524_009_guest_players) ===
   // guestPlayers : humains temporaires identifiés par leur nom (copine d'une
   //   joueuse, essayeuse). [{ id, name, note, promotedToPlayerId, firstSeenAt,
@@ -5857,6 +6054,9 @@ function persist() {
   save(K.coaches, state.coaches);
   save(K.drills, state.drills);
   save(K.drillImages, state.drillImages);
+  save(K.trainingPrograms, state.trainingPrograms);
+  save(K.trainingSessions, state.trainingSessions);
+  save(K.trainingCompletions, state.trainingCompletions);
   // FIX Option B : pendant l'édition d'un plan, bumper updatedAt de l'entrée
   // courante AVANT le save → la garde anti-écho de l'apply() trainingPlans peut
   // distinguer une édition locale fraîche d'un écho realtime obsolète (qui
@@ -9485,112 +9685,7 @@ function renderHomeCoach() {
         }
       })()}
 
-      ${renderProgramSelector()}
-      ${(() => {
-        const o = state.offseason;
-        const active = isOffseasonActive();
-        if (!o) {
-          return `
-            <div style="padding:0 18px;margin-bottom:18px">
-              <div onclick="openOffseasonConfig()" style="padding:14px;background:var(--bg-2);border:1.5px dashed var(--ink-3);border-radius:var(--radius);cursor:pointer;display:flex;align-items:center;gap:12px">
-                <span style="font-size:32px">☀</span>
-                <div style="flex:1">
-                  <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;letter-spacing:0.04em;color:var(--ink-2)">Configurer la prépa estivale</div>
-                  <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase;letter-spacing:0.04em">Programme hebdo de prépa physique pour les joueuses</div>
-                </div>
-                <span style="color:var(--ink-3);font-size:18px;font-family:'Anton'">+</span>
-              </div>
-            </div>
-          `;
-        }
-        // PHASE 4 : mode journalier → carte dédiée (engagement du jour), car
-        // o.exercises est vide en daily et le calcul hebdo donnerait 0%.
-        if (o.mode === 'daily') {
-          const today = new Date().toISOString().slice(0, 10);
-          const sched = o.dailySchedule || {};
-          const todayItems = sched[today] || [];
-          const _pool = currentSeasonPlayers();
-          const logs2 = state.offseasonLogs || {};
-          const todayExpected = _pool.length * todayItems.length;
-          const todayDone = _pool.reduce((acc, p) => {
-            const pLog = (logs2[p.id] || {})[today] || {};
-            return acc + todayItems.filter(it => pLog[it.id] && pLog[it.id].done).length;
-          }, 0);
-          const dPct = todayExpected > 0 ? Math.round((todayDone / todayExpected) * 100) : 0;
-          const dColor = dPct >= 70 ? 'var(--green)' : dPct >= 40 ? 'var(--orange)' : 'var(--red)';
-          const plannedDates = Object.keys(sched).length;
-          return `
-            <div class="section-header">
-              <div style="min-width:0;flex:1">
-                <div class="eyebrow" style="color:${active?'var(--orange)':'var(--ink-3)'}">${active ? '🗓 Journalier · actif' : '○ Journalier · inactif'}</div>
-                <h2 class="display-md mt-2" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(o.title)}</h2>
-              </div>
-              <div style="display:flex;gap:10px;align-items:center;flex-shrink:0">
-                <button class="section-action" onclick="openOffseasonConfig()">⚙ Gérer</button>
-                <button class="section-action" onclick="openOffseasonDashboard()">Suivi →</button>
-              </div>
-            </div>
-            <div style="padding:0 18px;margin-bottom:18px">
-              <div onclick="openOffseasonDashboard()" style="padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer">
-                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-                  <div style="font-family:'JetBrains Mono';font-size:10px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em">${todayItems.length ? "Engagement équipe · aujourd'hui" : "Aucun exo prévu aujourd'hui"}</div>
-                  ${todayItems.length ? `<div style="font-family:'Anton';font-size:28px;color:${dColor};line-height:1">${dPct}%</div>` : ''}
-                </div>
-                ${todayItems.length ? `<div style="height:6px;background:var(--bg-1);border-radius:3px;overflow:hidden;margin-bottom:8px"><div style="height:100%;width:${dPct}%;background:${dColor}"></div></div>` : ''}
-                <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">
-                  <span>${plannedDates} date${plannedDates>1?'s':''} planifiée${plannedDates>1?'s':''}</span>
-                  ${todayItems.length ? `<span>${todayItems.length} exo${todayItems.length>1?'s':''} aujourd'hui</span>` : ''}
-                </div>
-              </div>
-            </div>
-          `;
-        }
-        // Calcul engagement équipe semaine en cours
-        // SAISON : la prépa estivale concerne l'effectif de la saison courante,
-        // pas tout l'historique du roster.
-        const weekKey = getWeekKey();
-        const logs = state.offseasonLogs || {};
-        const _seasonPool = currentSeasonPlayers();
-        const totalDone = _seasonPool.reduce((acc, p) => {
-          const pLog = (logs[p.id] || {})[weekKey] || {};
-          return acc + o.exercises.filter(ex => pLog[ex.id] && pLog[ex.id].done).length;
-        }, 0);
-        const totalExpected = _seasonPool.length * o.exercises.length;
-        const teamPct = totalExpected > 0 ? Math.round((totalDone / totalExpected) * 100) : 0;
-        const color = teamPct >= 70 ? 'var(--green)' : teamPct >= 40 ? 'var(--orange)' : 'var(--red)';
-        // Joueuses actives cette semaine
-        const activePlayers = _seasonPool.filter(p => {
-          const pLog = (logs[p.id] || {})[weekKey] || {};
-          return o.exercises.some(ex => pLog[ex.id] && pLog[ex.id].done);
-        }).length;
-        return `
-          <div class="section-header">
-            <div style="min-width:0;flex:1">
-              <div class="eyebrow" style="color:${active?'var(--orange)':'var(--ink-3)'}">${active ? '☀ Actif · ' + formatWeekRange() : '○ Inactif · ' + formatDate(o.startDate, 'short') + ' → ' + formatDate(o.endDate, 'short')}</div>
-              <h2 class="display-md mt-2" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(o.title)}</h2>
-            </div>
-            <div style="display:flex;gap:10px;align-items:center;flex-shrink:0">
-              <button class="section-action" onclick="openOffseasonConfig()">⚙ Gérer</button>
-              <button class="section-action" onclick="openOffseasonDashboard()">Suivi →</button>
-            </div>
-          </div>
-          <div style="padding:0 18px;margin-bottom:18px">
-            <div onclick="openOffseasonDashboard()" style="padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer">
-              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-                <div style="font-family:'JetBrains Mono';font-size:10px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em">Engagement équipe · semaine</div>
-                <div style="font-family:'Anton';font-size:28px;color:${color};line-height:1">${teamPct}%</div>
-              </div>
-              <div style="height:6px;background:var(--bg-1);border-radius:3px;overflow:hidden;margin-bottom:8px">
-                <div style="height:100%;width:${teamPct}%;background:${color}"></div>
-              </div>
-              <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">
-                <span>${activePlayers}/${_seasonPool.length} joueuses actives</span>
-                <span>${o.exercises.length} exos × semaine</span>
-              </div>
-            </div>
-          </div>
-        `;
-      })()}
+      ${renderTrainingCoachCard()}
 
     </div>
   `;
@@ -9792,6 +9887,9 @@ function renderHomePlayer() {
 
       <!-- 1ter. Boîte à gages : point d'entrée visible pour proposer -->
       ${renderGageHomeCard()}
+
+      <!-- 1quater. Prépa physique : séance du jour / rattrapage 48 h -->
+      ${renderTrainingPlayerCard()}
 
       <!-- 2. Challenges actifs (preview 2-3, lien Tout → onglet) -->
       ${myActiveChallenges.length > 0 ? `
@@ -18014,6 +18112,1554 @@ function renderDrillFab() {
 }
 
 // ============================================================
+// PRÉPA « FULL PACKAGE » — cœur pur (scoring, dates, rattrapage)
+// cf. migration 20260713_004_training_programs.
+//
+// Tout ce bloc est SANS EFFET DE BORD et sans accès au DOM : c'est ce qui est
+// recopié à l'identique dans scripts/test-training-programs.mjs. Y toucher =
+// mettre le test à jour dans le même commit.
+//
+// FUSEAU — pourquoi tout est en UTC ici : les jours prévus sont des `date` SQL
+// (pas des instants). Passer par un Date local ferait basculer le jour d'un cran
+// pour tout fuseau négatif (UTC-5 → '2026-07-13' devient dimanche 12). Toutes les
+// bornes ci-dessous sont donc calculées en UTC, y compris « minuit du jour prévu ».
+// ============================================================
+
+// Barème par défaut. Volontairement dupliqué en base (colonne scoring_config
+// jsonb) et ici : un programme créé avant l'ajout d'une clé doit rester scorable,
+// donc chaque lecture retombe sur ce défaut clé par clé (cf. _trainingConfig).
+const TRAINING_DEFAULT_CONFIG = {
+  points: { min: 10, med: 20, ultra: 30 },
+  squad_multiplier: 2,
+  post_bonus: 10,
+  remind_hour: 9
+};
+const TRAINING_LEVELS = ['min', 'med', 'ultra'];
+const TRAINING_LEVEL_LABEL = { min: 'Minimum', med: 'Medium', ultra: 'Ultra' };
+// Fenêtre de rattrapage : 48 h à partir de MINUIT du jour prévu (pas de l'heure
+// de la séance — il n'y en a pas). Séance prévue lundi → rattrapable lundi et
+// mardi, périmée mercredi 00:00 UTC pile.
+const TRAINING_RATTRAPAGE_MS = 48 * 3600000;
+const TRAINING_DAY_LABELS = { 1: 'Lundi', 2: 'Mardi', 3: 'Mercredi', 4: 'Jeudi', 5: 'Vendredi', 6: 'Samedi', 7: 'Dimanche' };
+const TRAINING_BLOCK_TYPES = [
+  { id: 'warmup', label: 'Échauffement', icon: '🔥' },
+  { id: 'gainage', label: 'Gainage', icon: '🧱' },
+  { id: 'legs', label: 'Jambes', icon: '🦵' },
+  { id: 'course', label: 'Course', icon: '🏃' },
+  { id: 'recovery', label: 'Récupération', icon: '🧘' },
+  { id: 'custom', label: 'Autre', icon: '⚙' }
+];
+
+// Jours actifs normalisés : entiers ISO 1..7, dédupliqués, triés. Tolère les
+// strings ('1') car un <input> renvoie toujours du texte.
+function _trainingCleanDays(days) {
+  if (!Array.isArray(days)) return [];
+  const seen = new Set();
+  days.forEach(d => { const n = Number(d); if (Number.isInteger(n) && n >= 1 && n <= 7) seen.add(n); });
+  return [...seen].sort((a, b) => a - b);
+}
+
+// Barème effectif d'un programme = défauts + surcharges, fusionnés clé par clé.
+function _trainingConfig(program) {
+  const raw = (program && program.scoringConfig && typeof program.scoringConfig === 'object') ? program.scoringConfig : {};
+  const pts = (raw.points && typeof raw.points === 'object') ? raw.points : {};
+  const num = (v, d) => Number.isFinite(Number(v)) ? Number(v) : d;
+  return {
+    points: {
+      min: num(pts.min, TRAINING_DEFAULT_CONFIG.points.min),
+      med: num(pts.med, TRAINING_DEFAULT_CONFIG.points.med),
+      ultra: num(pts.ultra, TRAINING_DEFAULT_CONFIG.points.ultra)
+    },
+    squad_multiplier: num(raw.squad_multiplier, TRAINING_DEFAULT_CONFIG.squad_multiplier),
+    post_bonus: num(raw.post_bonus, TRAINING_DEFAULT_CONFIG.post_bonus),
+    remind_hour: num(raw.remind_hour, TRAINING_DEFAULT_CONFIG.remind_hour)
+  };
+}
+
+// FORMULE FIGÉE (ne pas « améliorer » sans reprise de l'historique) :
+//   total = (base_points × squad_multiplier) + post_bonus
+// Le multiplicateur squad porte sur la BASE SEULE ; le bonus post est additif et
+// n'est jamais multiplié. Ex : med + squad + post = 20×2 + 10 = 50.
+// Le total est arrondi (Math.round) : un multiplicateur décimal (1.5) doit rendre
+// un entier — points_total est une colonne `integer`, un float y serait tronqué
+// par le driver, donc on arrondit ici, explicitement.
+function _computePoints({ level, hasSquad, hasPost, config } = {}) {
+  const cfg = _trainingConfig({ scoringConfig: config || {} });
+  const lvl = TRAINING_LEVELS.includes(level) ? level : 'min';
+  const base = cfg.points[lvl];
+  const total = (base * (hasSquad ? cfg.squad_multiplier : 1)) + (hasPost ? cfg.post_bonus : 0);
+  return { base, total: Math.round(total) };
+}
+
+// Minuit UTC du jour 'YYYY-MM-DD'. null si la date est absente/malformée : les
+// appelants doivent traiter null comme « pas de fenêtre » (et non comme 0, qui
+// serait le 1er janvier 1970 et rendrait toute séance périmée).
+function _trainingDayStartMs(dateStr) {
+  if (!dateStr || typeof dateStr !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return null;
+  const ms = Date.parse(dateStr + 'T00:00:00Z');
+  return Number.isFinite(ms) ? ms : null;
+}
+
+// Fenêtre de validation d'une séance prévue le jour `datePlanned`.
+// true  ⟺ minuit(datePlanned) ≤ dateNow < minuit(datePlanned) + 48 h.
+// Borne HAUTE exclue : à 48 h pile, c'est périmé (mercredi 00:00 = trop tard).
+// Borne BASSE incluse et NON négociable : on ne valide pas une séance à l'avance
+// — sinon toute la semaine serait validable dès le lundi.
+function _isRattrapageValid(datePlanned, dateNow) {
+  const start = _trainingDayStartMs(datePlanned);
+  if (start === null) return false;
+  const now = (dateNow instanceof Date) ? dateNow.getTime() : Number(dateNow);
+  if (!Number.isFinite(now)) return false;
+  const elapsed = now - start;
+  return elapsed >= 0 && elapsed < TRAINING_RATTRAPAGE_MS;
+}
+
+// true si la séance est en RETARD mais encore rattrapable (= J+1 uniquement) :
+// sert au badge « Rattrapage possible » côté home. Le jour même n'est pas un
+// rattrapage, c'est la séance du jour.
+function _isRattrapage(datePlanned, dateNow) {
+  const start = _trainingDayStartMs(datePlanned);
+  if (start === null) return false;
+  const now = (dateNow instanceof Date) ? dateNow.getTime() : Number(dateNow);
+  if (!Number.isFinite(now)) return false;
+  const elapsed = now - start;
+  return elapsed >= 86400000 && elapsed < TRAINING_RATTRAPAGE_MS;
+}
+
+// Jour ISO (1=lundi … 7=dimanche) d'un 'YYYY-MM-DD', en UTC. null si invalide.
+function _trainingDayOfWeek(dateStr) {
+  const ms = _trainingDayStartMs(dateStr);
+  if (ms === null) return null;
+  const d = new Date(ms).getUTCDay(); // 0=dimanche
+  return d === 0 ? 7 : d;
+}
+
+// Toutes les dates prévues d'un programme : chaque jour de [startDate, endDate]
+// dont le jour ISO est dans daysActive. Bornes INCLUSES. Retourne [] si les
+// entrées sont invalides ou si end < start (jamais une boucle infinie).
+// Garde-fou 5 ans : une faute de frappe sur l'année (2260) ne doit pas figer
+// l'onglet en générant 90 000 dates.
+function _dateRangeForProgram(startDate, endDate, daysActive) {
+  const start = _trainingDayStartMs(startDate);
+  const end = _trainingDayStartMs(endDate);
+  const days = _trainingCleanDays(daysActive);
+  if (start === null || end === null || end < start || !days.length) return [];
+  const MAX_DAYS = 366 * 5;
+  const out = [];
+  for (let i = 0, ms = start; ms <= end && i < MAX_DAYS; i++, ms = start + i * 86400000) {
+    const iso = new Date(ms).toISOString().slice(0, 10);
+    const dow = new Date(ms).getUTCDay();
+    if (days.includes(dow === 0 ? 7 : dow)) out.push(iso);
+  }
+  return out;
+}
+
+// La session prévue un jour ISO donné, dans un programme. Les modèles
+// (isTemplate) ne sont rattachés à aucun jour : ils ne doivent jamais sortir ici.
+function _programSessionForDay(program, dayOfWeek) {
+  if (!program) return null;
+  const dow = Number(dayOfWeek);
+  return (state.trainingSessions || []).find(s =>
+    !s.deletedAt && !s.isTemplate && s.programId === program.id && s.dayOfWeek === dow
+  ) || null;
+}
+
+// Résumé lisible d'une validation (feed, historique, carte de cumul).
+// Décrit ce qui a été FAIT, pas ce qui était prévu.
+function _completionSummary(c) {
+  if (!c) return '';
+  const bits = [TRAINING_LEVEL_LABEL[c.contractLevel] || c.contractLevel];
+  if (c.squadTeammateId) bits.push('👯 Squad');
+  if (c.postPhotoUrl) bits.push('📸 Post');
+  if (Number.isFinite(c.runningDistanceKm) && c.runningDistanceKm > 0) bits.push('🏃 ' + c.runningDistanceKm + ' km');
+  return bits.join(' · ') + ' — ' + (c.pointsTotal || 0) + ' pts';
+}
+
+// ============================================================
+// PRÉPA « FULL PACKAGE » — accès, sélecteurs, wizard coach
+// ============================================================
+function _trainingIsCoach() { return !!(state.auth && state.auth.role === 'coach'); }
+function _trainingFlush() { try { if (window.PbSync && PbSync.flushNow) PbSync.flushNow(state).catch(() => {}); } catch (e) {} }
+function activeTrainingPrograms() { return (state.trainingPrograms || []).filter(p => !p.deletedAt); }
+
+// Un programme est-il en cours à la date du jour ? isActive est le drapeau coach
+// (dépublier sans supprimer) ; les bornes de dates font le reste.
+function _trainingProgramRunning(p, todayISO) {
+  if (!p || p.deletedAt || p.isActive === false) return false;
+  const d = todayISO || isoDate(new Date());
+  return !!p.startDate && !!p.endDate && p.startDate <= d && d <= p.endDate;
+}
+// Visibilité multi-effectif : un programme sans team_tag (ou 'both') est pour
+// tout le monde. Sinon il faut que l'équipe corresponde.
+function _trainingProgramVisibleTo(p, teamTag) {
+  if (!p) return false;
+  if (!p.teamTag || p.teamTag === 'both') return true;
+  if (!teamTag || teamTag === 'both') return true;
+  return p.teamTag === teamTag;
+}
+// Programmes visibles par la joueuse connectée, en cours aujourd'hui.
+function _myTrainingPrograms(todayISO) {
+  const tag = (state.auth && state.auth.role === 'player') ? currentPlayerTeamTag() : null;
+  return activeTrainingPrograms()
+    .filter(p => _trainingProgramRunning(p, todayISO) && _trainingProgramVisibleTo(p, tag))
+    .sort((a, b) => (a.startDate || '').localeCompare(b.startDate || ''));
+}
+// Programmes gérables par le coach connecté (scopé équipe pour un coach non-admin).
+function _coachTrainingPrograms() {
+  const list = activeTrainingPrograms().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  if (!isScopedCoach()) return list;
+  const teams = coachTeams();
+  return list.filter(p => !p.teamTag || p.teamTag === 'both' || teams.includes(p.teamTag));
+}
+// Sessions d'un programme, ordonnées par jour ISO. Exclut les modèles.
+function _trainingSessionsOf(programId) {
+  return (state.trainingSessions || [])
+    .filter(s => !s.deletedAt && !s.isTemplate && s.programId === programId)
+    .sort((a, b) => (a.dayOfWeek || 0) - (b.dayOfWeek || 0));
+}
+// Modèles de session réutilisables (is_template) — bibliothèque transverse.
+function _trainingTemplates() {
+  return (state.trainingSessions || [])
+    .filter(s => !s.deletedAt && s.isTemplate)
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+}
+// Validations vivantes d'une joueuse sur un programme.
+function _trainingCompletionsOf(programId, playerId) {
+  return (state.trainingCompletions || []).filter(c =>
+    !c.deletedAt && c.programId === programId && (!playerId || c.playerId === playerId)
+  );
+}
+// La validation d'une séance précise (joueuse, session, jour prévu), s'il y en a
+// une. Porte l'unicité côté front, en miroir de l'index unique partiel en base.
+function _trainingCompletionFor(sessionId, playerId, datePlanned) {
+  return (state.trainingCompletions || []).find(c =>
+    !c.deletedAt && c.sessionId === sessionId && c.playerId === playerId && c.datePlanned === datePlanned
+  ) || null;
+}
+// Bloc vierge.
+function _trainingNewBlock(type) {
+  return {
+    id: uid(), type: type || 'custom', name: '', instructions: '', track_distance: false,
+    levels: { min: { text: '', drill_id: null }, med: { text: '', drill_id: null }, ultra: { text: '', drill_id: null } }
+  };
+}
+// Normalise un bloc venu du jsonb : garantit les 3 niveaux même sur une donnée
+// ancienne ou incomplète (sinon l'UI joueuse planterait sur levels.med undefined).
+function _trainingBlockLevel(blk, level) {
+  const lv = (blk && blk.levels && blk.levels[level]) || {};
+  return { text: lv.text || '', drill_id: lv.drill_id || null };
+}
+// Le drill lié à un bloc/niveau, s'il existe encore (un drill supprimé depuis ne
+// doit pas afficher un bouton « Lancer » mort).
+function _trainingBlockDrill(blk, level) {
+  const id = _trainingBlockLevel(blk, level).drill_id;
+  if (!id) return null;
+  return (state.drills || []).find(d => d.id === id && !d.deletedAt) || null;
+}
+// Un bloc mesure-t-il une distance au niveau choisi ? (input km à la validation)
+function _trainingHasDistance(session, level) {
+  return !!(session && (session.blocks || []).some(b => b.track_distance && _trainingBlockLevel(b, level).text));
+}
+
+// --- WIZARD COACH -----------------------------------------------------------
+// Même pattern que les wizards drills : l'état vit sur state._trainingWizard (et
+// PAS sur window._), il est deep-cloné à l'ouverture (le wizard ne mute jamais
+// les entités vivantes), et chaque re-render est un openModal() complet.
+// Étapes : 1 métadonnées · 2 barème · 3 sessions (master/détail) · 4 publication.
+function openTrainingWizard(editId) {
+  if (!_trainingIsCoach()) return;
+  if (_denyIfScopedCoach()) return;
+  const src = editId ? activeTrainingPrograms().find(p => p.id === editId) : null;
+  const today = isoDate(new Date());
+  const in6w = new Date(); in6w.setDate(in6w.getDate() + 42);
+  const cfg = _trainingConfig(src);
+  const sessions = {};
+  if (src) {
+    _trainingSessionsOf(src.id).forEach(s => {
+      sessions[s.dayOfWeek] = JSON.parse(JSON.stringify({
+        id: s.id, name: s.name || '', formatLabel: s.formatLabel || '', introText: s.introText || '',
+        notesRecovery: s.notesRecovery || '', blocks: Array.isArray(s.blocks) ? s.blocks : []
+      }));
+    });
+  }
+  state._trainingWizard = {
+    editingId: src ? src.id : null,
+    step: 1,
+    name: src ? (src.name || '') : '',
+    description: src ? (src.description || '') : '',
+    startDate: src ? (src.startDate || today) : today,
+    endDate: src ? (src.endDate || isoDate(in6w)) : isoDate(in6w),
+    daysActive: src ? _trainingCleanDays(src.daysActive) : [1, 3, 5],
+    config: JSON.parse(JSON.stringify(cfg)),
+    teamTag: src ? (src.teamTag || 'both') : (effectiveTeamFilter() === 'all' ? 'both' : effectiveTeamFilter()),
+    sessions,
+    openDay: null,
+    openBlock: null
+  };
+  renderTrainingWizard();
+}
+function _tw() { return state._trainingWizard; }
+function _twGo(step) { const w = _tw(); if (!w) return; w.step = step; w.openDay = null; w.openBlock = null; renderTrainingWizard(); }
+function _twSet(k, v) { const w = _tw(); if (!w) return; w[k] = v; }
+function _twSetRender(k, v) { _twSet(k, v); renderTrainingWizard(); }
+function _twToggleDay(d) {
+  const w = _tw(); if (!w) return;
+  const n = Number(d);
+  w.daysActive = w.daysActive.includes(n) ? w.daysActive.filter(x => x !== n) : _trainingCleanDays([...w.daysActive, n]);
+  renderTrainingWizard();
+}
+// Barème : setter numérique tolérant (un <input> vide ne doit pas écrire NaN,
+// qui casserait _computePoints et se propagerait dans points_total).
+function _twNum(path, v) {
+  const w = _tw(); if (!w) return;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0) { renderTrainingWizard(); return; }
+  const parts = path.split('.');
+  let o = w.config;
+  for (let i = 0; i < parts.length - 1; i++) o = o[parts[i]];
+  o[parts[parts.length - 1]] = n;
+  renderTrainingWizard();
+}
+// Session du jour `d` dans le wizard, créée à la volée si absente.
+function _twSession(d) {
+  const w = _tw(); if (!w) return null;
+  if (!w.sessions[d]) {
+    w.sessions[d] = { id: null, name: (TRAINING_DAY_LABELS[d] || '') + ' — séance', formatLabel: '', introText: '', notesRecovery: '', blocks: [] };
+  }
+  return w.sessions[d];
+}
+function _twOpenDay(d) { const w = _tw(); if (!w) return; _twSession(d); w.openDay = Number(d); w.openBlock = null; renderTrainingWizard(); }
+function _twCloseDay() { const w = _tw(); if (!w) return; w.openDay = null; w.openBlock = null; renderTrainingWizard(); }
+function _twSessField(k, v) { const w = _tw(); if (!w || !w.openDay) return; _twSession(w.openDay)[k] = v; }
+function _twAddBlock() {
+  const w = _tw(); if (!w || !w.openDay) return;
+  const s = _twSession(w.openDay);
+  const b = _trainingNewBlock('warmup');
+  s.blocks.push(b);
+  w.openBlock = b.id;
+  renderTrainingWizard();
+}
+function _twOpenBlock(id) { const w = _tw(); if (!w) return; w.openBlock = id; renderTrainingWizard(); }
+function _twCloseBlock() { const w = _tw(); if (!w) return; w.openBlock = null; renderTrainingWizard(); }
+function _twBlock() {
+  const w = _tw(); if (!w || !w.openDay || !w.openBlock) return null;
+  return _twSession(w.openDay).blocks.find(b => b.id === w.openBlock) || null;
+}
+function _twBlockField(k, v) { const b = _twBlock(); if (b) b[k] = v; }
+function _twBlockType(t) { const b = _twBlock(); if (b) { b.type = t; renderTrainingWizard(); } }
+function _twBlockTrack(v) { const b = _twBlock(); if (b) { b.track_distance = !!v; renderTrainingWizard(); } }
+function _twBlockLevelText(level, v) {
+  const b = _twBlock(); if (!b) return;
+  b.levels = b.levels || {};
+  b.levels[level] = b.levels[level] || { text: '', drill_id: null };
+  b.levels[level].text = v;
+}
+function _twBlockLevelDrill(level, drillId) {
+  const b = _twBlock(); if (!b) return;
+  b.levels = b.levels || {};
+  b.levels[level] = b.levels[level] || { text: '', drill_id: null };
+  b.levels[level].drill_id = drillId || null;
+  renderTrainingWizard();
+}
+function _twDelBlock(id) {
+  const w = _tw(); if (!w || !w.openDay) return;
+  const s = _twSession(w.openDay);
+  s.blocks = s.blocks.filter(b => b.id !== id);
+  if (w.openBlock === id) w.openBlock = null;
+  renderTrainingWizard();
+}
+function _twMoveBlock(id, dir) {
+  const w = _tw(); if (!w || !w.openDay) return;
+  const s = _twSession(w.openDay);
+  const i = s.blocks.findIndex(b => b.id === id);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= s.blocks.length) return;
+  const t = s.blocks[i]; s.blocks[i] = s.blocks[j]; s.blocks[j] = t;
+  renderTrainingWizard();
+}
+// Charge un modèle (is_template) dans le jour ouvert. Deep-clone + ids de blocs
+// régénérés : deux jours issus du même modèle doivent avoir des blocs distincts,
+// sinon _twOpenBlock ouvrirait le mauvais (et l'édition serait partagée).
+function _twApplyTemplate(tplId) {
+  const w = _tw(); if (!w || !w.openDay) return;
+  const t = _trainingTemplates().find(x => x.id === tplId);
+  if (!t) return;
+  const s = _twSession(w.openDay);
+  s.formatLabel = t.formatLabel || '';
+  s.introText = t.introText || '';
+  s.notesRecovery = t.notesRecovery || '';
+  s.blocks = JSON.parse(JSON.stringify(Array.isArray(t.blocks) ? t.blocks : [])).map(b => ({ ...b, id: uid() }));
+  if (!s.name || /— séance$/.test(s.name)) s.name = t.name || s.name;
+  w.openBlock = null;
+  renderTrainingWizard();
+  try { showToast('📋 Modèle « ' + (t.name || 'sans nom') + ' » appliqué'); } catch (e) {}
+}
+// Enregistre le jour ouvert comme modèle réutilisable (session détachée : ni
+// programme ni jour, cf. la contrainte day_of_week de la migration).
+function _twSaveAsTemplate() {
+  const w = _tw(); if (!w || !w.openDay || !_trainingIsCoach()) return;
+  const s = _twSession(w.openDay);
+  if (!(s.blocks || []).length) { try { alert('Ajoute au moins un bloc avant d\'en faire un modèle.'); } catch (e) {} return; }
+  let name = '';
+  try { name = prompt('Nom du modèle :', s.name || 'Modèle'); } catch (e) { name = s.name || 'Modèle'; }
+  if (name === null) return;
+  name = (name || '').trim().slice(0, 60) || 'Modèle';
+  const now = Date.now();
+  state.trainingSessions = state.trainingSessions || [];
+  state.trainingSessions.unshift({
+    id: uid(), programId: null, dayOfWeek: null, name,
+    formatLabel: s.formatLabel || '', introText: s.introText || '', notesRecovery: s.notesRecovery || '',
+    blocks: JSON.parse(JSON.stringify(s.blocks)).map(b => ({ ...b, id: uid() })),
+    isTemplate: true, position: 0, createdAt: now, updatedAt: now, deletedAt: null
+  });
+  persist(); _trainingFlush();
+  renderTrainingWizard();
+  try { showToast('📋 Modèle « ' + name + ' » enregistré'); } catch (e) {}
+}
+
+// --- Rendu du wizard --------------------------------------------------------
+function renderTrainingWizard() {
+  const w = _tw(); if (!w) return;
+  let body, title, footer;
+  const dot = n => `<span style="width:8px;height:8px;border-radius:50%;background:${n === w.step ? 'var(--orange)' : 'var(--border)'};display:inline-block"></span>`;
+
+  if (w.step === 3 && w.openDay && w.openBlock) {
+    title = 'Bloc';
+    body = _twBlockEditorHtml();
+    footer = `<button class="btn btn-primary btn-block" onclick="_twCloseBlock()">✓ OK</button>`;
+  } else if (w.step === 3 && w.openDay) {
+    title = TRAINING_DAY_LABELS[w.openDay] || 'Séance';
+    body = _twDayEditorHtml();
+    footer = `<button class="btn btn-primary btn-block" onclick="_twCloseDay()">✓ OK</button>`;
+  } else {
+    title = w.step === 1 ? 'Le programme' : w.step === 2 ? 'Le barème' : w.step === 3 ? 'Les séances' : 'Publier';
+    body = w.step === 1 ? _twMetaHtml() : w.step === 2 ? _twScoringHtml() : w.step === 3 ? _twSessionsHtml() : _twPublishHtml();
+    footer = `
+      <div style="display:flex;gap:6px;flex:0 0 auto">${dot(1)}${dot(2)}${dot(3)}${dot(4)}</div>
+      <div style="flex:1"></div>
+      ${w.step > 1 ? `<button class="btn btn-secondary" onclick="_twGo(${w.step - 1})">← Retour</button>` : ''}
+      ${w.step < 4 ? `<button class="btn btn-primary" onclick="_twGo(${w.step + 1})">Suivant →</button>`
+        : `<button class="btn btn-primary" onclick="saveTrainingProgram()">✓ Publier</button>`}`;
+  }
+
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">Prépa · ${w.editingId ? 'édition' : 'nouveau programme'}</div>
+        <div class="modal-title">${esc(title)}</div>
+      </div>
+      <button class="modal-close" onclick="state._trainingWizard=null;closeModal()">✕</button>
+    </div>
+    <div class="modal-body">${body}</div>
+    <div class="modal-footer" style="display:flex;gap:6px;align-items:center">${footer}</div>
+  `);
+}
+
+// Étape 1 — métadonnées.
+function _twMetaHtml() {
+  const w = _tw();
+  const multi = !!(state.team && state.team.multiSquad);
+  return `
+    <div class="fld">
+      <label class="fld-label">Nom du programme</label>
+      <input type="text" value="${esc(w.name)}" placeholder="Prépa physique été" onchange="_twSet('name',this.value)">
+    </div>
+    <div class="fld">
+      <label class="fld-label">Description (optionnel)</label>
+      <textarea rows="2" placeholder="L'objectif du bloc…" onchange="_twSet('description',this.value)">${esc(w.description)}</textarea>
+    </div>
+    <div class="fld-row">
+      <div class="fld">
+        <label class="fld-label">Début</label>
+        <input type="date" value="${esc(w.startDate || '')}" onchange="_twSet('startDate',this.value)">
+      </div>
+      <div class="fld">
+        <label class="fld-label">Fin</label>
+        <input type="date" value="${esc(w.endDate || '')}" onchange="_twSet('endDate',this.value)">
+      </div>
+    </div>
+    <div class="eyebrow-muted" style="margin:14px 0 8px">Jours actifs</div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px">
+      ${[1, 2, 3, 4, 5, 6, 7].map(d => `
+        <button type="button" class="btn ${w.daysActive.includes(d) ? 'btn-primary' : 'btn-secondary'}" aria-pressed="${w.daysActive.includes(d)}"
+          onclick="_twToggleDay(${d})" style="padding:8px 12px;font-size:12px">${TRAINING_DAY_LABELS[d].slice(0, 3)}</button>
+      `).join('')}
+    </div>
+    ${multi ? `
+      <div class="eyebrow-muted" style="margin:14px 0 8px">Effectif concerné</div>
+      <div class="segmented">
+        ${[['both', 'Tout le monde'], ['e1', 'E1'], ['e2', 'E2']].map(([v, l]) => `
+          <button class="segmented-btn ${w.teamTag === v ? 'active' : ''}" onclick="_twSetRender('teamTag','${v}')">${l}</button>
+        `).join('')}
+      </div>` : ''}
+    <div style="margin-top:16px;padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:11px;color:var(--ink-2);line-height:1.5">
+      ${(() => {
+        const dates = _dateRangeForProgram(w.startDate, w.endDate, w.daysActive);
+        if (!dates.length) return '⚠ Choisis des dates valides et au moins un jour actif.';
+        return `${dates.length} séance${dates.length > 1 ? 's' : ''} prévue${dates.length > 1 ? 's' : ''} · ${w.daysActive.map(d => TRAINING_DAY_LABELS[d]).join(', ')}`;
+      })()}
+    </div>`;
+}
+
+// Étape 2 — barème. Le récap en bas montre le calcul en toutes lettres : c'est
+// la seule façon de vérifier d'un coup d'œil que le bonus post n'est pas multiplié.
+function _twScoringHtml() {
+  const w = _tw(); const c = w.config;
+  const row = (label, path, val, hint) => `
+    <div class="fld">
+      <label class="fld-label">${label}</label>
+      <input type="number" min="0" step="1" value="${val}" onchange="_twNum('${path}',this.value)">
+      ${hint ? `<div style="font-size:10px;color:var(--ink-3);margin-top:3px">${hint}</div>` : ''}
+    </div>`;
+  const ex = _computePoints({ level: 'med', hasSquad: true, hasPost: true, config: c });
+  const exMin = _computePoints({ level: 'min', config: c });
+  const exUltra = _computePoints({ level: 'ultra', hasSquad: true, hasPost: true, config: c });
+  return `
+    <div class="eyebrow-muted" style="margin-bottom:8px">Points par niveau de contrat</div>
+    ${row('🟢 Minimum', 'points.min', c.points.min)}
+    ${row('🟠 Medium', 'points.med', c.points.med)}
+    ${row('🔴 Ultra', 'points.ultra', c.points.ultra)}
+    <div class="eyebrow-muted" style="margin:14px 0 8px">Bonus</div>
+    ${row('👯 Multiplicateur squad', 'squad_multiplier', c.squad_multiplier, 'Multiplie les points du niveau (photo + coéquipière obligatoires).')}
+    ${row('📸 Bonus post', 'post_bonus', c.post_bonus, 'S\'ajoute au total, sans être multiplié (photo + message obligatoires).')}
+    ${row('🔔 Heure du rappel', 'remind_hour', c.remind_hour, 'Notification quotidienne les jours actifs (0-23).')}
+    <div style="margin-top:16px;padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:11px;color:var(--ink-2);line-height:1.7">
+      <b>Exemples</b><br>
+      Minimum seule → <b>${exMin.total} pts</b><br>
+      Medium + squad + post → ${c.points.med}×${c.squad_multiplier} + ${c.post_bonus} = <b>${ex.total} pts</b><br>
+      Ultra + squad + post → ${c.points.ultra}×${c.squad_multiplier} + ${c.post_bonus} = <b>${exUltra.total} pts</b>
+    </div>`;
+}
+
+// Étape 3 — une carte par jour actif (master). Le détail s'ouvre au clic.
+function _twSessionsHtml() {
+  const w = _tw();
+  if (!w.daysActive.length) return `<div class="empty"><div class="empty-icon">📅</div><div class="empty-title">Aucun jour actif</div><div class="empty-desc">Reviens à l'étape 1 pour en choisir.</div></div>`;
+  return `
+    <div class="eyebrow-muted" style="margin-bottom:8px">Une séance par jour actif</div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      ${w.daysActive.map(d => {
+        const s = w.sessions[d];
+        const n = s ? (s.blocks || []).length : 0;
+        return `
+          <button type="button" onclick="_twOpenDay(${d})" style="text-align:left;border:1px solid var(--border-soft);border-radius:10px;padding:12px;background:var(--surface);cursor:pointer;display:flex;align-items:center;gap:10px">
+            <div style="flex:1;min-width:0">
+              <div style="font-family:'Anton';font-size:14px;text-transform:uppercase">${TRAINING_DAY_LABELS[d]}</div>
+              <div style="font-size:11px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+                ${s && s.name ? esc(s.name) : 'Séance à définir'}${s && s.formatLabel ? ' · ' + esc(s.formatLabel) : ''}
+              </div>
+            </div>
+            <div style="font-size:11px;color:${n ? 'var(--orange)' : 'var(--ink-3)'};font-family:'JetBrains Mono';flex:none">${n} bloc${n > 1 ? 's' : ''}</div>
+            <div style="color:var(--ink-3);flex:none">›</div>
+          </button>`;
+      }).join('')}
+    </div>`;
+}
+
+// Étape 3 (détail) — une séance : métadonnées + liste de blocs réordonnables.
+function _twDayEditorHtml() {
+  const w = _tw(); const s = _twSession(w.openDay);
+  const tpls = _trainingTemplates();
+  return `
+    <div class="fld">
+      <label class="fld-label">Nom de la séance</label>
+      <input type="text" value="${esc(s.name)}" onchange="_twSessField('name',this.value)">
+    </div>
+    <div class="fld">
+      <label class="fld-label">Format (optionnel)</label>
+      <input type="text" value="${esc(s.formatLabel)}" placeholder="45 min · 3 tours" onchange="_twSessField('formatLabel',this.value)">
+    </div>
+    <div class="fld">
+      <label class="fld-label">Intro (optionnel)</label>
+      <textarea rows="2" placeholder="Le mot du coach…" onchange="_twSessField('introText',this.value)">${esc(s.introText)}</textarea>
+    </div>
+    <div class="fld">
+      <label class="fld-label">Notes récup (optionnel)</label>
+      <textarea rows="2" placeholder="Étirements, hydratation…" onchange="_twSessField('notesRecovery',this.value)">${esc(s.notesRecovery)}</textarea>
+    </div>
+    ${tpls.length ? `
+      <div class="eyebrow-muted" style="margin:14px 0 6px">Partir d'un modèle</div>
+      <select onchange="if(this.value)_twApplyTemplate(this.value);this.value=''" style="width:100%">
+        <option value="">— Choisir un modèle (remplace les blocs) —</option>
+        ${tpls.map(t => `<option value="${esc(t.id)}">${esc(t.name || 'Sans nom')} · ${(t.blocks || []).length} bloc(s)</option>`).join('')}
+      </select>` : ''}
+    <div class="eyebrow-muted" style="margin:14px 0 8px">Blocs</div>
+    <div style="display:flex;flex-direction:column;gap:6px">
+      ${(s.blocks || []).map((b, i) => {
+        const t = TRAINING_BLOCK_TYPES.find(x => x.id === b.type) || TRAINING_BLOCK_TYPES[5];
+        return `
+          <div style="display:flex;align-items:center;gap:4px;border:1px solid var(--border-soft);border-radius:8px;padding:8px;background:var(--surface)">
+            <div style="display:flex;flex-direction:column;gap:2px;flex:none">
+              <button class="btn-icon" onclick="_twMoveBlock('${b.id}',-1)" ${i === 0 ? 'disabled' : ''} title="Monter" style="padding:0 4px">▲</button>
+              <button class="btn-icon" onclick="_twMoveBlock('${b.id}',1)" ${i === (s.blocks.length - 1) ? 'disabled' : ''} title="Descendre" style="padding:0 4px">▼</button>
+            </div>
+            <button type="button" onclick="_twOpenBlock('${b.id}')" style="flex:1;min-width:0;text-align:left;background:none;border:none;cursor:pointer;padding:2px 4px">
+              <div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${t.icon} ${esc(b.name || t.label)}</div>
+              <div style="font-size:10px;color:var(--ink-3)">${esc(_twBlockSummary(b))}</div>
+            </button>
+            <button class="btn-icon" onclick="_twDelBlock('${b.id}')" title="Supprimer" style="flex:none">🗑</button>
+          </div>`;
+      }).join('') || `<div style="font-size:11px;color:var(--ink-3);padding:8px">Aucun bloc.</div>`}
+    </div>
+    <button class="btn btn-secondary btn-block" onclick="_twAddBlock()" style="margin-top:8px">＋ Ajouter un bloc</button>
+    <button class="btn btn-ghost btn-block" onclick="_twSaveAsTemplate()" style="margin-top:6px">📋 Enregistrer comme modèle</button>`;
+}
+// Résumé d'un bloc : quels niveaux sont remplis + drills liés.
+function _twBlockSummary(b) {
+  const filled = TRAINING_LEVELS.filter(l => _trainingBlockLevel(b, l).text);
+  const drills = TRAINING_LEVELS.filter(l => _trainingBlockLevel(b, l).drill_id).length;
+  const bits = [];
+  bits.push(filled.length ? filled.map(l => TRAINING_LEVEL_LABEL[l]).join('/') : '⚠ aucun niveau rempli');
+  if (drills) bits.push('⚡ ' + drills + ' drill' + (drills > 1 ? 's' : ''));
+  if (b.track_distance) bits.push('📏 distance');
+  return bits.join(' · ');
+}
+
+// Étape 3 (détail du détail) — un bloc : type, consignes, 3 niveaux, distance.
+function _twBlockEditorHtml() {
+  const b = _twBlock();
+  if (!b) return '<div class="empty"><div class="empty-icon">⚠</div><div class="empty-title">Bloc introuvable</div></div>';
+  const lvlRow = (level, icon, label) => {
+    const lv = _trainingBlockLevel(b, level);
+    const d = _trainingBlockDrill(b, level);
+    return `
+      <div style="border:1px solid var(--border-soft);border-radius:8px;padding:10px;margin-bottom:8px">
+        <div style="font-family:'Anton';font-size:12px;text-transform:uppercase;margin-bottom:6px">${icon} ${label}</div>
+        <input type="text" value="${esc(lv.text)}" placeholder="Ex : 3×10 · 2 km · 30s" onchange="_twBlockLevelText('${level}',this.value)" style="margin-bottom:6px">
+        <select onchange="_twBlockLevelDrill('${level}',this.value)" style="width:100%">
+          <option value="">— Aucun drill lié —</option>
+          ${activeDrills().filter(x => !x.isPreset).map(x => `
+            <option value="${esc(x.id)}" ${lv.drill_id === x.id ? 'selected' : ''}>${esc(_twDrillLabel(x))}</option>
+          `).join('')}
+        </select>
+        ${lv.drill_id && !d ? `<div style="font-size:10px;color:var(--red,#dc2626);margin-top:4px">⚠ Drill lié introuvable (supprimé ?) — le bouton « Lancer » ne s'affichera pas.</div>` : ''}
+      </div>`;
+  };
+  return `
+    <div class="eyebrow-muted" style="margin-bottom:8px">Type</div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px">
+      ${TRAINING_BLOCK_TYPES.map(t => `
+        <button type="button" class="btn ${b.type === t.id ? 'btn-primary' : 'btn-secondary'}" aria-pressed="${b.type === t.id}"
+          onclick="_twBlockType('${t.id}')" style="padding:8px 10px;font-size:11px">${t.icon} ${t.label}</button>
+      `).join('')}
+    </div>
+    <div class="fld">
+      <label class="fld-label">Nom du bloc</label>
+      <input type="text" value="${esc(b.name)}" placeholder="Gainage" onchange="_twBlockField('name',this.value)">
+    </div>
+    <div class="fld">
+      <label class="fld-label">Consignes (optionnel)</label>
+      <textarea rows="3" placeholder="Dos droit, respiration…" onchange="_twBlockField('instructions',this.value)">${esc(b.instructions)}</textarea>
+    </div>
+    <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--bg-3);border-radius:8px;cursor:pointer;margin-bottom:14px">
+      <input type="checkbox" ${b.track_distance ? 'checked' : ''} onchange="_twBlockTrack(this.checked)" style="width:20px;height:20px;flex:none">
+      <span style="font-size:13px">📏 Demander la distance parcourue à la validation</span>
+    </label>
+    <div class="eyebrow-muted" style="margin-bottom:8px">Les 3 niveaux de contrat</div>
+    <div style="font-size:10px;color:var(--ink-3);margin-bottom:8px;line-height:1.5">Laisse un niveau vide pour qu'il n'apparaisse pas chez la joueuse. Un drill lié affiche un bouton « Lancer » qui ouvre le drill en plein écran.</div>
+    ${lvlRow('min', '🟢', 'Minimum')}
+    ${lvlRow('med', '🟠', 'Medium')}
+    ${lvlRow('ultra', '🔴', 'Ultra')}`;
+}
+// Libellé d'un drill dans les <select> de liaison (le mode compte : il décide du
+// runtime lancé côté joueuse).
+function _twDrillLabel(d) {
+  const mode = d.mode === 'circuit' ? '🔄 Circuit' : d.mode === 'interval' ? '⏳ Fractionné' : '⚡ Réaction';
+  return mode + ' · ' + (d.name || 'Sans nom');
+}
+
+// Étape 4 — récapitulatif + publication.
+function _twPublishHtml() {
+  const w = _tw();
+  const dates = _dateRangeForProgram(w.startDate, w.endDate, w.daysActive);
+  const problems = _twValidate();
+  const line = (k, v) => `<div style="display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid var(--border-soft)"><span style="color:var(--ink-3);font-size:11px">${k}</span><span style="font-size:12px;text-align:right">${v}</span></div>`;
+  return `
+    ${problems.length ? `
+      <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--red,#dc2626);border-radius:6px;font-size:11px;color:var(--ink-2);line-height:1.7;margin-bottom:14px">
+        <b>À corriger avant de publier</b><br>${problems.map(p => '• ' + esc(p)).join('<br>')}
+      </div>` : `
+      <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--green,#15803d);border-radius:6px;font-size:11px;color:var(--ink-2);margin-bottom:14px">
+        ✓ Prêt à publier. Les joueuses verront le programme sur leur accueil.
+      </div>`}
+    ${line('Nom', esc(w.name || '—'))}
+    ${line('Période', esc((w.startDate || '?') + ' → ' + (w.endDate || '?')))}
+    ${line('Jours', esc(w.daysActive.map(d => TRAINING_DAY_LABELS[d]).join(', ') || '—'))}
+    ${line('Séances prévues', dates.length)}
+    ${line('Barème', `${w.config.points.min}/${w.config.points.med}/${w.config.points.ultra} · ×${w.config.squad_multiplier} · +${w.config.post_bonus}`)}
+    ${line('Rappel', w.config.remind_hour + 'h')}
+    ${w.daysActive.map(d => {
+      const s = w.sessions[d];
+      return line(TRAINING_DAY_LABELS[d], s && (s.blocks || []).length ? `${esc(s.name || '—')} · ${s.blocks.length} bloc(s)` : '<span style="color:var(--red,#dc2626)">vide</span>');
+    }).join('')}`;
+}
+// Validation de publication. Retourne la liste des problèmes (vide = OK).
+// Un jour actif sans bloc est bloquant : il produirait une séance vide chez la
+// joueuse, donc une case « à faire » impossible à faire.
+function _twValidate() {
+  const w = _tw(); if (!w) return ['Wizard fermé.'];
+  const out = [];
+  if (!(w.name || '').trim()) out.push('Le programme n\'a pas de nom.');
+  if (!w.startDate || !w.endDate) out.push('Dates de début/fin manquantes.');
+  else if (w.endDate < w.startDate) out.push('La date de fin est avant la date de début.');
+  if (!w.daysActive.length) out.push('Aucun jour actif.');
+  if (!_dateRangeForProgram(w.startDate, w.endDate, w.daysActive).length) out.push('Aucune séance ne tombe dans la période choisie.');
+  w.daysActive.forEach(d => {
+    const s = w.sessions[d];
+    if (!s || !(s.blocks || []).length) { out.push(TRAINING_DAY_LABELS[d] + ' : aucun bloc.'); return; }
+    if (!(s.name || '').trim()) out.push(TRAINING_DAY_LABELS[d] + ' : séance sans nom.');
+    const orphan = (s.blocks || []).filter(b => !TRAINING_LEVELS.some(l => _trainingBlockLevel(b, l).text));
+    if (orphan.length) out.push(TRAINING_DAY_LABELS[d] + ' : ' + orphan.length + ' bloc(s) sans aucun niveau rempli.');
+  });
+  return out;
+}
+
+// Publication : upsert du programme + réconciliation des sessions.
+// Les jours retirés de daysActive voient leur session SOFT-DELETED (jamais un
+// hard delete : les training_completions déjà validées la référencent en FK, et
+// l'historique/le classement doivent rester lisibles).
+function saveTrainingProgram() {
+  const w = _tw(); if (!w || !_trainingIsCoach()) return;
+  if (_denyIfScopedCoach()) return;
+  const problems = _twValidate();
+  if (problems.length) { try { alert('À corriger :\n\n' + problems.map(p => '• ' + p).join('\n')); } catch (e) {} return; }
+  const now = Date.now();
+  const name = (w.name || '').trim().slice(0, 80) || 'Programme';
+
+  let p;
+  if (w.editingId) {
+    p = activeTrainingPrograms().find(x => x.id === w.editingId);
+    if (!p) { state._trainingWizard = null; closeModal(); return; }
+    Object.assign(p, {
+      name, description: (w.description || '').trim(), startDate: w.startDate, endDate: w.endDate,
+      daysActive: _trainingCleanDays(w.daysActive), scoringConfig: JSON.parse(JSON.stringify(w.config)),
+      teamTag: w.teamTag || 'both', isActive: true, updatedAt: now
+    });
+  } else {
+    p = {
+      id: uid(), name, description: (w.description || '').trim(),
+      startDate: w.startDate, endDate: w.endDate, daysActive: _trainingCleanDays(w.daysActive),
+      scoringConfig: JSON.parse(JSON.stringify(w.config)),
+      createdBy: (currentCoach() || {}).id || null, teamTag: w.teamTag || 'both',
+      isActive: true, createdAt: now, updatedAt: now, deletedAt: null
+    };
+    state.trainingPrograms = state.trainingPrograms || [];
+    state.trainingPrograms.unshift(p);
+  }
+
+  state.trainingSessions = state.trainingSessions || [];
+  const existing = _trainingSessionsOf(p.id);
+  // 1) Créer / mettre à jour les jours actifs.
+  w.daysActive.forEach((d, i) => {
+    const src = _twSession(d);
+    const payload = {
+      name: (src.name || '').trim() || (TRAINING_DAY_LABELS[d] + ' — séance'),
+      formatLabel: (src.formatLabel || '').trim(),
+      introText: (src.introText || '').trim(),
+      notesRecovery: (src.notesRecovery || '').trim(),
+      blocks: JSON.parse(JSON.stringify(src.blocks || [])),
+      position: i, updatedAt: now, deletedAt: null
+    };
+    const cur = existing.find(s => s.dayOfWeek === d) || (src.id ? state.trainingSessions.find(s => s.id === src.id) : null);
+    if (cur) { Object.assign(cur, payload, { programId: p.id, dayOfWeek: d, isTemplate: false }); }
+    else {
+      state.trainingSessions.unshift({
+        id: uid(), programId: p.id, dayOfWeek: d, isTemplate: false,
+        createdAt: now, ...payload
+      });
+    }
+  });
+  // 2) Soft-delete des jours retirés du programme.
+  existing.filter(s => !w.daysActive.includes(s.dayOfWeek)).forEach(s => { s.deletedAt = now; s.updatedAt = now; });
+
+  persist(); _trainingFlush();
+  state._trainingWizard = null;
+  closeModal();
+  try { showToast('✓ Programme « ' + name + ' » publié'); } catch (e) {}
+  try { _trainingNotifyPublished(p); } catch (e) {}
+  try { render(); } catch (e) {}
+}
+
+// Dépublier (is_active=false) : le programme disparaît de chez la joueuse mais
+// l'historique de points reste intact. Réversible.
+function toggleTrainingProgramActive(id) {
+  if (!_trainingIsCoach() || _denyIfScopedCoach()) return;
+  const p = activeTrainingPrograms().find(x => x.id === id);
+  if (!p) return;
+  p.isActive = p.isActive === false;
+  p.updatedAt = Date.now();
+  persist(); _trainingFlush();
+  try { showToast(p.isActive ? '✓ Programme publié' : '⏸ Programme dépublié'); } catch (e) {}
+  render();
+}
+
+// Suppression : soft-delete du programme ET de ses sessions. Les validations
+// (points déjà gagnés) sont CONSERVÉES — on ne réécrit pas l'historique d'une
+// joueuse. Elles deviennent simplement invisibles avec leur programme.
+function deleteTrainingProgram(id) {
+  if (!_trainingIsCoach() || _denyIfScopedCoach()) return;
+  const p = activeTrainingPrograms().find(x => x.id === id);
+  if (!p) return;
+  const n = _trainingCompletionsOf(p.id).length;
+  const msg = 'Supprimer « ' + (p.name || 'ce programme') + ' » ?'
+    + (n ? '\n\n' + n + ' validation(s) déjà enregistrée(s) seront conservées en base (historique), mais ne seront plus affichées.' : '')
+    + '\n\nCette action est irréversible depuis l\'app.';
+  let okDel = false;
+  try { okDel = confirm(msg); } catch (e) { okDel = false; }
+  if (!okDel) return;
+  const now = Date.now();
+  p.deletedAt = now; p.updatedAt = now;
+  _trainingSessionsOf(p.id).forEach(s => { s.deletedAt = now; s.updatedAt = now; });
+  persist(); _trainingFlush();
+  try { showToast('🗑 Programme supprimé'); } catch (e) {}
+  render();
+}
+
+// --- Coach : carte home + bibliothèque de programmes ------------------------
+// Carte d'accueil coach. Occupe l'emplacement de l'ancien bloc « prépa estivale »
+// (offseason) dans renderHomeCoach, retiré de la nav en même temps que ce module
+// est arrivé. Le module offseason lui-même est INTACT (renderProgramSelector,
+// renderOffseason*, openOffseasonConfig, renderPlayerProgramme, table `programs`,
+// state.offseason) et sa route #/programme reste routable : conservé pour l'audit
+// et une restauration éventuelle. Ne pas supprimer ces fonctions.
+function renderTrainingCoachCard() {
+  if (!_trainingIsCoach()) return '';
+  const progs = _coachTrainingPrograms();
+  const today = isoDate(new Date());
+  const running = progs.filter(p => _trainingProgramRunning(p, today));
+  if (!progs.length) {
+    if (isScopedCoach()) return '';
+    return `
+      <div style="padding:0 18px;margin-bottom:18px">
+        <div onclick="openTrainingWizard()" style="border:1px dashed var(--border);border-radius:12px;padding:16px;cursor:pointer;text-align:center">
+          <div style="font-size:22px;margin-bottom:4px">💪</div>
+          <div style="font-family:'Anton';font-size:14px;text-transform:uppercase">Prépa physique</div>
+          <div style="font-size:11px;color:var(--ink-3);margin-top:4px">Crée un programme : séances par jour, 3 niveaux, points et classement.</div>
+        </div>
+      </div>`;
+  }
+  return `
+    <div class="section-header">
+      <div>
+        <div class="eyebrow">${running.length ? running.length + ' en cours' : 'Aucun en cours'}</div>
+        <h2 class="display-md mt-2">Prépa physique</h2>
+      </div>
+      <button class="section-action" onclick="openTrainingPrograms()">Gérer →</button>
+    </div>
+    <div style="padding:0 18px;display:flex;flex-direction:column;gap:8px;margin-bottom:18px">
+      ${(running.length ? running : progs.slice(0, 2)).map(p => {
+        const done = _trainingCompletionsOf(p.id).length;
+        const pool = _trainingPoolFor(p);
+        return `
+          <div onclick="openTrainingDashboard('${p.id}')" style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;background:var(--surface);cursor:pointer;display:flex;align-items:center;gap:10px">
+            <div style="flex:1;min-width:0">
+              <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p.name || 'Programme')}</div>
+              <div style="font-size:11px;color:var(--ink-3)">${esc(_trainingPeriodLabel(p))} · ${p.daysActive.map(d => TRAINING_DAY_LABELS[d].slice(0, 3)).join(' ')}</div>
+            </div>
+            <div style="text-align:right;flex:none">
+              <div style="font-family:'Anton';font-size:18px;color:var(--orange)">${done}</div>
+              <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">séance${done > 1 ? 's' : ''}${pool.length ? ' · ' + pool.length + ' j.' : ''}</div>
+            </div>
+          </div>`;
+      }).join('')}
+    </div>`;
+}
+// Libellé court d'une période ('13 juil. → 23 août').
+function _trainingPeriodLabel(p) {
+  if (!p || !p.startDate || !p.endDate) return '—';
+  try { return formatDate(p.startDate, 'short') + ' → ' + formatDate(p.endDate, 'short'); }
+  catch (e) { return p.startDate + ' → ' + p.endDate; }
+}
+// L'effectif concerné par un programme (scopé équipe + saison active).
+function _trainingPoolFor(p) {
+  const sid = getActiveSeasonId();
+  const team = (!p || !p.teamTag || p.teamTag === 'both') ? 'all' : p.teamTag;
+  const pool = (_seasonsLoaded() && sid) ? getSeasonPlayers(sid, { team }) : (state.players || []);
+  return visiblePlayersForUser(pool);
+}
+
+// Bibliothèque coach : liste des programmes + CRUD.
+function openTrainingPrograms() {
+  if (!_trainingIsCoach()) return;
+  const progs = _coachTrainingPrograms();
+  const today = isoDate(new Date());
+  const scoped = isScopedCoach();
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">${progs.length} programme${progs.length > 1 ? 's' : ''}</div>
+        <div class="modal-title">Prépa physique</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      ${progs.length ? progs.map(p => {
+        const running = _trainingProgramRunning(p, today);
+        const past = p.endDate && p.endDate < today;
+        const badge = running ? '<span style="color:var(--green,#15803d)">● En cours</span>'
+          : p.isActive === false ? '<span style="color:var(--ink-3)">⏸ Dépublié</span>'
+          : past ? '<span style="color:var(--ink-3)">✓ Terminé</span>'
+          : '<span style="color:var(--orange)">◷ À venir</span>';
+        return `
+          <div style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;margin-bottom:8px;background:var(--surface)">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+              <div style="flex:1;min-width:0">
+                <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p.name || 'Programme')}</div>
+                <div style="font-size:10px;color:var(--ink-3)">${badge} · ${esc(_trainingPeriodLabel(p))} · ${p.daysActive.map(d => TRAINING_DAY_LABELS[d].slice(0, 3)).join(' ')}</div>
+              </div>
+            </div>
+            ${p.description ? `<div style="font-size:11px;color:var(--ink-2);margin-bottom:8px">${esc(p.description)}</div>` : ''}
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
+              <button class="btn btn-secondary" onclick="openTrainingDashboard('${p.id}')" style="padding:6px 10px;font-size:11px">📊 Suivi</button>
+              ${scoped ? '' : `
+                <button class="btn btn-secondary" onclick="openTrainingWizard('${p.id}')" style="padding:6px 10px;font-size:11px">✎ Éditer</button>
+                <button class="btn btn-secondary" onclick="toggleTrainingProgramActive('${p.id}')" style="padding:6px 10px;font-size:11px">${p.isActive === false ? '▶ Publier' : '⏸ Dépublier'}</button>
+                <button class="btn btn-ghost" onclick="deleteTrainingProgram('${p.id}')" style="padding:6px 10px;font-size:11px">🗑</button>`}
+            </div>
+          </div>`;
+      }).join('') : `<div class="empty"><div class="empty-icon">💪</div><div class="empty-title">Aucun programme</div><div class="empty-desc">Crée ton premier programme de prépa ci-dessous.</div></div>`}
+    </div>
+    <div class="modal-footer">
+      ${scoped ? `<div style="font-size:11px;color:var(--ink-3);padding:4px">🔒 Création réservée à l'admin.</div>`
+        : `<button class="btn btn-primary btn-block" onclick="openTrainingWizard()">＋ Nouveau programme</button>`}
+    </div>
+  `);
+}
+
+// --- Cumul + classement -----------------------------------------------------
+// Classement d'un programme. Les points sont la SOMME des points_total FIGÉS
+// dans chaque validation — jamais un recalcul à partir du barème courant : si le
+// coach change le barème en cours de programme, l'historique doit rester tel
+// qu'il a été gagné (contrairement aux défis auto, qui eux recomputent à la
+// lecture — cf. autoChallengeScores).
+function _trainingLeaderboard(programId) {
+  const p = activeTrainingPrograms().find(x => x.id === programId);
+  if (!p) return [];
+  const comps = _trainingCompletionsOf(programId);
+  const byPlayer = {};
+  comps.forEach(c => {
+    const e = byPlayer[c.playerId] || (byPlayer[c.playerId] = { points: 0, sessions: 0, km: 0, squads: 0, posts: 0 });
+    e.points += Number(c.pointsTotal) || 0;
+    e.sessions++;
+    if (Number.isFinite(c.runningDistanceKm)) e.km += c.runningDistanceKm;
+    if (c.squadTeammateId) e.squads++;
+    if (c.postPhotoUrl) e.posts++;
+  });
+  // L'effectif fait foi (et pas seulement ceux qui ont validé) : une joueuse à 0
+  // doit apparaître, sinon le classement cache justement celles à relancer.
+  return _trainingPoolFor(p)
+    .map(pl => ({ id: pl.id, name: pl.name, num: pl.num, ...(byPlayer[pl.id] || { points: 0, sessions: 0, km: 0, squads: 0, posts: 0 }) }))
+    .sort((a, b) => b.points - a.points || b.sessions - a.sessions);
+}
+// Nombre de séances prévues jusqu'à aujourd'hui (dénominateur d'assiduité). On
+// s'arrête à aujourd'hui : compter les séances futures ferait afficher une
+// assiduité en chute libre dès le 1er jour du programme.
+function _trainingPlannedToDate(p, todayISO) {
+  const today = todayISO || isoDate(new Date());
+  const end = p.endDate < today ? p.endDate : today;
+  return _dateRangeForProgram(p.startDate, end, p.daysActive).length;
+}
+
+function openTrainingDashboard(programId) {
+  const p = activeTrainingPrograms().find(x => x.id === programId);
+  if (!p) return;
+  const rows = _trainingLeaderboard(programId);
+  const planned = _trainingPlannedToDate(p);
+  const max = Math.max(...rows.map(r => r.points), 1);
+  const anyScore = rows.some(r => r.points > 0);
+  const myPid = (state.auth && state.auth.role === 'player') ? state.auth.playerId : null;
+  const totalDone = rows.reduce((a, r) => a + r.sessions, 0);
+  const totalKm = rows.reduce((a, r) => a + r.km, 0);
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">${esc(_trainingPeriodLabel(p))}</div>
+        <div class="modal-title">${esc(p.name || 'Programme')}</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="stat-grid" style="padding:0;margin-bottom:16px">
+        <div class="stat-tile"><div class="stat-tile-label">Séances faites</div><div class="stat-tile-value">${totalDone}</div><div class="stat-tile-sub">sur ${planned} prévue${planned > 1 ? 's' : ''} à ce jour</div></div>
+        <div class="stat-tile"><div class="stat-tile-label">Joueuses actives</div><div class="stat-tile-value">${rows.filter(r => r.sessions > 0).length}<span style="color:var(--ink-4)"> · ${rows.length}</span></div><div class="stat-tile-sub">au moins 1 séance</div></div>
+        <div class="stat-tile"><div class="stat-tile-label">Distance</div><div class="stat-tile-value">${totalKm ? Math.round(totalKm) : 0}</div><div class="stat-tile-sub">km cumulés</div></div>
+        <div class="stat-tile"><div class="stat-tile-label">Points</div><div class="stat-tile-value">${rows.reduce((a, r) => a + r.points, 0)}</div><div class="stat-tile-sub">tous cumuls</div></div>
+      </div>
+      <div class="eyebrow-muted" style="margin-bottom:8px">Classement · points</div>
+      <div style="display:flex;flex-direction:column;gap:4px">
+        ${rows.length ? rows.map((e, i) => {
+          // Pas de podium sur des scores nuls (même règle que les défis) : tant
+          // que personne n'a marqué, le classement reste neutre.
+          const medal = (e.points > 0 && anyScore) ? (i === 0 ? 'gold' : i === 1 ? 'silver' : i === 2 ? 'bronze' : '') : '';
+          const isMine = myPid && myPid === e.id;
+          const pct = planned ? Math.min(100, Math.round((e.sessions / planned) * 100)) : 0;
+          return `
+            <div class="lb-row${isMine ? ' lb-row-me' : ''}" style="cursor:default">
+              <div class="lb-medal ${medal}">${i + 1}</div>
+              <div>
+                <div style="font-family:'Anton';font-size:14px;text-transform:uppercase">${isMine ? '⭐ ' : ''}#${e.num} ${esc(e.name)}${isMine ? ' · TOI' : ''}</div>
+                <div class="lb-progress"><div class="lb-progress-fill" style="width:${(e.points / max) * 100}%"></div></div>
+                <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">
+                  ${e.sessions}/${planned} séance(s) · ${pct}%${e.squads ? ' · 👯' + e.squads : ''}${e.posts ? ' · 📸' + e.posts : ''}${e.km ? ' · 🏃' + (Math.round(e.km * 10) / 10) + 'km' : ''}
+                </div>
+              </div>
+              <div style="text-align:right">
+                <div style="font-family:'Anton';font-size:20px;color:${isMine ? 'var(--orange)' : 'var(--ink)'}">${e.points}</div>
+                <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">pts</div>
+              </div>
+            </div>`;
+        }).join('') : `<div class="empty"><div class="empty-icon">👥</div><div class="empty-title">Effectif vide</div><div class="empty-desc">Aucune joueuse ne correspond à l'effectif de ce programme.</div></div>`}
+      </div>
+    </div>
+    <div class="modal-footer">
+      ${_trainingIsCoach() && !isScopedCoach() ? `<button class="btn btn-secondary btn-block" onclick="openTrainingWizard('${p.id}')">✎ Éditer le programme</button>` : ''}
+    </div>
+  `);
+}
+
+// ============================================================
+// PRÉPA « FULL PACKAGE » — côté joueuse (exécution + validation)
+// ============================================================
+
+// Les séances « dues » d'un programme à l'instant `nowMs` : celle du jour, plus
+// celle de la veille si elle est encore rattrapable et non validée.
+// Deux jours suffisent : la fenêtre est de 48 h depuis minuit, donc J-2 est déjà
+// périmé par construction (_isRattrapageValid le rejetterait de toute façon).
+function _trainingDueFor(program, playerId, nowMs) {
+  const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const out = [];
+  [0, 1].forEach(back => {
+    const d = new Date(now - back * 86400000);
+    const iso = isoDate(d);
+    if (!program.startDate || !program.endDate) return;
+    if (iso < program.startDate || iso > program.endDate) return;
+    const dow = _trainingDayOfWeek(iso);
+    if (!program.daysActive.includes(dow)) return;
+    if (!_isRattrapageValid(iso, now)) return;
+    const session = _programSessionForDay(program, dow);
+    if (!session) return;
+    const done = _trainingCompletionFor(session.id, playerId, iso);
+    out.push({ programId: program.id, session, datePlanned: iso, done, isRattrapage: back > 0 });
+  });
+  return out;
+}
+// Toutes les séances dues de la joueuse connectée, tous programmes confondus.
+function _myTrainingDue(nowMs) {
+  const pid = (state.auth && state.auth.role === 'player') ? state.auth.playerId : null;
+  if (!pid) return [];
+  const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const out = [];
+  _myTrainingPrograms(isoDate(new Date(now))).forEach(p => { out.push(..._trainingDueFor(p, pid, now)); });
+  // À faire d'abord, et le rattrapage avant la séance du jour (il périme plus tôt).
+  return out.sort((a, b) => (a.done ? 1 : 0) - (b.done ? 1 : 0) || (b.isRattrapage ? 1 : 0) - (a.isRattrapage ? 1 : 0));
+}
+// Heures restantes avant péremption d'une séance (badge d'urgence).
+function _trainingHoursLeft(datePlanned, nowMs) {
+  const start = _trainingDayStartMs(datePlanned);
+  if (start === null) return 0;
+  return Math.max(0, Math.ceil((start + TRAINING_RATTRAPAGE_MS - (Number.isFinite(nowMs) ? nowMs : Date.now())) / 3600000));
+}
+
+// Carte d'accueil joueuse : « Programmes actifs » (plusieurs possibles).
+function renderTrainingPlayerCard() {
+  if (!(state.auth && state.auth.role === 'player')) return '';
+  const pid = state.auth.playerId;
+  const now = Date.now();
+  const progs = _myTrainingPrograms(isoDate(new Date(now)));
+  if (!progs.length) return '';
+  const due = _myTrainingDue(now);
+  return `
+    <div class="section-header">
+      <div>
+        <div class="eyebrow">${progs.length > 1 ? progs.length + ' programmes actifs' : 'Programme actif'}</div>
+        <h2 class="display-md mt-2">Ma prépa</h2>
+      </div>
+    </div>
+    <div style="padding:0 18px;display:flex;flex-direction:column;gap:8px;margin-bottom:18px">
+      ${due.length ? due.map(d => {
+        const p = progs.find(x => x.id === d.programId);
+        const pts = _trainingCompletionsOf(d.programId, pid).reduce((a, c) => a + (Number(c.pointsTotal) || 0), 0);
+        const left = _trainingHoursLeft(d.datePlanned, now);
+        if (d.done) {
+          return `
+            <div style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;background:var(--surface);opacity:.75;display:flex;align-items:center;gap:10px">
+              <div style="font-size:20px;flex:none">✓</div>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(d.session.name || 'Séance')}${d.isRattrapage ? ' · hier' : ''}</div>
+                <div style="font-size:10px;color:var(--ink-3)">${esc(_completionSummary(d.done))}</div>
+              </div>
+            </div>`;
+        }
+        return `
+          <div onclick="openTrainingSession('${d.programId}','${d.session.id}','${d.datePlanned}')"
+            style="border:1px solid ${d.isRattrapage ? 'var(--orange)' : 'var(--border-soft)'};border-radius:10px;padding:12px;background:var(--surface);cursor:pointer">
+            <div style="display:flex;align-items:center;gap:10px">
+              <div style="font-size:20px;flex:none">${d.isRattrapage ? '⏳' : '💪'}</div>
+              <div style="flex:1;min-width:0">
+                <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(d.session.name || 'Séance')}</div>
+                <div style="font-size:10px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+                  ${esc(p ? (p.name || '') : '')}${d.session.formatLabel ? ' · ' + esc(d.session.formatLabel) : ''} · ${pts} pts cumulés
+                </div>
+              </div>
+              <div style="color:var(--ink-3);flex:none">›</div>
+            </div>
+            ${d.isRattrapage ? `
+              <div style="margin-top:8px;padding:6px 8px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:4px;font-size:10px;color:var(--ink-2)">
+                ⏳ Rattrapage possible — séance d'hier, encore ${left} h pour la valider.
+              </div>` : ''}
+          </div>`;
+      }).join('') : progs.map(p => {
+        const pts = _trainingCompletionsOf(p.id, pid).reduce((a, c) => a + (Number(c.pointsTotal) || 0), 0);
+        return `
+          <div onclick="openTrainingDashboard('${p.id}')" style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;background:var(--surface);cursor:pointer;display:flex;align-items:center;gap:10px">
+            <div style="font-size:20px;flex:none">🌴</div>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p.name || 'Programme')}</div>
+              <div style="font-size:10px;color:var(--ink-3)">Repos aujourd'hui · ${p.daysActive.map(d => TRAINING_DAY_LABELS[d].slice(0, 3)).join(' ')} · ${pts} pts</div>
+            </div>
+            <div style="color:var(--ink-3);flex:none">›</div>
+          </div>`;
+      }).join('')}
+    </div>`;
+}
+
+// --- Écran de séance --------------------------------------------------------
+// Le niveau choisi est ÉPHÉMÈRE (state._trainingView, jamais persisté) : il n'est
+// figé qu'au moment de la validation, dans contract_level.
+function openTrainingSession(programId, sessionId, datePlanned) {
+  const p = activeTrainingPrograms().find(x => x.id === programId);
+  const s = (state.trainingSessions || []).find(x => x.id === sessionId && !x.deletedAt);
+  if (!p || !s) return;
+  const cur = state._trainingView;
+  state._trainingView = {
+    programId, sessionId, datePlanned,
+    level: (cur && cur.sessionId === sessionId && cur.level) ? cur.level : 'med'
+  };
+  renderTrainingSession();
+}
+function _tvLevel(l) { const v = state._trainingView; if (!v) return; v.level = l; renderTrainingSession(); }
+
+function renderTrainingSession() {
+  const v = state._trainingView; if (!v) return;
+  const p = activeTrainingPrograms().find(x => x.id === v.programId);
+  const s = (state.trainingSessions || []).find(x => x.id === v.sessionId && !x.deletedAt);
+  if (!p || !s) { closeModal(); return; }
+  const pid = (state.auth && state.auth.role === 'player') ? state.auth.playerId : null;
+  const done = pid ? _trainingCompletionFor(s.id, pid, v.datePlanned) : null;
+  const cfg = _trainingConfig(p);
+  const now = Date.now();
+  const stillValid = _isRattrapageValid(v.datePlanned, now);
+  const left = _trainingHoursLeft(v.datePlanned, now);
+  // Un niveau sans texte n'est pas proposé : le coach ne l'a pas défini.
+  const availLevels = TRAINING_LEVELS.filter(l => (s.blocks || []).some(b => _trainingBlockLevel(b, l).text));
+  if (availLevels.length && !availLevels.includes(v.level)) v.level = availLevels[0];
+  const lvl = v.level;
+
+  const blocksHtml = (s.blocks || []).map((b, i) => {
+    const lv = _trainingBlockLevel(b, lvl);
+    if (!lv.text) return '';
+    const t = TRAINING_BLOCK_TYPES.find(x => x.id === b.type) || TRAINING_BLOCK_TYPES[5];
+    const d = _trainingBlockDrill(b, lvl);
+    return `
+      <div style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;margin-bottom:8px;background:var(--surface)">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <div style="font-size:16px;flex:none">${t.icon}</div>
+          <div style="flex:1;min-width:0">
+            <div style="font-family:'Anton';font-size:13px;text-transform:uppercase">${esc(b.name || t.label)}</div>
+          </div>
+          <div style="font-family:'Anton';font-size:15px;color:var(--orange);flex:none">${esc(lv.text)}</div>
+        </div>
+        ${b.instructions ? `<div class="md-content" style="font-size:11px;color:var(--ink-2);margin-bottom:8px">${mdToHtml(b.instructions)}</div>` : ''}
+        ${b.track_distance ? `<div style="font-size:10px;color:var(--ink-3);margin-bottom:8px">📏 Ta distance te sera demandée à la validation.</div>` : ''}
+        ${d ? `<button class="btn btn-primary btn-block" onclick="launchTrainingDrill('${d.id}')" style="margin-top:4px">▶ Lancer · ${esc(_twDrillLabel(d))}</button>` : ''}
+      </div>`;
+  }).join('');
+
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">${esc(p.name || 'Prépa')} · ${esc(formatDate(v.datePlanned, 'short'))}${v.datePlanned !== isoDate(new Date(now)) ? ' · rattrapage' : ''}</div>
+        <div class="modal-title">${esc(s.name || 'Séance')}</div>
+      </div>
+      <button class="modal-close" onclick="state._trainingView=null;closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      ${done ? `
+        <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--green,#15803d);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:14px">
+          ✓ <b>Séance validée</b> — ${esc(_completionSummary(done))}
+        </div>` : !stillValid ? `
+        <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--ink-3);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:14px">
+          ⌛ <b>Délai dépassé</b> — le rattrapage était possible jusqu'à 48 h après le jour prévu. Tu peux toujours faire la séance, mais elle ne compte plus de points.
+        </div>` : left <= 24 ? `
+        <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:14px">
+          ⏳ Encore <b>${left} h</b> pour valider cette séance.
+        </div>` : ''}
+      ${s.formatLabel ? `<div style="font-family:'JetBrains Mono';font-size:10px;color:var(--ink-3);text-transform:uppercase;margin-bottom:10px">${esc(s.formatLabel)}</div>` : ''}
+      ${s.introText ? `<div class="md-content" style="font-size:12px;color:var(--ink-2);margin-bottom:14px">${mdToHtml(s.introText)}</div>` : ''}
+
+      <div class="eyebrow-muted" style="margin-bottom:8px">Ton contrat du jour</div>
+      <div class="segmented" style="margin-bottom:6px">
+        ${[['min', '🟢 Minimum'], ['med', '🟠 Medium'], ['ultra', '🔴 Ultra']].filter(([l]) => availLevels.includes(l)).map(([l, lab]) => `
+          <button class="segmented-btn ${lvl === l ? 'active' : ''}" onclick="_tvLevel('${l}')">${lab}</button>
+        `).join('')}
+      </div>
+      <div style="font-size:10px;color:var(--ink-3);margin-bottom:14px">
+        ${cfg.points[lvl]} pts de base · ×${cfg.squad_multiplier} en squad · +${cfg.post_bonus} avec un post
+      </div>
+
+      ${blocksHtml || `<div class="empty"><div class="empty-icon">🤷</div><div class="empty-title">Rien à ce niveau</div><div class="empty-desc">Le coach n'a rien défini pour ce contrat.</div></div>`}
+
+      ${s.notesRecovery ? `
+        <div style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;background:var(--bg-3);margin-top:4px">
+          <div style="font-family:'Anton';font-size:12px;text-transform:uppercase;margin-bottom:6px">🧘 Récup</div>
+          <div class="md-content" style="font-size:11px;color:var(--ink-2)">${mdToHtml(s.notesRecovery)}</div>
+        </div>` : ''}
+    </div>
+    <div class="modal-footer">
+      ${done ? `<button class="btn btn-secondary btn-block" onclick="openTrainingDashboard('${p.id}')">📊 Voir le classement</button>`
+        : !stillValid ? `<button class="btn btn-secondary btn-block" onclick="state._trainingView=null;closeModal()">Fermer</button>`
+        : !availLevels.length ? ''
+        : `<button class="btn btn-primary btn-block" onclick="openTrainingValidate()">✓ J'ai fait la séance</button>`}
+    </div>
+  `);
+}
+
+// Lance le drill lié à un bloc. Il n'y a PAS de dispatcher générique sur d.mode
+// dans ce repo (chaque appelant branche à la main) — et les drills « réaction »
+// historiques n'ont aucun champ mode, d'où les tests d'égalité explicites.
+// Le runtime ferme la modale et fait son propre render() en sortie : on rouvre
+// donc la séance à la fermeture, sinon la joueuse retomberait sur l'accueil au
+// milieu de sa séance.
+function launchTrainingDrill(drillId) {
+  const d = (state.drills || []).find(x => x.id === drillId && !x.deletedAt);
+  if (!d) { try { showToast('⚠ Drill introuvable'); } catch (e) {} return; }
+  const v = state._trainingView;
+  if (v) window._trainingResume = { ...v };
+  if (d.mode === 'interval') launchInterval(d.id);
+  else if (d.mode === 'circuit') launchCircuit(d.id);
+  else launchDrill(d.id);
+}
+// Rappelée par les stopX() des runtimes via render() : si une séance était
+// ouverte avant le drill, on la rouvre. Volontairement window._ (volatile).
+function _trainingMaybeResume() {
+  const r = window._trainingResume;
+  if (!r) return;
+  window._trainingResume = null;
+  try { openTrainingSession(r.programId, r.sessionId, r.datePlanned); } catch (e) {}
+}
+
+// --- Validation -------------------------------------------------------------
+// Un seul écran : squad / post / distance, avec le total en direct. Les photos
+// sont uploadées AU CHOIX du fichier (et pas à la validation) pour que la joueuse
+// voie tout de suite si ça a marché, et pour ne pas empiler upload + insert dans
+// un même bouton dont l'échec serait ambigu.
+function openTrainingValidate() {
+  const v = state._trainingView; if (!v) return;
+  if (!(state.auth && state.auth.role === 'player')) return;
+  if (!_isRattrapageValid(v.datePlanned, Date.now())) { try { alert('Le délai de 48 h est dépassé : cette séance ne peut plus être validée.'); } catch (e) {} return; }
+  state._trainingValidate = {
+    programId: v.programId, sessionId: v.sessionId, datePlanned: v.datePlanned, level: v.level,
+    squadOn: false, squadTeammateId: '', squadPhotoUrl: '',
+    postOn: false, postPhotoUrl: '', postMessage: '',
+    distanceKm: '', busy: false
+  };
+  renderTrainingValidate();
+}
+function _tva() { return state._trainingValidate; }
+function _tvaSet(k, val) { const a = _tva(); if (a) a[k] = val; }
+function _tvaToggle(k) { const a = _tva(); if (!a) return; a[k] = !a[k]; renderTrainingValidate(); }
+// Total en direct : squad et post ne comptent que si leur pièce justificative est
+// bien là — cocher la case ne suffit pas, sinon l'aperçu mentirait sur le total.
+function _tvaPoints() {
+  const a = _tva(); if (!a) return { base: 0, total: 0 };
+  const p = activeTrainingPrograms().find(x => x.id === a.programId);
+  return _computePoints({
+    level: a.level,
+    hasSquad: _tvaSquadOk(), hasPost: _tvaPostOk(),
+    config: p ? p.scoringConfig : {}
+  });
+}
+function _tvaSquadOk() { const a = _tva(); return !!(a && a.squadOn && a.squadPhotoUrl && a.squadTeammateId); }
+function _tvaPostOk() { const a = _tva(); return !!(a && a.postOn && a.postPhotoUrl && (a.postMessage || '').trim()); }
+
+async function _tvaPhoto(kind, event) {
+  const a = _tva(); if (!a) return;
+  const file = (event.target.files || [])[0];
+  event.target.value = '';
+  if (!file) return;
+  if (!window.sb) { try { alert('Hors ligne : impossible d\'envoyer la photo pour l\'instant.'); } catch (e) {} return; }
+  a.busy = true; renderTrainingValidate();
+  try {
+    const blob = (typeof compressImageBlob === 'function') ? await compressImageBlob(file, 1200, 0.8) : file;
+    const fname = `${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`;
+    const { error: upErr } = await sb.storage.from('training-photos').upload(fname, blob, { contentType: 'image/jpeg', cacheControl: '31536000', upsert: false });
+    if (upErr) throw upErr;
+    const { data: pub } = sb.storage.from('training-photos').getPublicUrl(fname);
+    const url = (pub && pub.publicUrl) || '';
+    if (!url) throw new Error('URL publique indisponible');
+    if (kind === 'squad') a.squadPhotoUrl = url; else a.postPhotoUrl = url;
+  } catch (e) {
+    console.error('[training] upload ' + kind, e && e.message ? e.message : e);
+    try { alert('⚠ L\'envoi de la photo a échoué. Réessaie.'); } catch (e2) {}
+  }
+  a.busy = false;
+  renderTrainingValidate();
+}
+
+function renderTrainingValidate() {
+  const a = _tva(); if (!a) return;
+  const p = activeTrainingPrograms().find(x => x.id === a.programId);
+  const s = (state.trainingSessions || []).find(x => x.id === a.sessionId && !x.deletedAt);
+  if (!p || !s) { closeModal(); return; }
+  const cfg = _trainingConfig(p);
+  const pts = _tvaPoints();
+  const needDistance = _trainingHasDistance(s, a.level);
+  const me = currentPlayer();
+  const mates = _trainingPoolFor(p).filter(x => !me || x.id !== me.id);
+  const squadOk = _tvaSquadOk(), postOk = _tvaPostOk();
+
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">${esc(s.name || 'Séance')} · ${TRAINING_LEVEL_LABEL[a.level]}</div>
+        <div class="modal-title">Valider ma séance</div>
+      </div>
+      <button class="modal-close" onclick="state._trainingValidate=null;renderTrainingSession()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="text-align:center;padding:14px;background:var(--bg-3);border-radius:10px;margin-bottom:16px">
+        <div style="font-family:'Anton';font-size:38px;color:var(--orange);line-height:1">${pts.total}</div>
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">points</div>
+        <div style="font-size:10px;color:var(--ink-3);margin-top:6px">
+          ${pts.base}${squadOk ? ' × ' + cfg.squad_multiplier : ''}${postOk ? ' + ' + cfg.post_bonus : ''} = ${pts.total}
+        </div>
+      </div>
+
+      <!-- SQUAD -->
+      <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--bg-3);border-radius:8px;cursor:pointer;margin-bottom:6px">
+        <input type="checkbox" ${a.squadOn ? 'checked' : ''} onchange="_tvaToggle('squadOn')" style="width:20px;height:20px;flex:none">
+        <span style="flex:1;font-size:13px">👯 J'étais en squad <span style="color:var(--ink-3)">(×${cfg.squad_multiplier})</span></span>
+      </label>
+      ${a.squadOn ? `
+        <div style="border:1px solid ${squadOk ? 'var(--border-soft)' : 'var(--orange)'};border-radius:8px;padding:10px;margin-bottom:12px">
+          <div style="font-size:10px;color:var(--ink-3);margin-bottom:8px">Photo <b>et</b> coéquipière obligatoires pour le multiplicateur.</div>
+          <select onchange="_tvaSet('squadTeammateId',this.value);renderTrainingValidate()" style="width:100%;margin-bottom:8px">
+            <option value="">— Avec qui ? —</option>
+            ${mates.map(m => `<option value="${esc(m.id)}" ${a.squadTeammateId === m.id ? 'selected' : ''}>#${m.num} ${esc(m.name)}</option>`).join('')}
+          </select>
+          ${a.squadPhotoUrl
+            ? `<img src="${esc(a.squadPhotoUrl)}" alt="" style="width:100%;max-height:160px;object-fit:cover;border-radius:6px;margin-bottom:6px">
+               <button class="btn btn-ghost btn-block" onclick="_tvaSet('squadPhotoUrl','');renderTrainingValidate()" style="font-size:11px">🗑 Retirer la photo</button>`
+            : `<label class="btn btn-secondary btn-block" style="cursor:pointer;margin:0">
+                 📸 Ajouter la photo
+                 <input type="file" accept="image/*" onchange="_tvaPhoto('squad',event)" style="display:none" ${a.busy ? 'disabled' : ''}>
+               </label>`}
+        </div>` : ''}
+
+      <!-- POST -->
+      <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--bg-3);border-radius:8px;cursor:pointer;margin-bottom:6px">
+        <input type="checkbox" ${a.postOn ? 'checked' : ''} onchange="_tvaToggle('postOn')" style="width:20px;height:20px;flex:none">
+        <span style="flex:1;font-size:13px">📸 J'ai fait un post <span style="color:var(--ink-3)">(+${cfg.post_bonus})</span></span>
+      </label>
+      ${a.postOn ? `
+        <div style="border:1px solid ${postOk ? 'var(--border-soft)' : 'var(--orange)'};border-radius:8px;padding:10px;margin-bottom:12px">
+          <div style="font-size:10px;color:var(--ink-3);margin-bottom:8px">Photo <b>et</b> message obligatoires pour le bonus.</div>
+          <textarea rows="2" placeholder="Ton message…" onchange="_tvaSet('postMessage',this.value);renderTrainingValidate()" style="margin-bottom:8px">${esc(a.postMessage)}</textarea>
+          ${a.postPhotoUrl
+            ? `<img src="${esc(a.postPhotoUrl)}" alt="" style="width:100%;max-height:160px;object-fit:cover;border-radius:6px;margin-bottom:6px">
+               <button class="btn btn-ghost btn-block" onclick="_tvaSet('postPhotoUrl','');renderTrainingValidate()" style="font-size:11px">🗑 Retirer la photo</button>`
+            : `<label class="btn btn-secondary btn-block" style="cursor:pointer;margin:0">
+                 📸 Ajouter la photo
+                 <input type="file" accept="image/*" onchange="_tvaPhoto('post',event)" style="display:none" ${a.busy ? 'disabled' : ''}>
+               </label>`}
+        </div>` : ''}
+
+      <!-- DISTANCE -->
+      ${needDistance ? `
+        <div class="fld" style="margin-top:6px">
+          <label class="fld-label">🏃 Distance parcourue (km)</label>
+          <input type="number" min="0" step="0.1" value="${esc(String(a.distanceKm))}" placeholder="5.2" onchange="_tvaSet('distanceKm',this.value)">
+          <div style="font-size:10px;color:var(--ink-3);margin-top:3px">Optionnel — ne change pas tes points, c'est pour ton suivi.</div>
+        </div>` : ''}
+
+      ${a.busy ? `<div style="text-align:center;font-size:11px;color:var(--ink-3);padding:8px">⏳ Envoi de la photo…</div>` : ''}
+    </div>
+    <div class="modal-footer" style="display:flex;gap:6px">
+      <button class="btn btn-secondary" onclick="state._trainingValidate=null;renderTrainingSession()">Retour</button>
+      <button class="btn btn-primary" style="flex:1" onclick="confirmTrainingCompletion()" ${a.busy ? 'disabled' : ''}>✓ Valider · ${pts.total} pts</button>
+    </div>
+  `);
+}
+
+// Insert de la validation. base_points ET points_total sont FIGÉS ici : rejouer
+// le barème à la lecture réécrirait l'historique si le coach le change ensuite.
+function confirmTrainingCompletion() {
+  const a = _tva(); if (!a) return;
+  const pid = (state.auth && state.auth.role === 'player') ? state.auth.playerId : null;
+  if (!pid) return;
+  const p = activeTrainingPrograms().find(x => x.id === a.programId);
+  if (!p) return;
+  // Re-test du délai : la modale a pu rester ouverte au-delà de minuit + 48 h.
+  const now = Date.now();
+  if (!_isRattrapageValid(a.datePlanned, now)) {
+    try { alert('Le délai de 48 h vient d\'expirer : cette séance ne peut plus être validée.'); } catch (e) {}
+    state._trainingValidate = null; renderTrainingSession(); return;
+  }
+  // Une case cochée sans sa pièce justificative : on demande plutôt que de
+  // valider en silence à un total plus bas que celui espéré.
+  if (a.squadOn && !_tvaSquadOk()) { try { alert('Squad : il manque la photo ou la coéquipière.\n\nDécoche « en squad » si tu étais seule.'); } catch (e) {} return; }
+  if (a.postOn && !_tvaPostOk()) { try { alert('Post : il manque la photo ou le message.\n\nDécoche « j\'ai fait un post » si tu n\'en as pas fait.'); } catch (e) {} return; }
+  // Anti double-validation (miroir de l'index unique partiel en base).
+  if (_trainingCompletionFor(a.sessionId, pid, a.datePlanned)) {
+    try { showToast('✓ Séance déjà validée'); } catch (e) {}
+    state._trainingValidate = null; state._trainingView = null; closeModal(); render(); return;
+  }
+  const squadOk = _tvaSquadOk(), postOk = _tvaPostOk();
+  const pts = _computePoints({ level: a.level, hasSquad: squadOk, hasPost: postOk, config: p.scoringConfig });
+  const km = Number(a.distanceKm);
+  const c = {
+    id: uid(), programId: a.programId, sessionId: a.sessionId, playerId: pid,
+    datePlanned: a.datePlanned, dateCompleted: now, contractLevel: a.level,
+    basePoints: pts.base,
+    squadTeammateId: squadOk ? a.squadTeammateId : null,
+    squadPhotoUrl: squadOk ? a.squadPhotoUrl : null,
+    postPhotoUrl: postOk ? a.postPhotoUrl : null,
+    postMessage: postOk ? (a.postMessage || '').trim() : null,
+    runningDistanceKm: (Number.isFinite(km) && km > 0) ? km : null,
+    pointsTotal: pts.total, notes: '',
+    createdAt: now, updatedAt: now, deletedAt: null
+  };
+  state.trainingCompletions = state.trainingCompletions || [];
+  state.trainingCompletions.unshift(c);
+  persist(); _trainingFlush();
+  state._trainingValidate = null;
+  state._trainingView = null;
+  closeModal();
+  try { showToast('💪 Séance validée · +' + pts.total + ' pts'); } catch (e) {}
+  try { _trainingNotifyCoachCompletion(p, c); } catch (e) {}
+  try { render(); } catch (e) {}
+}
+
+// Le coach suit l'assiduité : une validation lui est poussée.
+function _trainingNotifyCoachCompletion(p, c) {
+  const me = currentPlayer();
+  const who = me ? ('#' + me.num + ' ' + me.name) : 'Une joueuse';
+  notifyPush([_pushCoachKey()], {
+    title: '💪 Séance validée',
+    body: who + ' · ' + (p.name || 'Prépa') + ' · ' + _completionSummary(c),
+    url: '/', tag: 'training-done-' + p.id, type: 'training_completion'
+  });
+}
+
+// --- Rappel quotidien -------------------------------------------------------
+// « N'oublie pas ta séance de [jour] : [nom] », à remind_hour (défaut 9h).
+//
+// LIMITE ASSUMÉE — il n'y a AUCUN ordonnanceur côté serveur dans ce projet : pas
+// de pg_cron, et push-send est une Edge Function appelée par un client, jamais
+// déclenchée toute seule. Un vrai rappel « même app fermée » demanderait un cron
+// serveur (pg_cron → push-send, ou un workflow n8n) — hors périmètre ici. D'où
+// deux chemins complémentaires, tous deux déclenchés par un appareil ALLUMÉ :
+//   • joueuse : notification LOCALE (l'app doit être ouverte) — attrape le cas
+//     courant « j'ouvre l'app dans la journée » ;
+//   • coach : PUSH réel vers les joueuses en retard (marche app fermée), relayé
+//     par l'appareil du coach dès qu'il est ouvert après l'heure du rappel.
+// Si personne n'ouvre l'app, il n'y a pas de rappel. C'est une limite connue, pas
+// un bug : ne pas « corriger » en ajoutant un timer, corriger avec un cron.
+//
+// Filigrane (K.trainingRemind, local, par identité) : 1 rappel par jour maximum.
+// Côté coach le filigrane est PAR APPAREIL — deux coachs connectés enverraient
+// donc deux pushes ; le `tag` identique les fait se remplacer sur le téléphone
+// de la joueuse plutôt que s'empiler.
+function _trainingRemindMark(dateISO) {
+  const m = load(K.trainingRemind, {}) || {};
+  m[themeIdentityKey()] = dateISO;
+  save(K.trainingRemind, m);
+}
+function _trainingRemindAlready(dateISO) {
+  const m = load(K.trainingRemind, {}) || {};
+  return m[themeIdentityKey()] === dateISO;
+}
+// L'heure du rappel est locale (pas UTC) : « 9h » veut dire 9h chez la joueuse.
+// C'est le seul endroit du module qui n'est PAS en UTC, et c'est voulu — à la
+// différence des jours prévus, l'heure de rappel est bien un instant vécu.
+function _trainingRemindCheck(nowMs) {
+  if (!state.auth) return;
+  const now = new Date(Number.isFinite(nowMs) ? nowMs : Date.now());
+  const todayISO = isoDate(now);
+  if (_trainingRemindAlready(todayISO)) return;
+  const role = state.auth.role;
+
+  if (role === 'player') {
+    // Uniquement la séance DU JOUR : un rattrapage a déjà son badge sur
+    // l'accueil, et notifier deux fois pour la même séance serait du bruit.
+    const due = _myTrainingDue(now.getTime()).filter(d => !d.done && !d.isRattrapage);
+    if (!due.length) return;
+    const d = due[0];
+    const p = activeTrainingPrograms().find(x => x.id === d.programId);
+    if (!p) return;
+    if (now.getHours() < _trainingConfig(p).remind_hour) return;
+    _trainingRemindMark(todayISO);
+    const dayLabel = TRAINING_DAY_LABELS[_trainingDayOfWeek(d.datePlanned)] || 'aujourd\'hui';
+    const msg = 'N\'oublie pas ta séance de ' + dayLabel.toLowerCase() + ' : ' + (d.session.name || 'prépa');
+    _trainingRemindShow('💪 Ta prépa', msg);
+    return;
+  }
+
+  if (role === 'coach') {
+    let sent = false;
+    _coachTrainingPrograms().forEach(p => {
+      if (!_trainingProgramRunning(p, todayISO)) return;
+      if (now.getHours() < _trainingConfig(p).remind_hour) return;
+      const dow = _trainingDayOfWeek(todayISO);
+      if (!p.daysActive.includes(dow)) return;
+      const s = _programSessionForDay(p, dow);
+      if (!s) return;
+      const late = _trainingPoolFor(p).filter(pl => !_trainingCompletionFor(s.id, pl.id, todayISO));
+      if (!late.length) return;
+      notifyPush(_pushPlayerKeys(late.map(pl => pl.id)), {
+        title: '💪 Ta prépa',
+        body: 'N\'oublie pas ta séance de ' + (TRAINING_DAY_LABELS[dow] || '').toLowerCase() + ' : ' + (s.name || 'prépa'),
+        url: '/',
+        // Même tag pour tous les émetteurs : deux coachs connectés → les deux
+        // pushes se remplacent au lieu de s'empiler.
+        tag: 'training-remind-' + p.id + '-' + todayISO,
+        type: 'training_remind'
+      });
+      sent = true;
+    });
+    if (sent) _trainingRemindMark(todayISO);
+  }
+}
+// Notification locale + bandeau (mêmes canaux que les alertes ambiantes).
+function _trainingRemindShow(title, msg) {
+  try { _ambientShowBanner('💪 ' + msg); } catch (e) {}
+  try {
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted' && navigator.serviceWorker) {
+      navigator.serviceWorker.ready.then(reg => {
+        reg.showNotification(title, { body: msg, tag: 'training-remind', renotify: false, icon: 'icon-192.png', badge: 'icon-192.png' });
+      }).catch(() => {});
+    }
+  } catch (e) {}
+}
+function _trainingRemindStart() {
+  if (window._trainingRemindTimer) return;
+  window._trainingRemindTimer = setInterval(() => { try { _trainingRemindCheck(); } catch (e) {} }, 60000);
+  try { _trainingRemindCheck(); } catch (e) {}
+}
+
+// Push à la publication : les joueuses concernées doivent savoir que le
+// programme existe, sinon personne ne va le chercher sur l'accueil.
+function _trainingNotifyPublished(p) {
+  const pool = _trainingPoolFor(p);
+  if (!pool.length) return;
+  notifyPush(_pushPlayerKeys(pool.map(x => x.id)), {
+    title: '💪 Nouveau programme',
+    body: (p.name || 'Prépa physique') + ' · ' + p.daysActive.map(d => TRAINING_DAY_LABELS[d]).join(', '),
+    url: '/', tag: 'training-' + p.id, type: 'training_program'
+  });
+}
+
+// ============================================================
 // DRILL RÉACTION (builder façon ReaXing/BlazePod) — cf. migration 20260710_001
 // ============================================================
 // Permissions : coach (admin OU non-admin) = CRUD complet sur la biblio commune
@@ -18493,6 +20139,10 @@ function stopDrillGame() {
   try { if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {}); } catch (e) {}
   _drillWakeLockRelease();
   try { render(); } catch (e) {}
+  // Prépa : si un drill a été lancé depuis une séance, on rouvre la séance
+  // (le runtime a fermé la modale au lancement — sans ça la joueuse
+  // retomberait sur l'accueil au milieu de sa prépa).
+  try { _trainingMaybeResume(); } catch (e) {}
 }
 
 // Config effective d'un lancement = drill + overrides éphémères (joueuse).
@@ -18899,6 +20549,10 @@ function stopCircuit() {
   try { if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {}); } catch (e) {}
   _drillWakeLockRelease();
   try { render(); } catch (e) {}
+  // Prépa : si un drill a été lancé depuis une séance, on rouvre la séance
+  // (le runtime a fermé la modale au lancement — sans ça la joueuse
+  // retomberait sur l'accueil au milieu de sa prépa).
+  try { _trainingMaybeResume(); } catch (e) {}
 }
 
 // ============================================================
@@ -19183,6 +20837,10 @@ function stopInterval() {
   try { if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {}); } catch (e) {}
   _drillWakeLockRelease();
   try { render(); } catch (e) {}
+  // Prépa : si un drill a été lancé depuis une séance, on rouvre la séance
+  // (le runtime a fermé la modale au lancement — sans ça la joueuse
+  // retomberait sur l'accueil au milieu de sa prépa).
+  try { _trainingMaybeResume(); } catch (e) {}
 }
 
 // ============================================================
@@ -32985,7 +34643,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-10.73';
+const APP_VERSION = '2026-07-10.74';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
@@ -33114,10 +34772,13 @@ try { initPullToRefresh(); } catch (e) { console.warn('[ptr] init', e && e.messa
 // (PWA rouverte sans être tuée → détecte un déploiement survenu entre-temps).
 setTimeout(() => { try { checkForUpdate({ force: true }); } catch (e) {} }, 4000);
 try { _ambientStart(); } catch (e) {} // alertes ambiantes de déroulé (coach)
+try { _trainingRemindStart(); } catch (e) {} // rappel prépa quotidien (cf. la limite documentée sur _trainingRemindCheck)
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) {
     try { checkForUpdate(); } catch (e) {}
     try { _ambientCheck(); } catch (e) {} // rattrape une transition franchie en arrière-plan
+    // Retour au 1er plan après l'heure du rappel → rattrape le rappel du jour.
+    try { _trainingRemindCheck(); } catch (e) {}
     // Retour au 1er plan : un gage a pu être assigné entre-temps → tirage.
     try { maybeShowGageReveal(); } catch (e) {}
     // Rafraîchit le badge d'icône (un signal a pu changer pendant l'absence).
