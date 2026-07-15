@@ -318,6 +318,221 @@ t('route #/programme toujours routable (audit)', () => {
   assert(ctx._pbIsValidSection('programme'), 'route programme cassée');
 });
 
+// ============================================================================
+// PARCOURS JOUEUSE — séance du jour, niveaux, validation, points, rattrapage.
+// ============================================================================
+// Un effectif minimal + une saison, sinon _trainingPoolFor renvoie [] et il n'y
+// a ni coéquipière de squad ni classement à vérifier.
+ctx.state.players = [
+  { id: 'p1', name: 'Alice', num: 7 },
+  { id: 'p2', name: 'Delph', num: 6 },
+  { id: 'p3', name: 'Zoé', num: 12 },
+];
+ctx._seasonsLoaded = () => false; // → _trainingPoolFor retombe sur state.players
+ctx.currentPlayer = () => ctx.state.players.find(p => p.id === (ctx.state.auth && ctx.state.auth.playerId));
+
+// Programme déterministe : lundi 13/07/2026, med+squad+post doit donner 50.
+const PROG = ctx.activeTrainingPrograms()[0];
+ctx.state.trainingPrograms = [{ ...PROG, startDate: '2026-07-13', endDate: '2026-08-23', daysActive: [1, 3], isActive: true, teamTag: 'both' }];
+const LUN = '2026-07-13';
+const MIDI_LUN = Date.parse('2026-07-13T12:00:00Z');
+const MIDI_MAR = Date.parse('2026-07-14T12:00:00Z');
+const MIDI_MER = Date.parse('2026-07-15T12:00:00Z');
+
+ctx.state.auth = { role: 'player', playerId: 'p1' };
+
+// Horloge gelée : le parcours joueuse est daté (fenêtre de 48 h), donc il doit
+// être joué à une date fixe — sinon la suite passerait ou casserait selon le jour
+// où on la lance. `Date` est partagé avec l'hôte : toujours restaurer.
+const REAL_NOW = Date.now;
+const freeze = ms => { Date.now = () => ms; };
+const unfreeze = () => { Date.now = REAL_NOW; };
+
+t('joueuse : le programme est visible', () => {
+  const mine = ctx._myTrainingPrograms(LUN);
+  assert(mine.length === 1, 'attendu 1 programme visible, reçu ' + mine.length);
+});
+t('joueuse : programme dépublié invisible', () => {
+  ctx.state.trainingPrograms[0].isActive = false;
+  assert(ctx._myTrainingPrograms(LUN).length === 0, 'programme dépublié encore visible');
+  ctx.state.trainingPrograms[0].isActive = true;
+});
+t('joueuse : hors période → invisible', () => {
+  assert(ctx._myTrainingPrograms('2026-09-01').length === 0, 'programme visible après sa fin');
+});
+
+const P = () => ctx.activeTrainingPrograms()[0];
+t('_trainingDueFor : lundi midi → séance du jour, pas un rattrapage', () => {
+  const due = ctx._trainingDueFor(P(), 'p1', MIDI_LUN);
+  assert(due.length === 1, 'attendu 1 séance due, reçu ' + due.length);
+  assert(due[0].datePlanned === LUN, 'mauvais jour prévu');
+  assert(due[0].isRattrapage === false, 'la séance du jour ne doit pas être un rattrapage');
+  assert(!due[0].done, 'séance déjà marquée faite');
+});
+t('_trainingDueFor : mardi midi → lundi en RATTRAPAGE (mardi non actif)', () => {
+  const due = ctx._trainingDueFor(P(), 'p1', MIDI_MAR);
+  assert(due.length === 1, 'attendu 1 séance due, reçu ' + due.length);
+  assert(due[0].datePlanned === LUN, 'le rattrapage doit porter sur lundi');
+  assert(due[0].isRattrapage === true, 'non marqué rattrapage');
+});
+t('_trainingDueFor : mercredi midi → séance de mercredi seule (lundi périmé)', () => {
+  const due = ctx._trainingDueFor(P(), 'p1', MIDI_MER);
+  assert(due.length === 1, 'attendu 1 séance due, reçu ' + due.length);
+  assert(due[0].datePlanned === '2026-07-15', 'lundi périmé encore proposé !');
+});
+t('_trainingHoursLeft décroît correctement', () => {
+  assert(ctx._trainingHoursLeft(LUN, MIDI_LUN) === 36, 'attendu 36h lundi midi, reçu ' + ctx._trainingHoursLeft(LUN, MIDI_LUN));
+  assert(ctx._trainingHoursLeft(LUN, MIDI_MAR) === 12, 'attendu 12h mardi midi');
+  assert(ctx._trainingHoursLeft(LUN, MIDI_MER) === 0, 'attendu 0h mercredi midi');
+});
+
+freeze(MIDI_LUN); // ↓ tout le parcours de validation se joue le lundi à midi
+
+t('openTrainingSession() rend la séance du lundi', () => {
+  const s = ctx._programSessionForDay(P(), 1);
+  ctx.openTrainingSession(P().id, s.id, LUN);
+  assert(ctx.state._trainingView, 'vue non initialisée');
+  assert(ctx.state._trainingView.level === 'med', 'niveau par défaut != med');
+  assert(ctx.__lastModal.includes('Ton contrat du jour'), 'sélecteur de niveau absent');
+  assert(ctx.__lastModal.includes('J\'ai fait la séance'), 'CTA de validation absent');
+});
+t('les 3 niveaux sont proposés et le texte suit le niveau', () => {
+  ctx._tvLevel('min');
+  assert(ctx.__lastModal.includes('5 min'), 'texte du niveau min absent');
+  ctx._tvLevel('ultra');
+  assert(ctx.__lastModal.includes('12 min'), 'texte du niveau ultra absent');
+  assert(ctx.__lastModal.includes('6 km'), 'texte course ultra absent');
+  ctx._tvLevel('med');
+});
+
+t('openTrainingValidate() ouvre la validation à 20 pts (med nu)', () => {
+  ctx.openTrainingValidate();
+  assert(ctx._tva(), 'état de validation absent');
+  assert(ctx._tvaPoints().total === 20, 'attendu 20, reçu ' + ctx._tvaPoints().total);
+});
+t('squad coché SANS photo/coéquipière → toujours 20 (l\'aperçu ne ment pas)', () => {
+  ctx._tvaToggle('squadOn');
+  assert(ctx._tvaPoints().total === 20, 'le multiplicateur s\'applique sans justificatif !');
+});
+t('squad complet → 40', () => {
+  ctx._tvaSet('squadTeammateId', 'p2');
+  ctx._tvaSet('squadPhotoUrl', 'https://s/squad.jpg');
+  assert(ctx._tvaSquadOk(), 'squad non validé');
+  assert(ctx._tvaPoints().total === 40, 'attendu 40, reçu ' + ctx._tvaPoints().total);
+});
+t('post complet → 50 — CAS DE RÉFÉRENCE (20×2 + 10)', () => {
+  ctx._tvaToggle('postOn');
+  ctx._tvaSet('postPhotoUrl', 'https://s/post.jpg');
+  ctx._tvaSet('postMessage', 'Séance faite 💪');
+  assert(ctx._tvaPostOk(), 'post non validé');
+  assert(ctx._tvaPoints().total === 50, 'attendu 50, reçu ' + ctx._tvaPoints().total);
+});
+t('la coéquipière proposée n\'est jamais soi-même', () => {
+  ctx.renderTrainingValidate();
+  assert(!ctx.__lastModal.includes('#7 Alice'), 'la joueuse se voit proposée comme sa propre coéquipière');
+  assert(ctx.__lastModal.includes('#6 Delph'), 'coéquipière absente du sélecteur');
+});
+t('distance demandée (un bloc course a track_distance)', () => {
+  assert(ctx.__lastModal.includes('Distance parcourue'), 'input distance absent alors qu\'un bloc course le demande');
+  ctx._tvaSet('distanceKm', '5.2');
+});
+
+t('confirmTrainingCompletion() écrit la validation à 50 pts', () => {
+  ctx.confirmTrainingCompletion();
+  const comps = ctx.state.trainingCompletions;
+  assert(comps.length === 1, 'attendu 1 validation, reçu ' + comps.length);
+  const c = comps[0];
+  assert(c.pointsTotal === 50, 'points_total = ' + c.pointsTotal + ' (attendu 50)');
+  assert(c.basePoints === 20, 'base_points = ' + c.basePoints + ' (attendu 20, figé)');
+  assert(c.contractLevel === 'med', 'niveau non figé');
+  assert(c.datePlanned === LUN, 'date_planned fausse');
+  assert(c.squadTeammateId === 'p2', 'coéquipière perdue');
+  assert(c.runningDistanceKm === 5.2, 'distance perdue: ' + c.runningDistanceKm);
+  assert(ctx.state._trainingValidate === null, 'état de validation non nettoyé');
+});
+t('anti double-validation', () => {
+  const s = ctx._programSessionForDay(P(), 1);
+  assert(ctx._trainingCompletionFor(s.id, 'p1', LUN), 'validation introuvable');
+  ctx.openTrainingSession(P().id, s.id, LUN);
+  assert(ctx.__lastModal.includes('Séance validée'), 'séance validée non signalée');
+  assert(!ctx.__lastModal.includes('J\'ai fait la séance'), 'CTA de validation encore proposé après coup');
+});
+t('barème changé APRÈS coup → l\'historique n\'est pas réécrit', () => {
+  ctx.state.trainingPrograms[0].scoringConfig = { points: { min: 1, med: 1, ultra: 1 }, squad_multiplier: 1, post_bonus: 0 };
+  const lb = ctx._trainingLeaderboard(P().id);
+  const me = lb.find(r => r.id === 'p1');
+  assert(me.points === 50, 'points recalculés depuis le barème courant (' + me.points + ') — doivent rester figés à 50');
+  ctx.state.trainingPrograms[0].scoringConfig = { points: { min: 10, med: 20, ultra: 30 }, squad_multiplier: 2, post_bonus: 10 };
+});
+t('classement : effectif entier, joueuses à 0 incluses', () => {
+  const lb = ctx._trainingLeaderboard(P().id);
+  assert(lb.length === 3, 'attendu 3 joueuses, reçu ' + lb.length);
+  assert(lb[0].id === 'p1' && lb[0].points === 50, 'tête de classement fausse');
+  assert(lb[1].points === 0 && lb[2].points === 0, 'joueuses à 0 absentes');
+  assert(lb[0].km === 5.2, 'km non agrégés');
+  assert(lb[0].squads === 1 && lb[0].posts === 1, 'compteurs squad/post faux');
+});
+t('validation hors délai refusée (mercredi pour lundi)', () => {
+  const s = ctx._programSessionForDay(P(), 1);
+  ctx.state.trainingCompletions = [];
+  ctx.state._trainingView = { programId: P().id, sessionId: s.id, datePlanned: LUN, level: 'med' };
+  ctx.__alerts.length = 0;
+  freeze(MIDI_MER);
+  ctx.openTrainingValidate();
+  assert(!ctx._tva(), 'validation ouverte alors que le délai est dépassé');
+  assert(ctx.__alerts.some(a => a.includes('48')), 'aucune alerte de délai');
+});
+t('séance périmée : l\'écran le dit et retire le CTA', () => {
+  const s = ctx._programSessionForDay(P(), 1);
+  freeze(MIDI_MER);
+  ctx.openTrainingSession(P().id, s.id, LUN);
+  assert(ctx.__lastModal.includes('Délai dépassé'), 'péremption non signalée');
+  assert(!ctx.__lastModal.includes('J\'ai fait la séance'), 'CTA proposé sur une séance périmée');
+});
+t('renderTrainingPlayerCard() : séance du jour cliquable', () => {
+  freeze(MIDI_LUN);
+  const h = ctx.renderTrainingPlayerCard();
+  assert(h.includes('Ma prépa'), 'carte joueuse absente');
+  assert(h.includes('openTrainingSession'), 'séance non cliquable');
+  assert(!h.includes('Rattrapage possible'), 'la séance du jour est présentée comme un rattrapage');
+});
+t('renderTrainingPlayerCard() : badge « Rattrapage possible » le lendemain', () => {
+  freeze(MIDI_MAR);
+  const h = ctx.renderTrainingPlayerCard();
+  assert(h.includes('Rattrapage possible'), 'badge de rattrapage absent');
+  assert(h.includes('12 h pour la valider'), 'heures restantes fausses/absentes');
+});
+t('renderTrainingPlayerCard() : jour de repos', () => {
+  freeze(Date.parse('2026-07-14T12:00:00Z'));
+  ctx.state.trainingPrograms[0].daysActive = [3]; // mercredi seul → mardi = repos
+  try {
+    const h = ctx.renderTrainingPlayerCard();
+    assert(h.includes('Repos'), 'jour de repos non affiché');
+  } finally { ctx.state.trainingPrograms[0].daysActive = [1, 3]; }
+});
+t('renderTrainingPlayerCard() vide si aucun programme', () => {
+  const keep = ctx.state.trainingPrograms;
+  ctx.state.trainingPrograms = [];
+  try { assert(ctx.renderTrainingPlayerCard() === '', 'carte rendue sans programme'); }
+  finally { ctx.state.trainingPrograms = keep; }
+});
+t('renderHomePlayer() rend sans throw', () => {
+  freeze(MIDI_LUN);
+  const h = ctx.renderHomePlayer();
+  assert(typeof h === 'string' && h.length > 0, 'home joueuse vide');
+});
+t('launchTrainingDrill : drill absent → pas de crash', () => {
+  ctx.launchTrainingDrill('inexistant');
+  assert(true);
+});
+t('_trainingMaybeResume : sans drill lancé → no-op', () => {
+  ctx.window._trainingResume = null;
+  ctx._trainingMaybeResume();
+  assert(true);
+});
+
+unfreeze();
+
 console.log('\n' + R.join('\n'));
 const fails = R.filter(r => r.startsWith('✗'));
 console.log('\n' + (fails.length ? '✗ ' + fails.length + ' échec(s) / ' + R.length : '✓ ' + R.length + '/' + R.length + ' checks OK'));

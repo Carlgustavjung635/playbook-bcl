@@ -9884,6 +9884,9 @@ function renderHomePlayer() {
       <!-- 1ter. Boîte à gages : point d'entrée visible pour proposer -->
       ${renderGageHomeCard()}
 
+      <!-- 1quater. Prépa physique : séance du jour / rattrapage 48 h -->
+      ${renderTrainingPlayerCard()}
+
       <!-- 2. Challenges actifs (preview 2-3, lien Tout → onglet) -->
       ${myActiveChallenges.length > 0 ? `
         <div class="section-header">
@@ -19110,6 +19113,440 @@ function openTrainingDashboard(programId) {
   `);
 }
 
+// ============================================================
+// PRÉPA « FULL PACKAGE » — côté joueuse (exécution + validation)
+// ============================================================
+
+// Les séances « dues » d'un programme à l'instant `nowMs` : celle du jour, plus
+// celle de la veille si elle est encore rattrapable et non validée.
+// Deux jours suffisent : la fenêtre est de 48 h depuis minuit, donc J-2 est déjà
+// périmé par construction (_isRattrapageValid le rejetterait de toute façon).
+function _trainingDueFor(program, playerId, nowMs) {
+  const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const out = [];
+  [0, 1].forEach(back => {
+    const d = new Date(now - back * 86400000);
+    const iso = isoDate(d);
+    if (!program.startDate || !program.endDate) return;
+    if (iso < program.startDate || iso > program.endDate) return;
+    const dow = _trainingDayOfWeek(iso);
+    if (!program.daysActive.includes(dow)) return;
+    if (!_isRattrapageValid(iso, now)) return;
+    const session = _programSessionForDay(program, dow);
+    if (!session) return;
+    const done = _trainingCompletionFor(session.id, playerId, iso);
+    out.push({ programId: program.id, session, datePlanned: iso, done, isRattrapage: back > 0 });
+  });
+  return out;
+}
+// Toutes les séances dues de la joueuse connectée, tous programmes confondus.
+function _myTrainingDue(nowMs) {
+  const pid = (state.auth && state.auth.role === 'player') ? state.auth.playerId : null;
+  if (!pid) return [];
+  const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const out = [];
+  _myTrainingPrograms(isoDate(new Date(now))).forEach(p => { out.push(..._trainingDueFor(p, pid, now)); });
+  // À faire d'abord, et le rattrapage avant la séance du jour (il périme plus tôt).
+  return out.sort((a, b) => (a.done ? 1 : 0) - (b.done ? 1 : 0) || (b.isRattrapage ? 1 : 0) - (a.isRattrapage ? 1 : 0));
+}
+// Heures restantes avant péremption d'une séance (badge d'urgence).
+function _trainingHoursLeft(datePlanned, nowMs) {
+  const start = _trainingDayStartMs(datePlanned);
+  if (start === null) return 0;
+  return Math.max(0, Math.ceil((start + TRAINING_RATTRAPAGE_MS - (Number.isFinite(nowMs) ? nowMs : Date.now())) / 3600000));
+}
+
+// Carte d'accueil joueuse : « Programmes actifs » (plusieurs possibles).
+function renderTrainingPlayerCard() {
+  if (!(state.auth && state.auth.role === 'player')) return '';
+  const pid = state.auth.playerId;
+  const now = Date.now();
+  const progs = _myTrainingPrograms(isoDate(new Date(now)));
+  if (!progs.length) return '';
+  const due = _myTrainingDue(now);
+  return `
+    <div class="section-header">
+      <div>
+        <div class="eyebrow">${progs.length > 1 ? progs.length + ' programmes actifs' : 'Programme actif'}</div>
+        <h2 class="display-md mt-2">Ma prépa</h2>
+      </div>
+    </div>
+    <div style="padding:0 18px;display:flex;flex-direction:column;gap:8px;margin-bottom:18px">
+      ${due.length ? due.map(d => {
+        const p = progs.find(x => x.id === d.programId);
+        const pts = _trainingCompletionsOf(d.programId, pid).reduce((a, c) => a + (Number(c.pointsTotal) || 0), 0);
+        const left = _trainingHoursLeft(d.datePlanned, now);
+        if (d.done) {
+          return `
+            <div style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;background:var(--surface);opacity:.75;display:flex;align-items:center;gap:10px">
+              <div style="font-size:20px;flex:none">✓</div>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(d.session.name || 'Séance')}${d.isRattrapage ? ' · hier' : ''}</div>
+                <div style="font-size:10px;color:var(--ink-3)">${esc(_completionSummary(d.done))}</div>
+              </div>
+            </div>`;
+        }
+        return `
+          <div onclick="openTrainingSession('${d.programId}','${d.session.id}','${d.datePlanned}')"
+            style="border:1px solid ${d.isRattrapage ? 'var(--orange)' : 'var(--border-soft)'};border-radius:10px;padding:12px;background:var(--surface);cursor:pointer">
+            <div style="display:flex;align-items:center;gap:10px">
+              <div style="font-size:20px;flex:none">${d.isRattrapage ? '⏳' : '💪'}</div>
+              <div style="flex:1;min-width:0">
+                <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(d.session.name || 'Séance')}</div>
+                <div style="font-size:10px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+                  ${esc(p ? (p.name || '') : '')}${d.session.formatLabel ? ' · ' + esc(d.session.formatLabel) : ''} · ${pts} pts cumulés
+                </div>
+              </div>
+              <div style="color:var(--ink-3);flex:none">›</div>
+            </div>
+            ${d.isRattrapage ? `
+              <div style="margin-top:8px;padding:6px 8px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:4px;font-size:10px;color:var(--ink-2)">
+                ⏳ Rattrapage possible — séance d'hier, encore ${left} h pour la valider.
+              </div>` : ''}
+          </div>`;
+      }).join('') : progs.map(p => {
+        const pts = _trainingCompletionsOf(p.id, pid).reduce((a, c) => a + (Number(c.pointsTotal) || 0), 0);
+        return `
+          <div onclick="openTrainingDashboard('${p.id}')" style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;background:var(--surface);cursor:pointer;display:flex;align-items:center;gap:10px">
+            <div style="font-size:20px;flex:none">🌴</div>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p.name || 'Programme')}</div>
+              <div style="font-size:10px;color:var(--ink-3)">Repos aujourd'hui · ${p.daysActive.map(d => TRAINING_DAY_LABELS[d].slice(0, 3)).join(' ')} · ${pts} pts</div>
+            </div>
+            <div style="color:var(--ink-3);flex:none">›</div>
+          </div>`;
+      }).join('')}
+    </div>`;
+}
+
+// --- Écran de séance --------------------------------------------------------
+// Le niveau choisi est ÉPHÉMÈRE (state._trainingView, jamais persisté) : il n'est
+// figé qu'au moment de la validation, dans contract_level.
+function openTrainingSession(programId, sessionId, datePlanned) {
+  const p = activeTrainingPrograms().find(x => x.id === programId);
+  const s = (state.trainingSessions || []).find(x => x.id === sessionId && !x.deletedAt);
+  if (!p || !s) return;
+  const cur = state._trainingView;
+  state._trainingView = {
+    programId, sessionId, datePlanned,
+    level: (cur && cur.sessionId === sessionId && cur.level) ? cur.level : 'med'
+  };
+  renderTrainingSession();
+}
+function _tvLevel(l) { const v = state._trainingView; if (!v) return; v.level = l; renderTrainingSession(); }
+
+function renderTrainingSession() {
+  const v = state._trainingView; if (!v) return;
+  const p = activeTrainingPrograms().find(x => x.id === v.programId);
+  const s = (state.trainingSessions || []).find(x => x.id === v.sessionId && !x.deletedAt);
+  if (!p || !s) { closeModal(); return; }
+  const pid = (state.auth && state.auth.role === 'player') ? state.auth.playerId : null;
+  const done = pid ? _trainingCompletionFor(s.id, pid, v.datePlanned) : null;
+  const cfg = _trainingConfig(p);
+  const now = Date.now();
+  const stillValid = _isRattrapageValid(v.datePlanned, now);
+  const left = _trainingHoursLeft(v.datePlanned, now);
+  // Un niveau sans texte n'est pas proposé : le coach ne l'a pas défini.
+  const availLevels = TRAINING_LEVELS.filter(l => (s.blocks || []).some(b => _trainingBlockLevel(b, l).text));
+  if (availLevels.length && !availLevels.includes(v.level)) v.level = availLevels[0];
+  const lvl = v.level;
+
+  const blocksHtml = (s.blocks || []).map((b, i) => {
+    const lv = _trainingBlockLevel(b, lvl);
+    if (!lv.text) return '';
+    const t = TRAINING_BLOCK_TYPES.find(x => x.id === b.type) || TRAINING_BLOCK_TYPES[5];
+    const d = _trainingBlockDrill(b, lvl);
+    return `
+      <div style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;margin-bottom:8px;background:var(--surface)">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <div style="font-size:16px;flex:none">${t.icon}</div>
+          <div style="flex:1;min-width:0">
+            <div style="font-family:'Anton';font-size:13px;text-transform:uppercase">${esc(b.name || t.label)}</div>
+          </div>
+          <div style="font-family:'Anton';font-size:15px;color:var(--orange);flex:none">${esc(lv.text)}</div>
+        </div>
+        ${b.instructions ? `<div class="md-content" style="font-size:11px;color:var(--ink-2);margin-bottom:8px">${mdToHtml(b.instructions)}</div>` : ''}
+        ${b.track_distance ? `<div style="font-size:10px;color:var(--ink-3);margin-bottom:8px">📏 Ta distance te sera demandée à la validation.</div>` : ''}
+        ${d ? `<button class="btn btn-primary btn-block" onclick="launchTrainingDrill('${d.id}')" style="margin-top:4px">▶ Lancer · ${esc(_twDrillLabel(d))}</button>` : ''}
+      </div>`;
+  }).join('');
+
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">${esc(p.name || 'Prépa')} · ${esc(formatDate(v.datePlanned, 'short'))}${v.datePlanned !== isoDate(new Date(now)) ? ' · rattrapage' : ''}</div>
+        <div class="modal-title">${esc(s.name || 'Séance')}</div>
+      </div>
+      <button class="modal-close" onclick="state._trainingView=null;closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      ${done ? `
+        <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--green,#15803d);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:14px">
+          ✓ <b>Séance validée</b> — ${esc(_completionSummary(done))}
+        </div>` : !stillValid ? `
+        <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--ink-3);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:14px">
+          ⌛ <b>Délai dépassé</b> — le rattrapage était possible jusqu'à 48 h après le jour prévu. Tu peux toujours faire la séance, mais elle ne compte plus de points.
+        </div>` : left <= 24 ? `
+        <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:14px">
+          ⏳ Encore <b>${left} h</b> pour valider cette séance.
+        </div>` : ''}
+      ${s.formatLabel ? `<div style="font-family:'JetBrains Mono';font-size:10px;color:var(--ink-3);text-transform:uppercase;margin-bottom:10px">${esc(s.formatLabel)}</div>` : ''}
+      ${s.introText ? `<div class="md-content" style="font-size:12px;color:var(--ink-2);margin-bottom:14px">${mdToHtml(s.introText)}</div>` : ''}
+
+      <div class="eyebrow-muted" style="margin-bottom:8px">Ton contrat du jour</div>
+      <div class="segmented" style="margin-bottom:6px">
+        ${[['min', '🟢 Minimum'], ['med', '🟠 Medium'], ['ultra', '🔴 Ultra']].filter(([l]) => availLevels.includes(l)).map(([l, lab]) => `
+          <button class="segmented-btn ${lvl === l ? 'active' : ''}" onclick="_tvLevel('${l}')">${lab}</button>
+        `).join('')}
+      </div>
+      <div style="font-size:10px;color:var(--ink-3);margin-bottom:14px">
+        ${cfg.points[lvl]} pts de base · ×${cfg.squad_multiplier} en squad · +${cfg.post_bonus} avec un post
+      </div>
+
+      ${blocksHtml || `<div class="empty"><div class="empty-icon">🤷</div><div class="empty-title">Rien à ce niveau</div><div class="empty-desc">Le coach n'a rien défini pour ce contrat.</div></div>`}
+
+      ${s.notesRecovery ? `
+        <div style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;background:var(--bg-3);margin-top:4px">
+          <div style="font-family:'Anton';font-size:12px;text-transform:uppercase;margin-bottom:6px">🧘 Récup</div>
+          <div class="md-content" style="font-size:11px;color:var(--ink-2)">${mdToHtml(s.notesRecovery)}</div>
+        </div>` : ''}
+    </div>
+    <div class="modal-footer">
+      ${done ? `<button class="btn btn-secondary btn-block" onclick="openTrainingDashboard('${p.id}')">📊 Voir le classement</button>`
+        : !stillValid ? `<button class="btn btn-secondary btn-block" onclick="state._trainingView=null;closeModal()">Fermer</button>`
+        : !availLevels.length ? ''
+        : `<button class="btn btn-primary btn-block" onclick="openTrainingValidate()">✓ J'ai fait la séance</button>`}
+    </div>
+  `);
+}
+
+// Lance le drill lié à un bloc. Il n'y a PAS de dispatcher générique sur d.mode
+// dans ce repo (chaque appelant branche à la main) — et les drills « réaction »
+// historiques n'ont aucun champ mode, d'où les tests d'égalité explicites.
+// Le runtime ferme la modale et fait son propre render() en sortie : on rouvre
+// donc la séance à la fermeture, sinon la joueuse retomberait sur l'accueil au
+// milieu de sa séance.
+function launchTrainingDrill(drillId) {
+  const d = (state.drills || []).find(x => x.id === drillId && !x.deletedAt);
+  if (!d) { try { showToast('⚠ Drill introuvable'); } catch (e) {} return; }
+  const v = state._trainingView;
+  if (v) window._trainingResume = { ...v };
+  if (d.mode === 'interval') launchInterval(d.id);
+  else if (d.mode === 'circuit') launchCircuit(d.id);
+  else launchDrill(d.id);
+}
+// Rappelée par les stopX() des runtimes via render() : si une séance était
+// ouverte avant le drill, on la rouvre. Volontairement window._ (volatile).
+function _trainingMaybeResume() {
+  const r = window._trainingResume;
+  if (!r) return;
+  window._trainingResume = null;
+  try { openTrainingSession(r.programId, r.sessionId, r.datePlanned); } catch (e) {}
+}
+
+// --- Validation -------------------------------------------------------------
+// Un seul écran : squad / post / distance, avec le total en direct. Les photos
+// sont uploadées AU CHOIX du fichier (et pas à la validation) pour que la joueuse
+// voie tout de suite si ça a marché, et pour ne pas empiler upload + insert dans
+// un même bouton dont l'échec serait ambigu.
+function openTrainingValidate() {
+  const v = state._trainingView; if (!v) return;
+  if (!(state.auth && state.auth.role === 'player')) return;
+  if (!_isRattrapageValid(v.datePlanned, Date.now())) { try { alert('Le délai de 48 h est dépassé : cette séance ne peut plus être validée.'); } catch (e) {} return; }
+  state._trainingValidate = {
+    programId: v.programId, sessionId: v.sessionId, datePlanned: v.datePlanned, level: v.level,
+    squadOn: false, squadTeammateId: '', squadPhotoUrl: '',
+    postOn: false, postPhotoUrl: '', postMessage: '',
+    distanceKm: '', busy: false
+  };
+  renderTrainingValidate();
+}
+function _tva() { return state._trainingValidate; }
+function _tvaSet(k, val) { const a = _tva(); if (a) a[k] = val; }
+function _tvaToggle(k) { const a = _tva(); if (!a) return; a[k] = !a[k]; renderTrainingValidate(); }
+// Total en direct : squad et post ne comptent que si leur pièce justificative est
+// bien là — cocher la case ne suffit pas, sinon l'aperçu mentirait sur le total.
+function _tvaPoints() {
+  const a = _tva(); if (!a) return { base: 0, total: 0 };
+  const p = activeTrainingPrograms().find(x => x.id === a.programId);
+  return _computePoints({
+    level: a.level,
+    hasSquad: _tvaSquadOk(), hasPost: _tvaPostOk(),
+    config: p ? p.scoringConfig : {}
+  });
+}
+function _tvaSquadOk() { const a = _tva(); return !!(a && a.squadOn && a.squadPhotoUrl && a.squadTeammateId); }
+function _tvaPostOk() { const a = _tva(); return !!(a && a.postOn && a.postPhotoUrl && (a.postMessage || '').trim()); }
+
+async function _tvaPhoto(kind, event) {
+  const a = _tva(); if (!a) return;
+  const file = (event.target.files || [])[0];
+  event.target.value = '';
+  if (!file) return;
+  if (!window.sb) { try { alert('Hors ligne : impossible d\'envoyer la photo pour l\'instant.'); } catch (e) {} return; }
+  a.busy = true; renderTrainingValidate();
+  try {
+    const blob = (typeof compressImageBlob === 'function') ? await compressImageBlob(file, 1200, 0.8) : file;
+    const fname = `${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`;
+    const { error: upErr } = await sb.storage.from('training-photos').upload(fname, blob, { contentType: 'image/jpeg', cacheControl: '31536000', upsert: false });
+    if (upErr) throw upErr;
+    const { data: pub } = sb.storage.from('training-photos').getPublicUrl(fname);
+    const url = (pub && pub.publicUrl) || '';
+    if (!url) throw new Error('URL publique indisponible');
+    if (kind === 'squad') a.squadPhotoUrl = url; else a.postPhotoUrl = url;
+  } catch (e) {
+    console.error('[training] upload ' + kind, e && e.message ? e.message : e);
+    try { alert('⚠ L\'envoi de la photo a échoué. Réessaie.'); } catch (e2) {}
+  }
+  a.busy = false;
+  renderTrainingValidate();
+}
+
+function renderTrainingValidate() {
+  const a = _tva(); if (!a) return;
+  const p = activeTrainingPrograms().find(x => x.id === a.programId);
+  const s = (state.trainingSessions || []).find(x => x.id === a.sessionId && !x.deletedAt);
+  if (!p || !s) { closeModal(); return; }
+  const cfg = _trainingConfig(p);
+  const pts = _tvaPoints();
+  const needDistance = _trainingHasDistance(s, a.level);
+  const me = currentPlayer();
+  const mates = _trainingPoolFor(p).filter(x => !me || x.id !== me.id);
+  const squadOk = _tvaSquadOk(), postOk = _tvaPostOk();
+
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">${esc(s.name || 'Séance')} · ${TRAINING_LEVEL_LABEL[a.level]}</div>
+        <div class="modal-title">Valider ma séance</div>
+      </div>
+      <button class="modal-close" onclick="state._trainingValidate=null;renderTrainingSession()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="text-align:center;padding:14px;background:var(--bg-3);border-radius:10px;margin-bottom:16px">
+        <div style="font-family:'Anton';font-size:38px;color:var(--orange);line-height:1">${pts.total}</div>
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">points</div>
+        <div style="font-size:10px;color:var(--ink-3);margin-top:6px">
+          ${pts.base}${squadOk ? ' × ' + cfg.squad_multiplier : ''}${postOk ? ' + ' + cfg.post_bonus : ''} = ${pts.total}
+        </div>
+      </div>
+
+      <!-- SQUAD -->
+      <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--bg-3);border-radius:8px;cursor:pointer;margin-bottom:6px">
+        <input type="checkbox" ${a.squadOn ? 'checked' : ''} onchange="_tvaToggle('squadOn')" style="width:20px;height:20px;flex:none">
+        <span style="flex:1;font-size:13px">👯 J'étais en squad <span style="color:var(--ink-3)">(×${cfg.squad_multiplier})</span></span>
+      </label>
+      ${a.squadOn ? `
+        <div style="border:1px solid ${squadOk ? 'var(--border-soft)' : 'var(--orange)'};border-radius:8px;padding:10px;margin-bottom:12px">
+          <div style="font-size:10px;color:var(--ink-3);margin-bottom:8px">Photo <b>et</b> coéquipière obligatoires pour le multiplicateur.</div>
+          <select onchange="_tvaSet('squadTeammateId',this.value);renderTrainingValidate()" style="width:100%;margin-bottom:8px">
+            <option value="">— Avec qui ? —</option>
+            ${mates.map(m => `<option value="${esc(m.id)}" ${a.squadTeammateId === m.id ? 'selected' : ''}>#${m.num} ${esc(m.name)}</option>`).join('')}
+          </select>
+          ${a.squadPhotoUrl
+            ? `<img src="${esc(a.squadPhotoUrl)}" alt="" style="width:100%;max-height:160px;object-fit:cover;border-radius:6px;margin-bottom:6px">
+               <button class="btn btn-ghost btn-block" onclick="_tvaSet('squadPhotoUrl','');renderTrainingValidate()" style="font-size:11px">🗑 Retirer la photo</button>`
+            : `<label class="btn btn-secondary btn-block" style="cursor:pointer;margin:0">
+                 📸 Ajouter la photo
+                 <input type="file" accept="image/*" onchange="_tvaPhoto('squad',event)" style="display:none" ${a.busy ? 'disabled' : ''}>
+               </label>`}
+        </div>` : ''}
+
+      <!-- POST -->
+      <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--bg-3);border-radius:8px;cursor:pointer;margin-bottom:6px">
+        <input type="checkbox" ${a.postOn ? 'checked' : ''} onchange="_tvaToggle('postOn')" style="width:20px;height:20px;flex:none">
+        <span style="flex:1;font-size:13px">📸 J'ai fait un post <span style="color:var(--ink-3)">(+${cfg.post_bonus})</span></span>
+      </label>
+      ${a.postOn ? `
+        <div style="border:1px solid ${postOk ? 'var(--border-soft)' : 'var(--orange)'};border-radius:8px;padding:10px;margin-bottom:12px">
+          <div style="font-size:10px;color:var(--ink-3);margin-bottom:8px">Photo <b>et</b> message obligatoires pour le bonus.</div>
+          <textarea rows="2" placeholder="Ton message…" onchange="_tvaSet('postMessage',this.value);renderTrainingValidate()" style="margin-bottom:8px">${esc(a.postMessage)}</textarea>
+          ${a.postPhotoUrl
+            ? `<img src="${esc(a.postPhotoUrl)}" alt="" style="width:100%;max-height:160px;object-fit:cover;border-radius:6px;margin-bottom:6px">
+               <button class="btn btn-ghost btn-block" onclick="_tvaSet('postPhotoUrl','');renderTrainingValidate()" style="font-size:11px">🗑 Retirer la photo</button>`
+            : `<label class="btn btn-secondary btn-block" style="cursor:pointer;margin:0">
+                 📸 Ajouter la photo
+                 <input type="file" accept="image/*" onchange="_tvaPhoto('post',event)" style="display:none" ${a.busy ? 'disabled' : ''}>
+               </label>`}
+        </div>` : ''}
+
+      <!-- DISTANCE -->
+      ${needDistance ? `
+        <div class="fld" style="margin-top:6px">
+          <label class="fld-label">🏃 Distance parcourue (km)</label>
+          <input type="number" min="0" step="0.1" value="${esc(String(a.distanceKm))}" placeholder="5.2" onchange="_tvaSet('distanceKm',this.value)">
+          <div style="font-size:10px;color:var(--ink-3);margin-top:3px">Optionnel — ne change pas tes points, c'est pour ton suivi.</div>
+        </div>` : ''}
+
+      ${a.busy ? `<div style="text-align:center;font-size:11px;color:var(--ink-3);padding:8px">⏳ Envoi de la photo…</div>` : ''}
+    </div>
+    <div class="modal-footer" style="display:flex;gap:6px">
+      <button class="btn btn-secondary" onclick="state._trainingValidate=null;renderTrainingSession()">Retour</button>
+      <button class="btn btn-primary" style="flex:1" onclick="confirmTrainingCompletion()" ${a.busy ? 'disabled' : ''}>✓ Valider · ${pts.total} pts</button>
+    </div>
+  `);
+}
+
+// Insert de la validation. base_points ET points_total sont FIGÉS ici : rejouer
+// le barème à la lecture réécrirait l'historique si le coach le change ensuite.
+function confirmTrainingCompletion() {
+  const a = _tva(); if (!a) return;
+  const pid = (state.auth && state.auth.role === 'player') ? state.auth.playerId : null;
+  if (!pid) return;
+  const p = activeTrainingPrograms().find(x => x.id === a.programId);
+  if (!p) return;
+  // Re-test du délai : la modale a pu rester ouverte au-delà de minuit + 48 h.
+  const now = Date.now();
+  if (!_isRattrapageValid(a.datePlanned, now)) {
+    try { alert('Le délai de 48 h vient d\'expirer : cette séance ne peut plus être validée.'); } catch (e) {}
+    state._trainingValidate = null; renderTrainingSession(); return;
+  }
+  // Une case cochée sans sa pièce justificative : on demande plutôt que de
+  // valider en silence à un total plus bas que celui espéré.
+  if (a.squadOn && !_tvaSquadOk()) { try { alert('Squad : il manque la photo ou la coéquipière.\n\nDécoche « en squad » si tu étais seule.'); } catch (e) {} return; }
+  if (a.postOn && !_tvaPostOk()) { try { alert('Post : il manque la photo ou le message.\n\nDécoche « j\'ai fait un post » si tu n\'en as pas fait.'); } catch (e) {} return; }
+  // Anti double-validation (miroir de l'index unique partiel en base).
+  if (_trainingCompletionFor(a.sessionId, pid, a.datePlanned)) {
+    try { showToast('✓ Séance déjà validée'); } catch (e) {}
+    state._trainingValidate = null; state._trainingView = null; closeModal(); render(); return;
+  }
+  const squadOk = _tvaSquadOk(), postOk = _tvaPostOk();
+  const pts = _computePoints({ level: a.level, hasSquad: squadOk, hasPost: postOk, config: p.scoringConfig });
+  const km = Number(a.distanceKm);
+  const c = {
+    id: uid(), programId: a.programId, sessionId: a.sessionId, playerId: pid,
+    datePlanned: a.datePlanned, dateCompleted: now, contractLevel: a.level,
+    basePoints: pts.base,
+    squadTeammateId: squadOk ? a.squadTeammateId : null,
+    squadPhotoUrl: squadOk ? a.squadPhotoUrl : null,
+    postPhotoUrl: postOk ? a.postPhotoUrl : null,
+    postMessage: postOk ? (a.postMessage || '').trim() : null,
+    runningDistanceKm: (Number.isFinite(km) && km > 0) ? km : null,
+    pointsTotal: pts.total, notes: '',
+    createdAt: now, updatedAt: now, deletedAt: null
+  };
+  state.trainingCompletions = state.trainingCompletions || [];
+  state.trainingCompletions.unshift(c);
+  persist(); _trainingFlush();
+  state._trainingValidate = null;
+  state._trainingView = null;
+  closeModal();
+  try { showToast('💪 Séance validée · +' + pts.total + ' pts'); } catch (e) {}
+  try { _trainingNotifyCoachCompletion(p, c); } catch (e) {}
+  try { render(); } catch (e) {}
+}
+
+// Le coach suit l'assiduité : une validation lui est poussée.
+function _trainingNotifyCoachCompletion(p, c) {
+  const me = currentPlayer();
+  const who = me ? ('#' + me.num + ' ' + me.name) : 'Une joueuse';
+  notifyPush([_pushCoachKey()], {
+    title: '💪 Séance validée',
+    body: who + ' · ' + (p.name || 'Prépa') + ' · ' + _completionSummary(c),
+    url: '/', tag: 'training-done-' + p.id, type: 'training_completion'
+  });
+}
+
 // Push à la publication : les joueuses concernées doivent savoir que le
 // programme existe, sinon personne ne va le chercher sur l'accueil.
 function _trainingNotifyPublished(p) {
@@ -19602,6 +20039,10 @@ function stopDrillGame() {
   try { if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {}); } catch (e) {}
   _drillWakeLockRelease();
   try { render(); } catch (e) {}
+  // Prépa : si un drill a été lancé depuis une séance, on rouvre la séance
+  // (le runtime a fermé la modale au lancement — sans ça la joueuse
+  // retomberait sur l'accueil au milieu de sa prépa).
+  try { _trainingMaybeResume(); } catch (e) {}
 }
 
 // Config effective d'un lancement = drill + overrides éphémères (joueuse).
@@ -20008,6 +20449,10 @@ function stopCircuit() {
   try { if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {}); } catch (e) {}
   _drillWakeLockRelease();
   try { render(); } catch (e) {}
+  // Prépa : si un drill a été lancé depuis une séance, on rouvre la séance
+  // (le runtime a fermé la modale au lancement — sans ça la joueuse
+  // retomberait sur l'accueil au milieu de sa prépa).
+  try { _trainingMaybeResume(); } catch (e) {}
 }
 
 // ============================================================
@@ -20292,6 +20737,10 @@ function stopInterval() {
   try { if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {}); } catch (e) {}
   _drillWakeLockRelease();
   try { render(); } catch (e) {}
+  // Prépa : si un drill a été lancé depuis une séance, on rouvre la séance
+  // (le runtime a fermé la modale au lancement — sans ça la joueuse
+  // retomberait sur l'accueil au milieu de sa prépa).
+  try { _trainingMaybeResume(); } catch (e) {}
 }
 
 // ============================================================
