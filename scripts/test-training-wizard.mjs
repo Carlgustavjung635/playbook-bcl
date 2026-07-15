@@ -531,6 +531,128 @@ t('_trainingMaybeResume : sans drill lancé → no-op', () => {
   assert(true);
 });
 
+// ============================================================================
+// RAPPEL QUOTIDIEN — heure locale, filigrane 1/jour, relais coach.
+// ============================================================================
+// Les heures du rappel sont LOCALES : on construit donc les instants de test avec
+// un Date local (et pas Date.parse('…Z')), sinon la suite passerait ou casserait
+// selon le fuseau de la machine qui la lance.
+const localAt = (iso, h) => { const [y, m, d] = iso.split('-').map(Number); return new Date(y, m - 1, d, h, 0, 0).getTime(); };
+const LUN_8H = localAt(LUN, 8);
+const LUN_9H = localAt(LUN, 9);
+const LUN_18H = localAt(LUN, 18);
+
+const resetRemind = () => { ctx.state.trainingCompletions = []; ctx.save(ctx.K.trainingRemind, {}); };
+let notified = [];
+ctx.notifyPush = (keys, payload) => { notified.push({ keys, payload }); };
+ctx._ambientShowBanner = msg => { ctx.__banner = msg; };
+
+t('joueuse : pas de rappel AVANT l\'heure (8h < 9h)', () => {
+  resetRemind(); ctx.__banner = '';
+  ctx.state.auth = { role: 'player', playerId: 'p1' };
+  freeze(LUN_8H);
+  ctx._trainingRemindCheck();
+  assert(!ctx.__banner, 'rappel envoyé avant l\'heure');
+});
+t('joueuse : rappel à l\'heure pile (9h), avec le jour et le nom', () => {
+  freeze(LUN_9H);
+  ctx._trainingRemindCheck();
+  assert(ctx.__banner, 'aucun rappel à 9h');
+  assert(ctx.__banner.includes('lundi'), 'le jour manque : ' + ctx.__banner);
+  assert(ctx.__banner.includes('N\'oublie pas'), 'formulation inattendue : ' + ctx.__banner);
+});
+t('joueuse : filigrane → 1 seul rappel par jour', () => {
+  ctx.__banner = '';
+  ctx._trainingRemindCheck();
+  assert(!ctx.__banner, 'rappel doublonné le même jour');
+});
+t('joueuse : pas de rappel si la séance est déjà validée', () => {
+  resetRemind(); ctx.__banner = '';
+  const s = ctx._programSessionForDay(P(), 1);
+  ctx.state.trainingCompletions = [{
+    id: 'c1', programId: P().id, sessionId: s.id, playerId: 'p1',
+    datePlanned: LUN, dateCompleted: LUN_9H, contractLevel: 'med',
+    basePoints: 20, pointsTotal: 20, deletedAt: null,
+  }];
+  freeze(LUN_18H);
+  ctx._trainingRemindCheck();
+  assert(!ctx.__banner, 'rappel envoyé alors que la séance est faite');
+});
+t('joueuse : pas de rappel un jour de repos', () => {
+  resetRemind(); ctx.__banner = '';
+  freeze(localAt('2026-07-14', 9)); // mardi, non actif
+  ctx._trainingRemindCheck();
+  assert(!ctx.__banner, 'rappel envoyé un jour de repos');
+});
+t('joueuse : heure de rappel configurable (18h)', () => {
+  resetRemind(); ctx.__banner = '';
+  ctx.state.trainingPrograms[0].scoringConfig.remind_hour = 18;
+  try {
+    freeze(LUN_9H);
+    ctx._trainingRemindCheck();
+    assert(!ctx.__banner, 'rappel à 9h alors qu\'il est réglé à 18h');
+    freeze(LUN_18H);
+    ctx._trainingRemindCheck();
+    assert(ctx.__banner, 'aucun rappel à 18h');
+  } finally { ctx.state.trainingPrograms[0].scoringConfig.remind_hour = 9; }
+});
+
+t('coach : relaie un push vers les joueuses en retard', () => {
+  resetRemind(); notified = [];
+  ctx.state.auth = { role: 'coach', coachId: 'admin' };
+  freeze(LUN_9H);
+  ctx._trainingRemindCheck();
+  assert(notified.length === 1, 'attendu 1 push, reçu ' + notified.length);
+  const n = notified[0];
+  assert(n.keys.length === 3, 'attendu les 3 joueuses en retard, reçu ' + n.keys.length);
+  assert(n.payload.body.includes('lundi'), 'jour absent du push');
+  assert(n.payload.type === 'training_remind', 'type de push faux');
+  assert(n.payload.tag === 'training-remind-' + P().id + '-' + LUN, 'tag de dédup faux : ' + n.payload.tag);
+});
+t('coach : filigrane → pas de push doublon', () => {
+  notified = [];
+  ctx._trainingRemindCheck();
+  assert(notified.length === 0, 'push doublonné');
+});
+t('coach : les joueuses à jour sont exclues du rappel', () => {
+  resetRemind(); notified = [];
+  const s = ctx._programSessionForDay(P(), 1);
+  ctx.state.trainingCompletions = [{
+    id: 'c2', programId: P().id, sessionId: s.id, playerId: 'p1',
+    datePlanned: LUN, dateCompleted: LUN_9H, contractLevel: 'med',
+    basePoints: 20, pointsTotal: 20, deletedAt: null,
+  }];
+  freeze(LUN_9H);
+  ctx._trainingRemindCheck();
+  assert(notified.length === 1, 'aucun push pour les retardataires restantes');
+  assert(notified[0].keys.length === 2, 'attendu 2 retardataires, reçu ' + notified[0].keys.length);
+  assert(!notified[0].keys.includes('player:p1'), 'la joueuse à jour est relancée');
+});
+t('coach : aucun push si tout le monde est à jour', () => {
+  resetRemind(); notified = [];
+  const s = ctx._programSessionForDay(P(), 1);
+  ctx.state.trainingCompletions = ['p1', 'p2', 'p3'].map((pid, i) => ({
+    id: 'c' + i, programId: P().id, sessionId: s.id, playerId: pid,
+    datePlanned: LUN, dateCompleted: LUN_9H, contractLevel: 'med',
+    basePoints: 20, pointsTotal: 20, deletedAt: null,
+  }));
+  freeze(LUN_9H);
+  ctx._trainingRemindCheck();
+  assert(notified.length === 0, 'push envoyé alors que tout le monde est à jour');
+});
+t('coach : pas de push avant l\'heure', () => {
+  resetRemind(); notified = [];
+  freeze(LUN_8H);
+  ctx._trainingRemindCheck();
+  assert(notified.length === 0, 'push envoyé avant l\'heure');
+});
+t('rappel : sans identité → no-op', () => {
+  ctx.state.auth = null;
+  freeze(LUN_9H);
+  ctx._trainingRemindCheck();
+  assert(true);
+});
+
 unfreeze();
 
 console.log('\n' + R.join('\n'));

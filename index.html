@@ -19547,6 +19547,102 @@ function _trainingNotifyCoachCompletion(p, c) {
   });
 }
 
+// --- Rappel quotidien -------------------------------------------------------
+// « N'oublie pas ta séance de [jour] : [nom] », à remind_hour (défaut 9h).
+//
+// LIMITE ASSUMÉE — il n'y a AUCUN ordonnanceur côté serveur dans ce projet : pas
+// de pg_cron, et push-send est une Edge Function appelée par un client, jamais
+// déclenchée toute seule. Un vrai rappel « même app fermée » demanderait un cron
+// serveur (pg_cron → push-send, ou un workflow n8n) — hors périmètre ici. D'où
+// deux chemins complémentaires, tous deux déclenchés par un appareil ALLUMÉ :
+//   • joueuse : notification LOCALE (l'app doit être ouverte) — attrape le cas
+//     courant « j'ouvre l'app dans la journée » ;
+//   • coach : PUSH réel vers les joueuses en retard (marche app fermée), relayé
+//     par l'appareil du coach dès qu'il est ouvert après l'heure du rappel.
+// Si personne n'ouvre l'app, il n'y a pas de rappel. C'est une limite connue, pas
+// un bug : ne pas « corriger » en ajoutant un timer, corriger avec un cron.
+//
+// Filigrane (K.trainingRemind, local, par identité) : 1 rappel par jour maximum.
+// Côté coach le filigrane est PAR APPAREIL — deux coachs connectés enverraient
+// donc deux pushes ; le `tag` identique les fait se remplacer sur le téléphone
+// de la joueuse plutôt que s'empiler.
+function _trainingRemindMark(dateISO) {
+  const m = load(K.trainingRemind, {}) || {};
+  m[themeIdentityKey()] = dateISO;
+  save(K.trainingRemind, m);
+}
+function _trainingRemindAlready(dateISO) {
+  const m = load(K.trainingRemind, {}) || {};
+  return m[themeIdentityKey()] === dateISO;
+}
+// L'heure du rappel est locale (pas UTC) : « 9h » veut dire 9h chez la joueuse.
+// C'est le seul endroit du module qui n'est PAS en UTC, et c'est voulu — à la
+// différence des jours prévus, l'heure de rappel est bien un instant vécu.
+function _trainingRemindCheck(nowMs) {
+  if (!state.auth) return;
+  const now = new Date(Number.isFinite(nowMs) ? nowMs : Date.now());
+  const todayISO = isoDate(now);
+  if (_trainingRemindAlready(todayISO)) return;
+  const role = state.auth.role;
+
+  if (role === 'player') {
+    // Uniquement la séance DU JOUR : un rattrapage a déjà son badge sur
+    // l'accueil, et notifier deux fois pour la même séance serait du bruit.
+    const due = _myTrainingDue(now.getTime()).filter(d => !d.done && !d.isRattrapage);
+    if (!due.length) return;
+    const d = due[0];
+    const p = activeTrainingPrograms().find(x => x.id === d.programId);
+    if (!p) return;
+    if (now.getHours() < _trainingConfig(p).remind_hour) return;
+    _trainingRemindMark(todayISO);
+    const dayLabel = TRAINING_DAY_LABELS[_trainingDayOfWeek(d.datePlanned)] || 'aujourd\'hui';
+    const msg = 'N\'oublie pas ta séance de ' + dayLabel.toLowerCase() + ' : ' + (d.session.name || 'prépa');
+    _trainingRemindShow('💪 Ta prépa', msg);
+    return;
+  }
+
+  if (role === 'coach') {
+    let sent = false;
+    _coachTrainingPrograms().forEach(p => {
+      if (!_trainingProgramRunning(p, todayISO)) return;
+      if (now.getHours() < _trainingConfig(p).remind_hour) return;
+      const dow = _trainingDayOfWeek(todayISO);
+      if (!p.daysActive.includes(dow)) return;
+      const s = _programSessionForDay(p, dow);
+      if (!s) return;
+      const late = _trainingPoolFor(p).filter(pl => !_trainingCompletionFor(s.id, pl.id, todayISO));
+      if (!late.length) return;
+      notifyPush(_pushPlayerKeys(late.map(pl => pl.id)), {
+        title: '💪 Ta prépa',
+        body: 'N\'oublie pas ta séance de ' + (TRAINING_DAY_LABELS[dow] || '').toLowerCase() + ' : ' + (s.name || 'prépa'),
+        url: '/',
+        // Même tag pour tous les émetteurs : deux coachs connectés → les deux
+        // pushes se remplacent au lieu de s'empiler.
+        tag: 'training-remind-' + p.id + '-' + todayISO,
+        type: 'training_remind'
+      });
+      sent = true;
+    });
+    if (sent) _trainingRemindMark(todayISO);
+  }
+}
+// Notification locale + bandeau (mêmes canaux que les alertes ambiantes).
+function _trainingRemindShow(title, msg) {
+  try { _ambientShowBanner('💪 ' + msg); } catch (e) {}
+  try {
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted' && navigator.serviceWorker) {
+      navigator.serviceWorker.ready.then(reg => {
+        reg.showNotification(title, { body: msg, tag: 'training-remind', renotify: false, icon: 'icon-192.png', badge: 'icon-192.png' });
+      }).catch(() => {});
+    }
+  } catch (e) {}
+}
+function _trainingRemindStart() {
+  if (window._trainingRemindTimer) return;
+  window._trainingRemindTimer = setInterval(() => { try { _trainingRemindCheck(); } catch (e) {} }, 60000);
+  try { _trainingRemindCheck(); } catch (e) {}
+}
+
 // Push à la publication : les joueuses concernées doivent savoir que le
 // programme existe, sinon personne ne va le chercher sur l'accueil.
 function _trainingNotifyPublished(p) {
@@ -34672,10 +34768,13 @@ try { initPullToRefresh(); } catch (e) { console.warn('[ptr] init', e && e.messa
 // (PWA rouverte sans être tuée → détecte un déploiement survenu entre-temps).
 setTimeout(() => { try { checkForUpdate({ force: true }); } catch (e) {} }, 4000);
 try { _ambientStart(); } catch (e) {} // alertes ambiantes de déroulé (coach)
+try { _trainingRemindStart(); } catch (e) {} // rappel prépa quotidien (cf. la limite documentée sur _trainingRemindCheck)
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) {
     try { checkForUpdate(); } catch (e) {}
     try { _ambientCheck(); } catch (e) {} // rattrape une transition franchie en arrière-plan
+    // Retour au 1er plan après l'heure du rappel → rattrape le rappel du jour.
+    try { _trainingRemindCheck(); } catch (e) {}
     // Retour au 1er plan : un gage a pu être assigné entre-temps → tirage.
     try { maybeShowGageReveal(); } catch (e) {}
     // Rafraîchit le badge d'icône (un signal a pu changer pendant l'absence).
