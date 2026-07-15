@@ -4755,6 +4755,72 @@ const ENTITIES = [
       const pendingLocal = local.filter(m => !remoteIds.has(m.id) && typeof m.id === 'string' && m.id.startsWith('x'));
       state.drillImages = [...pendingLocal, ...fromRemote];
     }
+  },
+  // ==========================================================================
+  // PRÉPA « FULL PACKAGE » (cf. migration 20260713_004_training_programs).
+  // 3 entités, même contrat que `drills` : LWW sur updatedAt, anti-wipe sur les
+  // ids locaux 'x…' (pas encore flushés), _reassertRows quand le local est
+  // devant. CRUD coach-only appliqué CÔTÉ FRONT (RLS = anon sandbox équipe).
+  //
+  // ATTENTION — ne PAS confondre avec l'entité `programs` (module offseason,
+  // table `programs`) définie plus haut : tables et schémas disjoints.
+  // ==========================================================================
+  {
+    key: 'trainingPrograms', table: 'training_programs', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.trainingPrograms || []).map(p => [p.id, _dumpTrainingProgramRow(p)])),
+    apply: (state, rows) => {
+      const local = state.trainingPrograms || [];
+      const localById = Object.fromEntries(local.map(p => [p.id, p]));
+      const remoteIds = new Set(rows.map(r => r.id));
+      const ahead = [];
+      const fromRemote = rows.map(r => {
+        const mapped = _trainingProgramFromRow(r);
+        const loc = localById[r.id];
+        if (loc && (loc.updatedAt || 0) > (mapped.updatedAt || 0)) { ahead.push(loc); return loc; }
+        return mapped;
+      });
+      const pendingLocal = local.filter(p => !remoteIds.has(p.id) && typeof p.id === 'string' && p.id.startsWith('x'));
+      state.trainingPrograms = [...pendingLocal, ...fromRemote];
+      if (ahead.length) _reassertRows('training_programs', ahead.map(_dumpTrainingProgramRow));
+    }
+  },
+  {
+    key: 'trainingSessions', table: 'training_sessions', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.trainingSessions || []).map(s => [s.id, _dumpTrainingSessionRow(s)])),
+    apply: (state, rows) => {
+      const local = state.trainingSessions || [];
+      const localById = Object.fromEntries(local.map(s => [s.id, s]));
+      const remoteIds = new Set(rows.map(r => r.id));
+      const ahead = [];
+      const fromRemote = rows.map(r => {
+        const mapped = _trainingSessionFromRow(r);
+        const loc = localById[r.id];
+        if (loc && (loc.updatedAt || 0) > (mapped.updatedAt || 0)) { ahead.push(loc); return loc; }
+        return mapped;
+      });
+      const pendingLocal = local.filter(s => !remoteIds.has(s.id) && typeof s.id === 'string' && s.id.startsWith('x'));
+      state.trainingSessions = [...pendingLocal, ...fromRemote];
+      if (ahead.length) _reassertRows('training_sessions', ahead.map(_dumpTrainingSessionRow));
+    }
+  },
+  {
+    key: 'trainingCompletions', table: 'training_completions', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.trainingCompletions || []).map(c => [c.id, _dumpTrainingCompletionRow(c)])),
+    apply: (state, rows) => {
+      const local = state.trainingCompletions || [];
+      const localById = Object.fromEntries(local.map(c => [c.id, c]));
+      const remoteIds = new Set(rows.map(r => r.id));
+      const ahead = [];
+      const fromRemote = rows.map(r => {
+        const mapped = _trainingCompletionFromRow(r);
+        const loc = localById[r.id];
+        if (loc && (loc.updatedAt || 0) > (mapped.updatedAt || 0)) { ahead.push(loc); return loc; }
+        return mapped;
+      });
+      const pendingLocal = local.filter(c => !remoteIds.has(c.id) && typeof c.id === 'string' && c.id.startsWith('x'));
+      state.trainingCompletions = [...pendingLocal, ...fromRemote];
+      if (ahead.length) _reassertRows('training_completions', ahead.map(_dumpTrainingCompletionRow));
+    }
   }
 ];
 
@@ -4867,6 +4933,112 @@ function _drillImageUrl(path) {
   if (!path || !window.sb) return '';
   try { const { data } = sb.storage.from('drill-images').getPublicUrl(path); return (data && data.publicUrl) || ''; }
   catch (e) { return ''; }
+}
+// --- PRÉPA « FULL PACKAGE » : sérialisation (module) -------------------------
+// cf. migration 20260713_004_training_programs.
+// Conventions de types côté état front (et pourquoi) :
+//   startDate/endDate/datePlanned : STRING 'YYYY-MM-DD' (colonnes `date`), jamais
+//     un ms epoch — un fuseau négatif décalerait le jour (cf. isoDate()).
+//   dateCompleted/createdAt/updatedAt/deletedAt : ms epoch (colonnes timestamptz).
+//   daysActive : int[] ISO 1=lundi … 7=dimanche.
+//   scoringConfig / blocks : jsonb passthrough (aucun schéma imposé en base).
+function _dumpTrainingProgramRow(p) {
+  return {
+    id: p.id, name: p.name || '', description: p.description || null,
+    start_date: p.startDate || null, end_date: p.endDate || null,
+    days_active: _trainingCleanDays(p.daysActive),
+    scoring_config: (p.scoringConfig && typeof p.scoringConfig === 'object' && !Array.isArray(p.scoringConfig)) ? p.scoringConfig : {},
+    created_by: p.createdBy || null,
+    team_tag: p.teamTag || null,
+    is_active: p.isActive !== false,
+    deleted_at: p.deletedAt ? new Date(p.deletedAt).toISOString() : null,
+    updated_at: p.updatedAt ? new Date(p.updatedAt).toISOString() : (p.createdAt ? new Date(p.createdAt).toISOString() : null)
+  };
+}
+function _trainingProgramFromRow(r) {
+  return {
+    id: r.id, name: r.name || '', description: r.description || '',
+    startDate: r.start_date || null, endDate: r.end_date || null,
+    daysActive: _trainingCleanDays(r.days_active),
+    scoringConfig: (r.scoring_config && typeof r.scoring_config === 'object' && !Array.isArray(r.scoring_config)) ? r.scoring_config : {},
+    createdBy: r.created_by || null,
+    teamTag: r.team_tag || null,
+    isActive: r.is_active !== false,
+    createdAt: r.created_at ? Date.parse(r.created_at) : null,
+    updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
+    deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
+  };
+}
+function _dumpTrainingSessionRow(s) {
+  return {
+    id: s.id, program_id: s.programId || null,
+    day_of_week: (Number.isFinite(s.dayOfWeek) && s.dayOfWeek >= 1 && s.dayOfWeek <= 7) ? s.dayOfWeek : null,
+    name: s.name || '', format_label: s.formatLabel || null,
+    intro_text: s.introText || null, notes_recovery: s.notesRecovery || null,
+    blocks: Array.isArray(s.blocks) ? s.blocks : [],
+    is_template: !!s.isTemplate,
+    position: Number.isFinite(s.position) ? s.position : 0,
+    deleted_at: s.deletedAt ? new Date(s.deletedAt).toISOString() : null,
+    updated_at: s.updatedAt ? new Date(s.updatedAt).toISOString() : (s.createdAt ? new Date(s.createdAt).toISOString() : null)
+  };
+}
+function _trainingSessionFromRow(r) {
+  return {
+    id: r.id, programId: r.program_id || null,
+    dayOfWeek: (Number.isFinite(r.day_of_week) && r.day_of_week >= 1 && r.day_of_week <= 7) ? r.day_of_week : null,
+    name: r.name || '', formatLabel: r.format_label || '',
+    introText: r.intro_text || '', notesRecovery: r.notes_recovery || '',
+    blocks: Array.isArray(r.blocks) ? r.blocks : [],
+    isTemplate: !!r.is_template,
+    position: Number.isFinite(r.position) ? r.position : 0,
+    createdAt: r.created_at ? Date.parse(r.created_at) : null,
+    updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
+    deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
+  };
+}
+function _dumpTrainingCompletionRow(c) {
+  return {
+    id: c.id, program_id: c.programId || null, session_id: c.sessionId || null,
+    player_id: c.playerId || null,
+    date_planned: c.datePlanned || null,
+    date_completed: c.dateCompleted ? new Date(c.dateCompleted).toISOString() : null,
+    contract_level: ['min', 'med', 'ultra'].includes(c.contractLevel) ? c.contractLevel : 'min',
+    base_points: Number.isFinite(c.basePoints) ? c.basePoints : 0,
+    squad_teammate_id: c.squadTeammateId || null,
+    squad_photo_url: c.squadPhotoUrl || null,
+    post_photo_url: c.postPhotoUrl || null,
+    post_message: c.postMessage || null,
+    running_distance_km: Number.isFinite(c.runningDistanceKm) ? c.runningDistanceKm : null,
+    points_total: Number.isFinite(c.pointsTotal) ? c.pointsTotal : 0,
+    notes: c.notes || null,
+    deleted_at: c.deletedAt ? new Date(c.deletedAt).toISOString() : null,
+    updated_at: c.updatedAt ? new Date(c.updatedAt).toISOString() : (c.createdAt ? new Date(c.createdAt).toISOString() : null)
+  };
+}
+function _trainingCompletionFromRow(r) {
+  // running_distance_km est `numeric` → PostgREST le renvoie en STRING ('5.20').
+  // Number.isFinite('5.20') est false : passer par Number() sinon la distance
+  // serait silencieusement perdue à chaque aller-retour DB.
+  const km = (r.running_distance_km === null || r.running_distance_km === undefined || r.running_distance_km === '')
+    ? null : Number(r.running_distance_km);
+  return {
+    id: r.id, programId: r.program_id || null, sessionId: r.session_id || null,
+    playerId: r.player_id || null,
+    datePlanned: r.date_planned || null,
+    dateCompleted: r.date_completed ? Date.parse(r.date_completed) : null,
+    contractLevel: ['min', 'med', 'ultra'].includes(r.contract_level) ? r.contract_level : 'min',
+    basePoints: Number.isFinite(r.base_points) ? r.base_points : 0,
+    squadTeammateId: r.squad_teammate_id || null,
+    squadPhotoUrl: r.squad_photo_url || null,
+    postPhotoUrl: r.post_photo_url || null,
+    postMessage: r.post_message || '',
+    runningDistanceKm: Number.isFinite(km) ? km : null,
+    pointsTotal: Number.isFinite(r.points_total) ? r.points_total : 0,
+    notes: r.notes || '',
+    createdAt: r.created_at ? Date.parse(r.created_at) : null,
+    updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
+    deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
+  };
 }
 // --- CHALLENGE_SERIES : sérialisation (module) ---
 function _dumpSeriesRow(challengeId, pid, s) {
@@ -5337,6 +5509,13 @@ const K = {
   chronoTension: 'pb8_chrono_tension', // map { "<role>:<playerId|->": bool } — mode tension 3-2-1
   sessionLogs: 'pb8_session_logs', // [] logs de session live d'entraînement (local, non sync, cap 50)
   guideSeen: 'pb8_guide_seen', // map { "<role>:<playerId|->": true } — mini-guide joueuse vu
+  // === PRÉPA « FULL PACKAGE » (cf. migration 20260713_004_training_programs) ===
+  // NE PAS confondre avec K.programs (module offseason, table `programs`) : autre
+  // schéma, autre table, autre module. Cf. l'en-tête de la migration.
+  trainingPrograms: 'pb8_training_programs', // [{ id, name, startDate, endDate, daysActive[], scoringConfig{}, ... }]
+  trainingSessions: 'pb8_training_sessions', // [{ id, programId, dayOfWeek, name, blocks[], isTemplate, ... }]
+  trainingCompletions: 'pb8_training_completions', // [{ id, programId, sessionId, playerId, datePlanned, contractLevel, pointsTotal, ... }]
+  trainingRemind: 'pb8_training_remind', // map { "<role>:<playerId|->": "YYYY-MM-DD" } — filigrane anti-doublon du rappel quotidien (local)
 };
 function load(k, d) { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : d; } catch { return d; } }
 // save() : sync localStorage avec gestion explicite du QuotaExceededError.
@@ -5754,6 +5933,16 @@ let state = {
   drills: load(K.drills, []),
   drillImages: load(K.drillImages, []),
 
+  // === PRÉPA « FULL PACKAGE » (cf. migration 20260713_004_training_programs) ===
+  // Programme individuel piloté par le coach : N sessions (1 par jour actif de la
+  // semaine), chaque session = N blocs déclinés en 3 niveaux (min/med/ultra). La
+  // joueuse choisit son niveau, exécute, valide → 1 trainingCompletion scorée.
+  // INDÉPENDANT de state.programs / state.offseason (module estival, retiré de la
+  // nav mais conservé en base) : ne jamais mélanger les deux.
+  trainingPrograms: load(K.trainingPrograms, []),
+  trainingSessions: load(K.trainingSessions, []),
+  trainingCompletions: load(K.trainingCompletions, []),
+
   // === JOUEUSES GUESTS (Phase 5 — cf. migration 20260524_009_guest_players) ===
   // guestPlayers : humains temporaires identifiés par leur nom (copine d'une
   //   joueuse, essayeuse). [{ id, name, note, promotedToPlayerId, firstSeenAt,
@@ -5857,6 +6046,9 @@ function persist() {
   save(K.coaches, state.coaches);
   save(K.drills, state.drills);
   save(K.drillImages, state.drillImages);
+  save(K.trainingPrograms, state.trainingPrograms);
+  save(K.trainingSessions, state.trainingSessions);
+  save(K.trainingCompletions, state.trainingCompletions);
   // FIX Option B : pendant l'édition d'un plan, bumper updatedAt de l'entrée
   // courante AVANT le save → la garde anti-écho de l'apply() trainingPlans peut
   // distinguer une édition locale fraîche d'un écho realtime obsolète (qui
@@ -18011,6 +18203,170 @@ function renderDrillFab() {
   const role = state.auth.role;
   if (role !== 'coach' && role !== 'player') return '';
   return `<button class="drill-fab" onclick="openDrillLibrary()" aria-label="Drill réaction" title="Drill réaction">⚡</button>`;
+}
+
+// ============================================================
+// PRÉPA « FULL PACKAGE » — cœur pur (scoring, dates, rattrapage)
+// cf. migration 20260713_004_training_programs.
+//
+// Tout ce bloc est SANS EFFET DE BORD et sans accès au DOM : c'est ce qui est
+// recopié à l'identique dans scripts/test-training-programs.mjs. Y toucher =
+// mettre le test à jour dans le même commit.
+//
+// FUSEAU — pourquoi tout est en UTC ici : les jours prévus sont des `date` SQL
+// (pas des instants). Passer par un Date local ferait basculer le jour d'un cran
+// pour tout fuseau négatif (UTC-5 → '2026-07-13' devient dimanche 12). Toutes les
+// bornes ci-dessous sont donc calculées en UTC, y compris « minuit du jour prévu ».
+// ============================================================
+
+// Barème par défaut. Volontairement dupliqué en base (colonne scoring_config
+// jsonb) et ici : un programme créé avant l'ajout d'une clé doit rester scorable,
+// donc chaque lecture retombe sur ce défaut clé par clé (cf. _trainingConfig).
+const TRAINING_DEFAULT_CONFIG = {
+  points: { min: 10, med: 20, ultra: 30 },
+  squad_multiplier: 2,
+  post_bonus: 10,
+  remind_hour: 9
+};
+const TRAINING_LEVELS = ['min', 'med', 'ultra'];
+const TRAINING_LEVEL_LABEL = { min: 'Minimum', med: 'Medium', ultra: 'Ultra' };
+// Fenêtre de rattrapage : 48 h à partir de MINUIT du jour prévu (pas de l'heure
+// de la séance — il n'y en a pas). Séance prévue lundi → rattrapable lundi et
+// mardi, périmée mercredi 00:00 UTC pile.
+const TRAINING_RATTRAPAGE_MS = 48 * 3600000;
+const TRAINING_DAY_LABELS = { 1: 'Lundi', 2: 'Mardi', 3: 'Mercredi', 4: 'Jeudi', 5: 'Vendredi', 6: 'Samedi', 7: 'Dimanche' };
+const TRAINING_BLOCK_TYPES = [
+  { id: 'warmup', label: 'Échauffement', icon: '🔥' },
+  { id: 'gainage', label: 'Gainage', icon: '🧱' },
+  { id: 'legs', label: 'Jambes', icon: '🦵' },
+  { id: 'course', label: 'Course', icon: '🏃' },
+  { id: 'recovery', label: 'Récupération', icon: '🧘' },
+  { id: 'custom', label: 'Autre', icon: '⚙' }
+];
+
+// Jours actifs normalisés : entiers ISO 1..7, dédupliqués, triés. Tolère les
+// strings ('1') car un <input> renvoie toujours du texte.
+function _trainingCleanDays(days) {
+  if (!Array.isArray(days)) return [];
+  const seen = new Set();
+  days.forEach(d => { const n = Number(d); if (Number.isInteger(n) && n >= 1 && n <= 7) seen.add(n); });
+  return [...seen].sort((a, b) => a - b);
+}
+
+// Barème effectif d'un programme = défauts + surcharges, fusionnés clé par clé.
+function _trainingConfig(program) {
+  const raw = (program && program.scoringConfig && typeof program.scoringConfig === 'object') ? program.scoringConfig : {};
+  const pts = (raw.points && typeof raw.points === 'object') ? raw.points : {};
+  const num = (v, d) => Number.isFinite(Number(v)) ? Number(v) : d;
+  return {
+    points: {
+      min: num(pts.min, TRAINING_DEFAULT_CONFIG.points.min),
+      med: num(pts.med, TRAINING_DEFAULT_CONFIG.points.med),
+      ultra: num(pts.ultra, TRAINING_DEFAULT_CONFIG.points.ultra)
+    },
+    squad_multiplier: num(raw.squad_multiplier, TRAINING_DEFAULT_CONFIG.squad_multiplier),
+    post_bonus: num(raw.post_bonus, TRAINING_DEFAULT_CONFIG.post_bonus),
+    remind_hour: num(raw.remind_hour, TRAINING_DEFAULT_CONFIG.remind_hour)
+  };
+}
+
+// FORMULE FIGÉE (ne pas « améliorer » sans reprise de l'historique) :
+//   total = (base_points × squad_multiplier) + post_bonus
+// Le multiplicateur squad porte sur la BASE SEULE ; le bonus post est additif et
+// n'est jamais multiplié. Ex : med + squad + post = 20×2 + 10 = 50.
+// Le total est arrondi (Math.round) : un multiplicateur décimal (1.5) doit rendre
+// un entier — points_total est une colonne `integer`, un float y serait tronqué
+// par le driver, donc on arrondit ici, explicitement.
+function _computePoints({ level, hasSquad, hasPost, config } = {}) {
+  const cfg = _trainingConfig({ scoringConfig: config || {} });
+  const lvl = TRAINING_LEVELS.includes(level) ? level : 'min';
+  const base = cfg.points[lvl];
+  const total = (base * (hasSquad ? cfg.squad_multiplier : 1)) + (hasPost ? cfg.post_bonus : 0);
+  return { base, total: Math.round(total) };
+}
+
+// Minuit UTC du jour 'YYYY-MM-DD'. null si la date est absente/malformée : les
+// appelants doivent traiter null comme « pas de fenêtre » (et non comme 0, qui
+// serait le 1er janvier 1970 et rendrait toute séance périmée).
+function _trainingDayStartMs(dateStr) {
+  if (!dateStr || typeof dateStr !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return null;
+  const ms = Date.parse(dateStr + 'T00:00:00Z');
+  return Number.isFinite(ms) ? ms : null;
+}
+
+// Fenêtre de validation d'une séance prévue le jour `datePlanned`.
+// true  ⟺ minuit(datePlanned) ≤ dateNow < minuit(datePlanned) + 48 h.
+// Borne HAUTE exclue : à 48 h pile, c'est périmé (mercredi 00:00 = trop tard).
+// Borne BASSE incluse et NON négociable : on ne valide pas une séance à l'avance
+// — sinon toute la semaine serait validable dès le lundi.
+function _isRattrapageValid(datePlanned, dateNow) {
+  const start = _trainingDayStartMs(datePlanned);
+  if (start === null) return false;
+  const now = (dateNow instanceof Date) ? dateNow.getTime() : Number(dateNow);
+  if (!Number.isFinite(now)) return false;
+  const elapsed = now - start;
+  return elapsed >= 0 && elapsed < TRAINING_RATTRAPAGE_MS;
+}
+
+// true si la séance est en RETARD mais encore rattrapable (= J+1 uniquement) :
+// sert au badge « Rattrapage possible » côté home. Le jour même n'est pas un
+// rattrapage, c'est la séance du jour.
+function _isRattrapage(datePlanned, dateNow) {
+  const start = _trainingDayStartMs(datePlanned);
+  if (start === null) return false;
+  const now = (dateNow instanceof Date) ? dateNow.getTime() : Number(dateNow);
+  if (!Number.isFinite(now)) return false;
+  const elapsed = now - start;
+  return elapsed >= 86400000 && elapsed < TRAINING_RATTRAPAGE_MS;
+}
+
+// Jour ISO (1=lundi … 7=dimanche) d'un 'YYYY-MM-DD', en UTC. null si invalide.
+function _trainingDayOfWeek(dateStr) {
+  const ms = _trainingDayStartMs(dateStr);
+  if (ms === null) return null;
+  const d = new Date(ms).getUTCDay(); // 0=dimanche
+  return d === 0 ? 7 : d;
+}
+
+// Toutes les dates prévues d'un programme : chaque jour de [startDate, endDate]
+// dont le jour ISO est dans daysActive. Bornes INCLUSES. Retourne [] si les
+// entrées sont invalides ou si end < start (jamais une boucle infinie).
+// Garde-fou 5 ans : une faute de frappe sur l'année (2260) ne doit pas figer
+// l'onglet en générant 90 000 dates.
+function _dateRangeForProgram(startDate, endDate, daysActive) {
+  const start = _trainingDayStartMs(startDate);
+  const end = _trainingDayStartMs(endDate);
+  const days = _trainingCleanDays(daysActive);
+  if (start === null || end === null || end < start || !days.length) return [];
+  const MAX_DAYS = 366 * 5;
+  const out = [];
+  for (let i = 0, ms = start; ms <= end && i < MAX_DAYS; i++, ms = start + i * 86400000) {
+    const iso = new Date(ms).toISOString().slice(0, 10);
+    const dow = new Date(ms).getUTCDay();
+    if (days.includes(dow === 0 ? 7 : dow)) out.push(iso);
+  }
+  return out;
+}
+
+// La session prévue un jour ISO donné, dans un programme. Les modèles
+// (isTemplate) ne sont rattachés à aucun jour : ils ne doivent jamais sortir ici.
+function _programSessionForDay(program, dayOfWeek) {
+  if (!program) return null;
+  const dow = Number(dayOfWeek);
+  return (state.trainingSessions || []).find(s =>
+    !s.deletedAt && !s.isTemplate && s.programId === program.id && s.dayOfWeek === dow
+  ) || null;
+}
+
+// Résumé lisible d'une validation (feed, historique, carte de cumul).
+// Décrit ce qui a été FAIT, pas ce qui était prévu.
+function _completionSummary(c) {
+  if (!c) return '';
+  const bits = [TRAINING_LEVEL_LABEL[c.contractLevel] || c.contractLevel];
+  if (c.squadTeammateId) bits.push('👯 Squad');
+  if (c.postPhotoUrl) bits.push('📸 Post');
+  if (Number.isFinite(c.runningDistanceKm) && c.runningDistanceKm > 0) bits.push('🏃 ' + c.runningDistanceKm + ' km');
+  return bits.join(' · ') + ' — ' + (c.pointsTotal || 0) + ' pts';
 }
 
 // ============================================================
