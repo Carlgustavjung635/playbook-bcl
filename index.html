@@ -18150,22 +18150,122 @@ function _drillCueHtml(cue) {
 // jouer un audio SILENCIEUX en boucle : tant qu'un média joue, le tab reste
 // actif écran éteint. Volume ~0 → inaudible, ne gêne pas les bips/TTS.
 // ============================================================
-const SILENT_AUDIO_B64 = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
-let _keepAliveAudio = null;
-function _drillKeepAliveStart() {
+// ⚠️ Le 1er essai utilisait un WAV base64 d'UN SEUL échantillon (0.02 ms) : iOS le
+// considère terminé instantanément → aucune media session soutenue → tab suspendu.
+// On génère donc à la volée un VRAI wav de plusieurs secondes (Blob URL, pas de
+// base64 géant dans le bundle), avec un dither ±1 LSB : le silence numérique
+// parfait peut être ignoré par iOS, un signal minuscule non-nul tient la session.
+let _keepAliveAudio = null, _keepAliveUrl = null, _keepAliveOsc = null;
+function _silentWavBlobUrl(seconds) {
+  const sampleRate = 8000, channels = 1, bps = 2;
+  const n = Math.max(1, Math.floor(sampleRate * (seconds || 10)));
+  const dataSize = n * bps * channels;
+  const buf = new ArrayBuffer(44 + dataSize), v = new DataView(buf);
+  const ws = (off, s) => { for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)); };
+  ws(0, 'RIFF'); v.setUint32(4, 36 + dataSize, true); ws(8, 'WAVE');
+  ws(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, channels, true);
+  v.setUint32(24, sampleRate, true); v.setUint32(28, sampleRate * channels * bps, true);
+  v.setUint16(32, channels * bps, true); v.setUint16(34, 16, true);
+  ws(36, 'data'); v.setUint32(40, dataSize, true);
+  for (let i = 0; i < n; i++) v.setInt16(44 + i * bps, (i % 2) ? 1 : -1, true); // dither ±1 LSB (inaudible)
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+}
+// MediaSession : déclare une session média active → iOS traite l'onglet comme un
+// lecteur audio et le suspend beaucoup moins agressivement écran éteint.
+function _drillMediaSessionOn(title) {
+  try {
+    if (!('mediaSession' in navigator)) return;
+    if (typeof MediaMetadata !== 'undefined') {
+      navigator.mediaSession.metadata = new MediaMetadata({ title: title || 'Drill en cours', artist: 'Playbook BCL', album: 'Séance' });
+    }
+    navigator.mediaSession.playbackState = 'playing';
+    // Handlers no-op : évite qu'un tap sur les contrôles de l'écran verrouillé tue la session.
+    ['play', 'pause', 'stop', 'previoustrack', 'nexttrack'].forEach(a => { try { navigator.mediaSession.setActionHandler(a, () => {}); } catch (e) {} });
+  } catch (e) {}
+}
+function _drillMediaSessionOff() {
+  try {
+    if (!('mediaSession' in navigator)) return;
+    navigator.mediaSession.playbackState = 'none';
+    navigator.mediaSession.metadata = null;
+    ['play', 'pause', 'stop', 'previoustrack', 'nexttrack'].forEach(a => { try { navigator.mediaSession.setActionHandler(a, null); } catch (e) {} });
+  } catch (e) {}
+}
+// Filet de secours : oscillateur Web Audio à gain quasi nul (l'AudioContext du
+// drill est déjà débloqué par le geste utilisateur) si l'élément <audio> échoue.
+function _drillKeepAliveOscStart() {
+  try {
+    if (_keepAliveOsc) return;
+    if (!_drillAudioCtx) _drillUnlockAudio();
+    const ctx = _drillAudioCtx; if (!ctx) return;
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.frequency.value = 30; g.gain.value = 0.0005; // inaudible
+    o.connect(g); g.connect(ctx.destination); o.start();
+    _keepAliveOsc = { o: o, g: g };
+  } catch (e) {}
+}
+function _drillKeepAliveOscStop() {
+  if (!_keepAliveOsc) return;
+  try { _keepAliveOsc.o.stop(); _keepAliveOsc.o.disconnect(); _keepAliveOsc.g.disconnect(); } catch (e) {}
+  _keepAliveOsc = null;
+}
+function _drillKeepAliveStart(title) {
+  _drillMediaSessionOn(title);
   if (_keepAliveAudio) return;
   try {
-    _keepAliveAudio = new Audio(SILENT_AUDIO_B64);
+    _keepAliveUrl = _silentWavBlobUrl(10); // 10 s bouclées (vs 0.02 ms avant)
+    _keepAliveAudio = new Audio(_keepAliveUrl);
     _keepAliveAudio.loop = true;
-    _keepAliveAudio.volume = 0.001;
+    _keepAliveAudio.volume = 0.02; // très bas mais NON nul (0 = iOS peut ignorer)
     _keepAliveAudio.setAttribute('playsinline', '');
-    _keepAliveAudio.play().catch(err => console.warn('[drill] keepalive play:', err && err.message));
-  } catch (e) { console.warn('[drill] keepalive:', e && e.message); }
+    _keepAliveAudio.setAttribute('webkit-playsinline', '');
+    const p = _keepAliveAudio.play();
+    if (p && p.catch) p.catch(err => { console.warn('[drill] keepalive audio KO → fallback Web Audio:', err && err.message); _drillKeepAliveOscStart(); });
+  } catch (e) { console.warn('[drill] keepalive:', e && e.message); _drillKeepAliveOscStart(); }
 }
 function _drillKeepAliveStop() {
-  if (!_keepAliveAudio) return;
-  try { _keepAliveAudio.pause(); _keepAliveAudio.src = ''; } catch (e) {}
-  _keepAliveAudio = null;
+  _drillMediaSessionOff();
+  _drillKeepAliveOscStop();
+  if (_keepAliveAudio) { try { _keepAliveAudio.pause(); _keepAliveAudio.src = ''; } catch (e) {} _keepAliveAudio = null; }
+  if (_keepAliveUrl) { try { URL.revokeObjectURL(_keepAliveUrl); } catch (e) {} _keepAliveUrl = null; }
+}
+// ---- Détection PWA installée (déterminant sur iOS) ----
+function _isIOSDevice() {
+  const ua = (navigator.userAgent || '');
+  return /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+function _isStandalonePWA() {
+  try {
+    return !!((window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true);
+  } catch (e) { return false; }
+}
+// iOS + onglet Safari (pas la PWA installée) → l'OS a le droit de tout suspendre
+// écran éteint, quoi qu'on fasse. On prévient UNE fois par session, sans bloquer.
+function _drillEnsureStandalone(retryFn) {
+  if (!_isIOSDevice() || _isStandalonePWA() || window._drillIosWarned) return true;
+  window._drillIosWarned = true;
+  window._drillIosRetry = (typeof retryFn === 'function') ? retryFn : null;
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">⚠️ Installe l'app pour les séances</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:13px;line-height:1.6;color:var(--ink-2)">
+        Tu es dans <strong>Safari (onglet)</strong>. Quand tu éteins l'écran, iOS suspend l'onglet : le
+        <strong>décompte se fige</strong> et la <strong>voix s'arrête</strong>.
+        <div style="margin:12px 0;padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px">
+          <strong>Installe l'app sur l'écran d'accueil :</strong><br>
+          Safari → <strong>Partager</strong> ⬆️ → <strong>« Sur l'écran d'accueil »</strong> → ouvre l'app depuis l'icône.
+        </div>
+        En app installée, la lecture audio en tâche de fond tient <strong>beaucoup mieux</strong> écran éteint.
+      </div>
+    </div>
+    <div class="modal-footer" style="display:flex;gap:6px">
+      <button class="btn btn-secondary btn-block" onclick="closeModal()">Plus tard</button>
+      <button class="btn btn-primary btn-block" onclick="closeModal();if(window._drillIosRetry)window._drillIosRetry()">Lancer quand même</button>
+    </div>`);
+  return false;
 }
 // Une session de drill tourne-t-elle ? (interval | circuit | stimulus)
 function _drillSessionActive() { return !!(window._interval || window._circuit || window._drillGame); }
@@ -18242,7 +18342,7 @@ function startDrillGame(config) {
     <div id="drill-cue" class="drill-cue"></div>`;
   document.body.style.overflow = 'hidden';
   _drillUnlockAudio();
-  _drillKeepAliveStart(); // iOS : garde le tab actif écran éteint
+  _drillKeepAliveStart((config && config.name) || 'Drill réaction'); // iOS : garde le tab actif écran éteint
   const now = Date.now();
   window._drillGame = {
     running: true, timer: null, anticTimer: null, count: 0, pool,
@@ -18345,11 +18445,12 @@ function _drillLaunchConfig(d, o) {
 function launchDrill(id, overrides) {
   const d = (state.drills || []).find(x => x.id === id);
   if (!d || d.deletedAt) return;
+  if (!_drillEnsureStandalone(() => launchDrill(id, overrides))) return; // iOS : prévient si Safari onglet
   const cfg = _drillLaunchConfig(d, overrides);
   const pool = _drillExpandPool(cfg.stimuli);
   if (!pool.length) { try { alert('Ce drill n\'a aucun stimulus jouable.'); } catch (e) {} return; }
   try { closeModal(); } catch (e) {}
-  startDrillGame({ pool, lengthMs: cfg.lengthMs, delayMs: cfg.delayMs, audioBeep: cfg.audioBeep, durationMode: cfg.durationMode, durationValue: cfg.durationValue, lengthEndMs: cfg.lengthEndMs, lengthMinMs: cfg.lengthMinMs, lengthMaxMs: cfg.lengthMaxMs, anticipationClock: cfg.anticipationClock });
+  startDrillGame({ pool, name: d.name || 'Drill', lengthMs: cfg.lengthMs, delayMs: cfg.delayMs, audioBeep: cfg.audioBeep, durationMode: cfg.durationMode, durationValue: cfg.durationValue, lengthEndMs: cfg.lengthEndMs, lengthMinMs: cfg.lengthMinMs, lengthMaxMs: cfg.lengthMaxMs, anticipationClock: cfg.anticipationClock });
 }
 
 // ============================================================
@@ -18488,6 +18589,7 @@ function _circuitNextPreviewHtml(nextStage) {
 function launchCircuit(id) {
   const d = (state.drills || []).find(x => x.id === id && !x.deletedAt);
   if (!d) return;
+  if (!_drillEnsureStandalone(() => launchCircuit(id))) return; // iOS : prévient si Safari onglet
   const stages = Array.isArray(d.stages) ? d.stages.filter(Boolean) : [];
   if (!stages.length) { try { alert('Ce circuit n\'a aucune étape.'); } catch (e) {} return; }
   try { closeModal(); } catch (e) {}
@@ -18503,7 +18605,7 @@ function launchCircuit(id) {
     </div>`;
   document.body.style.overflow = 'hidden';
   _drillUnlockAudio();
-  _drillKeepAliveStart(); // iOS : garde le tab actif écran éteint
+  _drillKeepAliveStart(d.name || 'Circuit'); // iOS : garde le tab actif écran éteint
   try { _ttsVoices(); } catch (e) {} // amorce le chargement des voix
   window._circuit = { drillId: id, name: d.name || 'Circuit', stages, idx: -1, paused: false, done: false,
     advanceMode: d.advanceMode === 'manual' ? 'manual' : 'auto',
@@ -18870,6 +18972,7 @@ function _intervalNextText(phase) {
 function launchInterval(drillId) {
   const d = (state.drills || []).find(x => x.id === drillId && !x.deletedAt);
   if (!d) return;
+  if (!_drillEnsureStandalone(() => launchInterval(drillId))) return; // iOS : prévient si Safari onglet
   const config = (d.intervalConfig && typeof d.intervalConfig === 'object') ? d.intervalConfig : _intervalDefaultConfig();
   const phases = _intervalBuildTimeline(config);
   if (!phases.length) { try { alert('Ce fractionné n\'a aucune phase (vérifie les cycles).'); } catch (e) {} return; }
@@ -18886,7 +18989,7 @@ function launchInterval(drillId) {
     </div>`;
   document.body.style.overflow = 'hidden';
   _drillUnlockAudio();
-  _drillKeepAliveStart(); // iOS : garde le tab actif écran éteint
+  _drillKeepAliveStart(d.name || 'Fractionné'); // iOS : garde le tab actif écran éteint
   try { _ttsVoices(); } catch (e) {}
   const audio = config.audio || {};
   window._interval = {
