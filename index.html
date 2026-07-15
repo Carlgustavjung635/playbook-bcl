@@ -18141,6 +18141,52 @@ function _drillCueHtml(cue) {
 // ============================================================
 // DRILL — Web Audio (bip court, sans fichier externe)
 // ============================================================
+// ============================================================
+// DRILL — KEEP-ALIVE iOS (écran en veille) + Wake Lock résilient
+// ------------------------------------------------------------
+// BUG iPhone : bouton power → écran éteint → Safari suspend le tab → le
+// décompte se fige et le TTS meurt. Le Wake Lock NE SUFFIT PAS (il empêche la
+// veille auto, pas la veille manuelle). La SEULE parade éprouvée sur iOS =
+// jouer un audio SILENCIEUX en boucle : tant qu'un média joue, le tab reste
+// actif écran éteint. Volume ~0 → inaudible, ne gêne pas les bips/TTS.
+// ============================================================
+const SILENT_AUDIO_B64 = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+let _keepAliveAudio = null;
+function _drillKeepAliveStart() {
+  if (_keepAliveAudio) return;
+  try {
+    _keepAliveAudio = new Audio(SILENT_AUDIO_B64);
+    _keepAliveAudio.loop = true;
+    _keepAliveAudio.volume = 0.001;
+    _keepAliveAudio.setAttribute('playsinline', '');
+    _keepAliveAudio.play().catch(err => console.warn('[drill] keepalive play:', err && err.message));
+  } catch (e) { console.warn('[drill] keepalive:', e && e.message); }
+}
+function _drillKeepAliveStop() {
+  if (!_keepAliveAudio) return;
+  try { _keepAliveAudio.pause(); _keepAliveAudio.src = ''; } catch (e) {}
+  _keepAliveAudio = null;
+}
+// Une session de drill tourne-t-elle ? (interval | circuit | stimulus)
+function _drillSessionActive() { return !!(window._interval || window._circuit || window._drillGame); }
+function _drillWakeLockAcquire() {
+  try {
+    if (!navigator.wakeLock || !navigator.wakeLock.request) return;
+    navigator.wakeLock.request('screen').then(s => { window._drillWakeLock = s; }).catch(() => {});
+  } catch (e) {}
+}
+function _drillWakeLockRelease() {
+  try { if (window._drillWakeLock) { window._drillWakeLock.release().catch(() => {}); window._drillWakeLock = null; } } catch (e) {}
+}
+// Retour au premier plan : le Wake Lock est AUTOMATIQUEMENT relâché par le
+// navigateur quand l'onglet passe en arrière-plan → il faut le re-demander.
+// On relance aussi l'audio keep-alive qu'iOS a pu mettre en pause.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || !_drillSessionActive()) return;
+  _drillWakeLockAcquire();
+  if (_keepAliveAudio && _keepAliveAudio.paused) { try { _keepAliveAudio.play().catch(() => {}); } catch (e) {} }
+});
+
 let _drillAudioCtx = null;
 function _drillUnlockAudio() {
   try {
@@ -18196,6 +18242,7 @@ function startDrillGame(config) {
     <div id="drill-cue" class="drill-cue"></div>`;
   document.body.style.overflow = 'hidden';
   _drillUnlockAudio();
+  _drillKeepAliveStart(); // iOS : garde le tab actif écran éteint
   const now = Date.now();
   window._drillGame = {
     running: true, timer: null, anticTimer: null, count: 0, pool,
@@ -18212,7 +18259,7 @@ function startDrillGame(config) {
   };
   // Plein écran (les 2 orientations). Pas de verrou d'orientation.
   try { if (host.requestFullscreen) host.requestFullscreen().catch(() => {}); } catch (e) {}
-  try { if (navigator.wakeLock && navigator.wakeLock.request) navigator.wakeLock.request('screen').then(s => { window._drillWakeLock = s; }).catch(() => {}); } catch (e) {}
+  _drillWakeLockAcquire();
   _drillNextCue();
 }
 function _drillNextCue() {
@@ -18269,10 +18316,11 @@ function stopDrillGame() {
   const g = window._drillGame;
   if (g) { g.running = false; if (g.timer) clearTimeout(g.timer); if (g.anticTimer) clearInterval(g.anticTimer); }
   window._drillGame = null;
+  _drillKeepAliveStop();
   const host = document.getElementById('drill-overlay'); if (host) host.remove();
   document.body.style.overflow = '';
   try { if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {}); } catch (e) {}
-  try { if (window._drillWakeLock) { window._drillWakeLock.release().catch(() => {}); window._drillWakeLock = null; } } catch (e) {}
+  _drillWakeLockRelease();
   try { render(); } catch (e) {}
 }
 
@@ -18455,13 +18503,15 @@ function launchCircuit(id) {
     </div>`;
   document.body.style.overflow = 'hidden';
   _drillUnlockAudio();
+  _drillKeepAliveStart(); // iOS : garde le tab actif écran éteint
   try { _ttsVoices(); } catch (e) {} // amorce le chargement des voix
   window._circuit = { drillId: id, name: d.name || 'Circuit', stages, idx: -1, paused: false, done: false,
     advanceMode: d.advanceMode === 'manual' ? 'manual' : 'auto',
     resting: false, restMs: 0, restNextIdx: null, _restBipMid: false,
-    elapsedMs: 0, ticks: 0, _lastFrame: Date.now(), _driver: null, _cueTimer: null, _pool: null, _bipSecLeft: null, startedAt: Date.now() };
+    elapsedMs: 0, ticks: 0, stageEpoch: Date.now(), pausedAccumMs: 0, pauseStartedAt: null,
+    _driver: null, _cueTimer: null, _pool: null, _bipSecLeft: null, startedAt: Date.now() };
   try { if (host.requestFullscreen) host.requestFullscreen().catch(() => {}); } catch (e) {}
-  try { if (navigator.wakeLock && navigator.wakeLock.request) navigator.wakeLock.request('screen').then(s => { window._drillWakeLock = s; }).catch(() => {}); } catch (e) {}
+  _drillWakeLockAcquire();
   window._circuit._driver = setInterval(_circuitTick, 100);
   _circuitEnterStage(0);
 }
@@ -18473,7 +18523,8 @@ function _circuitBar() {
 }
 function _circuitEnterStage(idx) {
   const c = window._circuit; if (!c) return;
-  c.idx = idx; c.elapsedMs = 0; c.ticks = 0; c.paused = false; c.resting = false; c._lastFrame = Date.now(); c._bipSecLeft = null;
+  c.idx = idx; c.elapsedMs = 0; c.ticks = 0; c.paused = false; c.resting = false; c._bipSecLeft = null;
+  c.stageEpoch = Date.now(); c.pausedAccumMs = 0; c.pauseStartedAt = null;
   if (c._cueTimer) { clearTimeout(c._cueTimer); c._cueTimer = null; }
   const st = c.stages[idx]; if (!st) return _circuitFinish();
   // Restaure le fond noir (au cas où on sort d'une phase de repos) + libellés de contrôle.
@@ -18512,11 +18563,18 @@ function _circuitRenderCountdown(st, remMs) {
   </div>`;
 }
 // Boucle maîtresse 100ms : accumule le temps (hors pause), pilote counter/countdown, vérifie l'avancement.
+// Temps écoulé RÉEL sur l'étape/repos courant (Date.now() = source de vérité,
+// pause déduite). Résilient au gel du tick (écran éteint iOS) : au réveil on
+// retombe sur la bonne valeur, pas sur un compteur en retard.
+function _circuitElapsedMs(c) {
+  if (!c) return 0;
+  const pausedNow = (c.paused && c.pauseStartedAt) ? (Date.now() - c.pauseStartedAt) : 0;
+  return Math.max(0, Date.now() - c.stageEpoch - c.pausedAccumMs - pausedNow);
+}
 function _circuitTick() {
   const c = window._circuit; if (!c || c.done) return;
-  const now = Date.now(); const dt = now - c._lastFrame; c._lastFrame = now;
+  c.elapsedMs = _circuitElapsedMs(c);
   if (c.paused) return;
-  c.elapsedMs += dt;
   // Phase de repos entre 2 étapes : countdown auto (indépendant du mode manuel).
   if (c.resting) {
     const rem = Math.max(0, c.restMs - c.elapsedMs);
@@ -18594,7 +18652,8 @@ function _circuitAdvance() {
 function _circuitEnterRest(restMs, nextIdx) {
   const c = window._circuit; if (!c) return;
   c.resting = true; c.restMs = Math.max(0, restMs); c.restNextIdx = nextIdx;
-  c.elapsedMs = 0; c._lastFrame = Date.now(); c._restBipMid = false;
+  c.elapsedMs = 0; c._restBipMid = false;
+  c.stageEpoch = Date.now(); c.pausedAccumMs = 0; c.pauseStartedAt = null;
   const host = document.getElementById('drill-overlay'); if (host) host.style.background = 'linear-gradient(160deg,#1e3a5f,#0f2438)'; // fond distinct (bleu)
   const bar = document.getElementById('circuit-bar'); if (bar) bar.textContent = `${c.name} · Repos avant étape ${nextIdx + 1}/${c.stages.length}`;
   const skipBtn = document.getElementById('circuit-skip'); if (skipBtn) skipBtn.textContent = 'Passer le repos';
@@ -18619,7 +18678,8 @@ function _circuitSkip() {
 }
 function _circuitPauseToggle() {
   const c = window._circuit; if (!c || c.done) return;
-  c.paused = !c.paused; c._lastFrame = Date.now();
+  if (!c.paused) { c.paused = true; c.pauseStartedAt = Date.now(); }
+  else { c.pausedAccumMs += Math.max(0, Date.now() - (c.pauseStartedAt || Date.now())); c.pauseStartedAt = null; c.paused = false; }
   const btn = document.getElementById('circuit-pause'); if (btn) btn.textContent = c.paused ? '▶ Reprendre' : '⏸ Pause';
   const st = c.stages[c.idx];
   if (!c.paused && !c.resting && st && st.type === 'stimulus') _circuitStimulusNextCue(st); // relance la boucle de cues
@@ -18646,9 +18706,11 @@ function _circuitFinish() {
 function _circuitRestart() {
   const c = window._circuit; if (!c) return;
   c.done = false; c.idx = -1; c.elapsedMs = 0; c.ticks = 0; c.paused = false; c.resting = false;
-  c.restNextIdx = null; c._restBipMid = false; c._bipSecLeft = null; c._lastFrame = Date.now(); c.startedAt = Date.now();
+  c.restNextIdx = null; c._restBipMid = false; c._bipSecLeft = null;
+  c.stageEpoch = Date.now(); c.pausedAccumMs = 0; c.pauseStartedAt = null; c.startedAt = Date.now();
   if (c._cueTimer) { clearTimeout(c._cueTimer); c._cueTimer = null; }
   const ctrl = document.getElementById('circuit-ctrl'); if (ctrl) ctrl.style.display = 'flex';
+  _drillKeepAliveStart(); _drillWakeLockAcquire();
   if (!c._driver) c._driver = setInterval(_circuitTick, 100);
   _circuitEnterStage(0);
 }
@@ -18656,11 +18718,12 @@ function stopCircuit() {
   const c = window._circuit;
   if (c) { c.done = true; if (c._driver) clearInterval(c._driver); if (c._cueTimer) clearTimeout(c._cueTimer); }
   window._circuit = null;
+  _drillKeepAliveStop();
   try { if (_ttsSupported()) window.speechSynthesis.cancel(); } catch (e) {}
   const host = document.getElementById('drill-overlay'); if (host) host.remove();
   document.body.style.overflow = '';
   try { if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {}); } catch (e) {}
-  try { if (window._drillWakeLock) { window._drillWakeLock.release().catch(() => {}); window._drillWakeLock = null; } } catch (e) {}
+  _drillWakeLockRelease();
   try { render(); } catch (e) {}
 }
 
@@ -18761,6 +18824,27 @@ function _intervalBuildTimeline(config) {
   return phases;
 }
 function _intervalTotalMs(config) { return _intervalBuildTimeline(config).reduce((a, p) => a + (Number(p.duration_ms) || 0), 0); }
+// Ajoute à chaque phase son offset ABSOLU start_ms/end_ms depuis le début de la
+// séance → permet de retrouver la phase courante à tout instant depuis un simple
+// `elapsed` (source de vérité = Date.now()), même si le tick a été gelé (veille iOS).
+function _intervalTimelineOffsets(phases) {
+  let acc = 0;
+  return (phases || []).map(p => {
+    const start = acc, dur = Math.max(0, Number(p.duration_ms) || 0);
+    acc += dur;
+    return Object.assign({}, p, { start_ms: start, end_ms: acc });
+  });
+}
+// Phase active à `elapsedMs`. null = séance terminée. Les phases de durée 0 sont
+// ignorées (start==end). PURE → testée hors navigateur.
+function _currentPhaseAt(elapsedMs, timeline) {
+  const t = timeline || [];
+  const e = Math.max(0, Number(elapsedMs) || 0);
+  for (let i = 0; i < t.length; i++) {
+    if (e < t[i].end_ms) return { index: i, phase: t[i], phaseElapsedMs: e - t[i].start_ms, phaseRemainingMs: t[i].end_ms - e };
+  }
+  return null;
+}
 function _intervalFmtShort(ms) { const s = Math.round((Number(ms) || 0) / 1000); if (s < 60) return s + 's'; const m = Math.floor(s / 60), r = s % 60; return r ? (m + ' min ' + r + 's') : (m + ' min'); }
 function _intervalPhaseBg(type) { return type === 'work' ? '#FF6B35' : type === 'rest' ? '#0074D9' : '#5a6472'; }
 function _intervalPhaseIcon(type) { return type === 'work' ? '🔥' : type === 'rest' ? '💤' : type === 'warmup' ? '🌡' : '🧊'; }
@@ -18802,27 +18886,30 @@ function launchInterval(drillId) {
     </div>`;
   document.body.style.overflow = 'hidden';
   _drillUnlockAudio();
+  _drillKeepAliveStart(); // iOS : garde le tab actif écran éteint
   try { _ttsVoices(); } catch (e) {}
   const audio = config.audio || {};
   window._interval = {
-    drillId, name: d.name || 'Fractionné', config, phases, idx: -1, paused: false, done: false,
-    elapsedMs: 0, priorMs: 0, totalMs: _intervalTotalMs(config), _lastFrame: Date.now(), _driver: null, _bipSecLeft: null,
+    drillId, name: d.name || 'Fractionné', config, phases, timeline: _intervalTimelineOffsets(phases),
+    idx: -1, paused: false, done: false,
+    startEpoch: Date.now(), pausedAccumMs: 0, pauseStartedAt: null,
+    totalMs: _intervalTotalMs(config), _driver: null, _bipSecLeft: null,
     ttsEnabled: !!audio.tts_enabled, ttsLang: audio.tts_lang || 'fr', bipStart: audio.bip_start !== false, bipCountdown: audio.bip_end_countdown !== false,
     nextPreview: config.next_preview !== false, startedAt: Date.now()
   };
   try { if (host.requestFullscreen) host.requestFullscreen().catch(() => {}); } catch (e) {}
-  try { if (navigator.wakeLock && navigator.wakeLock.request) navigator.wakeLock.request('screen').then(s => { window._drillWakeLock = s; }).catch(() => {}); } catch (e) {}
+  _drillWakeLockAcquire();
   window._interval._driver = setInterval(_intervalTick, 100);
-  _intervalEnterPhase(0);
+  _intervalTick(); // rend la 1re phase immédiatement
 }
+// Transition VISUELLE/AUDIO vers la phase idx. Ne touche PAS au temps (l'horloge
+// absolue Date.now() reste la source de vérité) — appelé par le tick au changement.
 function _intervalEnterPhase(idx) {
   const c = window._interval; if (!c) return;
-  const ph = c.phases[idx]; if (!ph) return _intervalFinish();
-  // priorMs = somme des durées des phases précédentes (pour le « temps total restant »).
-  c.priorMs = c.phases.slice(0, idx).reduce((a, p) => a + (Number(p.duration_ms) || 0), 0);
-  c.idx = idx; c.elapsedMs = 0; c.paused = false; c._lastFrame = Date.now(); c._bipSecLeft = null;
+  const ph = c.timeline[idx]; if (!ph) return _intervalFinish();
+  c.idx = idx; c._bipSecLeft = null;
   const host = document.getElementById('drill-overlay'); if (host) host.style.background = _intervalPhaseBg(ph.type);
-  const pauseBtn = document.getElementById('itv-pause'); if (pauseBtn) pauseBtn.textContent = '⏸ Pause';
+  const pauseBtn = document.getElementById('itv-pause'); if (pauseBtn) pauseBtn.textContent = c.paused ? '▶ Reprendre' : '⏸ Pause';
   // Audio : bip fort au démarrage d'un WORK ; TTS label (+ cycle).
   if (ph.type === 'work' && c.bipStart) { try { _drillBeep(); } catch (e) {} }
   if (c.ttsEnabled && _ttsSupported()) { const say = ph.label + (ph.type === 'work' && ph.cycleTotal ? (', cycle ' + ph.cycleIndex + ' sur ' + ph.cycleTotal) : ''); _ttsSpeak(say, c.ttsLang); }
@@ -18832,7 +18919,7 @@ function _intervalRenderPhase(ph, remMs) {
   const c = window._interval; if (!c) return;
   const cycleEl = document.getElementById('itv-cycle');
   if (cycleEl) cycleEl.textContent = (ph.type === 'work' || ph.type === 'rest') ? ('Cycle ' + ph.cycleIndex + '/' + ph.cycleTotal) : ph.label;
-  const nextPh = c.phases[c.idx + 1];
+  const nextPh = c.timeline[c.idx + 1];
   const previewHtml = (c.nextPreview && nextPh) ? `<div style="margin-top:5vmin;font-size:3.4vmin;font-family:'JetBrains Mono';opacity:0.85">Prochain : ${esc(_intervalNextText(nextPh))}</div>` : '';
   const el = document.getElementById('drill-cue');
   if (el) el.innerHTML = `<div style="text-align:center;color:#fff">
@@ -18841,30 +18928,45 @@ function _intervalRenderPhase(ph, remMs) {
     ${previewHtml}
   </div>`;
 }
+// Temps écoulé RÉEL depuis le départ (Date.now() = source de vérité), pause
+// déduite. Résilient : même si le tick est gelé (écran éteint iOS), au réveil on
+// retombe sur la bonne phase au bon instant.
+function _intervalElapsedMs(c) {
+  if (!c) return 0;
+  const pausedNow = (c.paused && c.pauseStartedAt) ? (Date.now() - c.pauseStartedAt) : 0;
+  return Math.max(0, Date.now() - c.startEpoch - c.pausedAccumMs - pausedNow);
+}
+// Repositionne la séance à `ms` (skip) en décalant l'origine.
+function _intervalSeek(c, ms) {
+  if (!c) return;
+  const pausedNow = (c.paused && c.pauseStartedAt) ? (Date.now() - c.pauseStartedAt) : 0;
+  c.startEpoch = Date.now() - Math.max(0, ms) - c.pausedAccumMs - pausedNow;
+}
 function _intervalTick() {
   const c = window._interval; if (!c || c.done) return;
-  const now = Date.now(); const dt = now - c._lastFrame; c._lastFrame = now;
-  if (c.paused) return;
-  c.elapsedMs += dt;
-  const ph = c.phases[c.idx]; if (!ph) return;
-  const dur = Number(ph.duration_ms) || 0;
-  const rem = Math.max(0, dur - c.elapsedMs);
-  const cd = document.getElementById('itv-cd'); if (cd) cd.textContent = _fmtChronoMs(rem);
-  const totalRem = Math.max(0, c.totalMs - (c.priorMs + c.elapsedMs));
-  const totEl = document.getElementById('itv-total'); if (totEl) totEl.textContent = 'Reste ' + _fmtChronoMs(totalRem);
-  if (c.bipCountdown) { const secLeft = Math.ceil(rem / 1000); if (secLeft <= 3 && secLeft >= 1 && secLeft !== c._bipSecLeft) { c._bipSecLeft = secLeft; try { _drillBeep(); } catch (e) {} } }
-  if (rem <= 0) _intervalAdvance();
+  const elapsed = _intervalElapsedMs(c);
+  const cur = _currentPhaseAt(elapsed, c.timeline);
+  if (!cur) return _intervalFinish();
+  // Changement de phase détecté depuis le temps absolu (robuste au gel du tick).
+  if (cur.index !== c.idx) _intervalEnterPhase(cur.index);
+  const cd = document.getElementById('itv-cd'); if (cd) cd.textContent = _fmtChronoMs(cur.phaseRemainingMs);
+  const totEl = document.getElementById('itv-total'); if (totEl) totEl.textContent = 'Reste ' + _fmtChronoMs(Math.max(0, c.totalMs - elapsed));
+  if (c.bipCountdown) {
+    const secLeft = Math.ceil(cur.phaseRemainingMs / 1000);
+    if (secLeft <= 3 && secLeft >= 1 && secLeft !== c._bipSecLeft) { c._bipSecLeft = secLeft; try { _drillBeep(); } catch (e) {} }
+  }
 }
-function _intervalAdvance() {
+function _intervalSkip() {
   const c = window._interval; if (!c || c.done) return;
   const next = c.idx + 1;
-  if (next >= c.phases.length) return _intervalFinish();
-  _intervalEnterPhase(next);
+  if (next >= c.timeline.length) return _intervalFinish();
+  _intervalSeek(c, c.timeline[next].start_ms);
+  _intervalTick(); // application immédiate (pas d'attente du prochain tick)
 }
-function _intervalSkip() { _intervalAdvance(); }
 function _intervalPauseToggle() {
   const c = window._interval; if (!c || c.done) return;
-  c.paused = !c.paused; c._lastFrame = Date.now();
+  if (!c.paused) { c.paused = true; c.pauseStartedAt = Date.now(); }
+  else { c.pausedAccumMs += Math.max(0, Date.now() - (c.pauseStartedAt || Date.now())); c.pauseStartedAt = null; c.paused = false; }
   const btn = document.getElementById('itv-pause'); if (btn) btn.textContent = c.paused ? '▶ Reprendre' : '⏸ Pause';
 }
 function _intervalFinish() {
@@ -18886,21 +18988,24 @@ function _intervalFinish() {
 }
 function _intervalRestart() {
   const c = window._interval; if (!c) return;
-  c.done = false; c.idx = -1; c.elapsedMs = 0; c.priorMs = 0; c.paused = false; c._bipSecLeft = null; c._lastFrame = Date.now(); c.startedAt = Date.now();
+  c.done = false; c.idx = -1; c.paused = false; c._bipSecLeft = null;
+  c.startEpoch = Date.now(); c.pausedAccumMs = 0; c.pauseStartedAt = null; c.startedAt = Date.now();
   const ctrl = document.getElementById('itv-ctrl'); if (ctrl) ctrl.style.display = 'flex';
   const bar = document.getElementById('itv-bar'); if (bar) bar.style.display = 'flex';
+  _drillKeepAliveStart(); _drillWakeLockAcquire();
   if (!c._driver) c._driver = setInterval(_intervalTick, 100);
-  _intervalEnterPhase(0);
+  _intervalTick();
 }
 function stopInterval() {
   const c = window._interval;
   if (c) { c.done = true; if (c._driver) clearInterval(c._driver); }
   window._interval = null;
+  _drillKeepAliveStop();
   try { if (_ttsSupported()) window.speechSynthesis.cancel(); } catch (e) {}
   const host = document.getElementById('drill-overlay'); if (host) host.remove();
   document.body.style.overflow = '';
   try { if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {}); } catch (e) {}
-  try { if (window._drillWakeLock) { window._drillWakeLock.release().catch(() => {}); window._drillWakeLock = null; } } catch (e) {}
+  _drillWakeLockRelease();
   try { render(); } catch (e) {}
 }
 
@@ -32686,7 +32791,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-10.71';
+const APP_VERSION = '2026-07-10.72';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
