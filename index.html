@@ -18141,6 +18141,222 @@ function _drillCueHtml(cue) {
 // ============================================================
 // DRILL — Web Audio (bip court, sans fichier externe)
 // ============================================================
+// ============================================================
+// DRILL — KEEP-ALIVE iOS (écran en veille) + Wake Lock résilient
+// ------------------------------------------------------------
+// BUG iPhone : bouton power → écran éteint → Safari suspend le tab → le
+// décompte se fige et le TTS meurt. Le Wake Lock NE SUFFIT PAS (il empêche la
+// veille auto, pas la veille manuelle). La SEULE parade éprouvée sur iOS =
+// jouer un audio SILENCIEUX en boucle : tant qu'un média joue, le tab reste
+// actif écran éteint. Volume ~0 → inaudible, ne gêne pas les bips/TTS.
+// ============================================================
+// ⚠️ Le 1er essai utilisait un WAV base64 d'UN SEUL échantillon (0.02 ms) : iOS le
+// considère terminé instantanément → aucune media session soutenue → tab suspendu.
+// On génère donc à la volée un VRAI wav de plusieurs secondes (Blob URL, pas de
+// base64 géant dans le bundle), avec un dither ±1 LSB : le silence numérique
+// parfait peut être ignoré par iOS, un signal minuscule non-nul tient la session.
+let _keepAliveAudio = null, _keepAliveUrl = null, _keepAliveOsc = null;
+function _silentWavBlobUrl(seconds) {
+  const sampleRate = 8000, channels = 1, bps = 2;
+  const n = Math.max(1, Math.floor(sampleRate * (seconds || 10)));
+  const dataSize = n * bps * channels;
+  const buf = new ArrayBuffer(44 + dataSize), v = new DataView(buf);
+  const ws = (off, s) => { for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)); };
+  ws(0, 'RIFF'); v.setUint32(4, 36 + dataSize, true); ws(8, 'WAVE');
+  ws(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, channels, true);
+  v.setUint32(24, sampleRate, true); v.setUint32(28, sampleRate * channels * bps, true);
+  v.setUint16(32, channels * bps, true); v.setUint16(34, 16, true);
+  ws(36, 'data'); v.setUint32(40, dataSize, true);
+  for (let i = 0; i < n; i++) v.setInt16(44 + i * bps, (i % 2) ? 1 : -1, true); // dither ±1 LSB (inaudible)
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+}
+// MediaSession : déclare une session média active → iOS traite l'onglet comme un
+// lecteur audio et le suspend beaucoup moins agressivement écran éteint.
+function _drillMediaSessionOn(title) {
+  try {
+    if (!('mediaSession' in navigator)) return;
+    if (typeof MediaMetadata !== 'undefined') {
+      navigator.mediaSession.metadata = new MediaMetadata({ title: title || 'Drill en cours', artist: 'Playbook BCL', album: 'Séance' });
+    }
+    navigator.mediaSession.playbackState = 'playing';
+    // Handlers no-op : évite qu'un tap sur les contrôles de l'écran verrouillé tue la session.
+    ['play', 'pause', 'stop', 'previoustrack', 'nexttrack'].forEach(a => { try { navigator.mediaSession.setActionHandler(a, () => {}); } catch (e) {} });
+  } catch (e) {}
+}
+function _drillMediaSessionOff() {
+  try {
+    if (!('mediaSession' in navigator)) return;
+    navigator.mediaSession.playbackState = 'none';
+    navigator.mediaSession.metadata = null;
+    ['play', 'pause', 'stop', 'previoustrack', 'nexttrack'].forEach(a => { try { navigator.mediaSession.setActionHandler(a, null); } catch (e) {} });
+  } catch (e) {}
+}
+// Filet de secours : oscillateur Web Audio à gain quasi nul (l'AudioContext du
+// drill est déjà débloqué par le geste utilisateur) si l'élément <audio> échoue.
+function _drillKeepAliveOscStart() {
+  try {
+    if (_keepAliveOsc) return;
+    if (!_drillAudioCtx) _drillUnlockAudio();
+    const ctx = _drillAudioCtx; if (!ctx) return;
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.frequency.value = 30; g.gain.value = 0.0005; // inaudible
+    o.connect(g); g.connect(ctx.destination); o.start();
+    _keepAliveOsc = { o: o, g: g };
+  } catch (e) {}
+}
+function _drillKeepAliveOscStop() {
+  if (!_keepAliveOsc) return;
+  try { _keepAliveOsc.o.stop(); _keepAliveOsc.o.disconnect(); _keepAliveOsc.g.disconnect(); } catch (e) {}
+  _keepAliveOsc = null;
+}
+// ---- Vidéo muette en boucle (hack NoSleep.js) ----
+// Média extraits de NoSleep.js (richtr/NoSleep.js, dist) — octets AUTHENTIQUES
+// (mp4 3753 o, ftyp/M4V ; webm 5577 o, EBML) : une vidéo qui joue empêche la mise
+// en veille auto et pèse comme "média actif" là où le Wake Lock est absent/refusé.
+const NOSLEEP_WEBM = 'data:video/webm;base64,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';
+const NOSLEEP_MP4 = 'data:video/mp4;base64,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';
+let _keepAliveVideo = null;
+function _drillNoSleepVideoStart() {
+  if (_keepAliveVideo) return;
+  try {
+    const v = document.createElement('video');
+    v.id = 'drill-nosleep';
+    v.setAttribute('playsinline', ''); v.setAttribute('webkit-playsinline', '');
+    v.setAttribute('muted', ''); v.muted = true; v.loop = true; v.autoplay = true;
+    v.style.cssText = 'position:fixed;bottom:0;right:0;width:1px;height:1px;opacity:0.01;pointer-events:none;z-index:-1';
+    [[NOSLEEP_WEBM, 'video/webm'], [NOSLEEP_MP4, 'video/mp4']].forEach(([src, type]) => {
+      const s = document.createElement('source'); s.src = src; s.type = type; v.appendChild(s);
+    });
+    document.body.appendChild(v);
+    _keepAliveVideo = v;
+    const p = v.play();
+    if (p && p.catch) p.catch(err => console.warn('[drill][keepalive] vidéo KO:', err && err.name, err && err.message));
+  } catch (e) { console.warn('[drill][keepalive] vidéo exception:', e && e.message); }
+}
+function _drillNoSleepVideoStop() {
+  if (!_keepAliveVideo) return;
+  try { _keepAliveVideo.pause(); _keepAliveVideo.removeAttribute('src'); _keepAliveVideo.load(); _keepAliveVideo.remove(); } catch (e) {}
+  _keepAliveVideo = null;
+}
+function _drillKeepAliveAudioStart() {
+  if (_keepAliveAudio) return;
+  try {
+    _keepAliveUrl = _silentWavBlobUrl(10); // 10 s bouclées (vs 0.02 ms avant)
+    _keepAliveAudio = new Audio(_keepAliveUrl);
+    _keepAliveAudio.loop = true;
+    _keepAliveAudio.volume = 0.02; // très bas mais NON nul (0 = iOS peut ignorer)
+    _keepAliveAudio.setAttribute('playsinline', '');
+    _keepAliveAudio.setAttribute('webkit-playsinline', '');
+    const p = _keepAliveAudio.play();
+    if (p && p.then) p.then(() => console.log('[drill][keepalive] ✅ audio silencieux en lecture (10 s bouclées)'))
+      .catch(err => console.warn('[drill][keepalive] ❌ audio KO:', err && err.name, err && err.message));
+  } catch (e) { console.warn('[drill][keepalive] audio exception:', e && e.message); }
+}
+// EMPILEMENT : on démarre TOUTES les techniques ensemble — la première qui tient
+// sauve la séance. Aucune n'est bloquante, chacune échoue en silence de son côté.
+function _drillKeepAliveStart(title) {
+  console.log('[drill][keepalive] démarrage (media session + vidéo + audio + oscillateur)');
+  _drillMediaSessionOn(title);
+  _drillNoSleepVideoStart();
+  _drillKeepAliveAudioStart();
+  _drillKeepAliveOscStart();
+}
+function _drillKeepAliveStop() {
+  console.log('[drill][keepalive] arrêt');
+  _drillMediaSessionOff();
+  _drillNoSleepVideoStop();
+  _drillKeepAliveOscStop();
+  if (_keepAliveAudio) { try { _keepAliveAudio.pause(); _keepAliveAudio.src = ''; } catch (e) {} _keepAliveAudio = null; }
+  if (_keepAliveUrl) { try { URL.revokeObjectURL(_keepAliveUrl); } catch (e) {} _keepAliveUrl = null; }
+}
+// Bandeau d'attente au lancement : dit la vérité à la joueuse (le décompte se
+// recale au réveil) → gère les attentes plutôt que de laisser croire à un bug.
+// Fade out après ~3.5 s, ne bloque rien.
+function _drillShowKeepAliveHint(host) {
+  try {
+    if (!host) return;
+    const b = document.createElement('div');
+    b.id = 'drill-hint';
+    b.style.cssText = "position:fixed;left:12px;right:12px;bottom:calc(env(safe-area-inset-bottom, 0px) + 86px);z-index:10004;background:rgba(0,0,0,0.78);color:#fff;border:1px solid rgba(255,255,255,0.18);border-radius:10px;padding:10px 12px;font-family:'JetBrains Mono';font-size:11px;line-height:1.5;text-align:center;transition:opacity .6s ease;opacity:1;pointer-events:none";
+    b.innerHTML = "📱 Écran verrouillé ? Le décompte continue et <strong>se recale à ton réveil</strong>.";
+    host.appendChild(b);
+    setTimeout(() => { b.style.opacity = '0'; setTimeout(() => { try { b.remove(); } catch (e) {} }, 700); }, 3500);
+  } catch (e) {}
+}
+// ---- Détection PWA installée (déterminant sur iOS) ----
+function _isIOSDevice() {
+  const ua = (navigator.userAgent || '');
+  return /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+function _isStandalonePWA() {
+  try {
+    return !!((window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true);
+  } catch (e) { return false; }
+}
+// iOS + onglet Safari (pas la PWA installée) → l'OS a le droit de tout suspendre
+// écran éteint, quoi qu'on fasse. On prévient UNE fois par session, sans bloquer.
+function _drillEnsureStandalone(retryFn) {
+  if (!_isIOSDevice() || _isStandalonePWA() || window._drillIosWarned) return true;
+  window._drillIosWarned = true;
+  window._drillIosRetry = (typeof retryFn === 'function') ? retryFn : null;
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">⚠️ Installe l'app pour les séances</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:13px;line-height:1.6;color:var(--ink-2)">
+        Tu es dans <strong>Safari (onglet)</strong>. Quand tu éteins l'écran, iOS suspend l'onglet : le
+        <strong>décompte se fige</strong> et la <strong>voix s'arrête</strong>.
+        <div style="margin:12px 0;padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px">
+          <strong>Installe l'app sur l'écran d'accueil :</strong><br>
+          Safari → <strong>Partager</strong> ⬆️ → <strong>« Sur l'écran d'accueil »</strong> → ouvre l'app depuis l'icône.
+        </div>
+        En app installée, la lecture audio en tâche de fond tient <strong>beaucoup mieux</strong> écran éteint.
+      </div>
+    </div>
+    <div class="modal-footer" style="display:flex;gap:6px">
+      <button class="btn btn-secondary btn-block" onclick="closeModal()">Plus tard</button>
+      <button class="btn btn-primary btn-block" onclick="closeModal();if(window._drillIosRetry)window._drillIosRetry()">Lancer quand même</button>
+    </div>`);
+  return false;
+}
+// Une session de drill tourne-t-elle ? (interval | circuit | stimulus)
+function _drillSessionActive() { return !!(window._interval || window._circuit || window._drillGame); }
+// Logs VISIBLES : un Wake Lock qui échoue le fait silencieusement par défaut →
+// impossible de diagnostiquer. Ici on trace demande / succès / échec / relâche.
+function _drillWakeLockAcquire() {
+  try {
+    if (!navigator.wakeLock || !navigator.wakeLock.request) {
+      console.warn('[drill][wakelock] ⚠️ API non supportée par ce navigateur → l\'écran peut s\'éteindre (la vidéo/audio keep-alive prennent le relais)');
+      return;
+    }
+    if (window._drillWakeLock) { console.log('[drill][wakelock] déjà actif'); return; }
+    console.log('[drill][wakelock] demande…');
+    navigator.wakeLock.request('screen').then(s => {
+      window._drillWakeLock = s;
+      console.log('[drill][wakelock] ✅ ACQUIS — écran maintenu allumé');
+      // Le navigateur relâche tout seul en arrière-plan : on le trace pour le diagnostic.
+      try { s.addEventListener('release', () => { console.warn('[drill][wakelock] ⚠️ RELÂCHÉ par le navigateur (onglet en arrière-plan ?)'); window._drillWakeLock = null; }); } catch (e) {}
+    }).catch(err => console.warn('[drill][wakelock] ❌ ÉCHEC:', (err && err.name) || '', (err && err.message) || ''));
+  } catch (e) { console.warn('[drill][wakelock] ❌ exception:', e && e.message); }
+}
+function _drillWakeLockRelease() {
+  try {
+    if (window._drillWakeLock) { window._drillWakeLock.release().catch(() => {}); window._drillWakeLock = null; console.log('[drill][wakelock] relâché (fin de séance)'); }
+  } catch (e) {}
+}
+// Retour au premier plan : le Wake Lock est AUTOMATIQUEMENT relâché par le
+// navigateur quand l'onglet passe en arrière-plan → il faut le re-demander.
+// On relance aussi l'audio keep-alive qu'iOS a pu mettre en pause.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || !_drillSessionActive()) return;
+  console.log('[drill] retour au premier plan → re-acquisition wake lock + relance keep-alive');
+  _drillWakeLockAcquire();
+  if (_keepAliveAudio && _keepAliveAudio.paused) { try { _keepAliveAudio.play().catch(() => {}); } catch (e) {} }
+  if (_keepAliveVideo && _keepAliveVideo.paused) { try { _keepAliveVideo.play().catch(() => {}); } catch (e) {} }
+});
+
 let _drillAudioCtx = null;
 function _drillUnlockAudio() {
   try {
@@ -18196,6 +18412,8 @@ function startDrillGame(config) {
     <div id="drill-cue" class="drill-cue"></div>`;
   document.body.style.overflow = 'hidden';
   _drillUnlockAudio();
+  _drillKeepAliveStart((config && config.name) || 'Drill réaction'); // iOS : garde le tab actif écran éteint
+  _drillShowKeepAliveHint(host);
   const now = Date.now();
   window._drillGame = {
     running: true, timer: null, anticTimer: null, count: 0, pool,
@@ -18212,7 +18430,7 @@ function startDrillGame(config) {
   };
   // Plein écran (les 2 orientations). Pas de verrou d'orientation.
   try { if (host.requestFullscreen) host.requestFullscreen().catch(() => {}); } catch (e) {}
-  try { if (navigator.wakeLock && navigator.wakeLock.request) navigator.wakeLock.request('screen').then(s => { window._drillWakeLock = s; }).catch(() => {}); } catch (e) {}
+  _drillWakeLockAcquire();
   _drillNextCue();
 }
 function _drillNextCue() {
@@ -18269,10 +18487,11 @@ function stopDrillGame() {
   const g = window._drillGame;
   if (g) { g.running = false; if (g.timer) clearTimeout(g.timer); if (g.anticTimer) clearInterval(g.anticTimer); }
   window._drillGame = null;
+  _drillKeepAliveStop();
   const host = document.getElementById('drill-overlay'); if (host) host.remove();
   document.body.style.overflow = '';
   try { if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {}); } catch (e) {}
-  try { if (window._drillWakeLock) { window._drillWakeLock.release().catch(() => {}); window._drillWakeLock = null; } } catch (e) {}
+  _drillWakeLockRelease();
   try { render(); } catch (e) {}
 }
 
@@ -18297,11 +18516,12 @@ function _drillLaunchConfig(d, o) {
 function launchDrill(id, overrides) {
   const d = (state.drills || []).find(x => x.id === id);
   if (!d || d.deletedAt) return;
+  if (!_drillEnsureStandalone(() => launchDrill(id, overrides))) return; // iOS : prévient si Safari onglet
   const cfg = _drillLaunchConfig(d, overrides);
   const pool = _drillExpandPool(cfg.stimuli);
   if (!pool.length) { try { alert('Ce drill n\'a aucun stimulus jouable.'); } catch (e) {} return; }
   try { closeModal(); } catch (e) {}
-  startDrillGame({ pool, lengthMs: cfg.lengthMs, delayMs: cfg.delayMs, audioBeep: cfg.audioBeep, durationMode: cfg.durationMode, durationValue: cfg.durationValue, lengthEndMs: cfg.lengthEndMs, lengthMinMs: cfg.lengthMinMs, lengthMaxMs: cfg.lengthMaxMs, anticipationClock: cfg.anticipationClock });
+  startDrillGame({ pool, name: d.name || 'Drill', lengthMs: cfg.lengthMs, delayMs: cfg.delayMs, audioBeep: cfg.audioBeep, durationMode: cfg.durationMode, durationValue: cfg.durationValue, lengthEndMs: cfg.lengthEndMs, lengthMinMs: cfg.lengthMinMs, lengthMaxMs: cfg.lengthMaxMs, anticipationClock: cfg.anticipationClock });
 }
 
 // ============================================================
@@ -18440,6 +18660,7 @@ function _circuitNextPreviewHtml(nextStage) {
 function launchCircuit(id) {
   const d = (state.drills || []).find(x => x.id === id && !x.deletedAt);
   if (!d) return;
+  if (!_drillEnsureStandalone(() => launchCircuit(id))) return; // iOS : prévient si Safari onglet
   const stages = Array.isArray(d.stages) ? d.stages.filter(Boolean) : [];
   if (!stages.length) { try { alert('Ce circuit n\'a aucune étape.'); } catch (e) {} return; }
   try { closeModal(); } catch (e) {}
@@ -18455,13 +18676,16 @@ function launchCircuit(id) {
     </div>`;
   document.body.style.overflow = 'hidden';
   _drillUnlockAudio();
+  _drillKeepAliveStart(d.name || 'Circuit'); // iOS : garde le tab actif écran éteint
+  _drillShowKeepAliveHint(host);
   try { _ttsVoices(); } catch (e) {} // amorce le chargement des voix
   window._circuit = { drillId: id, name: d.name || 'Circuit', stages, idx: -1, paused: false, done: false,
     advanceMode: d.advanceMode === 'manual' ? 'manual' : 'auto',
     resting: false, restMs: 0, restNextIdx: null, _restBipMid: false,
-    elapsedMs: 0, ticks: 0, _lastFrame: Date.now(), _driver: null, _cueTimer: null, _pool: null, _bipSecLeft: null, startedAt: Date.now() };
+    elapsedMs: 0, ticks: 0, stageEpoch: Date.now(), pausedAccumMs: 0, pauseStartedAt: null,
+    _driver: null, _cueTimer: null, _pool: null, _bipSecLeft: null, startedAt: Date.now() };
   try { if (host.requestFullscreen) host.requestFullscreen().catch(() => {}); } catch (e) {}
-  try { if (navigator.wakeLock && navigator.wakeLock.request) navigator.wakeLock.request('screen').then(s => { window._drillWakeLock = s; }).catch(() => {}); } catch (e) {}
+  _drillWakeLockAcquire();
   window._circuit._driver = setInterval(_circuitTick, 100);
   _circuitEnterStage(0);
 }
@@ -18473,7 +18697,8 @@ function _circuitBar() {
 }
 function _circuitEnterStage(idx) {
   const c = window._circuit; if (!c) return;
-  c.idx = idx; c.elapsedMs = 0; c.ticks = 0; c.paused = false; c.resting = false; c._lastFrame = Date.now(); c._bipSecLeft = null;
+  c.idx = idx; c.elapsedMs = 0; c.ticks = 0; c.paused = false; c.resting = false; c._bipSecLeft = null;
+  c.stageEpoch = Date.now(); c.pausedAccumMs = 0; c.pauseStartedAt = null;
   if (c._cueTimer) { clearTimeout(c._cueTimer); c._cueTimer = null; }
   const st = c.stages[idx]; if (!st) return _circuitFinish();
   // Restaure le fond noir (au cas où on sort d'une phase de repos) + libellés de contrôle.
@@ -18512,11 +18737,18 @@ function _circuitRenderCountdown(st, remMs) {
   </div>`;
 }
 // Boucle maîtresse 100ms : accumule le temps (hors pause), pilote counter/countdown, vérifie l'avancement.
+// Temps écoulé RÉEL sur l'étape/repos courant (Date.now() = source de vérité,
+// pause déduite). Résilient au gel du tick (écran éteint iOS) : au réveil on
+// retombe sur la bonne valeur, pas sur un compteur en retard.
+function _circuitElapsedMs(c) {
+  if (!c) return 0;
+  const pausedNow = (c.paused && c.pauseStartedAt) ? (Date.now() - c.pauseStartedAt) : 0;
+  return Math.max(0, Date.now() - c.stageEpoch - c.pausedAccumMs - pausedNow);
+}
 function _circuitTick() {
   const c = window._circuit; if (!c || c.done) return;
-  const now = Date.now(); const dt = now - c._lastFrame; c._lastFrame = now;
+  c.elapsedMs = _circuitElapsedMs(c);
   if (c.paused) return;
-  c.elapsedMs += dt;
   // Phase de repos entre 2 étapes : countdown auto (indépendant du mode manuel).
   if (c.resting) {
     const rem = Math.max(0, c.restMs - c.elapsedMs);
@@ -18594,7 +18826,8 @@ function _circuitAdvance() {
 function _circuitEnterRest(restMs, nextIdx) {
   const c = window._circuit; if (!c) return;
   c.resting = true; c.restMs = Math.max(0, restMs); c.restNextIdx = nextIdx;
-  c.elapsedMs = 0; c._lastFrame = Date.now(); c._restBipMid = false;
+  c.elapsedMs = 0; c._restBipMid = false;
+  c.stageEpoch = Date.now(); c.pausedAccumMs = 0; c.pauseStartedAt = null;
   const host = document.getElementById('drill-overlay'); if (host) host.style.background = 'linear-gradient(160deg,#1e3a5f,#0f2438)'; // fond distinct (bleu)
   const bar = document.getElementById('circuit-bar'); if (bar) bar.textContent = `${c.name} · Repos avant étape ${nextIdx + 1}/${c.stages.length}`;
   const skipBtn = document.getElementById('circuit-skip'); if (skipBtn) skipBtn.textContent = 'Passer le repos';
@@ -18619,7 +18852,8 @@ function _circuitSkip() {
 }
 function _circuitPauseToggle() {
   const c = window._circuit; if (!c || c.done) return;
-  c.paused = !c.paused; c._lastFrame = Date.now();
+  if (!c.paused) { c.paused = true; c.pauseStartedAt = Date.now(); }
+  else { c.pausedAccumMs += Math.max(0, Date.now() - (c.pauseStartedAt || Date.now())); c.pauseStartedAt = null; c.paused = false; }
   const btn = document.getElementById('circuit-pause'); if (btn) btn.textContent = c.paused ? '▶ Reprendre' : '⏸ Pause';
   const st = c.stages[c.idx];
   if (!c.paused && !c.resting && st && st.type === 'stimulus') _circuitStimulusNextCue(st); // relance la boucle de cues
@@ -18646,9 +18880,11 @@ function _circuitFinish() {
 function _circuitRestart() {
   const c = window._circuit; if (!c) return;
   c.done = false; c.idx = -1; c.elapsedMs = 0; c.ticks = 0; c.paused = false; c.resting = false;
-  c.restNextIdx = null; c._restBipMid = false; c._bipSecLeft = null; c._lastFrame = Date.now(); c.startedAt = Date.now();
+  c.restNextIdx = null; c._restBipMid = false; c._bipSecLeft = null;
+  c.stageEpoch = Date.now(); c.pausedAccumMs = 0; c.pauseStartedAt = null; c.startedAt = Date.now();
   if (c._cueTimer) { clearTimeout(c._cueTimer); c._cueTimer = null; }
   const ctrl = document.getElementById('circuit-ctrl'); if (ctrl) ctrl.style.display = 'flex';
+  _drillKeepAliveStart(); _drillWakeLockAcquire();
   if (!c._driver) c._driver = setInterval(_circuitTick, 100);
   _circuitEnterStage(0);
 }
@@ -18656,11 +18892,12 @@ function stopCircuit() {
   const c = window._circuit;
   if (c) { c.done = true; if (c._driver) clearInterval(c._driver); if (c._cueTimer) clearTimeout(c._cueTimer); }
   window._circuit = null;
+  _drillKeepAliveStop();
   try { if (_ttsSupported()) window.speechSynthesis.cancel(); } catch (e) {}
   const host = document.getElementById('drill-overlay'); if (host) host.remove();
   document.body.style.overflow = '';
   try { if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {}); } catch (e) {}
-  try { if (window._drillWakeLock) { window._drillWakeLock.release().catch(() => {}); window._drillWakeLock = null; } } catch (e) {}
+  _drillWakeLockRelease();
   try { render(); } catch (e) {}
 }
 
@@ -18761,6 +18998,27 @@ function _intervalBuildTimeline(config) {
   return phases;
 }
 function _intervalTotalMs(config) { return _intervalBuildTimeline(config).reduce((a, p) => a + (Number(p.duration_ms) || 0), 0); }
+// Ajoute à chaque phase son offset ABSOLU start_ms/end_ms depuis le début de la
+// séance → permet de retrouver la phase courante à tout instant depuis un simple
+// `elapsed` (source de vérité = Date.now()), même si le tick a été gelé (veille iOS).
+function _intervalTimelineOffsets(phases) {
+  let acc = 0;
+  return (phases || []).map(p => {
+    const start = acc, dur = Math.max(0, Number(p.duration_ms) || 0);
+    acc += dur;
+    return Object.assign({}, p, { start_ms: start, end_ms: acc });
+  });
+}
+// Phase active à `elapsedMs`. null = séance terminée. Les phases de durée 0 sont
+// ignorées (start==end). PURE → testée hors navigateur.
+function _currentPhaseAt(elapsedMs, timeline) {
+  const t = timeline || [];
+  const e = Math.max(0, Number(elapsedMs) || 0);
+  for (let i = 0; i < t.length; i++) {
+    if (e < t[i].end_ms) return { index: i, phase: t[i], phaseElapsedMs: e - t[i].start_ms, phaseRemainingMs: t[i].end_ms - e };
+  }
+  return null;
+}
 function _intervalFmtShort(ms) { const s = Math.round((Number(ms) || 0) / 1000); if (s < 60) return s + 's'; const m = Math.floor(s / 60), r = s % 60; return r ? (m + ' min ' + r + 's') : (m + ' min'); }
 function _intervalPhaseBg(type) { return type === 'work' ? '#FF6B35' : type === 'rest' ? '#0074D9' : '#5a6472'; }
 function _intervalPhaseIcon(type) { return type === 'work' ? '🔥' : type === 'rest' ? '💤' : type === 'warmup' ? '🌡' : '🧊'; }
@@ -18786,6 +19044,7 @@ function _intervalNextText(phase) {
 function launchInterval(drillId) {
   const d = (state.drills || []).find(x => x.id === drillId && !x.deletedAt);
   if (!d) return;
+  if (!_drillEnsureStandalone(() => launchInterval(drillId))) return; // iOS : prévient si Safari onglet
   const config = (d.intervalConfig && typeof d.intervalConfig === 'object') ? d.intervalConfig : _intervalDefaultConfig();
   const phases = _intervalBuildTimeline(config);
   if (!phases.length) { try { alert('Ce fractionné n\'a aucune phase (vérifie les cycles).'); } catch (e) {} return; }
@@ -18802,27 +19061,31 @@ function launchInterval(drillId) {
     </div>`;
   document.body.style.overflow = 'hidden';
   _drillUnlockAudio();
+  _drillKeepAliveStart(d.name || 'Fractionné'); // iOS : garde le tab actif écran éteint
+  _drillShowKeepAliveHint(host);
   try { _ttsVoices(); } catch (e) {}
   const audio = config.audio || {};
   window._interval = {
-    drillId, name: d.name || 'Fractionné', config, phases, idx: -1, paused: false, done: false,
-    elapsedMs: 0, priorMs: 0, totalMs: _intervalTotalMs(config), _lastFrame: Date.now(), _driver: null, _bipSecLeft: null,
+    drillId, name: d.name || 'Fractionné', config, phases, timeline: _intervalTimelineOffsets(phases),
+    idx: -1, paused: false, done: false,
+    startEpoch: Date.now(), pausedAccumMs: 0, pauseStartedAt: null,
+    totalMs: _intervalTotalMs(config), _driver: null, _bipSecLeft: null,
     ttsEnabled: !!audio.tts_enabled, ttsLang: audio.tts_lang || 'fr', bipStart: audio.bip_start !== false, bipCountdown: audio.bip_end_countdown !== false,
     nextPreview: config.next_preview !== false, startedAt: Date.now()
   };
   try { if (host.requestFullscreen) host.requestFullscreen().catch(() => {}); } catch (e) {}
-  try { if (navigator.wakeLock && navigator.wakeLock.request) navigator.wakeLock.request('screen').then(s => { window._drillWakeLock = s; }).catch(() => {}); } catch (e) {}
+  _drillWakeLockAcquire();
   window._interval._driver = setInterval(_intervalTick, 100);
-  _intervalEnterPhase(0);
+  _intervalTick(); // rend la 1re phase immédiatement
 }
+// Transition VISUELLE/AUDIO vers la phase idx. Ne touche PAS au temps (l'horloge
+// absolue Date.now() reste la source de vérité) — appelé par le tick au changement.
 function _intervalEnterPhase(idx) {
   const c = window._interval; if (!c) return;
-  const ph = c.phases[idx]; if (!ph) return _intervalFinish();
-  // priorMs = somme des durées des phases précédentes (pour le « temps total restant »).
-  c.priorMs = c.phases.slice(0, idx).reduce((a, p) => a + (Number(p.duration_ms) || 0), 0);
-  c.idx = idx; c.elapsedMs = 0; c.paused = false; c._lastFrame = Date.now(); c._bipSecLeft = null;
+  const ph = c.timeline[idx]; if (!ph) return _intervalFinish();
+  c.idx = idx; c._bipSecLeft = null;
   const host = document.getElementById('drill-overlay'); if (host) host.style.background = _intervalPhaseBg(ph.type);
-  const pauseBtn = document.getElementById('itv-pause'); if (pauseBtn) pauseBtn.textContent = '⏸ Pause';
+  const pauseBtn = document.getElementById('itv-pause'); if (pauseBtn) pauseBtn.textContent = c.paused ? '▶ Reprendre' : '⏸ Pause';
   // Audio : bip fort au démarrage d'un WORK ; TTS label (+ cycle).
   if (ph.type === 'work' && c.bipStart) { try { _drillBeep(); } catch (e) {} }
   if (c.ttsEnabled && _ttsSupported()) { const say = ph.label + (ph.type === 'work' && ph.cycleTotal ? (', cycle ' + ph.cycleIndex + ' sur ' + ph.cycleTotal) : ''); _ttsSpeak(say, c.ttsLang); }
@@ -18832,7 +19095,7 @@ function _intervalRenderPhase(ph, remMs) {
   const c = window._interval; if (!c) return;
   const cycleEl = document.getElementById('itv-cycle');
   if (cycleEl) cycleEl.textContent = (ph.type === 'work' || ph.type === 'rest') ? ('Cycle ' + ph.cycleIndex + '/' + ph.cycleTotal) : ph.label;
-  const nextPh = c.phases[c.idx + 1];
+  const nextPh = c.timeline[c.idx + 1];
   const previewHtml = (c.nextPreview && nextPh) ? `<div style="margin-top:5vmin;font-size:3.4vmin;font-family:'JetBrains Mono';opacity:0.85">Prochain : ${esc(_intervalNextText(nextPh))}</div>` : '';
   const el = document.getElementById('drill-cue');
   if (el) el.innerHTML = `<div style="text-align:center;color:#fff">
@@ -18841,30 +19104,45 @@ function _intervalRenderPhase(ph, remMs) {
     ${previewHtml}
   </div>`;
 }
+// Temps écoulé RÉEL depuis le départ (Date.now() = source de vérité), pause
+// déduite. Résilient : même si le tick est gelé (écran éteint iOS), au réveil on
+// retombe sur la bonne phase au bon instant.
+function _intervalElapsedMs(c) {
+  if (!c) return 0;
+  const pausedNow = (c.paused && c.pauseStartedAt) ? (Date.now() - c.pauseStartedAt) : 0;
+  return Math.max(0, Date.now() - c.startEpoch - c.pausedAccumMs - pausedNow);
+}
+// Repositionne la séance à `ms` (skip) en décalant l'origine.
+function _intervalSeek(c, ms) {
+  if (!c) return;
+  const pausedNow = (c.paused && c.pauseStartedAt) ? (Date.now() - c.pauseStartedAt) : 0;
+  c.startEpoch = Date.now() - Math.max(0, ms) - c.pausedAccumMs - pausedNow;
+}
 function _intervalTick() {
   const c = window._interval; if (!c || c.done) return;
-  const now = Date.now(); const dt = now - c._lastFrame; c._lastFrame = now;
-  if (c.paused) return;
-  c.elapsedMs += dt;
-  const ph = c.phases[c.idx]; if (!ph) return;
-  const dur = Number(ph.duration_ms) || 0;
-  const rem = Math.max(0, dur - c.elapsedMs);
-  const cd = document.getElementById('itv-cd'); if (cd) cd.textContent = _fmtChronoMs(rem);
-  const totalRem = Math.max(0, c.totalMs - (c.priorMs + c.elapsedMs));
-  const totEl = document.getElementById('itv-total'); if (totEl) totEl.textContent = 'Reste ' + _fmtChronoMs(totalRem);
-  if (c.bipCountdown) { const secLeft = Math.ceil(rem / 1000); if (secLeft <= 3 && secLeft >= 1 && secLeft !== c._bipSecLeft) { c._bipSecLeft = secLeft; try { _drillBeep(); } catch (e) {} } }
-  if (rem <= 0) _intervalAdvance();
+  const elapsed = _intervalElapsedMs(c);
+  const cur = _currentPhaseAt(elapsed, c.timeline);
+  if (!cur) return _intervalFinish();
+  // Changement de phase détecté depuis le temps absolu (robuste au gel du tick).
+  if (cur.index !== c.idx) _intervalEnterPhase(cur.index);
+  const cd = document.getElementById('itv-cd'); if (cd) cd.textContent = _fmtChronoMs(cur.phaseRemainingMs);
+  const totEl = document.getElementById('itv-total'); if (totEl) totEl.textContent = 'Reste ' + _fmtChronoMs(Math.max(0, c.totalMs - elapsed));
+  if (c.bipCountdown) {
+    const secLeft = Math.ceil(cur.phaseRemainingMs / 1000);
+    if (secLeft <= 3 && secLeft >= 1 && secLeft !== c._bipSecLeft) { c._bipSecLeft = secLeft; try { _drillBeep(); } catch (e) {} }
+  }
 }
-function _intervalAdvance() {
+function _intervalSkip() {
   const c = window._interval; if (!c || c.done) return;
   const next = c.idx + 1;
-  if (next >= c.phases.length) return _intervalFinish();
-  _intervalEnterPhase(next);
+  if (next >= c.timeline.length) return _intervalFinish();
+  _intervalSeek(c, c.timeline[next].start_ms);
+  _intervalTick(); // application immédiate (pas d'attente du prochain tick)
 }
-function _intervalSkip() { _intervalAdvance(); }
 function _intervalPauseToggle() {
   const c = window._interval; if (!c || c.done) return;
-  c.paused = !c.paused; c._lastFrame = Date.now();
+  if (!c.paused) { c.paused = true; c.pauseStartedAt = Date.now(); }
+  else { c.pausedAccumMs += Math.max(0, Date.now() - (c.pauseStartedAt || Date.now())); c.pauseStartedAt = null; c.paused = false; }
   const btn = document.getElementById('itv-pause'); if (btn) btn.textContent = c.paused ? '▶ Reprendre' : '⏸ Pause';
 }
 function _intervalFinish() {
@@ -18886,21 +19164,24 @@ function _intervalFinish() {
 }
 function _intervalRestart() {
   const c = window._interval; if (!c) return;
-  c.done = false; c.idx = -1; c.elapsedMs = 0; c.priorMs = 0; c.paused = false; c._bipSecLeft = null; c._lastFrame = Date.now(); c.startedAt = Date.now();
+  c.done = false; c.idx = -1; c.paused = false; c._bipSecLeft = null;
+  c.startEpoch = Date.now(); c.pausedAccumMs = 0; c.pauseStartedAt = null; c.startedAt = Date.now();
   const ctrl = document.getElementById('itv-ctrl'); if (ctrl) ctrl.style.display = 'flex';
   const bar = document.getElementById('itv-bar'); if (bar) bar.style.display = 'flex';
+  _drillKeepAliveStart(); _drillWakeLockAcquire();
   if (!c._driver) c._driver = setInterval(_intervalTick, 100);
-  _intervalEnterPhase(0);
+  _intervalTick();
 }
 function stopInterval() {
   const c = window._interval;
   if (c) { c.done = true; if (c._driver) clearInterval(c._driver); }
   window._interval = null;
+  _drillKeepAliveStop();
   try { if (_ttsSupported()) window.speechSynthesis.cancel(); } catch (e) {}
   const host = document.getElementById('drill-overlay'); if (host) host.remove();
   document.body.style.overflow = '';
   try { if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {}); } catch (e) {}
-  try { if (window._drillWakeLock) { window._drillWakeLock.release().catch(() => {}); window._drillWakeLock = null; } } catch (e) {}
+  _drillWakeLockRelease();
   try { render(); } catch (e) {}
 }
 
@@ -32686,7 +32967,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-10.71';
+const APP_VERSION = '2026-07-10.72';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
