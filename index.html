@@ -32296,6 +32296,18 @@ function setNotifSeenAt(ts) {
 // Construit le flux de notifs de l'identité courante. Chaque item :
 // { id, ts, icon, title, detail, count, unread, action? }. count = poids pour le
 // badge (agrégats : N à faire). Items triés du + récent au + ancien.
+// Détail d'une notif « gage accepté / passé » : joueuse + NOM DU GAGE (tronqué).
+// PURE → testable hors navigateur. Sans le nom du gage, deux gages DIFFÉRENTS
+// tirés par la même joueuse produisaient deux lignes strictement identiques
+// (« 🙈 GAGE PASSÉ · #6 Delph » ×2) → lu comme un doublon alors que ce sont
+// deux événements réels distincts. Cf. audit : aucune donnée dupliquée en base.
+function _notifDrawDetail(player, gage, maxLen) {
+  const max = Number.isFinite(maxLen) ? maxLen : 45;
+  const who = player ? ('#' + player.num + ' ' + player.name) : '';
+  let what = (gage && gage.text ? String(gage.text) : '').trim().replace(/\s+/g, ' ');
+  if (what.length > max) what = what.slice(0, max - 1).replace(/\s+$/, '') + '…';
+  return [who, what].filter(Boolean).join(' · ');
+}
 function notifFeed() {
   const a = state && state.auth;
   if (!a) return [];
@@ -32369,11 +32381,17 @@ function notifFeed() {
       if (typeof gagesPendingCount === 'function') { const n = gagesPendingCount(); if (n > 0) items.push({ id: 'gage-mod', ts: Date.now(), icon: '🎁', title: 'Gages à modérer', detail: n + ' proposition' + (n > 1 ? 's' : ''), count: n, unread: true, action: 'openGagesCoach()' }); }
       // Entraînements à clôturer (actionnable, agrégat)
       if (typeof getOverdueTrainings === 'function') { const n = getOverdueTrainings().length; if (n > 0) items.push({ id: 'overdue', ts: Date.now(), icon: '⏱', title: 'Entraînements à clôturer', detail: n + ' terminé' + (n > 1 ? 's' : '') + ' à valider', count: n, unread: true, action: 'openOverdueTrainingsModal()' }); }
-      // Gages tirés (accepté/passé) par les joueuses — informationnel
+      // Gages tirés (accepté/passé) par les joueuses — informationnel.
+      // Le détail porte le NOM DU GAGE en plus de la joueuse : sans lui, 2 gages
+      // DIFFÉRENTS de la même joueuse s'affichaient à l'identique (« #6 Delph »
+      // deux fois) et passaient pour un doublon. Ce n'en était pas un.
       (state.gageDraws || []).forEach(d => {
         if ((d.status === 'accepted' || d.status === 'skipped') && d.completedAt) {
           const p = (state.players || []).find(x => x.id === d.playerId);
-          info('draw-' + d.id, d.completedAt, d.status === 'accepted' ? '💪' : '🙈', d.status === 'accepted' ? 'Gage accepté' : 'Gage passé', (p ? '#' + p.num + ' ' + p.name : ''));
+          const g = (typeof _gageById === 'function' && d.gageId) ? _gageById(d.gageId) : null;
+          info('draw-' + d.id, d.completedAt, d.status === 'accepted' ? '💪' : '🙈',
+            d.status === 'accepted' ? 'Gage accepté' : 'Gage passé',
+            _notifDrawDetail(p, g));
         }
       });
       // Stats de match saisies — informationnel
@@ -32967,7 +32985,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-10.72';
+const APP_VERSION = '2026-07-10.73';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
