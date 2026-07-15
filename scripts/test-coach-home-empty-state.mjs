@@ -1,7 +1,14 @@
 // Test de l'état vide de la home coach (chantier 3, page B).
 // Vérifie : carte « Première saison ? » + CTA « + Créer un match » quand aucun
-// match, FORME/HISTORIQUE sinon, « Tous → » masqué s'il n'y a rien à montrer,
-// titre prépa sur 1 ligne (ellipsis) et sous-titre journalier sans répétition.
+// match, FORME/HISTORIQUE sinon, « Tous → » masqué s'il n'y a rien à montrer.
+//
+// SCÉNARIO 4 — HISTORIQUE : ce fichier vérifiait l'ellipsis du titre et le
+// sous-titre du bloc « prépa estivale » (offseason) rendu par renderHomeCoach
+// (PR #108). Ce bloc a été RETIRÉ de la home par la prépa « full package »
+// (training_programs) : le module offseason existe toujours mais n'est plus
+// rendu ici, donc ces assertions n'avaient plus de cible. Elles sont remplacées
+// par une garde de non-régression : la home coach ne doit plus rappeler
+// l'offseason, et doit rendre la nouvelle carte à la place.
 import assert from 'node:assert';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -37,17 +44,19 @@ t('FORME (Bilan saison / Win Rate) présente dans la branche normale', () => {
   assert.ok(/Bilan saison/.test(home) && /Win Rate/.test(home));
 });
 
-console.log('SCÉNARIO 4 — bloc prépa : titre 1 ligne + sous-titre dédupliqué');
-t('titre prépa avec ellipsis (≥ 2 occurrences : daily + weekly)', () => {
-  const n = (home.match(/text-overflow:ellipsis/g) || []).length;
-  assert.ok(n >= 2, 'attendu ≥2, vu ' + n);
+console.log('SCÉNARIO 4 — la prépa estivale (offseason) n\'est plus sur la home coach');
+t('aucun point d\'entrée offseason rendu par renderHomeCoach', () => {
+  assert.ok(!/openOffseasonConfig/.test(home), 'CTA « Configurer la prépa estivale » encore rendu');
+  assert.ok(!/openOffseasonDashboard/.test(home), 'carte engagement offseason encore rendue');
+  assert.ok(!/renderProgramSelector\(\)/.test(home), 'sélecteur de programmes offseason encore rendu');
 });
-t('conteneur titre min-width:0 / boutons flex-shrink:0', () => {
-  assert.ok(/min-width:0;flex:1/.test(home));
-  assert.ok(/align-items:center;flex-shrink:0/.test(home));
+t('la prépa « full package » a pris sa place', () => {
+  assert.ok(/\$\{renderTrainingCoachCard\(\)\}/.test(home), 'renderTrainingCoachCard absente de la home coach');
 });
-t('sous-titre journalier : « exos aujourd\'hui » conditionnel (pas de « 0 exo »)', () => {
-  assert.ok(/\$\{todayItems\.length \? `<span>\$\{todayItems\.length\} exo\$\{todayItems\.length>1\?'s':''\} aujourd'hui<\/span>` : ''\}/.test(home));
+t('le module offseason reste dans le fichier (audit / restauration)', () => {
+  assert.ok(/function renderProgramSelector\(\)/.test(html), 'renderProgramSelector supprimée');
+  assert.ok(/function openOffseasonConfig\(/.test(html), 'openOffseasonConfig supprimée');
+  assert.ok(/function renderPlayerProgramme\(\)/.test(html), 'renderPlayerProgramme supprimée');
 });
 
-console.log(`\n✅ ${pass} assertions OK — état vide home coach + bloc prépa.`);
+console.log(`\n✅ ${pass} assertions OK — état vide home coach + retrait offseason.`);

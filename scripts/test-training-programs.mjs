@@ -420,8 +420,10 @@ eq('round-trip : points_total figé à 50', compRT.pointsTotal, 50);
 eq('round-trip : base_points figé (barème au moment de la validation)', compRT.basePoints, 20);
 eq('round-trip : datePlanned reste une string', compRT.datePlanned, '2026-07-13');
 
-// numeric → PostgREST renvoie une STRING : sans Number(), la distance serait
-// silencieusement perdue à chaque aller-retour (régression testée ici).
+// numeric : mesuré en NUMBER sur ce stack (smoke PR #148), mais sérialisable en
+// STRING par d'autres versions du driver / à forte précision. Les deux cas doivent
+// donner 5.2 — sans le Number(), la variante string serait perdue en silence.
+eq('numeric renvoyé en number (5.2) → 5.2', _trainingCompletionFromRow({ ..._dumpTrainingCompletionRow(comp), running_distance_km: 5.2 }).runningDistanceKm, 5.2);
 eq('numeric renvoyé en string (\'5.20\') → number 5.2', _trainingCompletionFromRow({ ..._dumpTrainingCompletionRow(comp), running_distance_km: '5.20' }).runningDistanceKm, 5.2);
 eq('numeric null → null', _trainingCompletionFromRow({ ..._dumpTrainingCompletionRow(comp), running_distance_km: null }).runningDistanceKm, null);
 eq('numeric \'\' → null', _trainingCompletionFromRow({ ..._dumpTrainingCompletionRow(comp), running_distance_km: '' }).runningDistanceKm, null);

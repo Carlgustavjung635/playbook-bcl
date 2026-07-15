@@ -5016,9 +5016,13 @@ function _dumpTrainingCompletionRow(c) {
   };
 }
 function _trainingCompletionFromRow(r) {
-  // running_distance_km est `numeric` → PostgREST le renvoie en STRING ('5.20').
-  // Number.isFinite('5.20') est false : passer par Number() sinon la distance
-  // serait silencieusement perdue à chaque aller-retour DB.
+  // running_distance_km est `numeric`. MESURÉ sur ce stack (smoke PR #148) :
+  // PostgREST le renvoie en NUMBER (5.2), donc Number.isFinite suffirait. Mais
+  // `numeric` n'a aucune garantie de tenir dans un double — d'autres versions du
+  // driver (et les valeurs à forte précision) le sérialisent en STRING pour ne
+  // pas perdre de chiffres, et Number.isFinite('5.20') vaut false. Le Number()
+  // couvre les deux cas ; sans lui, un changement de driver perdrait la distance
+  // en silence à chaque aller-retour.
   const km = (r.running_distance_km === null || r.running_distance_km === undefined || r.running_distance_km === '')
     ? null : Number(r.running_distance_km);
   return {
