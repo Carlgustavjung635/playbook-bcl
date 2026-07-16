@@ -497,6 +497,26 @@
   }
   .test-banner-btn:active { background: rgba(255, 255, 255, 0.3); }
 
+  /* Carte « mode joueuse test » sur l'écran de PIN coach. Placée AU-DESSUS du
+     pavé PIN (après le sous-titre) pour être visible d'un coup d'œil sur iPhone
+     SE (568px) sans scroller — l'ancien placement en footer passait sous le fold.
+     Compacte (une ligne + sous-ligne) pour ne pas repousser le pavé. Accent
+     orange en dur (#c2410c) : reconnaissable, identique dans les 12 thèmes. */
+  .test-mode-card {
+    display: flex; align-items: center; gap: 10px; text-align: left;
+    width: 100%; max-width: 320px; margin: 4px 0 18px;
+    padding: 11px 12px; cursor: pointer;
+    background: rgba(194, 65, 12, 0.10);
+    border: 1px solid #c2410c; border-radius: 12px;
+    font-family: inherit; color: var(--ink);
+  }
+  .test-mode-card:active { background: rgba(194, 65, 12, 0.20); }
+  .test-mode-card-emoji { flex: none; font-size: 22px; line-height: 1; }
+  .test-mode-card-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .test-mode-card-txt b { font-size: 13px; font-weight: 700; }
+  .test-mode-card-txt small { font-size: 10px; color: var(--ink-3); line-height: 1.3; }
+  .test-mode-card-arrow { flex: none; font-size: 20px; color: #c2410c; font-weight: 700; }
+
   #ambient-alert {
     position: fixed; left: 50%; top: calc(env(safe-area-inset-top) + 10px);
     transform: translateX(-50%) translateY(-140%);
@@ -7768,6 +7788,15 @@ function renderAuth() {
         <div class="auth-logo" style="width:60px;height:60px;font-size:32px"><img class="brand-logo" src="/assets/bcl-logo-256.png" alt="Basket Club Lislois"></div>
         <div class="auth-title" style="font-size:24px">${pinTitle}</div>
         <div class="auth-subtitle">${isLocked ? 'Trop de tentatives' : 'Saisis ton code à 4 chiffres'}</div>
+        ${flow.role === 'coach' && !isLocked ? `
+          <button class="test-mode-card" onclick="openTestModeModal()">
+            <span class="test-mode-card-emoji">🧪</span>
+            <span class="test-mode-card-txt">
+              <b>Voir en mode joueuse test</b>
+              <small>Prévisualise l'app sans PIN · aucune donnée enregistrée</small>
+            </span>
+            <span class="test-mode-card-arrow">›</span>
+          </button>` : ''}
         <div class="pin-display">
           ${[0,1,2,3].map(i => `<div class="pin-dot ${i < len ? 'filled' : ''}"></div>`).join('')}
         </div>
@@ -7794,13 +7823,6 @@ function renderAuth() {
         </div>
         <button class="btn btn-ghost mt-3" onclick="pinKey('exit')">Changer d'utilisateur</button>
         ${!isLocked ? `<div style="margin-top:20px;font-size:11px;color:var(--ink-4);text-align:center">Code par défaut : 0000</div>` : ''}
-        ${flow.role === 'coach' ? `
-          <div style="margin-top:26px;padding-top:20px;border-top:1px solid var(--border-soft);width:100%;max-width:300px">
-            <button class="btn btn-secondary btn-block" onclick="openTestModeModal()">🧪 Voir en mode joueuse test</button>
-            <div style="margin-top:8px;font-size:10px;color:var(--ink-4);text-align:center;line-height:1.5">
-              Prévisualise l'app sans PIN, aucune donnée enregistrée
-            </div>
-          </div>` : ''}
       </div>
     `;
   }

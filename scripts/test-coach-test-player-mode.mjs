@@ -316,6 +316,24 @@ t('le bouton n\'apparaît QUE sur le login coach', () => {
   ctx.state.authFlow = { stage: 'role', role: null, playerId: null, pinInput: '' };
   ok(!/openTestModeModal\(\)/.test(ctx.renderAuth()), 'bouton exposé sur le choix de rôle');
 });
+t('la carte de test est AU-DESSUS du pavé PIN, pas en footer (visible sur iPhone SE)', () => {
+  ctx.state.auth = null;
+  ctx.state.authFlow = { stage: 'pin', role: 'coach', playerId: null, pinInput: '' };
+  const h = ctx.renderAuth();
+  const posCard = h.indexOf('openTestModeModal');
+  const posPad = h.indexOf('pin-pad');
+  ok(posCard !== -1 && posPad !== -1 && posCard < posPad, 'la carte est rendue APRÈS le pavé PIN → repasse sous le fold');
+});
+t('la carte de test disparaît quand le compte est verrouillé (cooldown)', () => {
+  // isLocked = getRemainingLockMs(key) > 0, et pour un coach golden-path (pas de
+  // coachId) la clé est 'coach' avec la propriété lockedUntil (pas count/last).
+  ctx.state.authFlow = { stage: 'pin', role: 'coach', playerId: null, coachId: null, pinInput: '' };
+  ctx.state.pinAttempts = { coach: { failedCount: 9, lockedUntil: Date.now() + 60000 } };
+  try {
+    const h = ctx.renderAuth();
+    ok(!/openTestModeModal\(\)/.test(h), 'carte exposée pendant un verrouillage (contourne le cooldown)');
+  } finally { ctx.state.pinAttempts = {}; }
+});
 t('renderHomePlayer() rend sans throw pour la ghost', () => {
   ctx.state.auth = { role: 'player', playerId: '__test__', mode: 'test', profile: { name: 'Ghost Test', postes: [3], taille: 175 } };
   const h = ctx.renderHomePlayer();
