@@ -475,6 +475,28 @@
 
   /* Alerte ambiante de déroulé d'entraînement (coach) — bannière HAUT, non
      bloquante, auto-dismiss. Cachée par défaut (pas de classe .ambient-on). */
+  /* Bandeau « mode joueuse test ». En flux (pas position:fixed) : le chrome haut
+     de cette app (topbar sticky + safe-area/notch en PWA standalone) est fragile,
+     un bandeau fixe se superposerait à la topbar. Rendu en tête de <main> sur
+     TOUS les écrans. Couleurs en dur (et pas var(--orange)) : le bandeau doit
+     rester lisible et identique dans les 12 thèmes, clairs comme sombres. */
+  .test-banner {
+    display: flex; align-items: center; gap: 10px;
+    margin: 10px 18px 14px; padding: 9px 12px;
+    background: #c2410c; color: #fff;
+    border: 1px solid #9a3412; border-radius: 10px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  }
+  .test-banner-txt { flex: 1; min-width: 0; font-size: 12px; line-height: 1.35; }
+  .test-banner-btn {
+    flex: none; cursor: pointer;
+    background: rgba(255, 255, 255, 0.16); color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.5); border-radius: 7px;
+    padding: 6px 10px; font-size: 11px; font-weight: 700;
+    font-family: inherit; white-space: nowrap;
+  }
+  .test-banner-btn:active { background: rgba(255, 255, 255, 0.3); }
+
   #ambient-alert {
     position: fixed; left: 50%; top: calc(env(safe-area-inset-top) + 10px);
     transform: translateX(-50%) translateY(-140%);
@@ -5070,6 +5092,13 @@ function _seriesFromRow(r) {
 // détectées PLUS RÉCENTES que le remote lors d'un apply : sans ça, un refetch
 // realtime concurrent + _seedCacheFromRemote masqueraient la mutation au flush.
 function _reassertRows(table, dumpRows) {
+  // MODE TEST — verrou n°3. _reassertRows re-pousse les lignes locales jugées
+  // plus récentes que le remote : en mode test ce serait exactement le vecteur
+  // de fuite (une modif fantôme réaffirmée en base par un apply() concurrent).
+  if (window.__PB_TEST_MODE__) {
+    console.log('[test-mode] skip', { action: 'PbSync._reassertRows', table });
+    return;
+  }
   if (!dumpRows || !dumpRows.length || !window.sb) return;
   try {
     sb.from(table).upsert(dumpRows, { onConflict: 'id' })
@@ -5119,6 +5148,15 @@ async function _flushEntity(entity, currentMap) {
 
 // Hook public : appelé après chaque persist() côté main script
 async function _flushAll(state) {
+  // MODE TEST — verrou n°2. Ce bloc est un <script type="module"> : il n'a accès
+  // ni à `state` (const du script principal) ni à _isTestMode(), d'où le drapeau
+  // window. C'est le seul point qui bloque les écritures de PbSync : elles
+  // passent par la const `sb` du module, que le Proxy sur window.sb n'intercepte
+  // PAS. Ne pas retirer en pensant que window.sb suffit.
+  if (window.__PB_TEST_MODE__) {
+    console.log('[test-mode] skip', { action: 'PbSync._flushAll' });
+    return;
+  }
   if (!Pb.online) return;
   for (const entity of ENTITIES) {
     if (entity.auth === 'l2' && !Pb.user) continue;
@@ -6021,6 +6059,13 @@ Object.defineProperty(state, 'offseason', {
 
 function persist() {
   invalidateAutoScoreCache(); // compteurs auto recomputés à la lecture : cache à jour
+  // MODE TEST — verrou n°1, et le plus important. persist() ne fait pas que du
+  // localStorage : il se termine par PbSync.schedule(state), qui pousse TOUT
+  // l'état en base 400 ms plus tard. Et le localStorage seul ne serait pas
+  // inoffensif non plus : une ligne fantôme d'id « x… » qui y resterait serait
+  // repoussée en base au prochain login RÉEL par l'anti-wipe de PbSync. On sort
+  // donc avant les deux moitiés. Cf. le bloc MODE JOUEUSE TEST.
+  if (_isTestMode()) { _testSkip('persist'); return; }
   save(K.auth, state.auth);
   save(K.section, state.section);
   save(K.plays, state.plays);
@@ -6130,8 +6175,12 @@ function teamTagMatches(tag, want) {
 // Joueuses d'une saison. includeLeft=true affiche aussi les parties (badge).
 // team : 'all' (défaut) | 'e1' | 'e2' → scope sur season_players.team_tag.
 function getSeasonPlayers(seasonId, { includeLeft = false, team = 'all' } = {}) {
-  if (!seasonId) return state.players || [];
-  const links = (state.seasonPlayers || []).filter(sp => sp.seasonId === seasonId);
+  // Ceinture : la joueuse fantôme n'est jamais censée être dans state.players
+  // (c'est la vraie garantie), mais si elle y atterrissait par un bug, elle
+  // fuiterait dans TOUS les effectifs, classements et cibles de notification —
+  // et serait poussée en base au flush. Le filtre coûte deux lignes.
+  if (!seasonId) return (state.players || []).filter(p => p && p.id !== TEST_PLAYER_ID);
+  const links = (state.seasonPlayers || []).filter(sp => sp.seasonId === seasonId && sp.playerId !== TEST_PLAYER_ID);
   return links.map(link => {
     const p = (state.players || []).find(p => p.id === link.playerId);
     if (!p) return null;
@@ -7194,7 +7243,240 @@ function currentSections() {
 
 function currentPlayer() {
   if (!state.auth || state.auth.role !== 'player') return null;
+  // Mode test : la ghost n'est PAS dans state.players (c'est tout l'intérêt —
+  // elle reste invisible des effectifs, classements et notifs). Sans ce
+  // court-circuit, renderHomePlayer tomberait sur `if (!p) return renderHomeCoach()`
+  // et le coach verrait sa propre home au lieu de celle des joueuses.
+  if (_isTestMode()) return _testPlayer();
   return state.players.find(p => p.id === state.auth.playerId);
+}
+
+// ============================================================
+// MODE JOUEUSE TEST (« ghost ») — prévisualisation coach, sans PIN
+// ============================================================
+// Le coach entre dans l'app avec exactement l'UI d'une joueuse, sur les VRAIES
+// données (programmes, défis, drills, plays…), mais RIEN n'est écrit nulle part.
+//
+// POURQUOI CE N'EST PAS QU'UN FLAG D'AFFICHAGE — les deux pièges :
+//
+// 1. persist() ne fait pas que du localStorage : il termine par
+//    PbSync.schedule(state), qui pousse TOUT l'état en base 400 ms plus tard.
+//    Bloquer le flush sans bloquer le localStorage ne suffirait pas non plus :
+//    une ligne fantôme d'id « x… » laissée en localStorage serait repoussée en
+//    base au PROCHAIN LOGIN RÉEL par l'heuristique anti-wipe de PbSync
+//    (pendingLocal = id.startsWith('x')). Incident déjà vécu (résidus de smoke
+//    ressuscités en prod). → persist() sort AVANT toute écriture en mode test.
+//
+// 2. Le bloc <script type="module"> tient sa PROPRE référence `sb` (const de
+//    module) : proxifier window.sb n'intercepte donc PAS les écritures de
+//    PbSync. Il faut deux verrous, et le module ne voit pas `state` (const) →
+//    il lit le drapeau window.__PB_TEST_MODE__.
+//
+// Verrous, du plus haut au plus bas :
+//   persist()        → sortie immédiate (localStorage + PbSync.schedule)
+//   _flushAll()      → sortie (module, via window.__PB_TEST_MODE__)
+//   _reassertRows()  → sortie (module)
+//   window.sb        → Proxy : insert/update/upsert/delete + Storage.upload/remove
+//                      neutralisés, les LECTURES passent (la ghost voit le vrai contenu)
+//   notifyPush()     → no-op
+// La sortie du mode test est un RELOAD dur : aucun résidu en mémoire ne peut
+// survivre pour être flushé par la session suivante.
+const TEST_PLAYER_ID = '__test__';
+function _isTestMode() { return !!(state.auth && state.auth.mode === 'test'); }
+// Drapeau lu par le bloc <script type="module">, qui n'a pas accès à `state`.
+function _testModeSyncFlag() { try { window.__PB_TEST_MODE__ = _isTestMode(); } catch (e) {} }
+// Trace unifiée de tout ce qui est bloqué.
+function _testSkip(action, extra) {
+  try { console.log('[test-mode] skip', Object.assign({ action }, extra || {})); } catch (e) {}
+}
+// La joueuse fantôme, fabriquée à la volée depuis state.auth.profile. Elle
+// n'est JAMAIS poussée dans state.players : tout ce qui liste des joueuses lit
+// state.players / seasonPlayers, donc ne pas l'y mettre est la garantie la plus
+// solide qu'elle reste invisible (les filtres explicites ne sont qu'une ceinture).
+function _testPlayer() {
+  const p = (state.auth && state.auth.profile) || {};
+  return {
+    id: TEST_PLAYER_ID,
+    name: p.name || 'Joueuse Test',
+    num: 0,
+    postes: Array.isArray(p.postes) ? p.postes.slice() : [],
+    taille_cm: Number.isFinite(p.taille) ? p.taille : null,
+    date_naissance: null,
+    photo: null, badges: [], feedback: null,
+    pin: '0000',
+    _test: true
+  };
+}
+
+// --- Écran de choix du profil ghost ----------------------------------------
+function openTestModeModal() {
+  state._testWizard = { name: 'Joueuse Test', postes: [], taille: '' };
+  renderTestModeModal();
+}
+function _tm() { return state._testWizard; }
+function _tmSet(k, v) { const w = _tm(); if (w) w[k] = v; }
+function _tmTogglePoste(n) {
+  const w = _tm(); if (!w) return;
+  const i = w.postes.indexOf(n);
+  if (i >= 0) w.postes.splice(i, 1); else w.postes.push(n);
+  w.postes.sort((a, b) => a - b);
+  renderTestModeModal();
+}
+function renderTestModeModal() {
+  const w = _tm(); if (!w) return;
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">Prévisualisation · aucune donnée enregistrée</div>
+        <div class="modal-title">🧪 Mode joueuse test</div>
+      </div>
+      <button class="modal-close" onclick="state._testWizard=null;closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:11px;color:var(--ink-2);line-height:1.6;margin-bottom:14px">
+        Tu vas voir l'app <b>exactement comme une joueuse</b>, avec le vrai contenu.
+        Tu peux cliquer partout, lancer des drills, valider des séances :
+        <b>rien n'est enregistré</b> et cette joueuse n'apparaît dans aucun effectif,
+        classement ni notification.
+      </div>
+      <div class="fld">
+        <label class="fld-label">Nom affiché</label>
+        <input type="text" value="${esc(w.name)}" placeholder="Joueuse Test" onchange="_tmSet('name',this.value)">
+      </div>
+      <div class="eyebrow-muted" style="margin:14px 0 8px">Poste(s) — optionnel</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">
+        ${[1, 2, 3, 4, 5].map(n => `
+          <button type="button" class="btn ${w.postes.includes(n) ? 'btn-primary' : 'btn-secondary'}" aria-pressed="${w.postes.includes(n)}"
+            onclick="_tmTogglePoste(${n})" style="padding:8px 14px;font-size:12px">${n}</button>
+        `).join('')}
+      </div>
+      <div class="fld" style="margin-top:14px">
+        <label class="fld-label">Taille (cm) — optionnel</label>
+        <input type="number" min="100" max="230" value="${esc(String(w.taille))}" placeholder="175" onchange="_tmSet('taille',this.value)">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary btn-block" onclick="enterTestMode()">🧪 Entrer en mode test</button>
+    </div>
+  `);
+}
+
+// --- Entrée / sortie --------------------------------------------------------
+function enterTestMode() {
+  const w = _tm() || {};
+  const taille = Number(w.taille);
+  state.auth = {
+    role: 'player',
+    playerId: TEST_PLAYER_ID,
+    name: (w.name || '').trim().slice(0, 40) || 'Joueuse Test',
+    mode: 'test',
+    profile: {
+      name: (w.name || '').trim().slice(0, 40) || 'Joueuse Test',
+      postes: Array.isArray(w.postes) ? w.postes.slice() : [],
+      taille: (Number.isFinite(taille) && taille >= 100 && taille <= 230) ? taille : null
+    }
+  };
+  _testModeSyncFlag();
+  state._testWizard = null;
+  state.authFlow = { stage: 'role', role: null, playerId: null, pinInput: '' };
+  state.section = 'home';
+  state.view = null;
+  // Surtout PAS de persist() ici : l'auth de test ne doit jamais toucher le
+  // localStorage (un rechargement doit ramener à l'écran de login, pas au ghost).
+  closeModal();
+  try { console.log('[test-mode] ON — aucune écriture ne sera émise (persist/flush/sb/push/upload bloqués)'); } catch (e) {}
+  render();
+}
+// Sortie = RELOAD DUR, volontairement. L'état en mémoire contient les
+// modifications fantômes ; un simple state.auth=null les laisserait en RAM, et
+// le premier persist() de la session suivante les pousserait en base. Le reload
+// relit le localStorage, jamais écrit pendant le test → base et cache intacts.
+function exitTestMode() {
+  try { console.log('[test-mode] OFF — rechargement pour repartir d\'un état propre'); } catch (e) {}
+  try { window.__PB_TEST_MODE__ = false; } catch (e) {}
+  try {
+    const u = new URL(location.href);
+    u.hash = '';
+    u.searchParams.set('tm', String(Date.now())); // casse le bfcache Safari
+    location.replace(u.toString());
+  } catch (e) { location.reload(); }
+}
+
+// Bandeau permanent. Rendu EN FLUX en tête de chaque écran (précédent :
+// renderPlayerGageReminder) et pas en position:fixed — le chrome haut de cette
+// app (topbar sticky + safe-area/notch en PWA standalone) a déjà coûté trois
+// correctifs de géométrie (#104/#105/#106), et un bandeau fixe se superposerait
+// à la topbar. En flux : présent sur tous les écrans, aucun risque de géométrie.
+function renderTestModeBanner() {
+  if (!_isTestMode()) return '';
+  return `
+    <div class="test-banner">
+      <div class="test-banner-txt">🧪 <b>Mode test</b> — rien n'est enregistré</div>
+      <button class="test-banner-btn" onclick="exitTestMode()">Quitter</button>
+    </div>
+  `;
+}
+
+// --- Neutralisation des écritures directes (main script) --------------------
+// Le module <script type="module"> garde sa propre const `sb` : ce Proxy ne
+// couvre QUE les appels du script principal (uploads Storage, écritures
+// ponctuelles). Les écritures de PbSync sont bloquées séparément dans _flushAll
+// et _reassertRows. Les LECTURES (select, getPublicUrl, list…) passent : la
+// ghost doit voir le vrai contenu.
+const _TM_WRITES = ['insert', 'update', 'upsert', 'delete'];
+// Objet chaînable + thenable : supporte `.insert(x).select().single()` comme
+// `await sb.from(t).delete().eq(...)`, et résout toujours { data:null, error:null }
+// — même forme qu'un succès, pour ne pas déclencher les branches d'erreur de
+// l'appelant (un faux échec afficherait « ⚠ l'envoi a échoué » à tort).
+function _tmNoopChain(action, table) {
+  _testSkip(action, { table });
+  const result = { data: null, error: null, count: null, status: 200, statusText: 'OK (test-mode)' };
+  const chain = new Proxy(function () {}, {
+    apply() { return chain; },
+    get(t, prop) {
+      if (prop === 'then') return (res, rej) => Promise.resolve(result).then(res, rej);
+      if (prop === 'catch') return f => Promise.resolve(result).catch(f);
+      if (prop === 'finally') return f => Promise.resolve(result).finally(f);
+      if (prop === 'data') return null;
+      if (prop === 'error') return null;
+      return () => chain;
+    }
+  });
+  return chain;
+}
+function _installTestModeSbGuard() {
+  if (window.__tmGuardOn || !window.sb) return;
+  const real = window.sb;
+  const tableProxy = (builder, table) => new Proxy(builder, {
+    get(t, prop) {
+      if (window.__PB_TEST_MODE__ && _TM_WRITES.includes(prop)) return () => _tmNoopChain('sb.' + prop, table);
+      const v = Reflect.get(t, prop);
+      return typeof v === 'function' ? v.bind(t) : v;
+    }
+  });
+  const storageProxy = storage => new Proxy(storage, {
+    get(t, prop) {
+      if (prop !== 'from') { const v = Reflect.get(t, prop); return typeof v === 'function' ? v.bind(t) : v; }
+      return bucket => new Proxy(t.from(bucket), {
+        get(b, p) {
+          if (window.__PB_TEST_MODE__ && (p === 'upload' || p === 'remove' || p === 'move' || p === 'copy')) {
+            return () => _tmNoopChain('storage.' + p, bucket);
+          }
+          const v = Reflect.get(b, p);
+          return typeof v === 'function' ? v.bind(b) : v;
+        }
+      });
+    }
+  });
+  window.sb = new Proxy(real, {
+    get(target, prop) {
+      if (prop === 'from') return table => tableProxy(target.from(table), table);
+      if (prop === 'storage') return storageProxy(target.storage);
+      const v = Reflect.get(target, prop);
+      return typeof v === 'function' ? v.bind(target) : v;
+    }
+  });
+  window.__tmGuardOn = true;
 }
 
 // ============================================================
@@ -7266,7 +7548,8 @@ function coachTeams() {
 // non-admin → uniquement les joueuses de ses équipes (team_tag du lien saison,
 // 'both' = visible par tous). Ceinture+bretelles au-dessus d'effectiveTeamFilter.
 function visiblePlayersForUser(players) {
-  if (!isScopedCoach()) return players || [];
+  players = (players || []).filter(p => p && p.id !== TEST_PLAYER_ID); // ceinture ghost
+  if (!isScopedCoach()) return players;
   const teams = coachTeams();
   return (players || []).filter(p => {
     const tag = (p && p._seasonLink && p._seasonLink.teamTag) || 'e1';
@@ -7511,6 +7794,13 @@ function renderAuth() {
         </div>
         <button class="btn btn-ghost mt-3" onclick="pinKey('exit')">Changer d'utilisateur</button>
         ${!isLocked ? `<div style="margin-top:20px;font-size:11px;color:var(--ink-4);text-align:center">Code par défaut : 0000</div>` : ''}
+        ${flow.role === 'coach' ? `
+          <div style="margin-top:26px;padding-top:20px;border-top:1px solid var(--border-soft);width:100%;max-width:300px">
+            <button class="btn btn-secondary btn-block" onclick="openTestModeModal()">🧪 Voir en mode joueuse test</button>
+            <div style="margin-top:8px;font-size:10px;color:var(--ink-4);text-align:center;line-height:1.5">
+              Prévisualise l'app sans PIN, aucune donnée enregistrée
+            </div>
+          </div>` : ''}
       </div>
     `;
   }
@@ -9200,6 +9490,12 @@ async function sbAccountSignOut() {
 }
 
 function doLogout() {
+  // MODE TEST — verrou n°5, indispensable. Ce chemin est atteignable depuis la
+  // ghost (⚙ Réglages → Changer d'utilisateur) et il est PIÈGEUX : il fait
+  // state.auth = null AVANT persist(), donc _isTestMode() serait déjà faux au
+  // moment du persist() → tout l'état sali par la ghost partirait en localStorage
+  // ET en base. On sort par le reload, seule sortie propre du mode test.
+  if (_isTestMode()) { exitTestMode(); return; }
   // Email binding strict : si l'identité sortante était liée à un compte cloud,
   // on déconnecte aussi ce compte pour que la personne suivante reparte d'une
   // identité vierge (pas de fuite des données perso cloud entre utilisateurs).
@@ -9228,6 +9524,7 @@ function doLogout() {
   persist();
   closeModal();
   render();
+  // (mode test : on n'arrive jamais ici — garde en tête de fonction)
   if (wasBound && window.SbAuth && SbAuth.isAuthed()) {
     SbAuth.signOut().catch(() => {});
   }
@@ -20997,7 +21294,7 @@ function _stimLetterToggleSel(letters, ch) { if (!letters) return; letters.selec
 function _drillWizLetterMode(mode) { const w = _dw(); if (!w || !w.stimuli.letters) return; _stimLetterMode(w.stimuli.letters, mode); renderDrillWizard(); }
 function _drillWizLetterSel(ch) { const w = _dw(); if (!w || !w.stimuli.letters) return; _stimLetterToggleSel(w.stimuli.letters, ch); renderDrillWizard(); }
 // Joueuses : catégorie stimulus (array de player ids ; présence = section active).
-function _stimPlayersRoster() { return (state.players || []).filter(p => p && !p.deletedAt); }
+function _stimPlayersRoster() { return (state.players || []).filter(p => p && !p.deletedAt && p.id !== TEST_PLAYER_ID); }
 function _drillWizTogglePlayers() { const w = _dw(); if (!w) return; if (Array.isArray(w.stimuli.players)) delete w.stimuli.players; else w.stimuli.players = []; renderDrillWizard(); }
 function _drillWizPlayer(id) { const w = _dw(); if (!w) return; w.stimuli.players = Array.isArray(w.stimuli.players) ? w.stimuli.players : []; const i = w.stimuli.players.indexOf(id); if (i >= 0) w.stimuli.players.splice(i, 1); else w.stimuli.players.push(id); renderDrillWizard(); }
 function _drillWizPlayersAll(on) { const w = _dw(); if (!w) return; w.stimuli.players = on ? _stimPlayersRoster().map(p => p.id) : []; renderDrillWizard(); }
@@ -34237,6 +34534,9 @@ async function openPushSettings() {
 }
 function notifyPush(ownerKeys, payload) {
   try {
+    // MODE TEST — verrou n°4. Un push part vers de VRAIS téléphones : c'est la
+    // fuite la plus visible du mode test, et la seule qui ne se rattrape pas.
+    if (_isTestMode()) { _testSkip('notifyPush', { title: payload && payload.title }); return; }
     if (!window.sb || (window.Pb && Pb.online === false)) return;
     const me = pushOwnerKey();
     ownerKeys = (ownerKeys || []).filter(k => k && k !== me); // pas d'auto-notif
@@ -34470,7 +34770,7 @@ function _renderBody() {
   document.getElementById('root').innerHTML = `
     <div class="app">
       ${renderTopbar()}
-      <main>${content}</main>
+      <main>${renderTestModeBanner()}${content}</main>
     </div>
     ${renderNav()}
     ${renderChronoFab()}
@@ -34643,7 +34943,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-10.74';
+const APP_VERSION = '2026-07-10.75';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
@@ -34766,6 +35066,17 @@ function initPullToRefresh() {
   document.addEventListener('touchcancel', () => { if (!refreshing) reset(); }, { passive: true });
 }
 
+// MODE TEST — le mode test ne survit JAMAIS à un rechargement. Deux raisons :
+// enterTextMode ne persiste pas l'auth (donc on ne devrait pas arriver ici avec
+// mode:'test'), et surtout une session de test ressuscitée serait un piège — le
+// coach se croirait connecté pour de vrai et ses actions seraient silencieusement
+// jetées. Ceinture explicite avant tout render, et remise à zéro du drapeau lu
+// par le bloc <script type="module">.
+try {
+  if (state.auth && state.auth.mode === 'test') { state.auth = null; state.section = 'home'; }
+  window.__PB_TEST_MODE__ = false;
+  _installTestModeSbGuard();
+} catch (e) { console.warn('[test-mode] init', e && e.message); }
 _pbBoot();
 try { initPullToRefresh(); } catch (e) { console.warn('[ptr] init', e && e.message); }
 // Auto-update : check au boot (après stabilisation) + à chaque retour au 1er plan
