@@ -19262,12 +19262,12 @@ function renderTrainingSession() {
     const d = _trainingBlockDrill(b, lvl);
     return `
       <div style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;margin-bottom:8px;background:var(--surface)">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-          <div style="font-size:16px;flex:none">${t.icon}</div>
+        <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:6px">
+          <div style="font-size:16px;flex:none;line-height:1.4">${t.icon}</div>
           <div style="flex:1;min-width:0">
-            <div style="font-family:'Anton';font-size:13px;text-transform:uppercase">${esc(b.name || t.label)}</div>
+            <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;overflow-wrap:break-word;line-height:1.25">${esc(b.name || t.label)}</div>
+            <div style="font-family:'Anton';font-size:15px;color:var(--orange);overflow-wrap:break-word;margin-top:2px;line-height:1.25">${esc(lv.text)}</div>
           </div>
-          <div style="font-family:'Anton';font-size:15px;color:var(--orange);flex:none">${esc(lv.text)}</div>
         </div>
         ${b.instructions ? `<div class="md-content" style="font-size:11px;color:var(--ink-2);margin-bottom:8px">${mdToHtml(b.instructions)}</div>` : ''}
         ${b.track_distance ? `<div style="font-size:10px;color:var(--ink-3);margin-bottom:8px">📏 Ta distance te sera demandée à la validation.</div>` : ''}
@@ -34643,7 +34643,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-10.74';
+const APP_VERSION = '2026-07-17.75';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
