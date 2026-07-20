@@ -18140,6 +18140,11 @@ const TRAINING_LEVEL_LABEL = { min: 'Minimum', med: 'Medium', ultra: 'Ultra' };
 // de la séance — il n'y en a pas). Séance prévue lundi → rattrapable lundi et
 // mardi, périmée mercredi 00:00 UTC pile.
 const TRAINING_RATTRAPAGE_MS = 48 * 3600000;
+// Fenêtre d'aperçu joueuse : un programme devient visible (en lecture seule)
+// 3 semaines avant sa startDate, pour que les joueuses le découvrent et se
+// projettent. La VALIDATION reste bloquée avant le jour J par _isRattrapageValid
+// (borne basse : pas de validation à l'avance) — l'aperçu n'ouvre aucune écriture.
+const TRAINING_PREVIEW_DAYS = 21;
 const TRAINING_DAY_LABELS = { 1: 'Lundi', 2: 'Mardi', 3: 'Mercredi', 4: 'Jeudi', 5: 'Vendredi', 6: 'Samedi', 7: 'Dimanche' };
 const TRAINING_BLOCK_TYPES = [
   { id: 'warmup', label: 'Échauffement', icon: '🔥' },
@@ -18289,6 +18294,29 @@ function _trainingProgramRunning(p, todayISO) {
   const d = todayISO || isoDate(new Date());
   return !!p.startDate && !!p.endDate && p.startDate <= d && d <= p.endDate;
 }
+// Nombre de jours entiers avant le début (>0 = pas encore commencé, 0 sinon).
+function _trainingDaysUntilStart(p, todayISO) {
+  const start = _trainingDayStartMs(p && p.startDate);
+  const t = _trainingDayStartMs(todayISO || isoDate(new Date()));
+  if (start === null || t === null) return 0;
+  return Math.max(0, Math.round((start - t) / 86400000));
+}
+// Le programme n'a pas encore commencé (mode aperçu = visible mais pas validable).
+function _trainingProgramPreview(p, todayISO) {
+  if (!_trainingProgramPreviewable(p, todayISO)) return false;
+  const d = todayISO || isoDate(new Date());
+  return p.startDate > d;
+}
+// Visible côté joueuse = en cours OU dans la fenêtre d'aperçu (21 j avant le
+// début). Un programme dépublié / supprimé / hors dates reste invisible.
+function _trainingProgramPreviewable(p, todayISO) {
+  if (!p || p.deletedAt || p.isActive === false || !p.startDate || !p.endDate) return false;
+  const startMs = _trainingDayStartMs(p.startDate);
+  if (startMs === null) return false;
+  const d = todayISO || isoDate(new Date());
+  const previewStart = isoDate(new Date(startMs - TRAINING_PREVIEW_DAYS * 86400000));
+  return previewStart <= d && d <= p.endDate;
+}
 // Visibilité multi-effectif : un programme sans team_tag (ou 'both') est pour
 // tout le monde. Sinon il faut que l'équipe corresponde.
 function _trainingProgramVisibleTo(p, teamTag) {
@@ -18297,11 +18325,11 @@ function _trainingProgramVisibleTo(p, teamTag) {
   if (!teamTag || teamTag === 'both') return true;
   return p.teamTag === teamTag;
 }
-// Programmes visibles par la joueuse connectée, en cours aujourd'hui.
+// Programmes visibles par la joueuse : en cours OU en aperçu (21 j avant début).
 function _myTrainingPrograms(todayISO) {
   const tag = (state.auth && state.auth.role === 'player') ? currentPlayerTeamTag() : null;
   return activeTrainingPrograms()
-    .filter(p => _trainingProgramRunning(p, todayISO) && _trainingProgramVisibleTo(p, tag))
+    .filter(p => _trainingProgramPreviewable(p, todayISO) && _trainingProgramVisibleTo(p, tag))
     .sort((a, b) => (a.startDate || '').localeCompare(b.startDate || ''));
 }
 // Programmes gérables par le coach connecté (scopé équipe pour un coach non-admin).
@@ -19160,23 +19188,45 @@ function _trainingHoursLeft(datePlanned, nowMs) {
   return Math.max(0, Math.ceil((start + TRAINING_RATTRAPAGE_MS - (Number.isFinite(nowMs) ? nowMs : Date.now())) / 3600000));
 }
 
-// Carte d'accueil joueuse : « Programmes actifs » (plusieurs possibles).
+// Carte d'accueil joueuse : « Ma prépa ». Programmes en cours (séance du jour /
+// rattrapage / repos) ET programmes en aperçu (pas encore commencés).
 function renderTrainingPlayerCard() {
   if (!(state.auth && state.auth.role === 'player')) return '';
   const pid = state.auth.playerId;
   const now = Date.now();
-  const progs = _myTrainingPrograms(isoDate(new Date(now)));
+  const todayISO = isoDate(new Date(now));
+  const progs = _myTrainingPrograms(todayISO);
   if (!progs.length) return '';
-  const due = _myTrainingDue(now);
-  return `
-    <div class="section-header">
-      <div>
-        <div class="eyebrow">${progs.length > 1 ? progs.length + ' programmes actifs' : 'Programme actif'}</div>
-        <h2 class="display-md mt-2">Ma prépa</h2>
-      </div>
-    </div>
-    <div style="padding:0 18px;display:flex;flex-direction:column;gap:8px;margin-bottom:18px">
-      ${due.length ? due.map(d => {
+  const previewProgs = progs.filter(p => _trainingProgramPreview(p, todayISO));
+  const runningProgs = progs.filter(p => _trainingProgramRunning(p, todayISO));
+  const due = _myTrainingDue(now); // seuls les programmes EN COURS produisent des séances dues
+  const eyebrow = runningProgs.length
+    ? (progs.length > 1 ? progs.length + ' programmes' : 'Programme actif')
+    : (previewProgs.length > 1 ? previewProgs.length + ' à venir' : 'À venir');
+
+  // Cartes « aperçu » : programmes pas encore commencés → découverte, pas de validation.
+  const previewCards = previewProgs.map(p => {
+    const days = _trainingDaysUntilStart(p, todayISO);
+    const when = days === 0 ? 'aujourd\'hui' : days === 1 ? 'demain' : 'dans ' + days + ' jours';
+    return `
+      <div onclick="openTrainingPreview('${p.id}')" style="border:1px solid var(--orange);border-radius:10px;padding:12px;background:var(--surface);cursor:pointer">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="font-size:20px;flex:none">🔭</div>
+          <div style="flex:1;min-width:0">
+            <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p.name || 'Programme')}</div>
+            <div style="font-size:10px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+              Démarre ${when} · ${p.daysActive.map(d => TRAINING_DAY_LABELS[d].slice(0, 3)).join(' ')} · découvre le programme
+            </div>
+          </div>
+          <div style="color:var(--ink-3);flex:none">›</div>
+        </div>
+        <div style="margin-top:8px;padding:6px 8px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:4px;font-size:10px;color:var(--ink-2)">
+          🔭 Aperçu — tu pourras valider tes séances dès le ${esc(formatDate(p.startDate, 'short'))}.
+        </div>
+      </div>`;
+  }).join('');
+
+  const runningCards = due.length ? due.map(d => {
         const p = progs.find(x => x.id === d.programId);
         const pts = _trainingCompletionsOf(d.programId, pid).reduce((a, c) => a + (Number(c.pointsTotal) || 0), 0);
         const left = _trainingHoursLeft(d.datePlanned, now);
@@ -19208,7 +19258,7 @@ function renderTrainingPlayerCard() {
                 ⏳ Rattrapage possible — séance d'hier, encore ${left} h pour la valider.
               </div>` : ''}
           </div>`;
-      }).join('') : progs.map(p => {
+      }).join('') : runningProgs.map(p => {
         const pts = _trainingCompletionsOf(p.id, pid).reduce((a, c) => a + (Number(c.pointsTotal) || 0), 0);
         return `
           <div onclick="openTrainingDashboard('${p.id}')" style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;background:var(--surface);cursor:pointer;display:flex;align-items:center;gap:10px">
@@ -19219,8 +19269,57 @@ function renderTrainingPlayerCard() {
             </div>
             <div style="color:var(--ink-3);flex:none">›</div>
           </div>`;
-      }).join('')}
+      }).join('');
+
+  return `
+    <div class="section-header">
+      <div>
+        <div class="eyebrow">${eyebrow}</div>
+        <h2 class="display-md mt-2">Ma prépa</h2>
+      </div>
+    </div>
+    <div style="padding:0 18px;display:flex;flex-direction:column;gap:8px;margin-bottom:18px">
+      ${previewCards}${runningCards}
     </div>`;
+}
+
+// Aperçu d'un programme pas encore commencé : liste des séances de la semaine,
+// chacune ouvrable en lecture seule (blocs, 3 niveaux, drills lançables à blanc).
+function openTrainingPreview(programId) {
+  const p = activeTrainingPrograms().find(x => x.id === programId);
+  if (!p) return;
+  const sessions = _trainingSessionsOf(programId);
+  const days = _trainingDaysUntilStart(p, isoDate(new Date()));
+  const when = days === 0 ? 'aujourd\'hui' : days === 1 ? 'demain' : 'dans ' + days + ' jours';
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">Aperçu · démarre ${when}</div>
+        <div class="modal-title">${esc(p.name || 'Programme')}</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:11px;color:var(--ink-2);line-height:1.5;margin-bottom:14px">
+        🔭 Découvre ton programme avant qu'il commence. La validation des séances s'ouvre le <b>${esc(formatDate(p.startDate, 'long'))}</b>.
+      </div>
+      ${p.description ? `<div class="md-content" style="font-size:12px;color:var(--ink-2);margin-bottom:14px">${mdToHtml(p.description)}</div>` : ''}
+      <div class="eyebrow-muted" style="margin-bottom:8px">Les séances de la semaine</div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        ${sessions.length ? sessions.map(s => {
+          const firstDate = _dateRangeForProgram(p.startDate, p.endDate, [s.dayOfWeek])[0] || p.startDate;
+          const nb = (s.blocks || []).length;
+          return `
+            <div onclick="openTrainingSession('${p.id}','${s.id}','${firstDate}')" style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;background:var(--surface);cursor:pointer;display:flex;align-items:center;gap:10px">
+              <div style="flex:1;min-width:0">
+                <div style="font-family:'Anton';font-size:13px;text-transform:uppercase">${esc(TRAINING_DAY_LABELS[s.dayOfWeek] || '')} · ${esc(s.name || 'Séance')}</div>
+                <div style="font-size:10px;color:var(--ink-3)">${s.formatLabel ? esc(s.formatLabel) + ' · ' : ''}${nb} bloc${nb > 1 ? 's' : ''}</div>
+              </div>
+              <div style="color:var(--ink-3);flex:none">›</div>
+            </div>`;
+        }).join('') : `<div class="empty"><div class="empty-icon">📭</div><div class="empty-title">Aucune séance</div><div class="empty-desc">Le coach n'a pas encore ajouté de séance.</div></div>`}
+      </div>
+    </div>`);
 }
 
 // --- Écran de séance --------------------------------------------------------
@@ -19248,6 +19347,12 @@ function renderTrainingSession() {
   const done = pid ? _trainingCompletionFor(s.id, pid, v.datePlanned) : null;
   const cfg = _trainingConfig(p);
   const now = Date.now();
+  const todayISO = isoDate(new Date(now));
+  // APERÇU : séance dont le jour prévu est dans le futur (programme pas encore
+  // commencé). Contenu entièrement consultable, mais validation neutralisée —
+  // à distinguer de « délai dépassé » (jour prévu passé de +48 h).
+  const isPreview = v.datePlanned > todayISO;
+  const daysUntil = _trainingDaysUntilStart(p, todayISO);
   const stillValid = _isRattrapageValid(v.datePlanned, now);
   const left = _trainingHoursLeft(v.datePlanned, now);
   // Un niveau sans texte n'est pas proposé : le coach ne l'a pas défini.
@@ -19278,7 +19383,7 @@ function renderTrainingSession() {
   openModal(`
     <div class="modal-header">
       <div>
-        <div class="eyebrow">${esc(p.name || 'Prépa')} · ${esc(formatDate(v.datePlanned, 'short'))}${v.datePlanned !== isoDate(new Date(now)) ? ' · rattrapage' : ''}</div>
+        <div class="eyebrow">${esc(p.name || 'Prépa')} · ${esc(formatDate(v.datePlanned, 'short'))}${isPreview ? ' · aperçu' : v.datePlanned < todayISO ? ' · rattrapage' : ''}</div>
         <div class="modal-title">${esc(s.name || 'Séance')}</div>
       </div>
       <button class="modal-close" onclick="state._trainingView=null;closeModal()">✕</button>
@@ -19287,6 +19392,9 @@ function renderTrainingSession() {
       ${done ? `
         <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--green,#15803d);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:14px">
           ✓ <b>Séance validée</b> — ${esc(_completionSummary(done))}
+        </div>` : isPreview ? `
+        <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:14px">
+          🔭 <b>Aperçu</b> — le programme démarre le ${esc(formatDate(p.startDate, 'long'))}. Découvre la séance dès maintenant ; tu pourras la valider le jour venu.
         </div>` : !stillValid ? `
         <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--ink-3);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:14px">
           ⌛ <b>Délai dépassé</b> — le rattrapage était possible jusqu'à 48 h après le jour prévu. Tu peux toujours faire la séance, mais elle ne compte plus de points.
@@ -19317,6 +19425,7 @@ function renderTrainingSession() {
     </div>
     <div class="modal-footer">
       ${done ? `<button class="btn btn-secondary btn-block" onclick="openTrainingDashboard('${p.id}')">📊 Voir le classement</button>`
+        : isPreview ? `<button class="btn btn-secondary btn-block" disabled style="opacity:.6;cursor:default">⏳ ${daysUntil === 0 ? 'Démarre aujourd\'hui' : daysUntil === 1 ? 'Démarre demain' : 'Démarre dans ' + daysUntil + ' jours'}</button>`
         : !stillValid ? `<button class="btn btn-secondary btn-block" onclick="state._trainingView=null;closeModal()">Fermer</button>`
         : !availLevels.length ? ''
         : `<button class="btn btn-primary btn-block" onclick="openTrainingValidate()">✓ J'ai fait la séance</button>`}
@@ -34643,7 +34752,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-17.75';
+const APP_VERSION = '2026-07-17.76';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {

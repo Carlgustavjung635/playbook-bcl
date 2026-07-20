@@ -362,6 +362,88 @@ t('joueuse : hors période → invisible', () => {
 });
 
 const P = () => ctx.activeTrainingPrograms()[0];
+
+// --- APERÇU 3 semaines avant le début (TRAINING_PREVIEW_DAYS = 21) -----------
+// Le programme démarre le 2026-07-13 → fenêtre d'aperçu ouverte dès le 2026-06-22.
+const AVANT = '2026-07-01';        // 12 j avant le début → dans la fenêtre d'aperçu
+const AVANT_MIDI = Date.parse('2026-07-01T12:00:00Z');
+const TROP_TOT = '2026-06-20';     // 23 j avant → hors fenêtre
+t('_trainingProgramPreviewable : visible 12 j avant le début', () => {
+  assert(ctx._trainingProgramPreviewable(P(), AVANT) === true, 'invisible dans la fenêtre d\'aperçu');
+});
+t('_trainingProgramPreviewable : invisible 23 j avant (hors fenêtre)', () => {
+  assert(ctx._trainingProgramPreviewable(P(), TROP_TOT) === false, 'visible trop tôt');
+});
+t('_trainingProgramPreviewable : borne exacte (21 j pile = 2026-06-22) visible', () => {
+  assert(ctx._trainingProgramPreviewable(P(), '2026-06-22') === true, 'borne 21 j exclue à tort');
+  assert(ctx._trainingProgramPreviewable(P(), '2026-06-21') === false, '22 j avant visible à tort');
+});
+t('_trainingProgramPreview : true avant le début, false pendant', () => {
+  assert(ctx._trainingProgramPreview(P(), AVANT) === true, 'pas marqué aperçu avant le début');
+  assert(ctx._trainingProgramPreview(P(), LUN) === false, 'marqué aperçu alors qu\'il a commencé');
+});
+t('_trainingProgramRunning reste false avant le début (comportement inchangé)', () => {
+  assert(ctx._trainingProgramRunning(P(), AVANT) === false, 'programme « en cours » avant sa startDate');
+  assert(ctx._trainingProgramRunning(P(), LUN) === true, 'programme pas en cours le jour du début');
+});
+t('_trainingDaysUntilStart : 12 j le 2026-07-01, 0 le jour J', () => {
+  assert(ctx._trainingDaysUntilStart(P(), AVANT) === 12, 'attendu 12, reçu ' + ctx._trainingDaysUntilStart(P(), AVANT));
+  assert(ctx._trainingDaysUntilStart(P(), LUN) === 0, 'attendu 0 le jour du début');
+});
+t('_myTrainingPrograms inclut le programme en aperçu', () => {
+  assert(ctx._myTrainingPrograms(AVANT).length === 1, 'programme en aperçu absent de Ma prépa');
+});
+t('AUCUNE séance validable avant le début (sécurité écriture)', () => {
+  // _trainingDueFor filtre par _isRattrapageValid → rien avant la startDate.
+  assert(ctx._trainingDueFor(P(), 'p1', AVANT_MIDI).length === 0, 'séance due avant le début → validation possible à l\'avance');
+  assert(ctx._isRattrapageValid(LUN, AVANT_MIDI) === false, 'validation autorisée 12 j à l\'avance');
+});
+t('renderTrainingPlayerCard : mode aperçu (🔭 + compte à rebours + pas de validation)', () => {
+  freeze(AVANT_MIDI);
+  try {
+    const h = ctx.renderTrainingPlayerCard();
+    assert(h.includes('Ma prépa'), 'carte absente');
+    assert(h.includes('À venir'), 'eyebrow « À venir » absent en aperçu');
+    assert(h.includes('openTrainingPreview'), 'carte aperçu non cliquable vers openTrainingPreview');
+    assert(h.includes('Démarre dans 12 jours'), 'compte à rebours absent/faux : ' + (h.match(/Démarre[^<·]*/) || [''])[0]);
+    assert(!h.includes('openTrainingSession'), 'une séance est proposée à la validation avant le début');
+    assert(!h.includes('Repos aujourd\'hui'), 'affiche « Repos » pour un programme pas commencé');
+  } finally { unfreeze(); }
+});
+t('openTrainingPreview : liste les séances de la semaine sans throw', () => {
+  freeze(AVANT_MIDI);
+  try {
+    ctx.openTrainingPreview(P().id);
+    assert(ctx.__lastModal.includes('Aperçu'), 'titre aperçu absent');
+    assert(ctx.__lastModal.includes('Les séances de la semaine'), 'liste des séances absente');
+    assert(ctx.__lastModal.includes('openTrainingSession'), 'séances non ouvrables en preview');
+  } finally { unfreeze(); }
+});
+t('renderTrainingSession : séance future → bandeau aperçu + bouton neutralisé', () => {
+  freeze(AVANT_MIDI);
+  try {
+    const s = ctx._programSessionForDay(P(), 1);
+    ctx.openTrainingSession(P().id, s.id, LUN); // LUN = 13/07 est dans le futur au 01/07
+    const h = ctx.__lastModal;
+    assert(h.includes('Aperçu'), 'bandeau aperçu absent');
+    assert(h.includes('démarre le'), 'date de démarrage absente du bandeau');
+    assert(h.includes('Démarre dans 12 jours') || h.includes('disabled'), 'bouton non neutralisé');
+    assert(!h.includes('J\'ai fait la séance'), 'bouton de validation exposé sur une séance future !');
+    // le contenu reste consultable
+    assert(h.includes('Ton contrat du jour'), 'sélecteur de niveau masqué en aperçu (or on veut la découverte)');
+  } finally { unfreeze(); ctx.state._trainingView = null; }
+});
+t('renderTrainingSession : le jour du début → mode normal (validable)', () => {
+  freeze(MIDI_LUN);
+  try {
+    const s = ctx._programSessionForDay(P(), 1);
+    ctx.openTrainingSession(P().id, s.id, LUN);
+    const h = ctx.__lastModal;
+    assert(h.includes('J\'ai fait la séance'), 'validation absente le jour du début');
+    assert(!h.includes('🔭'), 'bandeau aperçu encore présent le jour du début');
+  } finally { unfreeze(); ctx.state._trainingView = null; }
+});
+
 t('_trainingDueFor : lundi midi → séance du jour, pas un rattrapage', () => {
   const due = ctx._trainingDueFor(P(), 'p1', MIDI_LUN);
   assert(due.length === 1, 'attendu 1 séance due, reçu ' + due.length);
