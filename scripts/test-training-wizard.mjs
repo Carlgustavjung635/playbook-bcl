@@ -616,15 +616,68 @@ t('renderTrainingPlayerCard() : jour de repos (rien demain non plus)', () => {
     assert(h.includes('openTrainingPreview'), 'programme non consultable un jour de repos');
   } finally { ctx.state.trainingPrograms[0].daysActive = [1, 3]; unfreeze(); }
 });
-t('renderTrainingPlayerCard() : veille d\'une séance → carte « en avance »', () => {
+// ROLL FORWARD — cas d'usage réel : programme lun/mer/ven, on est MARDI, la
+// séance mise en avant doit être celle de MERCREDI, avec le MÊME rendu que le
+// jour J (pas de bandeau d'aperçu, bouton de validation actif).
+t('renderTrainingPlayerCard() : mardi → séance de mercredi mise en avant (roll forward)', () => {
   freeze(Date.parse('2026-07-14T12:00:00Z')); // mardi, mercredi actif
   ctx.state.trainingPrograms[0].daysActive = [3];
   try {
     const h = ctx.renderTrainingPlayerCard();
-    assert(h.includes('En avance'), 'bandeau anticipation absent la veille d\'une séance');
-    assert(h.includes('openTrainingSession'), 'séance de demain non ouvrable');
-    assert(!h.includes('Repos'), '« Repos » affiché alors qu\'une séance est proposée en avance');
+    assert(h.includes('openTrainingSession(\'p-test\',\'' + ctx._programSessionForDay(P(), 3).id + '\',\'2026-07-15\')')
+      || h.includes('\'2026-07-15\''), 'la séance ouverte n\'est pas celle du mercredi 15');
+    assert(!h.includes('Repos'), '« Repos » affiché alors que la séance de demain est proposée');
+    assert(h.includes('Demain'), 'date de la séance (demain) non rappelée dans le sous-titre');
+    // Rendu identique au jour J : pas d'icône ni de bandeau spécifiques.
+    assert(!h.includes('⏩'), 'icône « en avance » : le rendu doit être identique au jour J');
+    assert(!h.includes('En avance'), 'bandeau « en avance » : le rendu doit être identique au jour J');
   } finally { ctx.state.trainingPrograms[0].daysActive = [1, 3]; unfreeze(); }
+});
+t('_trainingActiveSessionFor : mardi → séance du mercredi ; mercredi → séance du jour', () => {
+  ctx.state.trainingPrograms[0].daysActive = [3];
+  try {
+    const mar = ctx._trainingActiveSessionFor(P(), 'p1', Date.parse('2026-07-14T12:00:00Z'));
+    assert(mar && mar.datePlanned === '2026-07-15', 'mardi ne roll pas forward vers mercredi');
+    assert(mar.isAdvance === true, 'séance de demain non marquée isAdvance');
+    const mer = ctx._trainingActiveSessionFor(P(), 'p1', Date.parse('2026-07-15T12:00:00Z'));
+    assert(mer && mer.datePlanned === '2026-07-15', 'mercredi n\'affiche pas sa propre séance');
+    assert(mer.isAdvance === false, 'la séance du jour marquée « en avance »');
+  } finally { ctx.state.trainingPrograms[0].daysActive = [1, 3]; }
+});
+t('_trainingActiveSessionFor : null quand ni aujourd\'hui ni demain ne sont actifs', () => {
+  ctx.state.trainingPrograms[0].daysActive = [3];
+  try {
+    // dimanche 19/07 : ni dimanche ni lundi 20 (non actif) → repos.
+    assert(ctx._trainingActiveSessionFor(P(), 'p1', Date.parse('2026-07-19T12:00:00Z')) === null,
+      'séance proposée un week-end sans lendemain actif');
+  } finally { ctx.state.trainingPrograms[0].daysActive = [1, 3]; }
+});
+t('règle 4 : si AUJOURD\'HUI a sa séance, pas de roll forward sur demain', () => {
+  ctx.state.trainingPrograms[0].daysActive = [1, 2]; // lundi ET mardi actifs
+  try {
+    const due = ctx._trainingDueFor(P(), 'p1', MIDI_LUN).filter(d => !d.isRattrapage);
+    assert(due.length === 1, 'attendu la seule séance du jour, reçu ' + due.length);
+    assert(due[0].datePlanned === LUN, 'ce n\'est pas la séance du jour');
+    assert(due[0].isAdvance === false, 'séance du jour marquée « en avance »');
+  } finally { ctx.state.trainingPrograms[0].daysActive = [1, 3]; }
+});
+t('écran de séance : mardi pour la séance de mercredi → rendu IDENTIQUE au jour J', () => {
+  ctx.state.trainingPrograms[0].daysActive = [3];
+  const s = ctx._programSessionForDay(P(), 3);
+  let veille, jourJ;
+  try {
+    freeze(Date.parse('2026-07-14T12:00:00Z'));       // mardi
+    ctx.openTrainingSession(P().id, s.id, '2026-07-15');
+    veille = ctx.__lastModal;
+    unfreeze(); freeze(Date.parse('2026-07-15T12:00:00Z')); // mercredi
+    ctx.openTrainingSession(P().id, s.id, '2026-07-15');
+    jourJ = ctx.__lastModal;
+  } finally { unfreeze(); ctx.state.trainingPrograms[0].daysActive = [1, 3]; ctx.state._trainingView = null; }
+  assert(veille.includes('J\'ai fait la séance'), 'validation absente la veille (H-24)');
+  assert(!veille.includes('🔭'), 'bandeau aperçu affiché sur une séance validable');
+  assert(!veille.includes('disabled'), 'bouton neutralisé la veille');
+  // Seule différence tolérée : le mot « demain » dans l'eyebrow.
+  assert(veille.replace(' · demain', '') === jourJ, 'l\'écran de la veille diffère de celui du jour J');
 });
 t('renderTrainingPlayerCard() vide si aucun programme', () => {
   const keep = ctx.state.trainingPrograms;

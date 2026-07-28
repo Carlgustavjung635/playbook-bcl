@@ -19248,6 +19248,13 @@ function openTrainingDashboard(programId) {
 // d'anticipation H-24). Trois jours suffisent : la fenêtre totale va de H-24 à
 // J+48 h, donc J-2 comme J+2 sont périmés/hors fenêtre par construction —
 // _isRattrapageValid les rejetterait de toute façon.
+//
+// ROLL FORWARD — un programme lun/mer/ven laisse des jours creux. Le mardi, la
+// séance mise en avant est celle du MERCREDI : c'est la prochaine, et elle est
+// déjà validable (H-24). Le roll forward s'arrête là : au-delà de 24 h la séance
+// ne serait pas validable, la proposer serait un bouton mort. Si le jour même a
+// sa propre séance, elle prime et on ne roll PAS forward (règle 4) — la séance
+// de demain reste accessible via « Voir tout le programme ».
 function _trainingDueFor(program, playerId, nowMs) {
   const now = Number.isFinite(nowMs) ? nowMs : Date.now();
   const todayISO = isoDate(new Date(now));
@@ -19272,7 +19279,18 @@ function _trainingDueFor(program, playerId, nowMs) {
       isAdvance: iso > todayISO
     });
   });
-  return out;
+  // Règle 4 : le jour même a sa séance → pas de roll forward sur demain.
+  const hasToday = out.some(d => !d.isRattrapage && !d.isAdvance);
+  return hasToday ? out.filter(d => !d.isAdvance) : out;
+}
+
+// LA séance à mettre en avant pour un programme, à l'instant `nowMs` : celle du
+// jour si le jour est actif, sinon celle de demain (roll forward). null les
+// jours de repos sans lendemain actif. Les rattrapages sont exclus : ils ont
+// leur propre carte, avec leur propre compte à rebours.
+function _trainingActiveSessionFor(program, playerId, nowMs) {
+  const due = _trainingDueFor(program, playerId, nowMs).filter(d => !d.isRattrapage);
+  return due.find(d => !d.done) || due[0] || null;
 }
 // Toutes les séances dues de la joueuse connectée, tous programmes confondus.
 function _myTrainingDue(nowMs) {
@@ -19335,7 +19353,11 @@ function renderTrainingPlayerCard() {
         const p = progs.find(x => x.id === d.programId);
         const pts = _trainingCompletionsOf(d.programId, pid).reduce((a, c) => a + (Number(c.pointsTotal) || 0), 0);
         const left = _trainingHoursLeft(d.datePlanned, now);
-        const dayTag = d.isRattrapage ? ' · hier' : d.isAdvance ? ' · demain' : '';
+        // Rendu VOLONTAIREMENT identique entre le jour même et la veille (H-24) :
+        // même icône, même carte, même bouton. Seule la date rappelée dans le
+        // sous-titre distingue les deux — sinon la joueuse croit à un autre mode.
+        const dayTag = d.isRattrapage ? ' · hier' : '';
+        const whenLine = d.isAdvance ? 'Demain ' + esc(formatDate(d.datePlanned, 'short')) + ' · ' : '';
         if (d.done) {
           return `
             <div style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;background:var(--surface);opacity:.75;display:flex;align-items:center;gap:10px">
@@ -19350,11 +19372,11 @@ function renderTrainingPlayerCard() {
           <div onclick="openTrainingSession('${d.programId}','${d.session.id}','${d.datePlanned}')"
             style="border:1px solid ${d.isRattrapage ? 'var(--orange)' : 'var(--border-soft)'};border-radius:10px;padding:12px;background:var(--surface);cursor:pointer">
             <div style="display:flex;align-items:center;gap:10px">
-              <div style="font-size:20px;flex:none">${d.isRattrapage ? '⏳' : d.isAdvance ? '⏩' : '💪'}</div>
+              <div style="font-size:20px;flex:none">${d.isRattrapage ? '⏳' : '💪'}</div>
               <div style="flex:1;min-width:0">
                 <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(d.session.name || 'Séance')}${dayTag}</div>
                 <div style="font-size:10px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
-                  ${esc(p ? (p.name || '') : '')}${d.session.formatLabel ? ' · ' + esc(d.session.formatLabel) : ''} · ${pts} pts cumulés
+                  ${whenLine}${esc(p ? (p.name || '') : '')}${d.session.formatLabel ? ' · ' + esc(d.session.formatLabel) : ''} · ${pts} pts cumulés
                 </div>
               </div>
               <div style="color:var(--ink-3);flex:none">›</div>
@@ -19362,9 +19384,6 @@ function renderTrainingPlayerCard() {
             ${d.isRattrapage ? `
               <div style="margin-top:8px;padding:6px 8px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:4px;font-size:10px;color:var(--ink-2)">
                 ⏳ Rattrapage possible — séance d'hier, encore ${left} h pour la valider.
-              </div>` : d.isAdvance ? `
-              <div style="margin-top:8px;padding:6px 8px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:4px;font-size:10px;color:var(--ink-2)">
-                ⏩ En avance — séance de demain, tu peux la valider dès aujourd'hui si tu l'as faite.
               </div>` : ''}
           </div>`;
       }).join('') : runningProgs.map(p => {
@@ -19515,7 +19534,7 @@ function renderTrainingSession() {
   openModal(`
     <div class="modal-header">
       <div>
-        <div class="eyebrow">${esc(p.name || 'Prépa')} · ${esc(formatDate(v.datePlanned, 'short'))}${isPreview ? ' · aperçu' : isAdvance ? ' · en avance' : v.datePlanned < todayISO ? ' · rattrapage' : ''}</div>
+        <div class="eyebrow">${esc(p.name || 'Prépa')} · ${esc(formatDate(v.datePlanned, 'short'))}${isPreview ? ' · aperçu' : isAdvance ? ' · demain' : v.datePlanned < todayISO ? ' · rattrapage' : ''}</div>
         <div class="modal-title">${esc(s.name || 'Séance')}</div>
       </div>
       <button class="modal-close" onclick="state._trainingView=null;closeModal()">✕</button>
@@ -19530,10 +19549,7 @@ function renderTrainingSession() {
         </div>` : !stillValid ? `
         <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--ink-3);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:14px">
           ⌛ <b>Délai dépassé</b> — le rattrapage était possible jusqu'à 48 h après le jour prévu. Tu peux toujours faire la séance, mais elle ne compte plus de points.
-        </div>` : isAdvance ? `
-        <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:14px">
-          ⏩ <b>En avance</b> — séance prévue demain. Si tu la fais aujourd'hui, tu peux la valider tout de suite : elle compte les mêmes points.
-        </div>` : left <= 24 ? `
+        </div>` : isAdvance ? '' /* séance de demain : écran STRICTEMENT identique au jour J (pas de bandeau, pas de bouton différent) — seule la date de l'eyebrow change */ : left <= 24 ? `
         <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:14px">
           ⏳ Encore <b>${left} h</b> pour valider cette séance.
         </div>` : ''}
@@ -19563,7 +19579,7 @@ function renderTrainingSession() {
         : isPreview ? `<button class="btn btn-secondary btn-block" disabled style="opacity:.6;cursor:default">⏳ ${daysUntil === 0 ? 'Démarre aujourd\'hui' : daysUntil === 1 ? 'Démarre demain' : 'Démarre dans ' + daysUntil + ' jours'}</button>`
         : !stillValid ? `<button class="btn btn-secondary btn-block" onclick="state._trainingView=null;closeModal()">Fermer</button>`
         : !availLevels.length ? ''
-        : `<button class="btn btn-primary btn-block" onclick="openTrainingValidate()">✓ J'ai fait la séance${isAdvance ? ' (en avance)' : ''}</button>`}
+        : `<button class="btn btn-primary btn-block" onclick="openTrainingValidate()">✓ J'ai fait la séance</button>`}
     </div>
   `);
 }
@@ -34893,7 +34909,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-21.77';
+const APP_VERSION = '2026-07-21.78';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {

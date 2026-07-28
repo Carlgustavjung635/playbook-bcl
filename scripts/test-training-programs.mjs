@@ -199,6 +199,20 @@ ok('24 h + 1 ms avant → INVALIDE (l\'anticipation s\'arrête à 24 h)', !_isRa
 ok('l\'avant-veille → invalide', !_isRattrapageValid(LUNDI, Date.parse('2026-07-11T18:00:00Z')));
 ok('12 jours avant → invalide (toute la semaine n\'est pas ouverte)', !_isRattrapageValid(LUNDI, Date.parse('2026-07-01T12:00:00Z')));
 
+// CAS RÉEL (prépa estivale) : programme lun/mer/ven à partir du mardi 28/07/2026.
+// On est le 28 (mardi, jour creux) → la séance du mercredi 29 doit être validable.
+const MER29 = '2026-07-29';
+const PREP_ESTIVALE = { startDate: '2026-07-28', endDate: '2026-08-17' };
+eq('sanity : 2026-07-28 est un mardi (ISO 2)', _trainingDayOfWeek('2026-07-28'), 2);
+eq('sanity : 2026-07-29 est un mercredi (ISO 3)', _trainingDayOfWeek(MER29), 3);
+ok('mardi 28 23:00 → séance du 29 validable', _isRattrapageValid(MER29, Date.parse('2026-07-28T23:00:00Z')));
+ok('mardi 28 00:00 → validable (borne basse exacte, H-24 pile)', _isRattrapageValid(MER29, Date.parse('2026-07-28T00:00:00Z')));
+ok('lundi 27 23:00 → PAS validable (J-2, hors fenêtre)', !_isRattrapageValid(MER29, Date.parse('2026-07-27T23:00:00Z')));
+ok('mardi 28 → séance du 29 validable pour le programme démarré le 28',
+  _trainingCanValidate(PREP_ESTIVALE, MER29, Date.parse('2026-07-28T12:00:00Z')));
+ok('lundi 27 (veille du lancement) → rien n\'est validable',
+  !_trainingCanValidate(PREP_ESTIVALE, '2026-07-28', Date.parse('2026-07-27T12:00:00Z')));
+
 // _isTrainingAdvance : marque la validation EN AVANCE (et rien d'autre).
 ok('la veille → marquée « en avance »', _isTrainingAdvance(LUNDI, T0 - 6 * 3600000));
 ok('24 h pile avant → en avance (borne incluse)', _isTrainingAdvance(LUNDI, T0 - TRAINING_ADVANCE_MS));
