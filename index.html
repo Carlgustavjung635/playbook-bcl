@@ -7154,10 +7154,26 @@ function getAllEventsBetween(fromISO, toISO, opts) {
   convocs.forEach(c => {
     getConvocInstances(c, fromISO, toISO).forEach(i => all.push(i));
   });
-  return all.sort((a, b) => {
+  return _dedupeMatchEvents(all.sort((a, b) => {
     if (a.date !== b.date) return a.date.localeCompare(b.date);
     return (a.time || '').localeCompare(b.time || '');
+  }));
+}
+
+// Filet d'AFFICHAGE contre les convocations 'match' en double (cf.
+// cleanupOrphanMatchConvocs) : tant qu'un appareil du groupe n'a pas encore
+// tourné le cleanup convergent, plusieurs lignes peuvent coexister pour un même
+// match. On n'en affiche qu'une, et la MÊME partout : id le plus petit, donc la
+// plus ancienne. Les convocations d'entraînement ne sont pas touchées (deux
+// séances légitimes peuvent partager date et intitulé).
+function _dedupeMatchEvents(list) {
+  const best = {};
+  list.forEach(ev => {
+    if (ev.type !== 'match') return;
+    const k = _convocMatchSig(ev);
+    if (!best[k] || String(ev.id).localeCompare(String(best[k].id)) < 0) best[k] = ev;
   });
+  return list.filter(ev => ev.type !== 'match' || best[_convocMatchSig(ev)] === ev);
 }
 
 // Annuler une instance précise d'une récurrence
@@ -9888,7 +9904,7 @@ function renderHomePlayer() {
       <!-- 1ter. Boîte à gages : point d'entrée visible pour proposer -->
       ${renderGageHomeCard()}
 
-      <!-- 1quater. Prépa physique : séance du jour / rattrapage 48 h -->
+      <!-- 1quater. Prépa physique : séance du jour / anticipation 24 h / rattrapage 48 h -->
       ${renderTrainingPlayerCard()}
 
       <!-- 2. Challenges actifs (preview 2-3, lien Tout → onglet) -->
@@ -13158,10 +13174,47 @@ function saveMatch(id, isNew) {
   persist(); closeModal(); render();
 }
 
+// ── LIEN MATCH ⇄ CONVOCATION : reconstruction par SIGNATURE ─────────────────
+// Le lien (m.convocId / c.matchId) est purement LOCAL : ni `matches.convoc_id`
+// ni `convocations.match_id` n'existent en base (cf. ENTITIES). Tout appareil
+// qui repart d'un fetch (nouveau device, cache vidé, second coach) perd donc le
+// lien — et l'ancien cleanup en concluait « convocation orpheline » puis en
+// recréait une NEUVE, poussée en base. D'où les matchs affichés 2 ou 3 fois côté
+// joueuse (bug constaté : 3 convocs pour 1 seul match du 29/08).
+// La signature (date | adversaire | équipe) est calculable à l'identique sur
+// tous les appareils : l'adoption devient convergente, et la suppression d'un
+// doublon « tient » puisque tous les clients élisent la même survivante.
+function _matchConvocSig(dateStr, opponent, teamTag) {
+  return [dateStr || '', String(opponent || '').trim().toLowerCase(), teamTag === 'e2' ? 'e2' : 'e1'].join('|');
+}
+function _matchSig(m) { return _matchConvocSig(m && m.date, m && m.opponent, m && m.teamTag); }
+// Le titre d'une convoc match est TOUJOURS 'vs <adversaire>' (syncConvocFromMatch) :
+// on retire le préfixe pour retrouver l'adversaire.
+function _convocMatchSig(c) {
+  return _matchConvocSig(c && c.date, String((c && c.title) || '').replace(/^vs\s*/i, ''), c && c.teamTag);
+}
+// Convocations candidates pour un match, triées de façon DÉTERMINISTE (id
+// croissant = la plus ancienne d'abord, les ids étant 'x<timestamp><random>').
+// `claimed` : ids déjà attribués à un autre match (deux matchs de même date /
+// adversaire / équipe ne doivent pas se voler la même convocation).
+function _convocsForMatch(m, claimed) {
+  const sig = _matchSig(m);
+  return (state.convocations || [])
+    .filter(c => c.type === 'match' && !(claimed && claimed.has(c.id))
+      && (c.matchId ? c.matchId === m.id : _convocMatchSig(c) === sig))
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+}
+
 // Crée/met à jour la convocation liée à un match
 function syncConvocFromMatch(m) {
   state.convocations = state.convocations || [];
   let convoc = m.convocId ? state.convocations.find(c => c.id === m.convocId) : null;
+  // Lien perdu (fetch sur un autre appareil) : on ADOPTE la convocation existante
+  // au lieu d'en créer une deuxième.
+  if (!convoc) {
+    convoc = _convocsForMatch(m)[0] || null;
+    if (convoc) { convoc.matchId = m.id; m.convocId = convoc.id; }
+  }
   // Heure d'événement : RDV si défini, sinon heure du match
   const effectiveTime = getMatchRdvTime(m) || m.time || '';
   const effectivePlace = m.rdvPlace || m.place || '';
@@ -13217,47 +13270,56 @@ function deleteMatch(id) {
 // TRANSPORT / COVOITURAGE MATCHS EXTÉRIEURS
 // ============================================================
 
-// Nettoyage : supprime les convocations 'match' orphelines (sans matchId) — appelé au démarrage
+// Nettoyage au démarrage : une convocation 'match' VIVANTE par match, pas plus.
+// Trois opérations, dans cet ordre :
+//   1. ADOPTION — chaque match reprend la convocation existante qui lui
+//      correspond (lien local, sinon signature). Rien n'est recréé tant qu'il
+//      reste une candidate : c'est ce qui stoppe la prolifération.
+//   2. FUSION + SUPPRESSION des doublons — les RSVP posés sur un doublon sont
+//      recopiés sur la survivante AVANT de le supprimer (sinon une présence
+//      déclarée disparaîtrait avec la ligne).
+//   3. ORPHELINES — convocations 'match' dont le match n'existe plus : out.
 function cleanupOrphanMatchConvocs() {
   if (!state.convocations) return;
   const before = state.convocations.length;
-  state.convocations = state.convocations.filter(c => {
-    if (c.type !== 'match') return true; // garder tout sauf match
-    if (c.matchId && state.matches.find(m => m.id === c.matchId)) return true; // garder si liée à un match valide
-    return false; // supprimer les orphelines
-  });
-  // Vérifier l'inverse : matchs avec convocId pointant vers rien → recréer la convoc
-  let recreated = 0;
+  const claimed = new Set();  // convocations conservées (une par match)
+  const dupes = new Set();    // doublons à supprimer
+  let created = 0, adopted = 0, mergedRsvp = 0;
+
   (state.matches || []).forEach(m => {
-    if (m.convocId && !state.convocations.find(c => c.id === m.convocId)) {
-      m.convocId = null; // sera recréé au sync
+    const cands = _convocsForMatch(m, claimed);
+    if (!cands.length) {
+      // Aucune candidate : le match n'a réellement pas de convocation.
+      m.convocId = null;
+      syncConvocFromMatch(m);
+      if (m.convocId) { claimed.add(m.convocId); created++; }
+      return;
     }
-    if (!m.convocId) {
-      // Créer la convoc maintenant
-      const effectiveTime = getMatchRdvTime(m) || m.time || '';
-      const effectivePlace = m.rdvPlace || m.place || '';
-      const convoc = {
-        id: uid(),
-        type: 'match',
-        matchId: m.id,
-        title: 'vs ' + (m.opponent || '?'),
-        date: m.date,
-        time: effectiveTime,
-        place: effectivePlace,
-        home: m.home,
-        notes: m.notes || '',
-        responses: {},
-        seasonId: m.seasonId || state.currentSeasonId || null,
-        teamTag: m.teamTag === 'e2' ? 'e2' : 'e1',
-      };
-      state.convocations.unshift(convoc);
-      m.convocId = convoc.id;
-      recreated++;
-    }
+    const survivor = cands[0];
+    if (m.convocId !== survivor.id) adopted++;
+    survivor.matchId = m.id;
+    m.convocId = survivor.id;
+    claimed.add(survivor.id);
+    cands.slice(1).forEach(dup => {
+      Object.entries(dup.responses || {}).forEach(([pid, resp]) => {
+        if (!resp) return;
+        survivor.responses = survivor.responses || {};
+        if (!survivor.responses[pid]) { survivor.responses[pid] = resp; mergedRsvp++; }
+      });
+      dupes.add(dup.id);
+    });
   });
-  if (state.convocations.length !== before || recreated > 0) {
+
+  state.convocations = state.convocations.filter(c => {
+    if (c.type !== 'match') return true;   // garder tout sauf match
+    if (dupes.has(c.id)) return false;     // doublon
+    return claimed.has(c.id);              // sinon : orpheline (match supprimé)
+  });
+
+  if (state.convocations.length !== before || created > 0 || adopted > 0) {
     persist();
-    console.log('[cleanup] convocs match orphelines supprimées :', before - state.convocations.length, '· convocs recréées :', recreated);
+    console.log('[cleanup] convocs match — supprimées :', before - state.convocations.length,
+      '· adoptées :', adopted, '· créées :', created, '· RSVP fusionnés :', mergedRsvp);
   }
 }
 
@@ -18140,10 +18202,18 @@ const TRAINING_LEVEL_LABEL = { min: 'Minimum', med: 'Medium', ultra: 'Ultra' };
 // de la séance — il n'y en a pas). Séance prévue lundi → rattrapable lundi et
 // mardi, périmée mercredi 00:00 UTC pile.
 const TRAINING_RATTRAPAGE_MS = 48 * 3600000;
+// Fenêtre d'ANTICIPATION : une séance devient validable 24 h avant minuit de son
+// jour prévu — concrètement, la séance de demain est validable dès aujourd'hui.
+// Motif : une joueuse qui décale sa séance à la veille (déplacement, boulot)
+// n'avait aucun moyen de la compter. Fenêtre totale = H-24 → J+48 h.
+// ⚠ L'anticipation ne rouvre PAS l'aperçu 21 j : la validation reste refusée
+// tant que le programme n'a pas démarré (cf. _trainingCanValidate).
+const TRAINING_ADVANCE_MS = 24 * 3600000;
 // Fenêtre d'aperçu joueuse : un programme devient visible (en lecture seule)
 // 3 semaines avant sa startDate, pour que les joueuses le découvrent et se
-// projettent. La VALIDATION reste bloquée avant le jour J par _isRattrapageValid
-// (borne basse : pas de validation à l'avance) — l'aperçu n'ouvre aucune écriture.
+// projettent. La VALIDATION reste bloquée tant que le programme n'a pas démarré
+// (_trainingCanValidate) — l'aperçu n'ouvre aucune écriture, y compris la veille
+// du lancement où la fenêtre H-24 pourrait sinon s'appliquer.
 const TRAINING_PREVIEW_DAYS = 21;
 const TRAINING_DAY_LABELS = { 1: 'Lundi', 2: 'Mardi', 3: 'Mercredi', 4: 'Jeudi', 5: 'Vendredi', 6: 'Samedi', 7: 'Dimanche' };
 const TRAINING_BLOCK_TYPES = [
@@ -18206,17 +18276,41 @@ function _trainingDayStartMs(dateStr) {
 }
 
 // Fenêtre de validation d'une séance prévue le jour `datePlanned`.
-// true  ⟺ minuit(datePlanned) ≤ dateNow < minuit(datePlanned) + 48 h.
+// true  ⟺ minuit(datePlanned) − 24 h ≤ dateNow < minuit(datePlanned) + 48 h.
 // Borne HAUTE exclue : à 48 h pile, c'est périmé (mercredi 00:00 = trop tard).
-// Borne BASSE incluse et NON négociable : on ne valide pas une séance à l'avance
-// — sinon toute la semaine serait validable dès le lundi.
+// Borne BASSE : 24 h AVANT (la séance de demain est validable dès aujourd'hui).
+// Elle reste bornée à 24 h — toute la semaine ne devient pas validable dès le
+// lundi — et ne s'applique qu'à un programme DÉMARRÉ (cf. _trainingCanValidate).
 function _isRattrapageValid(datePlanned, dateNow) {
   const start = _trainingDayStartMs(datePlanned);
   if (start === null) return false;
   const now = (dateNow instanceof Date) ? dateNow.getTime() : Number(dateNow);
   if (!Number.isFinite(now)) return false;
   const elapsed = now - start;
-  return elapsed >= 0 && elapsed < TRAINING_RATTRAPAGE_MS;
+  return elapsed >= -TRAINING_ADVANCE_MS && elapsed < TRAINING_RATTRAPAGE_MS;
+}
+
+// true si la séance est validée EN AVANCE (jour prévu pas encore commencé) :
+// sert au libellé « ⏩ En avance » et à ne pas la confondre avec la séance du
+// jour dans les rappels.
+function _isTrainingAdvance(datePlanned, dateNow) {
+  const start = _trainingDayStartMs(datePlanned);
+  if (start === null) return false;
+  const now = (dateNow instanceof Date) ? dateNow.getTime() : Number(dateNow);
+  if (!Number.isFinite(now)) return false;
+  const elapsed = now - start;
+  return elapsed < 0 && elapsed >= -TRAINING_ADVANCE_MS;
+}
+
+// Validation autorisée ⟺ (a) on est dans la fenêtre H-24 → J+48 h ET (b) le
+// programme a DÉMARRÉ. La condition (b) est ce qui préserve l'aperçu 21 j en
+// lecture seule : la veille du grand départ, la 1re séance reste consultable
+// mais non validable.
+function _trainingCanValidate(program, datePlanned, nowMs) {
+  const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+  if (!_isRattrapageValid(datePlanned, now)) return false;
+  if (!program || !program.startDate) return false;
+  return isoDate(new Date(now)) >= program.startDate;
 }
 
 // true si la séance est en RETARD mais encore rattrapable (= J+1 uniquement) :
@@ -19149,25 +19243,34 @@ function openTrainingDashboard(programId) {
 // PRÉPA « FULL PACKAGE » — côté joueuse (exécution + validation)
 // ============================================================
 
-// Les séances « dues » d'un programme à l'instant `nowMs` : celle du jour, plus
-// celle de la veille si elle est encore rattrapable et non validée.
-// Deux jours suffisent : la fenêtre est de 48 h depuis minuit, donc J-2 est déjà
-// périmé par construction (_isRattrapageValid le rejetterait de toute façon).
+// Les séances « dues » d'un programme à l'instant `nowMs` : celle du jour, celle
+// de la veille si elle est encore rattrapable, et celle de DEMAIN (fenêtre
+// d'anticipation H-24). Trois jours suffisent : la fenêtre totale va de H-24 à
+// J+48 h, donc J-2 comme J+2 sont périmés/hors fenêtre par construction —
+// _isRattrapageValid les rejetterait de toute façon.
 function _trainingDueFor(program, playerId, nowMs) {
   const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const todayISO = isoDate(new Date(now));
   const out = [];
-  [0, 1].forEach(back => {
+  [1, 0, -1].forEach(back => {  // veille, jour même, lendemain
     const d = new Date(now - back * 86400000);
     const iso = isoDate(d);
     if (!program.startDate || !program.endDate) return;
     if (iso < program.startDate || iso > program.endDate) return;
     const dow = _trainingDayOfWeek(iso);
     if (!program.daysActive.includes(dow)) return;
-    if (!_isRattrapageValid(iso, now)) return;
+    // L'anticipation ne s'applique qu'à un programme déjà démarré : sinon la
+    // veille du lancement rendrait la 1re séance validable, ce qui percerait
+    // l'aperçu 21 j (lecture seule).
+    if (!_trainingCanValidate(program, iso, now)) return;
     const session = _programSessionForDay(program, dow);
     if (!session) return;
     const done = _trainingCompletionFor(session.id, playerId, iso);
-    out.push({ programId: program.id, session, datePlanned: iso, done, isRattrapage: back > 0 });
+    out.push({
+      programId: program.id, session, datePlanned: iso, done,
+      isRattrapage: back > 0,
+      isAdvance: iso > todayISO
+    });
   });
   return out;
 }
@@ -19178,8 +19281,10 @@ function _myTrainingDue(nowMs) {
   const now = Number.isFinite(nowMs) ? nowMs : Date.now();
   const out = [];
   _myTrainingPrograms(isoDate(new Date(now))).forEach(p => { out.push(..._trainingDueFor(p, pid, now)); });
-  // À faire d'abord, et le rattrapage avant la séance du jour (il périme plus tôt).
-  return out.sort((a, b) => (a.done ? 1 : 0) - (b.done ? 1 : 0) || (b.isRattrapage ? 1 : 0) - (a.isRattrapage ? 1 : 0));
+  // À faire d'abord ; puis par urgence : rattrapage (périme le plus tôt), séance
+  // du jour, enfin l'anticipation de demain (la moins pressée).
+  const rank = d => d.isRattrapage ? 0 : d.isAdvance ? 2 : 1;
+  return out.sort((a, b) => (a.done ? 1 : 0) - (b.done ? 1 : 0) || rank(a) - rank(b));
 }
 // Heures restantes avant péremption d'une séance (badge d'urgence).
 function _trainingHoursLeft(datePlanned, nowMs) {
@@ -19230,12 +19335,13 @@ function renderTrainingPlayerCard() {
         const p = progs.find(x => x.id === d.programId);
         const pts = _trainingCompletionsOf(d.programId, pid).reduce((a, c) => a + (Number(c.pointsTotal) || 0), 0);
         const left = _trainingHoursLeft(d.datePlanned, now);
+        const dayTag = d.isRattrapage ? ' · hier' : d.isAdvance ? ' · demain' : '';
         if (d.done) {
           return `
             <div style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;background:var(--surface);opacity:.75;display:flex;align-items:center;gap:10px">
               <div style="font-size:20px;flex:none">✓</div>
               <div style="flex:1;min-width:0">
-                <div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(d.session.name || 'Séance')}${d.isRattrapage ? ' · hier' : ''}</div>
+                <div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(d.session.name || 'Séance')}${dayTag}</div>
                 <div style="font-size:10px;color:var(--ink-3)">${esc(_completionSummary(d.done))}</div>
               </div>
             </div>`;
@@ -19244,9 +19350,9 @@ function renderTrainingPlayerCard() {
           <div onclick="openTrainingSession('${d.programId}','${d.session.id}','${d.datePlanned}')"
             style="border:1px solid ${d.isRattrapage ? 'var(--orange)' : 'var(--border-soft)'};border-radius:10px;padding:12px;background:var(--surface);cursor:pointer">
             <div style="display:flex;align-items:center;gap:10px">
-              <div style="font-size:20px;flex:none">${d.isRattrapage ? '⏳' : '💪'}</div>
+              <div style="font-size:20px;flex:none">${d.isRattrapage ? '⏳' : d.isAdvance ? '⏩' : '💪'}</div>
               <div style="flex:1;min-width:0">
-                <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(d.session.name || 'Séance')}</div>
+                <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(d.session.name || 'Séance')}${dayTag}</div>
                 <div style="font-size:10px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
                   ${esc(p ? (p.name || '') : '')}${d.session.formatLabel ? ' · ' + esc(d.session.formatLabel) : ''} · ${pts} pts cumulés
                 </div>
@@ -19256,12 +19362,15 @@ function renderTrainingPlayerCard() {
             ${d.isRattrapage ? `
               <div style="margin-top:8px;padding:6px 8px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:4px;font-size:10px;color:var(--ink-2)">
                 ⏳ Rattrapage possible — séance d'hier, encore ${left} h pour la valider.
+              </div>` : d.isAdvance ? `
+              <div style="margin-top:8px;padding:6px 8px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:4px;font-size:10px;color:var(--ink-2)">
+                ⏩ En avance — séance de demain, tu peux la valider dès aujourd'hui si tu l'as faite.
               </div>` : ''}
           </div>`;
       }).join('') : runningProgs.map(p => {
         const pts = _trainingCompletionsOf(p.id, pid).reduce((a, c) => a + (Number(c.pointsTotal) || 0), 0);
         return `
-          <div onclick="openTrainingDashboard('${p.id}')" style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;background:var(--surface);cursor:pointer;display:flex;align-items:center;gap:10px">
+          <div onclick="openTrainingPreview('${p.id}')" style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;background:var(--surface);cursor:pointer;display:flex;align-items:center;gap:10px">
             <div style="font-size:20px;flex:none">🌴</div>
             <div style="flex:1;min-width:0">
               <div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p.name || 'Programme')}</div>
@@ -19271,6 +19380,15 @@ function renderTrainingPlayerCard() {
           </div>`;
       }).join('');
 
+  // Le programme doit rester consultable TOUS LES JOURS, y compris les jours de
+  // repos : sans ce lien, une joueuse tombant sur « repos aujourd'hui » n'avait
+  // aucun moyen de voir le contenu des séances (bug remonté par l'effectif).
+  // (Le jour de repos, la carte 🌴 mène déjà au programme : pas de doublon.)
+  const browseLinks = (due.length ? runningProgs : []).map(p => `
+    <div onclick="openTrainingPreview('${p.id}')" style="text-align:center;padding:8px;font-size:11px;color:var(--ink-3);cursor:pointer;border:1px dashed var(--border);border-radius:8px">
+      📖 Voir tout le programme${runningProgs.length > 1 ? ' · ' + esc(p.name || '') : ''} (${p.daysActive.map(d => TRAINING_DAY_LABELS[d].slice(0, 3)).join(' ')})
+    </div>`).join('');
+
   return `
     <div class="section-header">
       <div>
@@ -19279,7 +19397,7 @@ function renderTrainingPlayerCard() {
       </div>
     </div>
     <div style="padding:0 18px;display:flex;flex-direction:column;gap:8px;margin-bottom:18px">
-      ${previewCards}${runningCards}
+      ${previewCards}${runningCards}${browseLinks}
     </div>`;
 }
 
@@ -19289,31 +19407,43 @@ function openTrainingPreview(programId) {
   const p = activeTrainingPrograms().find(x => x.id === programId);
   if (!p) return;
   const sessions = _trainingSessionsOf(programId);
-  const days = _trainingDaysUntilStart(p, isoDate(new Date()));
+  const nowMs = Date.now();
+  const todayISO = isoDate(new Date(nowMs));
+  const days = _trainingDaysUntilStart(p, todayISO);
   const when = days === 0 ? 'aujourd\'hui' : days === 1 ? 'demain' : 'dans ' + days + ' jours';
+  // Le même écran sert AVANT le début (aperçu 21 j) et PENDANT le programme :
+  // c'est le seul endroit où la joueuse voit toutes ses séances, y compris un
+  // jour de repos. Seuls l'en-tête et le bandeau changent.
+  const running = _trainingProgramRunning(p, todayISO);
   openModal(`
     <div class="modal-header">
       <div>
-        <div class="eyebrow">Aperçu · démarre ${when}</div>
+        <div class="eyebrow">${running ? 'Mon programme · ' + esc(_trainingPeriodLabel(p)) : 'Aperçu · démarre ' + when}</div>
         <div class="modal-title">${esc(p.name || 'Programme')}</div>
       </div>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <div class="modal-body">
       <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:11px;color:var(--ink-2);line-height:1.5;margin-bottom:14px">
-        🔭 Découvre ton programme avant qu'il commence. La validation des séances s'ouvre le <b>${esc(formatDate(p.startDate, 'long'))}</b>.
+        ${running
+          ? `📖 Toutes tes séances. Tu peux valider la séance du jour, celle de <b>demain</b> (24 h en avance) et rattraper la veille jusqu'à 48 h.`
+          : `🔭 Découvre ton programme avant qu'il commence. La validation des séances s'ouvre le <b>${esc(formatDate(p.startDate, 'long'))}</b>.`}
       </div>
       ${p.description ? `<div class="md-content" style="font-size:12px;color:var(--ink-2);margin-bottom:14px">${mdToHtml(p.description)}</div>` : ''}
       <div class="eyebrow-muted" style="margin-bottom:8px">Les séances de la semaine</div>
       <div style="display:flex;flex-direction:column;gap:8px">
         ${sessions.length ? sessions.map(s => {
-          const firstDate = _dateRangeForProgram(p.startDate, p.endDate, [s.dayOfWeek])[0] || p.startDate;
+          // Programme en cours → on ouvre la PROCHAINE occurrence du jour (celle
+          // qu'on peut valider), pas la toute première du programme.
+          const dates = _dateRangeForProgram(p.startDate, p.endDate, [s.dayOfWeek]);
+          const target = (running ? dates.find(d => d >= todayISO) : null) || dates[0] || p.startDate;
           const nb = (s.blocks || []).length;
+          const openable = _trainingCanValidate(p, target, nowMs);
           return `
-            <div onclick="openTrainingSession('${p.id}','${s.id}','${firstDate}')" style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;background:var(--surface);cursor:pointer;display:flex;align-items:center;gap:10px">
+            <div onclick="openTrainingSession('${p.id}','${s.id}','${target}')" style="border:1px solid ${openable ? 'var(--orange)' : 'var(--border-soft)'};border-radius:10px;padding:12px;background:var(--surface);cursor:pointer;display:flex;align-items:center;gap:10px">
               <div style="flex:1;min-width:0">
                 <div style="font-family:'Anton';font-size:13px;text-transform:uppercase">${esc(TRAINING_DAY_LABELS[s.dayOfWeek] || '')} · ${esc(s.name || 'Séance')}</div>
-                <div style="font-size:10px;color:var(--ink-3)">${s.formatLabel ? esc(s.formatLabel) + ' · ' : ''}${nb} bloc${nb > 1 ? 's' : ''}</div>
+                <div style="font-size:10px;color:var(--ink-3)">${s.formatLabel ? esc(s.formatLabel) + ' · ' : ''}${nb} bloc${nb > 1 ? 's' : ''}${running ? ' · ' + esc(formatDate(target, 'short')) + (openable ? ' · validable' : '') : ''}</div>
               </div>
               <div style="color:var(--ink-3);flex:none">›</div>
             </div>`;
@@ -19348,12 +19478,14 @@ function renderTrainingSession() {
   const cfg = _trainingConfig(p);
   const now = Date.now();
   const todayISO = isoDate(new Date(now));
-  // APERÇU : séance dont le jour prévu est dans le futur (programme pas encore
-  // commencé). Contenu entièrement consultable, mais validation neutralisée —
-  // à distinguer de « délai dépassé » (jour prévu passé de +48 h).
-  const isPreview = v.datePlanned > todayISO;
+  // Trois états distincts pour un jour prévu FUTUR :
+  //   • anticipé  : demain, programme démarré → validable (fenêtre H-24) ;
+  //   • aperçu    : plus loin, ou programme pas encore démarré → lecture seule ;
+  //   • dépassé   : jour prévu passé de +48 h.
+  const stillValid = _trainingCanValidate(p, v.datePlanned, now);
+  const isAdvance = stillValid && _isTrainingAdvance(v.datePlanned, now);
+  const isPreview = v.datePlanned > todayISO && !isAdvance;
   const daysUntil = _trainingDaysUntilStart(p, todayISO);
-  const stillValid = _isRattrapageValid(v.datePlanned, now);
   const left = _trainingHoursLeft(v.datePlanned, now);
   // Un niveau sans texte n'est pas proposé : le coach ne l'a pas défini.
   const availLevels = TRAINING_LEVELS.filter(l => (s.blocks || []).some(b => _trainingBlockLevel(b, l).text));
@@ -19383,7 +19515,7 @@ function renderTrainingSession() {
   openModal(`
     <div class="modal-header">
       <div>
-        <div class="eyebrow">${esc(p.name || 'Prépa')} · ${esc(formatDate(v.datePlanned, 'short'))}${isPreview ? ' · aperçu' : v.datePlanned < todayISO ? ' · rattrapage' : ''}</div>
+        <div class="eyebrow">${esc(p.name || 'Prépa')} · ${esc(formatDate(v.datePlanned, 'short'))}${isPreview ? ' · aperçu' : isAdvance ? ' · en avance' : v.datePlanned < todayISO ? ' · rattrapage' : ''}</div>
         <div class="modal-title">${esc(s.name || 'Séance')}</div>
       </div>
       <button class="modal-close" onclick="state._trainingView=null;closeModal()">✕</button>
@@ -19398,6 +19530,9 @@ function renderTrainingSession() {
         </div>` : !stillValid ? `
         <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--ink-3);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:14px">
           ⌛ <b>Délai dépassé</b> — le rattrapage était possible jusqu'à 48 h après le jour prévu. Tu peux toujours faire la séance, mais elle ne compte plus de points.
+        </div>` : isAdvance ? `
+        <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:14px">
+          ⏩ <b>En avance</b> — séance prévue demain. Si tu la fais aujourd'hui, tu peux la valider tout de suite : elle compte les mêmes points.
         </div>` : left <= 24 ? `
         <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:14px">
           ⏳ Encore <b>${left} h</b> pour valider cette séance.
@@ -19428,7 +19563,7 @@ function renderTrainingSession() {
         : isPreview ? `<button class="btn btn-secondary btn-block" disabled style="opacity:.6;cursor:default">⏳ ${daysUntil === 0 ? 'Démarre aujourd\'hui' : daysUntil === 1 ? 'Démarre demain' : 'Démarre dans ' + daysUntil + ' jours'}</button>`
         : !stillValid ? `<button class="btn btn-secondary btn-block" onclick="state._trainingView=null;closeModal()">Fermer</button>`
         : !availLevels.length ? ''
-        : `<button class="btn btn-primary btn-block" onclick="openTrainingValidate()">✓ J'ai fait la séance</button>`}
+        : `<button class="btn btn-primary btn-block" onclick="openTrainingValidate()">✓ J'ai fait la séance${isAdvance ? ' (en avance)' : ''}</button>`}
     </div>
   `);
 }
@@ -19465,7 +19600,11 @@ function _trainingMaybeResume() {
 function openTrainingValidate() {
   const v = state._trainingView; if (!v) return;
   if (!(state.auth && state.auth.role === 'player')) return;
-  if (!_isRattrapageValid(v.datePlanned, Date.now())) { try { alert('Le délai de 48 h est dépassé : cette séance ne peut plus être validée.'); } catch (e) {} return; }
+  const _p = activeTrainingPrograms().find(x => x.id === v.programId);
+  if (!_trainingCanValidate(_p, v.datePlanned, Date.now())) {
+    try { alert('Cette séance n\'est pas validable : la fenêtre va de 24 h avant le jour prévu à 48 h après.'); } catch (e) {}
+    return;
+  }
   state._trainingValidate = {
     programId: v.programId, sessionId: v.sessionId, datePlanned: v.datePlanned, level: v.level,
     squadOn: false, squadTeammateId: '', squadPhotoUrl: '',
@@ -19608,10 +19747,10 @@ function confirmTrainingCompletion() {
   if (!pid) return;
   const p = activeTrainingPrograms().find(x => x.id === a.programId);
   if (!p) return;
-  // Re-test du délai : la modale a pu rester ouverte au-delà de minuit + 48 h.
+  // Re-test de la fenêtre : la modale a pu rester ouverte au-delà de minuit + 48 h.
   const now = Date.now();
-  if (!_isRattrapageValid(a.datePlanned, now)) {
-    try { alert('Le délai de 48 h vient d\'expirer : cette séance ne peut plus être validée.'); } catch (e) {}
+  if (!_trainingCanValidate(p, a.datePlanned, now)) {
+    try { alert('Le délai vient d\'expirer : cette séance ne peut plus être validée.'); } catch (e) {}
     state._trainingValidate = null; renderTrainingSession(); return;
   }
   // Une case cochée sans sa pièce justificative : on demande plutôt que de
@@ -19701,7 +19840,9 @@ function _trainingRemindCheck(nowMs) {
   if (role === 'player') {
     // Uniquement la séance DU JOUR : un rattrapage a déjà son badge sur
     // l'accueil, et notifier deux fois pour la même séance serait du bruit.
-    const due = _myTrainingDue(now.getTime()).filter(d => !d.done && !d.isRattrapage);
+    // L'anticipation (séance de demain) n'a rien à faire dans un rappel « du
+    // jour » : elle est proposée, jamais réclamée.
+    const due = _myTrainingDue(now.getTime()).filter(d => !d.done && !d.isRattrapage && !d.isAdvance);
     if (!due.length) return;
     const d = due[0];
     const p = activeTrainingPrograms().find(x => x.id === d.programId);
@@ -34752,7 +34893,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-17.76';
+const APP_VERSION = '2026-07-21.77';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {

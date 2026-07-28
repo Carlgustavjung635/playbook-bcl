@@ -419,6 +419,17 @@ t('openTrainingPreview : liste les séances de la semaine sans throw', () => {
     assert(ctx.__lastModal.includes('openTrainingSession'), 'séances non ouvrables en preview');
   } finally { unfreeze(); }
 });
+t('openTrainingPreview : programme EN COURS → écran « mon programme » consultable', () => {
+  freeze(MIDI_MAR); // mardi = jour de repos (jours actifs lun/mer)
+  try {
+    ctx.openTrainingPreview(P().id);
+    const h = ctx.__lastModal;
+    assert(h.includes('Mon programme'), 'en-tête « Mon programme » absent pendant le programme');
+    assert(!h.includes('🔭 Découvre'), 'bandeau d\'aperçu affiché sur un programme déjà démarré');
+    assert(h.includes('Les séances de la semaine'), 'liste des séances absente');
+    assert(h.includes('validable'), 'aucune séance signalée validable (mercredi = demain)');
+  } finally { unfreeze(); }
+});
 t('renderTrainingSession : séance future → bandeau aperçu + bouton neutralisé', () => {
   freeze(AVANT_MIDI);
   try {
@@ -451,11 +462,21 @@ t('_trainingDueFor : lundi midi → séance du jour, pas un rattrapage', () => {
   assert(due[0].isRattrapage === false, 'la séance du jour ne doit pas être un rattrapage');
   assert(!due[0].done, 'séance déjà marquée faite');
 });
-t('_trainingDueFor : mardi midi → lundi en RATTRAPAGE (mardi non actif)', () => {
+t('_trainingDueFor : mardi midi → lundi en RATTRAPAGE + mercredi EN AVANCE', () => {
   const due = ctx._trainingDueFor(P(), 'p1', MIDI_MAR);
-  assert(due.length === 1, 'attendu 1 séance due, reçu ' + due.length);
-  assert(due[0].datePlanned === LUN, 'le rattrapage doit porter sur lundi');
-  assert(due[0].isRattrapage === true, 'non marqué rattrapage');
+  assert(due.length === 2, 'attendu 2 séances dues (rattrapage + anticipation), reçu ' + due.length);
+  const ratt = due.find(d => d.datePlanned === LUN);
+  const adv = due.find(d => d.datePlanned === '2026-07-15');
+  assert(ratt && ratt.isRattrapage === true, 'lundi non marqué rattrapage');
+  assert(ratt.isAdvance === false, 'lundi marqué « en avance » à tort');
+  assert(adv && adv.isAdvance === true, 'mercredi (demain) non proposé en anticipation');
+  assert(adv.isRattrapage === false, 'mercredi marqué rattrapage à tort');
+});
+t('_trainingDueFor : la veille du LANCEMENT ne propose rien (aperçu 21 j préservé)', () => {
+  // 12/07 = veille du démarrage (13/07). La fenêtre H-24 couvrirait le lundi,
+  // mais le programme n'a pas commencé → aucune écriture possible.
+  const due = ctx._trainingDueFor(P(), 'p1', Date.parse('2026-07-12T12:00:00Z'));
+  assert(due.length === 0, 'séance validable la veille du lancement : l\'aperçu est percé');
 });
 t('_trainingDueFor : mercredi midi → séance de mercredi seule (lundi périmé)', () => {
   const due = ctx._trainingDueFor(P(), 'p1', MIDI_MER);
@@ -584,13 +605,26 @@ t('renderTrainingPlayerCard() : badge « Rattrapage possible » le lendemain', (
   assert(h.includes('Rattrapage possible'), 'badge de rattrapage absent');
   assert(h.includes('12 h pour la valider'), 'heures restantes fausses/absentes');
 });
-t('renderTrainingPlayerCard() : jour de repos', () => {
-  freeze(Date.parse('2026-07-14T12:00:00Z'));
-  ctx.state.trainingPrograms[0].daysActive = [3]; // mercredi seul → mardi = repos
+t('renderTrainingPlayerCard() : jour de repos (rien demain non plus)', () => {
+  freeze(MIDI_LUN);
+  ctx.state.trainingPrograms[0].daysActive = [3]; // mercredi seul → lundi et mardi = repos
   try {
     const h = ctx.renderTrainingPlayerCard();
     assert(h.includes('Repos'), 'jour de repos non affiché');
-  } finally { ctx.state.trainingPrograms[0].daysActive = [1, 3]; }
+    // Le programme doit rester consultable un jour de repos (bug remonté par
+    // l'effectif : « je ne vois pas le programme »).
+    assert(h.includes('openTrainingPreview'), 'programme non consultable un jour de repos');
+  } finally { ctx.state.trainingPrograms[0].daysActive = [1, 3]; unfreeze(); }
+});
+t('renderTrainingPlayerCard() : veille d\'une séance → carte « en avance »', () => {
+  freeze(Date.parse('2026-07-14T12:00:00Z')); // mardi, mercredi actif
+  ctx.state.trainingPrograms[0].daysActive = [3];
+  try {
+    const h = ctx.renderTrainingPlayerCard();
+    assert(h.includes('En avance'), 'bandeau anticipation absent la veille d\'une séance');
+    assert(h.includes('openTrainingSession'), 'séance de demain non ouvrable');
+    assert(!h.includes('Repos'), '« Repos » affiché alors qu\'une séance est proposée en avance');
+  } finally { ctx.state.trainingPrograms[0].daysActive = [1, 3]; unfreeze(); }
 });
 t('renderTrainingPlayerCard() vide si aucun programme', () => {
   const keep = ctx.state.trainingPrograms;

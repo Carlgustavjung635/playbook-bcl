@@ -19,6 +19,7 @@ const TRAINING_DEFAULT_CONFIG = {
 const TRAINING_LEVELS = ['min', 'med', 'ultra'];
 const TRAINING_LEVEL_LABEL = { min: 'Minimum', med: 'Medium', ultra: 'Ultra' };
 const TRAINING_RATTRAPAGE_MS = 48 * 3600000;
+const TRAINING_ADVANCE_MS = 24 * 3600000;
 
 function _trainingCleanDays(days) {
   if (!Array.isArray(days)) return [];
@@ -59,7 +60,25 @@ function _isRattrapageValid(datePlanned, dateNow) {
   const now = (dateNow instanceof Date) ? dateNow.getTime() : Number(dateNow);
   if (!Number.isFinite(now)) return false;
   const elapsed = now - start;
-  return elapsed >= 0 && elapsed < TRAINING_RATTRAPAGE_MS;
+  return elapsed >= -TRAINING_ADVANCE_MS && elapsed < TRAINING_RATTRAPAGE_MS;
+}
+function _isTrainingAdvance(datePlanned, dateNow) {
+  const start = _trainingDayStartMs(datePlanned);
+  if (start === null) return false;
+  const now = (dateNow instanceof Date) ? dateNow.getTime() : Number(dateNow);
+  if (!Number.isFinite(now)) return false;
+  const elapsed = now - start;
+  return elapsed < 0 && elapsed >= -TRAINING_ADVANCE_MS;
+}
+// isoDate : copie fidèle (composantes LOCALES, comme dans l'app).
+function isoDate(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+function _trainingCanValidate(program, datePlanned, nowMs) {
+  const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+  if (!_isRattrapageValid(datePlanned, now)) return false;
+  if (!program || !program.startDate) return false;
+  return isoDate(new Date(now)) >= program.startDate;
 }
 function _isRattrapage(datePlanned, dateNow) {
   const start = _trainingDayStartMs(datePlanned);
@@ -154,7 +173,7 @@ eq('squad_mult à 0 → base annulée', _computePoints({ level: 'med', hasSquad:
 eq('config null → défauts', _computePoints({ level: 'med', config: null }).total, 20);
 
 // ============================================================================
-// 2) _isRattrapageValid — 48 h à partir de MINUIT du jour prévu
+// 2) _isRattrapageValid — fenêtre H-24 → J+48 h autour de MINUIT du jour prévu
 // ============================================================================
 // 2026-07-13 est un LUNDI. minuit UTC = référence.
 const LUNDI = '2026-07-13';
@@ -171,10 +190,33 @@ ok('48h01 → invalide', !_isRattrapageValid(LUNDI, T0 + 48 * 3600000 + 60000));
 ok('mercredi 00:00 UTC → périmé', !_isRattrapageValid(LUNDI, Date.parse('2026-07-15T00:00:00Z')));
 ok('mardi 23:59 UTC → encore valide', _isRattrapageValid(LUNDI, Date.parse('2026-07-14T23:59:00Z')));
 
-// Borne basse : minuit pile est inclus, avant est refusé.
-ok('minuit du jour prévu pile → valide (borne basse incluse)', _isRattrapageValid(LUNDI, T0));
-ok('1 ms avant minuit → invalide (pas de validation à l\'avance)', !_isRattrapageValid(LUNDI, T0 - 1));
-ok('la veille → invalide', !_isRattrapageValid(LUNDI, Date.parse('2026-07-12T18:00:00Z')));
+// Borne basse : H-24 (anticipation). La séance de demain est validable.
+ok('minuit du jour prévu pile → valide', _isRattrapageValid(LUNDI, T0));
+ok('1 ms avant minuit → valide (anticipation)', _isRattrapageValid(LUNDI, T0 - 1));
+ok('la veille 18:00 → valide (anticipation, H-6)', _isRattrapageValid(LUNDI, Date.parse('2026-07-12T18:00:00Z')));
+ok('24 h pile avant → valide (borne basse incluse)', _isRattrapageValid(LUNDI, T0 - TRAINING_ADVANCE_MS));
+ok('24 h + 1 ms avant → INVALIDE (l\'anticipation s\'arrête à 24 h)', !_isRattrapageValid(LUNDI, T0 - TRAINING_ADVANCE_MS - 1));
+ok('l\'avant-veille → invalide', !_isRattrapageValid(LUNDI, Date.parse('2026-07-11T18:00:00Z')));
+ok('12 jours avant → invalide (toute la semaine n\'est pas ouverte)', !_isRattrapageValid(LUNDI, Date.parse('2026-07-01T12:00:00Z')));
+
+// _isTrainingAdvance : marque la validation EN AVANCE (et rien d'autre).
+ok('la veille → marquée « en avance »', _isTrainingAdvance(LUNDI, T0 - 6 * 3600000));
+ok('24 h pile avant → en avance (borne incluse)', _isTrainingAdvance(LUNDI, T0 - TRAINING_ADVANCE_MS));
+ok('minuit pile → PAS en avance (c\'est le jour même)', !_isTrainingAdvance(LUNDI, T0));
+ok('jour même 10:00 → pas en avance', !_isTrainingAdvance(LUNDI, T0 + 10 * 3600000));
+ok('J+1 → pas en avance (c\'est un rattrapage)', !_isTrainingAdvance(LUNDI, T0 + 30 * 3600000));
+ok('avant-veille → pas en avance (hors fenêtre)', !_isTrainingAdvance(LUNDI, T0 - 30 * 3600000));
+ok('date malformée → false', !_isTrainingAdvance('13/07/2026', T0));
+
+// _trainingCanValidate : l'anticipation ne perce PAS l'aperçu 21 j — la veille
+// du lancement, la 1re séance reste en lecture seule.
+const PROG_LUNDI = { startDate: LUNDI, endDate: '2026-08-23' };
+ok('veille du lancement → séance du 1er jour NON validable (aperçu préservé)',
+  !_trainingCanValidate(PROG_LUNDI, LUNDI, T0 - 6 * 3600000));
+ok('programme démarré → séance du lendemain validable',
+  _trainingCanValidate({ startDate: LUNDI, endDate: '2026-08-23' }, '2026-07-15', Date.parse('2026-07-14T12:00:00Z')));
+ok('programme absent → jamais validable', !_trainingCanValidate(null, LUNDI, T0 + 3600000));
+ok('jour même du lancement → validable', _trainingCanValidate(PROG_LUNDI, LUNDI, T0 + 10 * 3600000));
 
 // Le jour même et J+1 sont dans la fenêtre.
 ok('jour même 10:00 → valide', _isRattrapageValid(LUNDI, T0 + 10 * 3600000));
@@ -450,4 +492,4 @@ deq('anti-wipe : id local \'x…\' absent du remote est conservé',
 deq('anti-wipe : id local déjà présent en remote n\'est pas dupliqué',
   _pending([{ id: 'x1' }], new Set(['x1'])).map(x => x.id), []);
 
-console.log(`\n✓ ${passed} assertions passées — prépa full package (scoring figé (base×mult)+bonus, rattrapage 48h depuis minuit UTC, dates prévues, round-trip PbSync ×3) OK`);
+console.log(`\n✓ ${passed} assertions passées — prépa full package (scoring figé (base×mult)+bonus, fenêtre H-24 → J+48h depuis minuit UTC, dates prévues, round-trip PbSync ×3) OK`);
