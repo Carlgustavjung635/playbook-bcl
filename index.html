@@ -16950,16 +16950,122 @@ function reopenGage(drawId) {
   persist(); _gageFlush(); render();
   if (typeof showToast === 'function') showToast('↩️ Gage remis au pool');
 }
-// « Invalider » (gage secret grillé, impossible…) : échec NEUTRE, aucune dette.
-// Le gage reste tirable (jamais marqué réalisé).
+// « Invalider » (gage secret grillé, impossible, clic par erreur…) : échec
+// NEUTRE, aucune dette. Le geste ouvre une modale à 3 issues, parce que
+// « invalider » seul était un CUL-DE-SAC : le tirage mourait, la joueuse ne
+// devait plus rien, ne retirait rien, et n'était même pas prévenue. Le coach
+// devait deviner s'il fallait réassigner à la main.
+//
+//   🎲 redraw → le tirage meurt ET un nouveau tirage 'owed' est créé : elle
+//               repioche dans le pool. SANS dette (ce n'est pas une sanction).
+//   🔁 keep   → même gage, remis « à réaliser ». L'horloge des gages à durée
+//               limitée REPART (completedAt = maintenant), sinon un gage déjà
+//               expiré serait réinvalidé dans la foulée par _sweepExpiredGages.
+//   ❌ cancel → on oublie : tirage invalidé ET gage sorti du pool (soft-delete),
+//               donc plus tirable par personne. C'est le sens de « on efface ».
 function invalidateGage(drawId) {
   const d = (state.gageDraws || []).find(x => x.id === drawId);
   if (!d || (d.status !== 'accepted' && d.status !== 'player_done')) return;
-  let reason = ''; try { reason = prompt('Raison de l\'invalidation (optionnel : grillé, impossible, annulé…) :') || ''; } catch (e) {}
+  const p = (state.players || []).find(x => x.id === d.playerId);
+  const g = _gageById(d.gageId);
+  const who = p ? ('#' + p.num + ' ' + p.name) : 'cette joueuse';
+  const opt = (val, icon, title, desc, checked) => `
+    <label style="display:flex;gap:10px;align-items:flex-start;padding:10px;border:1px solid var(--border-soft);border-radius:8px;margin-bottom:8px;cursor:pointer">
+      <input type="radio" name="ginv-choice" value="${val}" ${checked ? 'checked' : ''} style="margin-top:3px;flex:none">
+      <span style="flex:1;min-width:0">
+        <span style="display:block;font-family:'Anton';font-size:13px;text-transform:uppercase">${icon} ${title}</span>
+        <span style="display:block;font-size:11px;color:var(--ink-3);line-height:1.45;margin-top:2px">${desc}</span>
+      </span>
+    </label>`;
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow-muted">Invalider le gage de ${esc(who)}</div>
+        <div class="modal-title" style="font-size:15px">Et ensuite ?</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      ${g && g.text ? `<div style="padding:8px 10px;background:var(--bg-3);border-radius:6px;margin-bottom:12px;font-size:12px;color:var(--ink-2);line-height:1.45">« ${esc(g.text)} »</div>` : ''}
+      ${opt('redraw', '🎲', 'Nouveau tirage', 'Ce gage est annulé pour elle et elle repioche au sort dans le pool. Aucune dette ajoutée.', true)}
+      ${opt('keep', '🔁', 'Garder le même gage', 'Le gage repasse « à réaliser ». Elle devra le refaire.')}
+      ${opt('cancel', '❌', 'Annuler définitivement', 'On oublie : elle ne doit plus rien, et le gage sort du pool pour TOUT LE MONDE.')}
+      <div class="fld" style="margin-top:4px">
+        <label class="fld-label">Raison (optionnel)</label>
+        <input id="ginv-reason" type="text" placeholder="Ex : clic par erreur, grillée, impossible…">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Annuler</button>
+      <button class="btn btn-primary" onclick="confirmInvalidateGage('${drawId}')">Continuer</button>
+    </div>
+  `);
+}
+// Applique l'issue choisie. IDEMPOTENT : la garde sur le statut rejette tout
+// second appel (double-tap, re-clic après coup) — sans elle, « nouveau tirage »
+// empilerait un tirage 'owed' de plus à chaque clic.
+function confirmInvalidateGage(drawId, choiceOverride, reasonOverride) {
+  const d = (state.gageDraws || []).find(x => x.id === drawId);
+  if (!d || (d.status !== 'accepted' && d.status !== 'player_done')) return false;
+  let choice = choiceOverride;
+  if (!choice) {
+    try {
+      const el = document.querySelector('input[name="ginv-choice"]:checked');
+      choice = el ? el.value : 'redraw';
+    } catch (e) { choice = 'redraw'; }
+  }
+  if (!['redraw', 'keep', 'cancel'].includes(choice)) choice = 'redraw';
+  let reason = reasonOverride;
+  if (reason === undefined) {
+    try { reason = (document.getElementById('ginv-reason') || {}).value || ''; } catch (e) { reason = ''; }
+  }
+  reason = (reason || '').trim();
   const now = Date.now();
-  d.status = 'invalidated'; d.invalidatedAt = now; d.invalidationReason = reason.trim() || null; d.updatedAt = now;
-  persist(); _gageFlush(); render();
-  if (typeof showToast === 'function') showToast('❌ Gage invalidé (sans dette)');
+  const g = _gageById(d.gageId);
+
+  if (choice === 'keep') {
+    // Retour « à réaliser » sur LE MÊME gage. completedAt = now relance la
+    // deadline des gages à durée limitée (cf. _drawDeadline).
+    d.status = 'accepted';
+    d.playerDoneAt = null; d.invalidatedAt = null; d.invalidationReason = null;
+    d.completedAt = now; d.updatedAt = now;
+  } else {
+    d.status = 'invalidated'; d.invalidatedAt = now; d.updatedAt = now;
+    d.invalidationReason = reason || (choice === 'redraw' ? 'Nouveau tirage' : 'Annulé par la coach');
+    if (choice === 'redraw') {
+      // 1 seul tirage, SANS la dette : invalider n'est pas une sanction
+      // (contrairement à assignDrawsToPlayer qui ajoute 1 + dette).
+      const sid = (getSeasonIdForDate(isoDate(new Date(now))) || getActiveSeasonId()) || null;
+      state.gageDraws = state.gageDraws || [];
+      state.gageDraws.push({ id: uid(), playerId: d.playerId, gageId: null, status: 'owed',
+        assignedAt: now, drawnAt: null, completedAt: null, seasonId: sid, createdAt: now, updatedAt: now });
+    } else if (choice === 'cancel' && g && !g.deletedAt) {
+      // « On oublie » : le gage sort du pool pour tout le monde (soft-delete —
+      // un hard delete serait repoussé au flush par les autres clients).
+      g.deletedAt = now; _gageTouch(g);
+    }
+  }
+  persist(); _gageFlush();
+  try { closeModal(); } catch (e) {}
+  // La joueuse était la grande absente : aucune notif ne partait à
+  // l'invalidation manuelle. Elle doit savoir, surtout si elle doit repiocher.
+  try {
+    const body = choice === 'redraw' ? 'Ta coach a invalidé ton gage — tu as un nouveau tirage à faire'
+      : choice === 'keep' ? 'Ta coach a invalidé ta validation — le gage est toujours à faire'
+      : 'Ta coach a annulé ton gage — tu ne dois plus rien';
+    notifyPush(_pushPlayerKeys([d.playerId]), {
+      title: choice === 'cancel' ? '❌ Gage annulé' : '❌ Gage invalidé',
+      body: body + (reason ? ' (' + reason + ')' : ''),
+      url: '/', tag: 'gage-invalidated-' + d.id, type: 'gage_invalidated'
+    });
+  } catch (e) {}
+  if (typeof showToast === 'function') {
+    showToast(choice === 'redraw' ? '🎲 Invalidé · nouveau tirage assigné'
+      : choice === 'keep' ? '🔁 Invalidé · le gage reste à faire'
+      : '❌ Gage annulé et sorti du pool');
+  }
+  render();
+  return true;
 }
 
 function renderTeam() {
@@ -34492,6 +34598,23 @@ function notifFeed(opts) {
         detail: _notifDrawDetail(p, g) });
     });
   });
+  // Gages invalidés — les DEUX côtés. Le coach suit ce qu'il a invalidé ;
+  // la joueuse doit savoir que sa validation a sauté (et si elle doit repiocher,
+  // le tirage 'owed' lui remonte en plus via la source « gages-a-tirer »).
+  src('all', 'gages-invalides', () => {
+    (state.gageDraws || []).forEach(d => {
+      if (d.status !== 'invalidated' || !d.invalidatedAt) return;
+      if (role === 'player' && d.playerId !== pid) return;   // jamais celles des autres
+      const g = (typeof _gageById === 'function' && d.gageId) ? _gageById(d.gageId) : null;
+      const pl = (state.players || []).find(x => x.id === d.playerId);
+      const what = (g && g.text) ? String(g.text).replace(/\s+/g, ' ').slice(0, 45) : '';
+      add('all', {
+        id: 'ginval-' + d.id, ts: d.invalidatedAt, icon: '❌', title: 'Gage invalidé',
+        detail: [role === 'coach' ? _notifDrawDetail(pl, g) : what, d.invalidationReason]
+          .filter(Boolean).join(' · ')
+      });
+    });
+  });
   src('coach', 'stats-match', () => {
     if (typeof currentSeasonMatches !== 'function') return;
     currentSeasonMatches().filter(m => m.playerStats && Object.keys(m.playerStats).length).forEach(m =>
@@ -35124,7 +35247,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-29.80';
+const APP_VERSION = '2026-07-29.81';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
