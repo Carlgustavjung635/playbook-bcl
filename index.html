@@ -8559,29 +8559,48 @@ function _effectifSeasonBody() {
         <span>Afficher l'historique (joueuses parties)</span>
       </label>
 
+      ${renderLicenceFilterChips(active)}
+
       ${active.length === 0 ? `
         <div class="empty" style="padding:18px">
           <div class="empty-icon">○</div>
           <div class="empty-title">Aucune joueuse dans cet effectif</div>
           ${readOnly ? '' : '<div class="empty-desc">Utilise les boutons ci-dessus pour en ajouter</div>'}
         </div>
-      ` : `
+      ` : (() => {
+        const shown = active.filter(({ player: p }) => _licenceMatchesFilter(p.id));
+        if (!shown.length) return `
+          <div class="empty" style="padding:18px">
+            <div class="empty-icon">🎫</div>
+            <div class="empty-title">Aucune joueuse dans ce filtre</div>
+            <div class="empty-desc">Change de filtre pour revoir l'effectif.</div>
+          </div>`;
+        // LIGNE ALLÉGÉE — avant, chaque ligne empilait le badge d'équipe, la
+        // dernière connexion, 3 boutons d'équipe, le statut de licence, un
+        // bouton « marquer fait » et un bouton « partir » : illisible, et le
+        // moindre tap risquait la mauvaise action. Une ligne = identité +
+        // l'essentiel en une sous-ligne scannable ; tout le reste passe
+        // derrière un tap (openPlayerSeasonPanel).
+        return `
         <div style="display:flex;flex-direction:column;gap:6px">
-          ${active.map(({ link, player: p }) => `
-            <div style="display:flex;align-items:center;gap:8px;padding:10px;background:var(--bg-1);border-radius:8px;border:1px solid var(--border)">
-              ${p.photo ? `<img src="${p.photo}" style="width:36px;height:36px;border-radius:50%;object-fit:cover;border:2px solid var(--orange)">` : `<div style="width:36px;height:36px;border-radius:50%;background:var(--bg-3);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:14px;color:var(--orange);border:2px solid var(--border)">${esc((p.name||'?').charAt(0).toUpperCase())}</div>`}
-              <div style="font-family:'Anton';font-size:16px;color:var(--orange);min-width:36px">#${p.num}</div>
+          ${shown.map(({ link, player: p }) => {
+            const ls = _lastSeenBadge(p.lastSeenAt);
+            const lm = _licenceMeta(_licenceStatusOf(_licenceFor(p.id)));
+            return `
+            <div onclick="openPlayerSeasonPanel('${esc(p.id)}')" style="display:flex;align-items:center;gap:9px;padding:10px;background:var(--bg-1);border-radius:8px;border:1px solid var(--border);cursor:pointer">
+              ${p.photo ? `<img src="${p.photo}" style="width:36px;height:36px;border-radius:50%;object-fit:cover;border:2px solid var(--orange);flex:none">` : `<div style="width:36px;height:36px;border-radius:50%;background:var(--bg-3);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:14px;color:var(--orange);border:2px solid var(--border);flex:none">${esc((p.name||'?').charAt(0).toUpperCase())}</div>`}
+              <div style="font-family:'Anton';font-size:16px;color:var(--orange);min-width:32px;flex:none">#${p.num}</div>
               <div style="flex:1;min-width:0">
-                <div style="display:flex;align-items:center;gap:6px"><div style="font-family:'Anton';text-transform:uppercase;font-size:13px">${esc(p.name)}</div>${teamTagBadge(link.teamTag)}</div>
-                ${(() => { const ls = _lastSeenBadge(p.lastSeenAt); return `<div style="font-size:9px;color:${ls.color};font-family:'JetBrains Mono';margin-top:2px"${ls.exact ? ` title="Dernière connexion : ${ls.exact}"` : ''}><span style="font-size:7px;vertical-align:middle">${ls.dot}</span> ${ls.label}</div>`; })()}
-                ${readOnly ? '' : renderPlayerTeamTagToggle(p.id, link.teamTag)}
-                ${renderLicenceRosterBadge(p.id)}
+                <div style="font-family:'Anton';text-transform:uppercase;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p.name)}</div>
+                <div style="font-size:9px;font-family:'JetBrains Mono';margin-top:3px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+                  ${esc(_teamTagLabel(link.teamTag))} · <span style="color:${ls.color}"${ls.exact ? ` title="Dernière connexion : ${ls.exact}"` : ''}>${ls.label}</span> · <span style="color:${lm.color}" title="Licence : ${esc(lm.label)}">🎫 ${lm.dot}</span>
+                </div>
               </div>
-              ${readOnly ? '' : `<button class="btn btn-ghost" style="font-size:10px;color:var(--red);padding:6px 8px" onclick="removePlayerFromSeason('${esc(p.id)}')" title="Retirer de la saison">↗ Partir</button>`}
-            </div>
-          `).join('')}
-        </div>
-      `}
+              <span class="list-row-trail" style="flex:none">›</span>
+            </div>`;
+          }).join('')}
+        </div>`;
+      })()}
 
       ${showHistory && left.length > 0 ? `
         <div style="margin-top:18px">
@@ -10296,9 +10315,11 @@ function renderPlayerMatches() {
   if (!p) return renderHomeCoach();
   const today = new Date(); today.setHours(0,0,0,0);
   const todayStr = isoDate(today);
-  // Horizon prochains matchs : 90 jours (fin de saison typique)
-  const horizon = new Date(today.getTime() + 90 * 86400000);
-  const upcoming = getAllEventsBetween(todayStr, isoDate(horizon))
+  // Horizon élargi à 1 an : le sous-filtre « toute la saison » doit vraiment
+  // tout montrer. Les 90 jours d'avant tronquaient silencieusement la fin de
+  // saison, et le compteur d'en-tête mentait d'autant.
+  const horizon = new Date(today.getTime() + 365 * 86400000);
+  const upcomingAll = getAllEventsBetween(todayStr, isoDate(horizon))
     .filter(ev => ev.type === 'match');
 
   // Passés : on prend currentSeasonMatches() (saison forcée=active pour
@@ -10367,30 +10388,60 @@ function renderPlayerMatches() {
     `;
   };
 
+  // Mêmes onglets et mêmes périodes que la vue coach (cf. renderMatches) —
+  // l'app doit se comporter pareil des deux côtés. La différence tient à la
+  // SOURCE : ici getAllEventsBetween, qui ne renvoie que les événements
+  // CONVOQUÉS de la joueuse, jamais tous les matchs de l'équipe.
+  const tab = (state._matchTab === 'played' || (!state._matchTab && !upcomingAll.length)) ? 'played' : 'upcoming';
+  const range = MATCH_RANGES.some(r => r.id === state._matchRange)
+    ? state._matchRange
+    : _matchDefaultRange(upcomingAll, todayStr);
+  const upcoming = upcomingAll.filter(ev => _matchInRange(ev, range, todayStr));
+
   return `
     <div class="fade-up">
       <div class="section-header">
         <div>
-          <div class="eyebrow">${upcoming.length} à venir · ${playedMatches.length} joué${playedMatches.length>1?'s':''}</div>
+          <div class="eyebrow">${upcomingAll.length} à venir · ${playedMatches.length} joué${playedMatches.length>1?'s':''}</div>
           <h2 class="display-lg mt-2">Match</h2>
         </div>
       </div>
 
-      ${upcoming.length > 0 ? `
-        <div class="section-header"><div><div class="eyebrow">90 prochains jours</div><h2 class="display-md mt-2">À venir</h2></div></div>
+      ${(upcomingAll.length || playedMatches.length) ? `
+        <div class="segmented" style="margin:0 0 10px">
+          <button class="segmented-btn ${tab === 'upcoming' ? 'active' : ''}" onclick="setMatchTab('upcoming')">📅 À venir${upcomingAll.length ? ' · ' + upcomingAll.length : ''}</button>
+          <button class="segmented-btn ${tab === 'played' ? 'active' : ''}" onclick="setMatchTab('played')">🏀 Joués${playedMatches.length ? ' · ' + playedMatches.length : ''}</button>
+        </div>
+
+        ${tab === 'upcoming' ? `
+          <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:12px">
+            ${MATCH_RANGES.map(r => `<button class="btn ${range === r.id ? 'btn-primary' : 'btn-secondary'}" style="min-height:32px;padding:0 10px;font-size:11px" onclick="setMatchRange('${r.id}')">${r.label}</button>`).join('')}
+          </div>` : ''}
+      ` : ''}
+
+      ${tab === 'upcoming' ? (upcoming.length > 0 ? `
         <div class="list-section">
-          ${upcoming.slice(0, 12).map(ev => playerEventRow(ev, p.id)).join('')}
+          ${upcoming.map(ev => playerEventRow(ev, p.id)).join('')}
         </div>
       ` : `
-        <div class="empty" style="padding:24px"><div class="empty-icon">🏀</div><div class="empty-title">Aucun match prévu</div><div class="empty-desc">Ton coach va programmer la suite.</div></div>
-      `}
-
-      ${playedMatches.length > 0 ? `
-        <div class="section-header"><div><div class="eyebrow">Bilan saison</div><h2 class="display-md mt-2">Joués</h2></div></div>
+        <div class="empty" style="padding:24px">
+          <div class="empty-icon">🏀</div>
+          <div class="empty-title">Aucun match à venir</div>
+          <div class="empty-desc">${upcomingAll.length
+            ? 'Rien sur cette période — essaie « Toute la saison ».'
+            : 'Ton coach va programmer la suite.'}</div>
+        </div>
+      `) : (playedMatches.length > 0 ? `
         <div class="list-section">
           ${playedMatches.slice(0, 20).map(pastMatchRow).join('')}
         </div>
-      ` : ''}
+      ` : `
+        <div class="empty" style="padding:24px">
+          <div class="empty-icon">🏀</div>
+          <div class="empty-title">Aucun match joué</div>
+          <div class="empty-desc">La saison n'a pas encore commencé.</div>
+        </div>
+      `)}
 
       ${ffbbBlock}
     </div>
@@ -17489,6 +17540,100 @@ function openLicenceEditor(playerId) {
 
 // --- Coach : bandeau + badge, DANS l'écran Effectif (pas d'onglet dédié) -----
 // Bandeau de synthèse en tête de l'onglet « Saison en cours ».
+// Libellé court d'équipe pour la sous-ligne de l'effectif (vide si multi-effectif
+// désactivé : afficher « E1 » quand il n'y a qu'une équipe n'apprend rien).
+function _teamTagLabel(tag) {
+  try { return isMultiSquad() ? teamLabel(tag || 'e1', true) : ''; } catch (e) { return ''; }
+}
+
+// --- Filtre licence dans l'écran Effectif -----------------------------------
+// « Qui n'a pas encore sa licence » est LA question du coach en début de saison.
+// Le filtre vit à côté de l'effectif plutôt que dans un écran dédié : c'est là
+// qu'il relance les joueuses, et il y voit déjà tout le reste.
+const LICENCE_FILTERS = [
+  { id: 'all', label: 'Toutes' },
+  { id: 'todo', label: '🎫 À faire' },     // tout sauf « c'est fait »
+  { id: 'in_progress', label: '⏳ En cours' },
+  { id: 'done', label: '✅ Faite' },
+  { id: 'none', label: '⚪ Sans réponse' },
+];
+function setLicenceFilter(key) {
+  state._licenceFilter = LICENCE_FILTERS.some(f => f.id === key) ? key : 'all';
+  try { openEffectif(state._effectifTab || 'season'); } catch (e) { render(); }
+}
+function _licenceFilterKey() {
+  return LICENCE_FILTERS.some(f => f.id === state._licenceFilter) ? state._licenceFilter : 'all';
+}
+function _licenceMatchesFilter(playerId, key) {
+  const f = key || _licenceFilterKey();
+  if (f === 'all') return true;
+  const s = _licenceStatusOf(_licenceFor(playerId));
+  if (f === 'todo') return s !== 'done';          // inclut « pas encore répondu »
+  if (f === 'none') return s === null;
+  return s === f;
+}
+function renderLicenceFilterChips(active) {
+  if (!_licenceIsCoach() || !getActiveSeasonId()) return '';
+  const list = active || [];
+  if (list.length < 2) return '';   // un filtre sur 0 ou 1 joueuse n'aide personne
+  const key = _licenceFilterKey();
+  const count = f => list.filter(({ player: p }) => _licenceMatchesFilter(p.id, f)).length;
+  const shown = count(key);
+  return `
+    <div style="margin-bottom:10px">
+      <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:6px">
+        ${LICENCE_FILTERS.map(f => {
+          const n = count(f.id);
+          return `<button class="btn ${key === f.id ? 'btn-primary' : 'btn-secondary'}" style="min-height:30px;padding:0 9px;font-size:11px${!n && f.id !== 'all' ? ';opacity:0.45' : ''}" onclick="setLicenceFilter('${f.id}')">${f.label}${n ? ' · ' + n : ''}</button>`;
+        }).join('')}
+      </div>
+      <div style="font-size:9px;font-family:'JetBrains Mono';color:var(--ink-3);text-transform:uppercase;letter-spacing:0.05em">${shown} / ${list.length} joueuse${list.length > 1 ? 's' : ''}</div>
+    </div>`;
+}
+
+// Panneau d'une joueuse dans la saison : tout ce qui encombrait la ligne.
+function openPlayerSeasonPanel(playerId) {
+  if (!_licenceIsCoach()) return;
+  const p = (state.players || []).find(x => x.id === playerId);
+  if (!p) return;
+  const sid = state.currentSeasonId;
+  const link = (state.seasonPlayers || []).find(sp => sp.seasonId === sid && sp.playerId === playerId && !sp.leftAt);
+  const readOnly = isCurrentSeasonReadOnly();
+  const lm = _licenceMeta(_licenceStatusOf(_licenceFor(playerId)));
+  const l = _licenceFor(playerId);
+  const ls = _lastSeenBadge(p.lastSeenAt);
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow-muted">#${p.num} ${esc(p.name)}</div>
+        <div class="modal-title" style="font-size:15px">Dans la saison</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:10px;font-family:'JetBrains Mono';color:${ls.color};margin-bottom:12px">${ls.dot} ${ls.label}</div>
+
+      ${link && !readOnly && isMultiSquad() ? `
+        <div class="eyebrow-muted mb-2">Équipe</div>
+        <div style="margin-bottom:14px">${renderPlayerTeamTagToggle(playerId, link.teamTag)}</div>` : ''}
+
+      <div class="eyebrow-muted mb-2">🎫 Licence ${esc(getActiveSeasonId() || '')}</div>
+      <div style="padding:9px 11px;border:1px solid var(--border-soft);border-left:3px solid ${lm.color};border-radius:8px;margin-bottom:8px">
+        <div style="font-size:12px;color:${lm.color}">${lm.dot} ${esc(lm.label)}</div>
+        ${l ? `<div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px">Déclaré par ${l.updatedBy === 'coach' ? 'le coach' : 'la joueuse'}${l.updatedAt ? ' · ' + _notifAgo(l.updatedAt) : ''}</div>` : ''}
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        ${_licenceStatusOf(_licenceFor(playerId)) === 'done' ? '' : `<button class="btn btn-secondary" style="font-size:11px;padding:6px 10px" onclick="markLicenceDone('${esc(playerId)}')">✅ Marquer fait</button>`}
+        <button class="btn btn-secondary" style="font-size:11px;padding:6px 10px" onclick="openLicenceEditor('${esc(playerId)}')">✎ Modifier le statut</button>
+      </div>
+    </div>
+    ${link && !readOnly ? `
+      <div class="modal-footer">
+        <button class="btn btn-ghost btn-block" style="color:var(--red);font-size:12px" onclick="removePlayerFromSeason('${esc(playerId)}')">↗ Retirer de la saison</button>
+      </div>` : ''}
+  `);
+}
+
 function renderLicenceSummary() {
   if (!_licenceIsCoach()) return '';
   const sid = getActiveSeasonId();
@@ -17507,19 +17652,6 @@ function renderLicenceSummary() {
     <div style="padding:9px 11px;background:var(--bg-3);border-radius:8px;margin-bottom:12px">
       <div style="font-size:9px;font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em;color:var(--ink-3);margin-bottom:4px">🎫 Licences ${esc(sid)} · ${st.done}/${st.total}</div>
       <div style="display:flex;flex-wrap:wrap;gap:4px 10px;font-size:11px">${bits.join('')}</div>
-    </div>`;
-}
-// Badge + action rapide sur une ligne de l'effectif.
-function renderLicenceRosterBadge(playerId) {
-  if (!_licenceIsCoach() || !getActiveSeasonId()) return '';
-  const status = _licenceStatusOf(_licenceFor(playerId));
-  const m = _licenceMeta(status);
-  return `
-    <div style="display:flex;align-items:center;gap:4px;margin-top:3px">
-      <button class="btn btn-ghost" style="font-size:9px;padding:2px 5px;color:${m.color};font-family:'JetBrains Mono';text-transform:uppercase"
-        onclick="event.stopPropagation();openLicenceEditor('${playerId}')" title="Licence : ${esc(m.label)}">🎫 ${m.dot} ${esc(m.short)}</button>
-      ${status === 'done' ? '' : `<button class="btn btn-ghost" style="font-size:9px;padding:2px 5px;color:${LICENCE_META.done.color}"
-        onclick="event.stopPropagation();markLicenceDone('${playerId}')" title="Marquer sa licence comme faite">✅ Marquer fait</button>`}
     </div>`;
 }
 
@@ -17569,24 +17701,72 @@ function renderLicencePlayerCard() {
       </div>
     </div>`;
 }
+// --- Rappel en pop-up (joueuse) ---------------------------------------------
+// La carte d'accueil se laissait ignorer indéfiniment. Le rappel s'impose donc
+// à l'ouverture, mais reste ESQUIVABLE : « Plus tard » le repousse au lendemain.
+//
+// Report daté (et non sessionStorage) : une PWA gardée ouverte des jours
+// n'ouvre pas de nouvelle session, le rappel ne reviendrait jamais ; à
+// l'inverse, quelqu'un qui rouvre l'app dix fois dans la journée serait harcelé
+// par un simple flag de session. Une date par identité donne exactement
+// « plus aujourd'hui, on en reparle demain ». Même pattern que le rappel de
+// prépa (K.trainingRemind).
+const LICENCE_SNOOZE_KEY = 'pb8_licence_snooze';
+function _licenceSnoozedToday() {
+  try {
+    const m = JSON.parse(localStorage.getItem(LICENCE_SNOOZE_KEY) || '{}');
+    return m[themeIdentityKey()] === isoDate(new Date());
+  } catch (e) { return false; }
+}
+function snoozeLicencePrompt() {
+  try {
+    const m = JSON.parse(localStorage.getItem(LICENCE_SNOOZE_KEY) || '{}');
+    m[themeIdentityKey()] = isoDate(new Date());
+    localStorage.setItem(LICENCE_SNOOZE_KEY, JSON.stringify(m));
+  } catch (e) {}
+  try { closeModal(); } catch (e) {}
+}
+// Affiche le rappel si — et seulement si — il a quelque chose à demander.
+function maybeShowLicencePrompt(force) {
+  const a = state.auth;
+  if (!a || a.role !== 'player' || !a.playerId) return false;
+  if (!getActiveSeasonId()) return false;
+  const status = _licenceStatusOf(_licenceFor(a.playerId));
+  if (status === 'done') return false;             // plus jamais une fois fait
+  if (!force) {
+    if (_licenceSnoozedToday()) return false;
+    // Ne pas passer devant une popup déjà ouverte (diffusion, tirage de gage) :
+    // elles attendent une action, ce rappel non.
+    try { if (document.getElementById('modal-root')) return false; } catch (e) {}
+  }
+  openMyLicence({ prompt: true });
+  return true;
+}
+
 // Rouvre le choix après un « c'est fait » (erreur de clic, ou statut posé par
 // le coach que la joueuse veut corriger).
-function openMyLicence() {
+function openMyLicence(opts) {
   const a = state.auth;
   if (!a || a.role !== 'player' || !a.playerId) return;
+  const isPrompt = !!(opts && opts.prompt);
   const status = _licenceStatusOf(_licenceFor(a.playerId));
   openModal(`
     <div class="modal-header">
-      <div class="modal-title">🎫 Ma licence ${esc(getActiveSeasonId() || '')}</div>
-      <button class="modal-close" onclick="closeModal()">✕</button>
+      <div>
+        ${isPrompt ? '<div class="eyebrow">Rappel</div>' : ''}
+        <div class="modal-title">🎫 Ma licence ${esc(getActiveSeasonId() || '')}</div>
+      </div>
+      <button class="modal-close" onclick="${isPrompt ? 'snoozeLicencePrompt()' : 'closeModal()'}">✕</button>
     </div>
     <div class="modal-body">
+      ${isPrompt ? `<div style="font-size:12px;color:var(--ink-2);line-height:1.5;margin-bottom:12px">Où en es-tu de ta licence ? Ça prend 2 secondes et ça évite à ton coach de relancer tout le monde 🙏</div>` : ''}
       ${LICENCE_STATUSES.map(v => {
         const m = LICENCE_META[v];
         return `<button class="btn ${status === v ? 'btn-primary' : 'btn-secondary'} btn-block mb-2" style="text-align:left;font-size:12px;padding:10px;white-space:normal;line-height:1.35"
-          onclick="setMyLicenceStatus('${v}');closeModal()">${status === v ? '◉' : '○'} ${m.icon} ${esc(m.label)}</button>`;
+          onclick="setMyLicenceStatus('${v}');closeModal()">${status === v ? '◉' : '○'} ${m.icon} ${esc(m.label)}${v === 'email_missing' ? '<span style="display:block;font-size:10px;opacity:0.75;margin-top:2px">(vérifie tes spams — ton coach sera prévenu)</span>' : ''}</button>`;
       }).join('')}
     </div>
+    ${isPrompt ? `<div class="modal-footer"><button class="btn btn-ghost btn-block" onclick="snoozeLicencePrompt()">Plus tard</button></div>` : ''}
   `);
 }
 
@@ -34745,6 +34925,14 @@ function _initPlayersSync() {
             setTimeout(() => { try { maybeShowGageReveal(); } catch (e) {} }, 1400);
           }
         } catch (e) { console.warn('[gage] boot reveal:', e.message); }
+        // LICENCE : rappel non bloquant, en dernier de la file (les gages et
+        // les diffusions passent avant — eux exigent une action, pas lui).
+        try {
+          if (state.auth && state.auth.role === 'player' && !window._licenceBootChecked) {
+            window._licenceBootChecked = true;
+            setTimeout(() => { try { maybeShowLicencePrompt(); } catch (e) {} }, 2200);
+          }
+        } catch (e) { console.warn('[licence] boot prompt:', e.message); }
         // Subscribe Realtime sur toutes les entités configurées. On utilise
         // scheduleRender (debouncé 100ms) au lieu de render() direct pour
         // collapser plusieurs events Realtime en un seul re-render.
@@ -35776,7 +35964,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-29.89';
+const APP_VERSION = '2026-07-29.90';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {

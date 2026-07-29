@@ -30,7 +30,9 @@ const mkEl = () => ({
   getContext: () => null, setAttribute() {}, focus() {},
 });
 const doc = {
-  getElementById: () => mkEl(), createElement: mkEl,
+  // 'modal-root' absent par défaut = aucune modale ouverte (comportement réel).
+  getElementById: (id) => (id === 'modal-root' ? null : mkEl()),
+  createElement: mkEl,
   querySelector: () => null, querySelectorAll: () => [],
   addEventListener() {}, removeEventListener() {},
   body: mkEl(), documentElement: mkEl(), head: mkEl(), visibilityState: 'visible',
@@ -304,32 +306,83 @@ t('le bandeau est vide côté joueuse', () => {
   assert(ctx.renderLicenceSummary() === '', 'bandeau coach exposé à la joueuse');
   asCoach();
 });
-t('le badge de ligne porte le statut et l\'action « marquer fait »', () => {
+// La ligne d'effectif est allégée : le statut n'y est plus qu'une pastille, et
+// toutes les actions sont derrière un tap (openPlayerSeasonPanel).
+t('la ligne d\'effectif porte la pastille de licence, pas les boutons', () => {
   seed();
-  const b = ctx.renderLicenceRosterBadge('pA');
-  assert(/Sans r.ponse/i.test(b), 'statut absent : ' + b);
-  assert(b.includes("markLicenceDone('pA')"), 'action rapide absente');
-  assert(b.includes("openLicenceEditor('pA')"), 'accès au détail absent');
+  ctx.openEffectif('season');
+  const m = ctx.__lastModal || '';
+  assert(m.includes("openPlayerSeasonPanel('pA')"), 'la ligne n\'ouvre pas le panneau');
+  assert(!m.includes('markLicenceDone('), 'les actions encombrent encore la ligne');
+  assert(m.includes('🎫'), 'pastille de licence absente');
 });
-t('« marquer fait » disparaît quand c\'est déjà fait', () => {
+t('le panneau joueuse porte le statut ET les actions', () => {
+  seed();
+  ctx.openPlayerSeasonPanel('pA');
+  const m = ctx.__lastModal || '';
+  assert(/Pas encore r.pondu/i.test(m), 'statut absent : ' + m.slice(0, 200));
+  assert(m.includes("markLicenceDone('pA')"), 'action « marquer fait » absente');
+  assert(m.includes("openLicenceEditor('pA')"), 'accès au détail absent');
+  assert(m.includes("removePlayerFromSeason('pA')"), 'retrait de la saison absent');
+});
+t('« marquer fait » disparaît du panneau quand c\'est déjà fait', () => {
   seed();
   ctx.markLicenceDone('pA');
-  const b = ctx.renderLicenceRosterBadge('pA');
-  assert(!b.includes('markLicenceDone'), 'action redondante encore affichée');
-  assert(/Fait/.test(b), 'statut fait absent');
+  ctx.openPlayerSeasonPanel('pA');
+  const m = ctx.__lastModal || '';
+  assert(!m.includes('markLicenceDone('), 'action redondante encore affichée');
+  assert(/C&#39;est fait|C'est fait/.test(m), 'statut fait absent');
 });
-t('le badge est vide côté joueuse', () => {
+t('le panneau est un no-op côté joueuse', () => {
   seed(); asPlayer('pA');
-  assert(ctx.renderLicenceRosterBadge('pB') === '', 'badge coach exposé à la joueuse');
+  ctx.__lastModal = null;
+  ctx.openPlayerSeasonPanel('pB');
+  assert(!ctx.__lastModal, 'panneau coach ouvert pour une joueuse');
   asCoach();
 });
-t('l\'écran Effectif rend avec le bandeau et les badges', () => {
+t('l\'écran Effectif rend avec le bandeau de synthèse', () => {
+  seed();
+  ctx.markLicenceDone('pA');
+  ctx.openEffectif('season');
+  assert((ctx.__lastModal || '').includes('🎫 Licences'), 'bandeau absent de l\'effectif');
+});
+
+// --- 6bis) filtre licence dans l'effectif -----------------------------------
+t('les 5 filtres sont proposés avec leur compte', () => {
   seed();
   ctx.markLicenceDone('pA');
   ctx.openEffectif('season');
   const m = ctx.__lastModal || '';
-  assert(m.includes('🎫 Licences'), 'bandeau absent de l\'effectif');
-  assert(m.includes("markLicenceDone('pB')"), 'badge absent des lignes');
+  ['all', 'todo', 'in_progress', 'done', 'none'].forEach(f =>
+    assert(m.includes("setLicenceFilter('" + f + "')"), 'filtre ' + f + ' absent'));
+  assert(/\d+ \/ 3 joueuses/.test(m), 'compteur X / N absent');
+});
+t('« à faire » retient tout sauf « c\'est fait » (dont les sans-réponse)', () => {
+  seed();
+  ctx.markLicenceDone('pA');
+  assert(ctx._licenceMatchesFilter('pA', 'todo') === false, 'une licence faite est listée à faire');
+  assert(ctx._licenceMatchesFilter('pB', 'todo') === true, 'une sans-réponse devrait être à faire');
+});
+t('« sans réponse » ne retient QUE l\'absence de déclaration', () => {
+  seed();
+  asPlayer('pA'); ctx.setMyLicenceStatus('in_progress'); asCoach();
+  assert(ctx._licenceMatchesFilter('pA', 'none') === false, 'une déclarée passe pour sans réponse');
+  assert(ctx._licenceMatchesFilter('pB', 'none') === true, 'une non déclarée manque');
+});
+t('le filtre restreint réellement la liste affichée', () => {
+  seed();
+  ctx.markLicenceDone('pA');
+  ctx.setLicenceFilter('done');
+  const m = ctx.__lastModal || '';
+  assert(m.includes('Candice'), 'la joueuse filtrée manque');
+  assert(!m.includes('Delph'), 'une joueuse hors filtre est affichée');
+  ctx.setLicenceFilter('all');
+});
+t('un filtre vide affiche un état vide, pas une liste muette', () => {
+  seed();
+  ctx.setLicenceFilter('done');   // personne n'a fait sa licence
+  assert(/Aucune joueuse dans ce filtre/.test(ctx.__lastModal || ''), 'état vide absent');
+  ctx.setLicenceFilter('all');
 });
 t('la modale de détail liste les 4 états et l\'auteur', () => {
   seed();
@@ -338,6 +391,89 @@ t('la modale de détail liste les 4 états et l\'auteur', () => {
   const m = ctx.__lastModal || '';
   ctx.LICENCE_STATUSES.forEach(v => assert(m.includes("setLicenceStatusAsCoach('pA','" + v + "')"), 'état ' + v + ' absent'));
   assert(/D.clar. par le coach/i.test(m), 'auteur absent');
+});
+
+// --- 6ter) rappel en pop-up (joueuse) ---------------------------------------
+// La carte d'accueil se laissait ignorer indéfiniment : le rappel s'impose à
+// l'ouverture, mais reste esquivable — « Plus tard » le repousse AU LENDEMAIN.
+function clearSnooze() { try { ctx.localStorage.removeItem('pb8_licence_snooze'); } catch (e) {} }
+
+t('sans déclaration, le rappel s\'affiche', () => {
+  seed(); clearSnooze(); asPlayer('pA');
+  ctx.__lastModal = null;
+  assert(ctx.maybeShowLicencePrompt() === true, 'rappel non déclenché');
+  const m = ctx.__lastModal || '';
+  assert(/Rappel/.test(m), 'ce n\'est pas le mode rappel');
+  ctx.LICENCE_STATUSES.forEach(v => assert(m.includes("setMyLicenceStatus('" + v + "')"), 'choix ' + v + ' absent'));
+  assert(m.includes('snoozeLicencePrompt()'), 'bouton « Plus tard » absent');
+  asCoach();
+});
+t('une fois « c\'est fait », plus jamais de rappel', () => {
+  seed(); clearSnooze(); asPlayer('pA');
+  ctx.setMyLicenceStatus('done');
+  assert(ctx.maybeShowLicencePrompt() === false, 'rappel affiché alors que c\'est fait');
+  asCoach();
+});
+t('un statut intermédiaire NE dispense PAS du rappel', () => {
+  seed(); clearSnooze(); asPlayer('pA');
+  ctx.setMyLicenceStatus('in_progress');
+  assert(ctx.maybeShowLicencePrompt() === true, 'rappel abandonné trop tôt');
+  asCoach();
+});
+t('« Plus tard » coupe le rappel pour la journée', () => {
+  seed(); clearSnooze(); asPlayer('pA');
+  assert(ctx.maybeShowLicencePrompt() === true, 'rappel initial absent');
+  ctx.snoozeLicencePrompt();
+  assert(ctx.maybeShowLicencePrompt() === false, 'rappel réaffiché le même jour');
+  asCoach();
+});
+t('...mais il revient le lendemain (report DATÉ, pas un flag de session)', () => {
+  seed(); asPlayer('pA');
+  // On simule un report posé la veille.
+  ctx.localStorage.setItem('pb8_licence_snooze', JSON.stringify({ [ctx.themeIdentityKey()]: '2020-01-01' }));
+  assert(ctx.maybeShowLicencePrompt() === true, 'le report d\'hier bloque encore aujourd\'hui');
+  clearSnooze(); asCoach();
+});
+t('le rappel ne passe pas devant une popup déjà ouverte', () => {
+  seed(); clearSnooze(); asPlayer('pA');
+  const realGet = doc.getElementById;
+  doc.getElementById = (id) => mkEl();   // une modale est ouverte
+  assert(ctx.maybeShowLicencePrompt() === false, 'le rappel a doublé une popup en cours');
+  doc.getElementById = realGet;
+  asCoach();
+});
+t('...sauf en ouverture manuelle (force)', () => {
+  seed(); clearSnooze(); asPlayer('pA');
+  ctx.snoozeLicencePrompt();
+  assert(ctx.maybeShowLicencePrompt(true) === true, 'l\'ouverture manuelle est bloquée par le report');
+  asCoach();
+});
+t('aucun rappel côté coach', () => {
+  seed(); clearSnooze();
+  assert(ctx.maybeShowLicencePrompt() === false, 'rappel joueuse déclenché pour le coach');
+});
+t('aucun rappel sans saison active', () => {
+  seed(); clearSnooze(); asPlayer('pA');
+  S.activeSeasonId = null; S.seasons = [];
+  assert(ctx.maybeShowLicencePrompt() === false, 'rappel hors saison');
+  asCoach();
+});
+t('l\'ouverture normale n\'affiche NI « Rappel » ni « Plus tard »', () => {
+  seed(); clearSnooze(); asPlayer('pA');
+  ctx.openMyLicence();
+  const m = ctx.__lastModal || '';
+  assert(!/snoozeLicencePrompt/.test(m), '« Plus tard » proposé hors rappel');
+  asCoach();
+});
+t('le rappel est branché au boot, après gages et diffusions', () => {
+  // On ancre sur le hook de boot lui-même : '_gageBootChecked' apparaît AUSSI
+  // dans doLogout, bien plus haut dans le fichier.
+  const gage = html.indexOf('!window._gageBootChecked');
+  const lic = html.indexOf('!window._licenceBootChecked');
+  assert(gage > 0 && lic > gage, 'le rappel licence doit venir APRÈS les gages');
+  const boot = html.slice(gage, lic + 400);
+  assert(/maybeShowLicencePrompt\(\)/.test(boot), 'rappel non branché au boot');
+  assert(/_licenceBootChecked/.test(boot), 'garde one-shot absente');
 });
 
 // --- 7) sérialisation (bloc module, hors portée du vm) ----------------------

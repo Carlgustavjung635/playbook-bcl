@@ -87,11 +87,20 @@ console.log('SCÉNARIO 4 — corps Saison (statique) : boutons + listes conserv�
 {
   const b = extractFn(html, '_effectifSeasonBody');
   t('empty state si pas de saison', () => assert.ok(/Aucune saison sélectionnée/.test(b)));
-  t('boutons Ajouter / Créer + retrait + réintégration conservés', () => {
+  t('boutons Ajouter / Créer + réintégration conservés', () => {
     assert.ok(/openAddPlayersToSeasonModal\(\)/.test(b));
     assert.ok(/openCreateNewPlayerForSeason\(\)/.test(b));
-    assert.ok(/removePlayerFromSeason\(/.test(b));
     assert.ok(/restorePlayerInSeason\(/.test(b));
+  });
+  t('la ligne ouvre le panneau joueuse, elle ne porte plus les actions', () => {
+    // v.90 : la ligne empilait équipe + dernière connexion + 3 boutons d'équipe
+    // + licence + « partir ». Tout est passé derrière un tap.
+    assert.ok(/openPlayerSeasonPanel\(/.test(b), 'la ligne n\'ouvre pas le panneau');
+    assert.ok(!/removePlayerFromSeason\(/.test(b), '« partir » encombre encore la ligne');
+  });
+  t('« retirer de la saison » vit désormais dans le panneau', () => {
+    const panel = extractFn(html, 'openPlayerSeasonPanel');
+    assert.ok(/removePlayerFromSeason\(/.test(panel), 'retrait introuvable dans le panneau');
   });
 }
 

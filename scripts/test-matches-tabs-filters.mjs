@@ -248,14 +248,53 @@ t('les boutons Dashboard et + MATCH restent là', () => {
   const h = ctx.renderMatches();
   ok(h.includes('openDashboard()') && h.includes('editMatch()'), 'actions d\'en-tête perdues');
 });
-t('la vue JOUEUSE n\'est pas touchée', () => {
-  seed([M('a', '2026-09-09'), M('c', '2026-05-12', 60, 55)]);
+// La vue joueuse reçoit les MÊMES onglets et périodes (v.90) — l'app doit se
+// comporter pareil des deux côtés. Ce qui doit rester différent, c'est la
+// SOURCE : elle ne voit que SES convocations, jamais tous les matchs de l'équipe.
+// La liste « à venir » de la joueuse vient de getAllEventsBetween, donc de ses
+// CONVOCATIONS — pas de state.matches. Le décor doit en poser une par match,
+// sinon on testerait une vue vide sans s'en rendre compte.
+function asPlayer(matches) {
+  seed(matches);
   S.auth = { role: 'player', playerId: 'pX' };
   S.players = [{ id: 'pX', name: 'Lea', num: 7 }];
   S.seasonPlayers = [{ seasonId: '2026-2027', playerId: 'pX', teamTag: 'e1', joinedAt: '2026-07-01', leftAt: null }];
+  S.convocations = (matches || []).map((m, i) => ({
+    id: 'cv' + i, type: 'match', title: 'vs ' + m.opponent, date: m.date, time: '19:30',
+    location: '', note: '', recurrence: null, cancelledInstances: [], instanceOverrides: {},
+    attachments: [], responses: {}, seasonId: '2026-2027', teamTag: 'e1', closed: false,
+  }));
+}
+t('la vue joueuse rend et porte les mêmes onglets', () => {
+  asPlayer([M('a', '2026-09-09'), M('c', '2026-05-12', 60, 55)]);
   const h = ctx.renderPlayerMatches();
   ok(typeof h === 'string' && h.length > 0, 'la vue joueuse ne rend plus');
-  ok(!h.includes('setMatchTab'), 'les onglets coach ont fuité côté joueuse');
+  ok(h.includes("setMatchTab('upcoming')") && h.includes("setMatchTab('played')"), 'onglets absents côté joueuse');
+});
+t('la vue joueuse porte les mêmes périodes', () => {
+  asPlayer([M('a', '2026-09-09')]);
+  const h = ctx.renderPlayerMatches();
+  ['all', 'week', 'next', 'month'].forEach(k =>
+    ok(h.includes("setMatchRange('" + k + "')"), 'période ' + k + ' absente côté joueuse'));
+});
+t('l\'onglet « joués » de la joueuse liste ses matchs joués', () => {
+  asPlayer([M('c', '2026-05-12', 60, 55)]);
+  ctx.setMatchTab('played');
+  ok(ctx.renderPlayerMatches().includes('Adv c'), 'match joué absent');
+  ctx.setMatchTab('upcoming');
+});
+t('l\'horizon « toute la saison » ne tronque plus à 90 jours', () => {
+  // Un match à +6 mois : invisible avec l'ancien horizon, et le compteur mentait.
+  asPlayer([M('loin', '2027-01-15')]);
+  const src = html.slice(html.indexOf('function renderPlayerMatches'), html.indexOf('function renderPlayerCalendrier'));
+  ok(/365 \* 86400000/.test(src), 'horizon toujours à 90 jours');
+  ok(!/90 prochains jours/.test(src), 'libellé « 90 prochains jours » encore présent');
+});
+t('la joueuse ne voit jamais les actions du coach', () => {
+  asPlayer([M('a', '2026-09-09')]);
+  const h = ctx.renderPlayerMatches();
+  ok(!h.includes('editMatch()'), '« + MATCH » exposé à la joueuse');
+  ok(!h.includes('openDashboard()'), 'le dashboard coach est exposé à la joueuse');
 });
 t('ouvrir un match affiche toujours le détail', () => {
   seed([M('a', '2026-09-09')]);
