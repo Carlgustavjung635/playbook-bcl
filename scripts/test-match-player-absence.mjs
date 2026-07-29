@@ -22,7 +22,11 @@ function extractFn(name) {
   throw new Error('déséquilibré : ' + name);
 }
 
-const src = ['_effectiveConvocStatus', '_matchConvoc', 'matchSaveAbsence', 'matchRestorePresence']
+// _rsvpStamp / _rsvpPresent horodatent la réponse RSVP (sans quoi un désistement
+// n'a pas de date et ne peut pas entrer dans le feed de notifs) et écrivent un
+// statut 'present' explicite au lieu de supprimer la ligne. Extraits eux aussi :
+// matchSaveAbsence/matchRestorePresence les appellent.
+const src = ['_rsvpStamp', '_rsvpPresent', '_effectiveConvocStatus', '_matchConvoc', 'matchSaveAbsence', 'matchRestorePresence']
   .map(extractFn).join('\n\n');
 function build(state, formValues = { 'ab-reason': 'Blessure', 'ab-msg': 'désolée' }) {
   const log = { notified: [], persisted: 0, closed: 0, rendered: 0 };
@@ -58,13 +62,27 @@ console.log('SCÉNARIO 1 — déclarer absente : écrit responses + notifie le c
   });
 }
 
-console.log('SCÉNARIO 2 — revenir sur sa décision : supprime la réponse + notifie');
+console.log('SCÉNARIO 2 — revenir sur sa décision : statut present horodaté + notifie');
 {
   const s = state('player', { pl: { status: 'absent', reason: 'Blessure' } });
   const { api, log } = build(s);
   api.matchRestorePresence('m1');
-  t('c.responses[pid] supprimé (retour présente par défaut)', () => {
-    assert.strictEqual(s.convocations[0].responses.pl, undefined);
+  // On n'EFFACE plus la ligne : on écrit un statut 'present' horodaté. Effacer
+  // rendait le retour de présence invisible pour le coach (aucune trace, donc
+  // aucune notif possible). Tous les lecteurs de l'effectif traitent déjà
+  // `status === 'present'` exactement comme l'absence de ligne.
+  t('c.responses[pid] porte un statut present horodaté', () => {
+    const r = s.convocations[0].responses.pl;
+    assert.strictEqual(r.status, 'present');
+    assert.ok(Number.isFinite(r.at) && r.at > 0, 'horodatage manquant');
+  });
+  t('équivalent à « présente » pour les lecteurs d\'effectif', () => {
+    const r = s.convocations[0].responses.pl;
+    assert.ok(!r || r.status === 'present');       // idiome getMatchRoster / appel
+    assert.ok(!(r && r.status === 'absent'));      // idiome comptage des absentes
+  });
+  t('_effectiveConvocStatus renvoie bien present', () => {
+    assert.strictEqual(api._effectiveConvocStatus(s.convocations[0], '2026-07-10', 'pl'), 'present');
   });
   t('push coach absent→present', () => assert.deepStrictEqual(log.notified, [['absent', 'present']]));
 }

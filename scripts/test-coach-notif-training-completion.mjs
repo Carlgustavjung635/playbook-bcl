@@ -121,7 +121,8 @@ seed();
 ctx.render = () => {}; ctx.showToast = () => {}; ctx.notifyPush = () => {};
 ctx.openModal = h => { ctx.__lastModal = h; };
 
-const trItems = () => ctx.notifFeed().filter(i => String(i.id).startsWith('trdone-'));
+const trItems = (o) => ctx.notifFeed(o).filter(i => String(i.id).startsWith('trdone-'));
+const allItems = () => ctx.notifFeed({ showRead: true });
 
 // --- 1) LE BUG D'ORIGINE ----------------------------------------------------
 t('la validation apparaît dans le feed coach (cloche non vide)', () => {
@@ -146,12 +147,25 @@ t('l\'action pointe une fonction qui existe et rend sans throw', () => {
   assert(ctx.__lastModal && ctx.__lastModal.includes('2.9km'), 'le suivi ne montre pas la distance');
 });
 
-// --- 2) filigrane « tout lu » ----------------------------------------------
-t('après markAllNotifsRead, l\'entrée reste mais devient lue', () => {
+// --- 2) filigrane : marquer lu → DISPARAÎT (demande explicite du coach) -----
+t('marquée lue, l\'entrée disparaît du flux par défaut', () => {
   ctx.setNotifSeenAt(DONE_AT + 60000);
-  const it = trItems();
-  assert(it.length === 1, 'entrée disparue une fois lue');
-  assert(it[0].unread === false, 'toujours non lue');
+  assert(trItems().length === 0, 'entrée lue encore affichée');
+});
+t('...mais reste consultable via showRead (historique non détruit)', () => {
+  const it = trItems({ showRead: true });
+  assert(it.length === 1, 'historique perdu');
+  assert(it[0].unread === false, 'devrait être marquée lue');
+  ctx.setNotifSeenAt(DONE_AT - 60000);
+});
+t('les items ACTIONNABLES survivent au « tout marquer lu »', () => {
+  // Un gage à modérer reste tant qu'il n'est PAS modéré : le filigrane ne doit
+  // pas escamoter une tâche en attente.
+  S.gages = [{ id: 'g1', text: 'Chanter', status: 'pending', seasonId: '2026-2027' }];
+  ctx.setNotifSeenAt(Date.now() + 60000);
+  const todos = ctx.notifFeed().filter(i => i.id === 'gage-mod');
+  assert(todos.length === 1, 'la tâche « gages à modérer » a disparu une fois lue');
+  S.gages = [];
   ctx.setNotifSeenAt(DONE_AT - 60000);
 });
 
@@ -195,7 +209,7 @@ t('2 validations de la même joueuse = 2 entrées distinctes (jour prévu au dé
     runningDistanceKm: null, pointsTotal: 10, notes: '',
     createdAt: DONE_AT - 86400000, updatedAt: DONE_AT - 86400000, deletedAt: null,
   });
-  const it = trItems();
+  const it = trItems({ showRead: true });
   assert(it.length === 2, 'attendu 2, reçu ' + it.length);
   assert(it[0].detail !== it[1].detail, 'les 2 entrées sont indiscernables : ' + it[0].detail);
 });
@@ -208,7 +222,7 @@ t('la liste est bornée à 30 par programme (notifFeed tourne à chaque render)'
       createdAt: DONE_AT - i * 3600000, updatedAt: DONE_AT - i * 3600000, deletedAt: null,
     });
   }
-  assert(trItems().length === 30, 'borne non respectée : ' + trItems().length);
+  assert(trItems({ showRead: true }).length === 30, 'borne non respectée : ' + trItems({ showRead: true }).length);
 });
 
 // --- 5) le feed ne throw pas sur une donnée partielle -----------------------
@@ -221,6 +235,126 @@ t('une validation sans date ni joueuse connue ne casse pas le feed', () => {
   const feed = ctx.notifFeed();
   assert(Array.isArray(feed), 'feed cassé');
   assert(trItems().length === 0, 'row sans horodatage listée quand même');
+});
+
+// --- 6) ISOLATION DES SOURCES ----------------------------------------------
+// Le mode de panne d'origine : tout le feed dans UN seul try → la 1re source qui
+// throw fait disparaître en silence toutes les suivantes. Le coach ne voyait
+// plus que les gages (source #3) parce que tout ce qui suivait mourait avec.
+t('une source qui throw ne tue PAS les autres sources', () => {
+  seed();
+  S.trainingCompletions[0].deletedAt = null;
+  const boom = () => { throw new Error('source cassée'); };
+  const saved = ctx.currentSeasonMatches;
+  ctx.currentSeasonMatches = boom;              // casse « stats-match » (avant prépa)
+  const it = trItems();
+  ctx.currentSeasonMatches = saved;
+  assert(it.length === 1, 'la source prépa est morte avec la source cassée');
+});
+t('une source qui throw ne vide pas non plus les gages', () => {
+  seed();
+  S.gageDraws = [{ id: 'd1', playerId: 'pA', gageId: 'g1', status: 'accepted', completedAt: DONE_AT }];
+  S.gages = [{ id: 'g1', text: 'Chanter', status: 'approved', seasonId: '2026-2027' }];
+  const saved = ctx._coachTrainingPrograms;
+  ctx._coachTrainingPrograms = () => { throw new Error('boom'); };
+  const draws = ctx.notifFeed().filter(i => String(i.id).startsWith('draw-'));
+  ctx._coachTrainingPrograms = saved;
+  assert(draws.length === 1, 'les gages ont disparu à cause d\'une autre source');
+});
+
+// --- 7) DÉSISTEMENTS (coach only) ------------------------------------------
+// Postérieur au filigrane posé par seed() (DONE_AT − 60 s) : sans ça les RSVP
+// seraient « déjà lus » et donc masqués par défaut — le test testerait le vide.
+const RSVP_AT = DONE_AT + 3600000;
+function seedRsvp() {
+  seed();
+  S.trainingCompletions = [];
+  S.currentSeasonId = '2026-2027';
+  S.convocations = [
+    { id: 'cv1', type: 'training', title: 'Entraînement', date: '2026-07-30', time: '19:30',
+      seasonId: '2026-2027', teamTag: 'both', recurrence: null, instanceOverrides: {},
+      responses: { pA: { status: 'absent', reason: 'Blessure', at: RSVP_AT } } },
+    { id: 'cv2', type: 'match', title: 'vs Untel', date: '2026-08-01',
+      seasonId: '2026-2027', teamTag: 'both', recurrence: null, instanceOverrides: {},
+      responses: { pB: { status: 'present', reason: '', at: RSVP_AT + 1000 } } },
+  ];
+}
+const rsvpItems = (o) => ctx.notifFeed(o).filter(i => String(i.id).startsWith('rsvp-'));
+
+t('un désistement entraînement apparaît chez le coach', () => {
+  seedRsvp();
+  const it = rsvpItems().filter(i => i.id.includes('pA'));
+  assert(it.length === 1, 'désistement absent (' + it.length + ')');
+  assert(it[0].title === 'Désistement entraînement', 'titre = ' + it[0].title);
+  assert(it[0].detail.includes('#7 Joueuse A'), 'joueuse absente : ' + it[0].detail);
+  assert(it[0].detail.includes('Blessure'), 'motif absent : ' + it[0].detail);
+});
+t('un désistement match est titré comme tel', () => {
+  seedRsvp();
+  S.convocations[1].responses = { pB: { status: 'absent', reason: 'Vacances', at: RSVP_AT } };
+  const it = rsvpItems().filter(i => i.id.includes('pB'));
+  assert(it.length === 1, 'désistement match absent');
+  assert(it[0].title === 'Désistement match', 'titre = ' + it[0].title);
+});
+t('un retour de présence est notifié séparément', () => {
+  seedRsvp();
+  const it = rsvpItems().filter(i => i.id.includes('pB'));
+  assert(it.length === 1 && it[0].title === 'Retour de présence', 'retour absent : ' + JSON.stringify(it));
+});
+t('un désistement sur une OCCURRENCE récurrente remonte aussi', () => {
+  seedRsvp();
+  S.convocations[0].responses = {};
+  S.convocations[0].recurrence = { freq: 'weekly', days: [4] };
+  S.convocations[0].instanceOverrides = { '2026-07-30': { responses: { pA: { status: 'absent', reason: 'Boulot', at: RSVP_AT } } } };
+  const it = rsvpItems().filter(i => i.id.includes('pA'));
+  assert(it.length === 1, 'désistement sur occurrence récurrente ignoré');
+  assert(it[0].detail.includes('Boulot'), 'motif absent');
+});
+t('pas de doublon quand instanceOverrides recopie c.responses', () => {
+  seedRsvp();
+  S.convocations[0].recurrence = { freq: 'weekly', days: [4] };
+  // saveInstanceAbsence initialise l'override PAR COPIE de c.responses
+  S.convocations[0].instanceOverrides = { '2026-07-30': { responses: { pA: { status: 'absent', reason: 'Blessure', at: RSVP_AT } } } };
+  const it = rsvpItems().filter(i => i.id.includes('pA') && i.id.includes('2026-07-30'));
+  assert(it.length === 1, 'doublon : ' + it.length + ' entrées pour le même RSVP');
+});
+t('un RSVP SANS horodatage est ignoré (legacy, pas de place dans un flux trié)', () => {
+  seedRsvp();
+  S.convocations[0].responses = { pA: { status: 'absent', reason: 'Blessure' } };
+  assert(rsvpItems({ showRead: true }).filter(i => i.id.includes('pA')).length === 0, 'legacy sans date listé');
+});
+t('AUDIENCE : la joueuse ne voit AUCUN désistement (ni le sien, ni celui des autres)', () => {
+  seedRsvp();
+  S.auth = { role: 'player', playerId: 'pA' };
+  const leak = ctx.notifFeed({ showRead: true }).filter(i => String(i.id).startsWith('rsvp-'));
+  assert(leak.length === 0, 'fuite de ' + leak.length + ' désistement(s) côté joueuse');
+  S.auth = { role: 'coach', coachId: 'admin' };
+});
+t('toute entrée porte une audience valide', () => {
+  seedRsvp();
+  const bad = allItems().filter(i => !['coach', 'player', 'all'].includes(i.audience));
+  assert(bad.length === 0, 'audience manquante sur : ' + JSON.stringify(bad.map(i => i.id)));
+});
+t('le feed coach ne contient QUE du coach/all', () => {
+  seedRsvp();
+  assert(allItems().every(i => i.audience !== 'player'), 'entrée joueuse dans le feed coach');
+});
+
+// --- 8) joueuse : ses propres validations de prépa --------------------------
+t('la joueuse voit SA validation, pas celle des autres', () => {
+  seed();
+  S.trainingCompletions.push({
+    id: 'compB', programId: 'prog1', sessionId: 'sMer', playerId: 'pB',
+    datePlanned: '2026-07-29', dateCompleted: DONE_AT, contractLevel: 'med',
+    basePoints: 20, pointsTotal: 20, runningDistanceKm: 5, postMessage: '', notes: '',
+    createdAt: DONE_AT, updatedAt: DONE_AT, deletedAt: null,
+  });
+  S.auth = { role: 'player', playerId: 'pA' };
+  const mine = ctx.notifFeed({ showRead: true }).filter(i => String(i.id).startsWith('trmine-'));
+  assert(mine.length === 1, 'attendu 1 validation perso, reçu ' + mine.length);
+  assert(mine[0].id === 'trmine-comp1', 'mauvaise validation : ' + mine[0].id);
+  assert(mine[0].detail.includes('2.92'), 'distance absente : ' + mine[0].detail);
+  S.auth = { role: 'coach', coachId: 'admin' };
 });
 
 console.log(R.join('\n'));

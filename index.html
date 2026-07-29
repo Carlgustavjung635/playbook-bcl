@@ -3972,7 +3972,13 @@ const ENTITIES = [
         byConv[r.convocation_id][r.player_id] = {
           status: r.status, reason: r.reason,
           lateMinutes: r.late_minutes != null ? Number(r.late_minutes) : null,
-          instanceDate: r.instance_date
+          instanceDate: r.instance_date,
+          // `at` (horodatage du RSVP) est posé côté client par _rsvpStamp mais
+          // n'est PAS dans le dump → sur l'appareil du COACH, qui ne fait que
+          // recevoir, il serait toujours absent. On le reconstruit depuis
+          // `updated_at` (trigger serveur, déjà en base) : sans ça, aucun
+          // désistement d'une joueuse ne peut apparaître dans le feed coach.
+          at: r.updated_at ? Date.parse(r.updated_at) : null
         };
       });
       (state.convocations || []).forEach(c => { if (byConv[c.id]) c.responses = byConv[c.id]; });
@@ -10798,8 +10804,8 @@ function playerToggleAbsence(cid) {
   const isPresent = !r || r.status === 'present';
 
   if (!isPresent) {
-    // Currently absent → reset to present
-    delete c.responses[p.id];
+    // Currently absent → reset to present (ligne 'present' horodatée, pas un delete)
+    c.responses[p.id] = _rsvpPresent();
     persist(); render(); return;
   }
 
@@ -10831,11 +10837,11 @@ function confirmPlayerAbsence(cid) {
   const c = state.convocations.find(x => x.id === cid); if (!c) return;
   const prev = _effectiveConvocStatus(c, null, p.id);
   c.responses = c.responses || {};
-  c.responses[p.id] = {
+  c.responses[p.id] = _rsvpStamp({
     status: 'absent',
     reason: document.getElementById('ab-reason').value,
     message: document.getElementById('ab-msg').value.trim(),
-  };
+  });
   persist(); closeModal(); render();
   _notifyCoachConvocResponse(c, null, prev, 'absent');
 }
@@ -14726,11 +14732,11 @@ function matchSaveAbsence(matchId) {
   const pid = state.auth.playerId;
   const prev = _effectiveConvocStatus(c, m.date, pid);
   c.responses = c.responses || {};
-  c.responses[pid] = {
+  c.responses[pid] = _rsvpStamp({
     status: 'absent',
     reason: (document.getElementById('ab-reason') || {}).value || '',
     message: ((document.getElementById('ab-msg') || {}).value || '').trim(),
-  };
+  });
   persist(); closeModal(); render();
   _notifyCoachConvocResponse(c, m.date, prev, 'absent');
 }
@@ -14741,7 +14747,8 @@ function matchRestorePresence(matchId) {
   if (!m || !c) return;
   const pid = state.auth.playerId;
   const prev = _effectiveConvocStatus(c, m.date, pid);
-  if (c.responses) delete c.responses[pid];
+  c.responses = c.responses || {};
+  c.responses[pid] = _rsvpPresent();
   persist(); render();
   _notifyCoachConvocResponse(c, m.date, prev, 'present');
 }
@@ -17480,18 +17487,19 @@ function saveAbsence(convocId, playerId) {
   const c = state.convocations.find(x => x.id === convocId);
   const prev = _effectiveConvocStatus(c, null, playerId);
   c.responses = c.responses || {};
-  c.responses[playerId] = {
+  c.responses[playerId] = _rsvpStamp({
     status: 'absent',
     reason: document.getElementById('ab-reason').value,
     message: document.getElementById('ab-msg').value.trim(),
-  };
+  });
   persist(); closeModal(); render();
   _notifyCoachConvocResponse(c, null, prev, 'absent');
 }
 function markPresent(convocId, playerId) {
   const c = state.convocations.find(x => x.id === convocId);
   const prev = _effectiveConvocStatus(c, null, playerId);
-  if (c.responses) delete c.responses[playerId];
+  c.responses = c.responses || {};
+  c.responses[playerId] = _rsvpPresent();
   persist(); render();
   _notifyCoachConvocResponse(c, null, prev, 'present');
 }
@@ -26345,10 +26353,10 @@ function confirmAbsentDuringCall(parentId, dateStr, pid) {
     c.instanceOverrides = c.instanceOverrides || {};
     c.instanceOverrides[dateStr] = c.instanceOverrides[dateStr] || {};
     c.instanceOverrides[dateStr].responses = c.instanceOverrides[dateStr].responses || {};
-    c.instanceOverrides[dateStr].responses[pid] = { status: 'absent', reason };
+    c.instanceOverrides[dateStr].responses[pid] = _rsvpStamp({ status: 'absent', reason });
   } else {
     c.responses = c.responses || {};
-    c.responses[pid] = { status: 'absent', reason };
+    c.responses[pid] = _rsvpStamp({ status: 'absent', reason });
   }
   persist();
   closeModal();
@@ -26603,18 +26611,18 @@ function saveInstanceAbsence(parentId, dateStr, playerId) {
     c.instanceOverrides = c.instanceOverrides || {};
     c.instanceOverrides[dateStr] = c.instanceOverrides[dateStr] || { responses: {...(c.responses||{})} };
     c.instanceOverrides[dateStr].responses = c.instanceOverrides[dateStr].responses || {};
-    c.instanceOverrides[dateStr].responses[playerId] = {
+    c.instanceOverrides[dateStr].responses[playerId] = _rsvpStamp({
       status: 'absent',
       reason: document.getElementById('ab-reason').value,
       message: document.getElementById('ab-msg').value.trim(),
-    };
+    });
   } else {
     c.responses = c.responses || {};
-    c.responses[playerId] = {
+    c.responses[playerId] = _rsvpStamp({
       status: 'absent',
       reason: document.getElementById('ab-reason').value,
       message: document.getElementById('ab-msg').value.trim(),
-    };
+    });
   }
   persist(); closeModal(); openEventInstance(parentId, dateStr);
   _notifyCoachConvocResponse(c, dateStr, prev, 'absent');
@@ -26624,9 +26632,10 @@ function restoreInstancePresent(parentId, dateStr, playerId) {
   if (!c) return;
   const prev = _effectiveConvocStatus(c, dateStr, playerId);
   if (c.recurrence && c.instanceOverrides && c.instanceOverrides[dateStr] && c.instanceOverrides[dateStr].responses) {
-    delete c.instanceOverrides[dateStr].responses[playerId];
-  } else if (c.responses) {
-    delete c.responses[playerId];
+    c.instanceOverrides[dateStr].responses[playerId] = _rsvpPresent();
+  } else {
+    c.responses = c.responses || {};
+    c.responses[playerId] = _rsvpPresent();
   }
   persist(); openEventInstance(parentId, dateStr);
   _notifyCoachConvocResponse(c, dateStr, prev, 'present');
@@ -34225,6 +34234,23 @@ function setNotifSeenAt(ts) {
 // tirés par la même joueuse produisaient deux lignes strictement identiques
 // (« 🙈 GAGE PASSÉ · #6 Delph » ×2) → lu comme un doublon alors que ce sont
 // deux événements réels distincts. Cf. audit : aucune donnée dupliquée en base.
+// --- RSVP : horodatage + statut « présente » explicite ----------------------
+// Une réponse RSVP était stockée `{status, reason, message}` — SANS timestamp.
+// Un feed est trié par date et calcule le non-lu avec `ts > filigrane` : sans
+// horodatage, un désistement ne peut tout simplement PAS y entrer. D'où `at`.
+//
+// Et le retour de présence SUPPRIMAIT la ligne, donc l'événement « finalement
+// je serai là » ne laissait aucune trace. On écrit désormais un statut
+// 'present' horodaté au lieu de supprimer : tous les lecteurs de l'effectif
+// traitent DÉJÀ `status === 'present'` exactement comme l'absence de ligne
+// (`!r || r.status === 'present'`), donc c'est neutre côté compo/appel — mais
+// l'événement est conservé et devient notifiable.
+//
+// `at` voyage dans l'entité PbSync `convocationResponses` (jsonb côté client,
+// colonne `updated_at` côté base) : aucune migration.
+function _rsvpStamp(resp) { return Object.assign({}, resp, { at: Date.now() }); }
+function _rsvpPresent() { return { status: 'present', reason: '', message: '', at: Date.now() }; }
+
 function _notifDrawDetail(player, gage, maxLen) {
   const max = Number.isFinite(maxLen) ? maxLen : 45;
   const who = player ? ('#' + player.num + ' ' + player.name) : '';
@@ -34232,135 +34258,275 @@ function _notifDrawDetail(player, gage, maxLen) {
   if (what.length > max) what = what.slice(0, max - 1).replace(/\s+$/, '') + '…';
   return [who, what].filter(Boolean).join(' · ');
 }
-function notifFeed() {
+// --- Désistements / retours de présence (RSVP) ------------------------------
+// Événements RSVP horodatés, du plus récent au plus ancien. Deux gisements :
+//   • c.responses                          → convocs simples ET matchs
+//     (entité PbSync `convocationResponses`, table convocation_responses)
+//   • c.instanceOverrides[date].responses  → occurrences d'une convoc récurrente
+//     (portées par la colonne instance_overrides de `convocations`)
+// Les deux doivent être lus : ignorer le second rendrait tout désistement sur un
+// entraînement récurrent invisible.
+//
+// LIMITE ASSUMÉE — les RSVP écrits AVANT le déploiement de _rsvpStamp n'ont
+// aucun horodatage côté client, et ceux jamais repassés par la base n'ont pas
+// d'`updated_at` à reconstruire : ils sont ignorés. Un feed trié par date ne
+// peut rien faire d'un événement sans date. Les nouveaux désistements
+// apparaissent normalement.
+function _notifRsvpEvents(limit) {
+  const convs = (typeof currentSeasonConvocations === 'function') ? currentSeasonConvocations() : [];
+  const raw = [];
+  const take = (c, playerId, resp, dateISO) => {
+    if (!resp || !playerId) return;
+    const ts = Number(resp.at) || 0;
+    if (!ts) return;
+    raw.push({
+      convocId: c.id, type: c.type === 'match' ? 'match' : 'training',
+      title: c.title || '', date: dateISO || c.date || '', playerId,
+      status: resp.status === 'absent' ? 'absent' : 'present',
+      reason: resp.reason || '', ts
+    });
+  };
+  convs.forEach(c => {
+    Object.entries(c.responses || {}).forEach(([p, r]) => take(c, p, r, (r && r.instanceDate) || c.date));
+    Object.entries(c.instanceOverrides || {}).forEach(([d, ov]) => {
+      Object.entries((ov && ov.responses) || {}).forEach(([p, r]) => take(c, p, r, d));
+    });
+  });
+  // Dédoublonnage (convoc, joueuse, date) : instanceOverrides[date] est initialisé
+  // PAR COPIE de c.responses (cf. saveInstanceAbsence) → le même RSVP peut exister
+  // des deux côtés. On garde le plus récent = l'état courant.
+  const best = {};
+  raw.forEach(e => {
+    const k = e.convocId + '|' + e.playerId + '|' + e.date;
+    if (!best[k] || e.ts > best[k].ts) best[k] = e;
+  });
+  return Object.values(best)
+    .sort((x, y) => y.ts - x.ts)
+    .slice(0, Number.isFinite(limit) ? limit : 40);
+}
+
+// Construit le flux de notifs de l'identité courante. Chaque item :
+// { id, ts, icon, title, detail, count, unread, audience, action? }.
+//
+// AUDIENCE — chaque source déclare qui la voit :
+//   'coach'  → staff uniquement (désistements, présences, modération, suivi)
+//   'player' → la joueuse connectée, sur SES données uniquement
+//   'all'    → les deux, chacun sur son périmètre
+// Le filtre est appliqué à l'entrée de la source (`src`), donc une source coach
+// ne peut pas fuiter côté joueuse : une joueuse n'a pas à savoir qui se désiste.
+//
+// ISOLATION — chaque source tourne dans SON PROPRE try/catch. Tout le feed
+// vivait auparavant dans un try unique : la première source qui throwait faisait
+// disparaître EN SILENCE toutes les suivantes, sans la moindre trace en console.
+// C'est le mode de panne qui laissait le coach avec les seuls gages.
+//
+// LU/NON LU — deux natures, et elles ne se comportent pas pareil :
+//   • ACTIONNABLE (`todo`) : il reste QUELQUE CHOSE À FAIRE (gages à modérer,
+//     entraînements à clôturer, tirage à faire). « Non lu » est intrinsèque :
+//     l'item reste tant que le travail n'est pas fait. Le marquer lu ne doit pas
+//     le faire disparaître, sinon on perd la tâche.
+//   • INFORMATIONNEL (`add`) : juste à voir. « Non lu » = ts > filigrane, et
+//     « Tout marquer lu » le fait DISPARAÎTRE du flux (opts.showRead pour
+//     ressortir l'historique).
+function notifFeed(opts) {
   const a = state && state.auth;
   if (!a) return [];
+  const role = a.role;
+  if (role !== 'coach' && role !== 'player') return [];
+  const pid = (role === 'player') ? a.playerId : null;
+  if (role === 'player' && !pid) return [];
   const seen = getNotifSeenAt();
+  const showRead = !!(opts && opts.showRead);
   const items = [];
-  const info = (id, ts, icon, title, detail) => { if (ts) items.push({ id, ts, icon, title, detail, count: 1, unread: ts > seen }); };
-  try {
-    if (a.role === 'player' && a.playerId) {
-      const pid = a.playerId;
-      // Messages (actionnable : non lu = receipt pending)
-      if (typeof playerInboxBroadcasts === 'function') {
-        playerInboxBroadcasts(pid).forEach(b => {
-          const unread = typeof _inboxIsUnread === 'function' ? _inboxIsUnread(b, pid) : false;
-          items.push({ id: 'msg-' + b.id, ts: b.createdAt || 0, icon: (b.pollOptions && b.pollOptions.length >= 2) ? '🗳' : '📨',
-            title: (b.pollOptions && b.pollOptions.length >= 2) ? 'Sondage' : 'Message du coach', detail: (b.message || '').slice(0, 60), count: 1, unread, action: "openInboxBroadcast('" + b.id + "')" });
-        });
-      }
-      // Gages à tirer (actionnable, agrégat)
-      if (typeof pendingDraws === 'function') {
-        const n = pendingDraws(pid).length;
-        if (n > 0) items.push({ id: 'gages', ts: Math.max(0, ...pendingDraws(pid).map(d => d.assignedAt || 0)), icon: '🎁', title: 'Gage à tirer', detail: n + ' tirage' + (n > 1 ? 's' : '') + ' au sort à faire', count: n, unread: true, action: 'maybeShowGageReveal()' });
-      }
-      // Retour du coach (feedback général qualités/axes/objectifs techniques) — informationnel.
-      // SECURITY: ne lit que feedback.positives/negatives/technicals, jamais injury/etc.
-      const meFb = (state.players || []).find(p => p.id === pid);
-      if (meFb && meFb.feedback) {
-        const fpos = (meFb.feedback.positives || []).length;
-        const fneg = (meFb.feedback.negatives || []).length;
-        const ftech = (meFb.feedback.technicals || []).length;
-        if (fpos + fneg + ftech > 0) {
-          const fts = meFb.feedback.updatedAt || 0;
-          const dParts = [];
-          if (fpos) dParts.push(fpos + ' qualité' + (fpos > 1 ? 's' : ''));
-          if (fneg) dParts.push(fneg + ' axe' + (fneg > 1 ? 's' : ''));
-          if (ftech) dParts.push(ftech + ' objectif' + (ftech > 1 ? 's' : '') + ' technique' + (ftech > 1 ? 's' : ''));
-          items.push({ id: 'feedback-' + pid, ts: fts, icon: '📝', title: 'Retour du coach',
-            detail: dParts.join(' · '),
-            count: 1, unread: fts > seen, action: 'openMyFeedback()' });
-        }
-      }
-      // Convocs (nouvelle / modifiée) — informationnel
-      if (typeof currentSeasonConvocations === 'function') {
-        currentSeasonConvocations().forEach(c => {
-          const ts = Math.max(c.createdAt || 0, c.updatedAt || 0);
-          const isMatch = c.type === 'match';
-          info('cv-' + c.id, ts, isMatch ? '🏀' : '🗓', isMatch ? 'Convocation match' : 'Convocation entraînement', (c.title || '') + (c.date ? ' · ' + formatDate(c.date, 'short') : ''));
-        });
-      }
-      // Nouveaux plays — informationnel
-      if (typeof currentSeasonPlays === 'function') {
-        currentSeasonPlays().forEach(p => info('play-' + p.id, p.createdAt || 0, '📋', 'Nouveau play', p.title || ''));
-      }
-      // Plans d'entraînement validés/modifiés — informationnel
-      (state.trainingPlans || []).forEach(tp => {
-        const v = tp.plan && tp.plan.validated; const ts = (tp.plan && tp.plan.validatedAt) || tp.updatedAt || 0;
-        if (v) info('plan-' + tp.convocationId + '-' + tp.instanceDate, ts, '✅', "Plan d'entraînement prêt", '');
+
+  const add = (audience, o) => {
+    if (!o || !o.id || !o.ts) return;
+    items.push(Object.assign({ count: 1, icon: '🔔', title: '', detail: '' }, o,
+      { audience, unread: o.ts > seen }));
+  };
+  const todo = (audience, o) => {
+    if (!o || !o.id) return;
+    items.push(Object.assign({ count: 1, ts: Date.now(), icon: '🔔', title: '', detail: '' }, o,
+      { audience, unread: true }));
+  };
+  const src = (audience, label, fn) => {
+    if (audience !== 'all' && audience !== role) return;
+    try { fn(); }
+    catch (e) { try { console.warn('[notif] source « ' + label + ' » ignorée : ' + (e && e.message)); } catch (e2) {} }
+  };
+
+  // ======================= JOUEUSE =======================
+  src('player', 'messages', () => {
+    if (typeof playerInboxBroadcasts !== 'function') return;
+    playerInboxBroadcasts(pid).forEach(b => {
+      // Non-lu porté par le receipt (actionnable), pas par le filigrane.
+      const unread = typeof _inboxIsUnread === 'function' ? _inboxIsUnread(b, pid) : false;
+      const isPoll = !!(b.pollOptions && b.pollOptions.length >= 2);
+      items.push({
+        id: 'msg-' + b.id, ts: b.createdAt || 0, icon: isPoll ? '🗳' : '📨',
+        title: isPoll ? 'Sondage' : 'Message du coach', detail: (b.message || '').slice(0, 60),
+        count: 1, unread, audience: 'player', action: "openInboxBroadcast('" + b.id + "')"
       });
-      // Nouveaux défis — informationnel
-      if (typeof currentSeasonChallenges === 'function') {
-        currentSeasonChallenges().filter(c => !c.badgesAwarded).forEach(c => info('ch-' + c.id, c.createdAt || c.updatedAt || 0, '🏆', 'Nouveau défi', c.title || ''));
-      }
-      // Trophées débloqués — informationnel
-      const me = (state.players || []).find(p => p.id === pid);
-      (me && me.badges || []).forEach((b, i) => info('badge-' + i + '-' + (b.date || ''), b.date ? Date.parse(b.date + 'T12:00:00') : 0, '🏅', 'Trophée débloqué', b.challengeTitle || ''));
-      // Récap match (stats perso dispo) — informationnel
-      if (typeof currentSeasonMatches === 'function') {
-        currentSeasonMatches().filter(m => m.playerStats && m.playerStats[pid]).forEach(m => info('recap-' + m.id, m.updatedAt || 0, '📊', 'Récap match dispo', 'vs ' + (m.opponent || '')));
-      }
-    } else if (a.role === 'coach') {
-      // Propositions de gage à modérer (actionnable, agrégat)
-      if (typeof gagesPendingCount === 'function') { const n = gagesPendingCount(); if (n > 0) items.push({ id: 'gage-mod', ts: Date.now(), icon: '🎁', title: 'Gages à modérer', detail: n + ' proposition' + (n > 1 ? 's' : ''), count: n, unread: true, action: 'openGagesCoach()' }); }
-      // Entraînements à clôturer (actionnable, agrégat)
-      if (typeof getOverdueTrainings === 'function') { const n = getOverdueTrainings().length; if (n > 0) items.push({ id: 'overdue', ts: Date.now(), icon: '⏱', title: 'Entraînements à clôturer', detail: n + ' terminé' + (n > 1 ? 's' : '') + ' à valider', count: n, unread: true, action: 'openOverdueTrainingsModal()' }); }
-      // Gages tirés (accepté/passé) par les joueuses — informationnel.
-      // Le détail porte le NOM DU GAGE en plus de la joueuse : sans lui, 2 gages
-      // DIFFÉRENTS de la même joueuse s'affichaient à l'identique (« #6 Delph »
-      // deux fois) et passaient pour un doublon. Ce n'en était pas un.
-      (state.gageDraws || []).forEach(d => {
-        if ((d.status === 'accepted' || d.status === 'skipped') && d.completedAt) {
-          const p = (state.players || []).find(x => x.id === d.playerId);
-          const g = (typeof _gageById === 'function' && d.gageId) ? _gageById(d.gageId) : null;
-          info('draw-' + d.id, d.completedAt, d.status === 'accepted' ? '💪' : '🙈',
-            d.status === 'accepted' ? 'Gage accepté' : 'Gage passé',
-            _notifDrawDetail(p, g));
-        }
+    });
+  });
+  src('player', 'gages-a-tirer', () => {
+    if (typeof pendingDraws !== 'function') return;
+    const d = pendingDraws(pid);
+    if (!d.length) return;
+    todo('player', { id: 'gages', ts: Math.max(0, ...d.map(x => x.assignedAt || 0)) || Date.now(),
+      icon: '🎁', title: 'Gage à tirer', detail: d.length + ' tirage' + (d.length > 1 ? 's' : '') + ' au sort à faire',
+      count: d.length, action: 'maybeShowGageReveal()' });
+  });
+  src('player', 'feedback', () => {
+    // SECURITY: ne lit que feedback.positives/negatives/technicals, jamais injury/etc.
+    const meFb = (state.players || []).find(p => p.id === pid);
+    if (!meFb || !meFb.feedback) return;
+    const fpos = (meFb.feedback.positives || []).length;
+    const fneg = (meFb.feedback.negatives || []).length;
+    const ftech = (meFb.feedback.technicals || []).length;
+    if (fpos + fneg + ftech === 0) return;
+    const dParts = [];
+    if (fpos) dParts.push(fpos + ' qualité' + (fpos > 1 ? 's' : ''));
+    if (fneg) dParts.push(fneg + ' axe' + (fneg > 1 ? 's' : ''));
+    if (ftech) dParts.push(ftech + ' objectif' + (ftech > 1 ? 's' : '') + ' technique' + (ftech > 1 ? 's' : ''));
+    add('player', { id: 'feedback-' + pid, ts: meFb.feedback.updatedAt || 0, icon: '📝',
+      title: 'Retour du coach', detail: dParts.join(' · '), action: 'openMyFeedback()' });
+  });
+  src('player', 'convocs', () => {
+    if (typeof currentSeasonConvocations !== 'function') return;
+    currentSeasonConvocations().forEach(c => {
+      const isMatch = c.type === 'match';
+      add('player', { id: 'cv-' + c.id, ts: Math.max(c.createdAt || 0, c.updatedAt || 0),
+        icon: isMatch ? '🏀' : '🗓', title: isMatch ? 'Convocation match' : 'Convocation entraînement',
+        detail: (c.title || '') + (c.date ? ' · ' + formatDate(c.date, 'short') : '') });
+    });
+  });
+  src('player', 'plays', () => {
+    if (typeof currentSeasonPlays !== 'function') return;
+    currentSeasonPlays().forEach(p => add('player', { id: 'play-' + p.id, ts: p.createdAt || 0,
+      icon: '📋', title: 'Nouveau play', detail: p.title || '' }));
+  });
+  src('player', 'plans', () => {
+    (state.trainingPlans || []).forEach(tp => {
+      if (!(tp.plan && tp.plan.validated)) return;
+      add('player', { id: 'plan-' + tp.convocationId + '-' + tp.instanceDate,
+        ts: (tp.plan && tp.plan.validatedAt) || tp.updatedAt || 0, icon: '✅',
+        title: "Plan d'entraînement prêt", detail: '' });
+    });
+  });
+  src('player', 'defis', () => {
+    if (typeof currentSeasonChallenges !== 'function') return;
+    currentSeasonChallenges().filter(c => !c.badgesAwarded).forEach(c =>
+      add('player', { id: 'ch-' + c.id, ts: c.createdAt || c.updatedAt || 0, icon: '🏆',
+        title: 'Nouveau défi', detail: c.title || '' }));
+  });
+  src('player', 'trophees', () => {
+    const me = (state.players || []).find(p => p.id === pid);
+    ((me && me.badges) || []).forEach((b, i) => add('player', {
+      id: 'badge-' + i + '-' + (b.date || ''), ts: b.date ? Date.parse(b.date + 'T12:00:00') : 0,
+      icon: '🏅', title: 'Trophée débloqué', detail: b.challengeTitle || '' }));
+  });
+  src('player', 'recap-match', () => {
+    if (typeof currentSeasonMatches !== 'function') return;
+    currentSeasonMatches().filter(m => m.playerStats && m.playerStats[pid]).forEach(m =>
+      add('player', { id: 'recap-' + m.id, ts: m.updatedAt || 0, icon: '📊',
+        title: 'Récap match dispo', detail: 'vs ' + (m.opponent || '') }));
+  });
+  // Ses PROPRES validations de prépa (la joueuse ne voit jamais celles des autres).
+  src('player', 'prepa-mes-seances', () => {
+    (state.trainingCompletions || [])
+      .filter(c => !c.deletedAt && c.playerId === pid)
+      .sort((x, y) => (y.dateCompleted || 0) - (x.dateCompleted || 0))
+      .slice(0, 20)
+      .forEach(c => {
+        const p = (state.trainingPrograms || []).find(x => x.id === c.programId && !x.deletedAt);
+        if (!p) return;
+        add('player', { id: 'trmine-' + c.id, ts: c.dateCompleted || c.createdAt || 0, icon: '💪',
+          title: 'Séance validée', detail: (p.name || 'Prépa') + ' · ' + _completionSummary(c),
+          action: "openTrainingDashboard('" + p.id + "')" });
       });
-      // Stats de match saisies — informationnel
-      if (typeof currentSeasonMatches === 'function') {
-        currentSeasonMatches().filter(m => m.playerStats && Object.keys(m.playerStats).length).forEach(m => info('stats-' + m.id, m.updatedAt || 0, '📊', 'Stats de match saisies', 'vs ' + (m.opponent || '')));
-      }
-      // Séances de prépa validées — informationnel.
-      // Le push partait déjà (_trainingNotifyCoachCompletion), mais RIEN ne le
-      // matérialisait ici : le coach recevait la notif système puis, en ouvrant
-      // l'app, ne retrouvait aucune trace (cloche vide, badge à 0). La donnée
-      // était pourtant bien en base et bien affichée — mais seulement en allant
-      // manuellement dans Prépa physique → 📊 Suivi. Toute notif poussée doit
-      // avoir son pendant dans le feed, sinon la notif mène à une impasse.
-      if (typeof _coachTrainingPrograms === 'function' && typeof _trainingCompletionsOf === 'function') {
-        _coachTrainingPrograms().forEach(p => {
-          // Scoping : un coach non-admin ne voit que les joueuses de son effectif.
-          const pool = new Set(_trainingPoolFor(p).map(x => x.id));
-          _trainingCompletionsOf(p.id)
-            .filter(c => pool.has(c.playerId))
-            .sort((a, b) => (b.dateCompleted || 0) - (a.dateCompleted || 0))
-            // Borne : 20 joueuses × 3 séances/sem × 3 sem ≈ 180 validations, et
-            // notifFeed() est rappelé à CHAQUE render (via appBadgeCount).
-            .slice(0, 30)
-            .forEach(c => {
-              const pl = (state.players || []).find(x => x.id === c.playerId);
-              const who = pl ? ('#' + pl.num + ' ' + pl.name) : 'Une joueuse';
-              // Le jour PRÉVU est dans le détail : sans lui, deux validations de
-              // la même joueuse s'affichent à l'identique et passent pour un
-              // doublon — même piège que _notifDrawDetail sur les gages.
-              let day = c.datePlanned || '';
-              try { day = formatDate(c.datePlanned, 'short'); } catch (e) {}
-              const ts = c.dateCompleted || c.createdAt || 0;
-              if (!ts) return;
-              items.push({
-                id: 'trdone-' + c.id, ts, icon: '💪', title: 'Séance validée',
-                detail: who + ' · ' + day + ' · ' + _completionSummary(c),
-                count: 1, unread: ts > seen,
-                action: "openTrainingDashboard('" + p.id + "')"
-              });
-            });
+  });
+
+  // ======================== COACH ========================
+  src('coach', 'gages-a-moderer', () => {
+    if (typeof gagesPendingCount !== 'function') return;
+    const n = gagesPendingCount();
+    if (n > 0) todo('coach', { id: 'gage-mod', icon: '🎁', title: 'Gages à modérer',
+      detail: n + ' proposition' + (n > 1 ? 's' : ''), count: n, action: 'openGagesCoach()' });
+  });
+  src('coach', 'entrainements-a-cloturer', () => {
+    if (typeof getOverdueTrainings !== 'function') return;
+    const n = getOverdueTrainings().length;
+    if (n > 0) todo('coach', { id: 'overdue', icon: '⏱', title: 'Entraînements à clôturer',
+      detail: n + ' terminé' + (n > 1 ? 's' : '') + ' à valider', count: n, action: 'openOverdueTrainingsModal()' });
+  });
+  // Désistements et retours de présence — COACH ONLY.
+  src('coach', 'desistements', () => {
+    _notifRsvpEvents(40).forEach(e => {
+      const pl = (state.players || []).find(x => x.id === e.playerId);
+      const who = pl ? ('#' + pl.num + ' ' + pl.name) : 'Une joueuse';
+      let when = e.date;
+      try { when = formatDate(e.date, 'short'); } catch (err) {}
+      const isMatch = e.type === 'match';
+      const quoi = (isMatch ? 'match' : 'entraînement') + (e.title ? ' « ' + e.title + ' »' : '');
+      add('coach', {
+        // Le statut est dans l'id : un désistement puis un retour sont deux
+        // événements distincts et ne doivent pas se recouvrir silencieusement.
+        id: 'rsvp-' + e.convocId + '-' + e.playerId + '-' + e.date + '-' + e.status,
+        ts: e.ts,
+        icon: e.status === 'absent' ? '🚫' : '🙋',
+        title: e.status === 'absent' ? (isMatch ? 'Désistement match' : 'Désistement entraînement') : 'Retour de présence',
+        detail: who + ' · ' + when + ' · ' + quoi + (e.status === 'absent' && e.reason ? ' · ' + e.reason : ''),
+        action: "openEventInstance('" + e.convocId + "','" + e.date + "')"
+      });
+    });
+  });
+  src('coach', 'gages-tires', () => {
+    (state.gageDraws || []).forEach(d => {
+      if (!((d.status === 'accepted' || d.status === 'skipped') && d.completedAt)) return;
+      const p = (state.players || []).find(x => x.id === d.playerId);
+      const g = (typeof _gageById === 'function' && d.gageId) ? _gageById(d.gageId) : null;
+      add('coach', { id: 'draw-' + d.id, ts: d.completedAt,
+        icon: d.status === 'accepted' ? '💪' : '🙈',
+        title: d.status === 'accepted' ? 'Gage accepté' : 'Gage passé',
+        detail: _notifDrawDetail(p, g) });
+    });
+  });
+  src('coach', 'stats-match', () => {
+    if (typeof currentSeasonMatches !== 'function') return;
+    currentSeasonMatches().filter(m => m.playerStats && Object.keys(m.playerStats).length).forEach(m =>
+      add('coach', { id: 'stats-' + m.id, ts: m.updatedAt || 0, icon: '📊',
+        title: 'Stats de match saisies', detail: 'vs ' + (m.opponent || '') }));
+  });
+  // Séances de prépa validées par les joueuses.
+  src('coach', 'prepa-validations', () => {
+    if (typeof _coachTrainingPrograms !== 'function' || typeof _trainingCompletionsOf !== 'function') return;
+    _coachTrainingPrograms().forEach(p => {
+      // Scoping : un coach non-admin ne voit que les joueuses de son effectif.
+      const pool = new Set(_trainingPoolFor(p).map(x => x.id));
+      _trainingCompletionsOf(p.id)
+        .filter(c => pool.has(c.playerId))
+        .sort((x, y) => (y.dateCompleted || 0) - (x.dateCompleted || 0))
+        // Borne : 20 joueuses × 3 séances/sem × 3 sem ≈ 180 validations, et
+        // notifFeed() est rappelé à CHAQUE render (via appBadgeCount).
+        .slice(0, 30)
+        .forEach(c => {
+          const pl = (state.players || []).find(x => x.id === c.playerId);
+          const who = pl ? ('#' + pl.num + ' ' + pl.name) : 'Une joueuse';
+          // Le jour PRÉVU est dans le détail : sans lui, deux validations de la
+          // même joueuse s'affichent à l'identique et passent pour un doublon —
+          // même piège que _notifDrawDetail sur les gages.
+          let day = c.datePlanned || '';
+          try { day = formatDate(c.datePlanned, 'short'); } catch (e) {}
+          add('coach', { id: 'trdone-' + c.id, ts: c.dateCompleted || c.createdAt || 0, icon: '💪',
+            title: 'Séance validée', detail: who + ' · ' + day + ' · ' + _completionSummary(c),
+            action: "openTrainingDashboard('" + p.id + "')" });
         });
-      }
-    }
-  } catch (e) { /* feed best-effort */ }
-  return items.sort((x, y) => (y.ts || 0) - (x.ts || 0));
+    });
+  });
+
+  const out = showRead ? items : items.filter(i => i.unread);
+  return out.sort((x, y) => (y.ts || 0) - (x.ts || 0));
 }
 function appBadgeCount() {
   return notifFeed().filter(i => i.unread).reduce((s, i) => s + (i.count || 1), 0);
@@ -34393,8 +34559,16 @@ function markAllNotifsRead() {
   if (document.getElementById('modal-root')) openNotifCenter(); // refresh la modale ouverte
   else render();
 }
+// Bascule « afficher aussi les notifs déjà lues ». Volatile (pas de persistance) :
+// le flux par défaut ne montre QUE le non-lu — marquer lu doit vider la cloche.
+// L'historique reste consultable d'un tap, il n'est pas détruit.
+function toggleNotifShowRead() {
+  window._notifShowRead = !window._notifShowRead;
+  openNotifCenter();
+}
 function openNotifCenter() {
-  const feed = notifFeed();
+  const showRead = !!window._notifShowRead;
+  const feed = notifFeed({ showRead });
   const unreadN = feed.filter(i => i.unread).reduce((s, i) => s + (i.count || 1), 0);
   const rows = feed.slice(0, 40).map(i => `
     <div class="list-row" ${i.action ? `onclick="closeModal();setTimeout(()=>{try{${i.action}}catch(e){}},60)"` : ''} style="${i.action ? 'cursor:pointer' : ''}">
@@ -34411,8 +34585,13 @@ function openNotifCenter() {
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <div class="modal-body" style="padding:0">
-      ${unreadN ? `<div style="padding:10px 16px;border-bottom:1px solid var(--border-soft);text-align:right"><button class="btn btn-ghost" style="font-size:12px" onclick="markAllNotifsRead()">Tout marquer lu</button></div>` : ''}
-      ${feed.length ? `<div class="list-section" style="margin:0">${rows}</div>` : '<div class="empty" style="padding:40px 16px"><div class="empty-icon">🔔</div><div class="empty-title">Rien de neuf</div><div class="empty-desc">Tu es à jour !</div></div>'}
+      <div style="padding:10px 16px;border-bottom:1px solid var(--border-soft);display:flex;align-items:center;gap:8px">
+        <button class="btn btn-ghost" style="font-size:12px;padding:4px 8px" onclick="toggleNotifShowRead()">${showRead ? '● Non lues seulement' : '○ Afficher les lues'}</button>
+        <div style="flex:1"></div>
+        ${unreadN ? `<button class="btn btn-ghost" style="font-size:12px;padding:4px 8px" onclick="markAllNotifsRead()">Tout marquer lu</button>` : ''}
+      </div>
+      ${feed.length ? `<div class="list-section" style="margin:0">${rows}</div>`
+        : `<div class="empty" style="padding:40px 16px"><div class="empty-icon">🔔</div><div class="empty-title">${showRead ? 'Aucune notification' : 'Rien de neuf'}</div><div class="empty-desc">${showRead ? 'Rien à afficher pour le moment.' : 'Tu es à jour ! Les notifs lues sont masquées — tape « Afficher les lues » pour revoir tout le reste.'}</div></div>`}
     </div>
   `);
 }
@@ -34945,7 +35124,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-29.79';
+const APP_VERSION = '2026-07-29.80';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {

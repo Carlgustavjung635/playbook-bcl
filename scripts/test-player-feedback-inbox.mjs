@@ -47,9 +47,14 @@ t('renderPlayerFeedbackCard ne référence JAMAIS .injury (code, hors commentair
 t('entrée feedback dans notifFeed (branche player) : icône 📝 + action + objectifs techniques', () => {
   const feed = html.slice(html.indexOf('function notifFeed'), html.indexOf('function appBadgeCount'));
   assert.ok(/id: 'feedback-' \+ pid/.test(feed));
-  assert.ok(/icon: '📝', title: 'Retour du coach'/.test(feed));
+  // notifFeed a été découpé en sources isolées : icon et title ne sont plus
+  // forcément sur la même ligne. On teste la présence, pas la mise en forme.
+  assert.ok(/icon: '📝'/.test(feed) && /title: 'Retour du coach'/.test(feed));
   assert.ok(/action: 'openMyFeedback\(\)'/.test(feed));
-  assert.ok(/unread: fts > seen/.test(feed));
+  // Le non-lu n'est plus calculé source par source : `add()` le dérive une seule
+  // fois de ts vs filigrane. La source doit donc fournir le ts du feedback.
+  assert.ok(/ts: meFb\.feedback\.updatedAt/.test(feed), 'la source ne fournit pas le ts du feedback');
+  assert.ok(/unread: o\.ts > seen/.test(feed), 'le calcul central du non-lu a disparu');
   assert.ok(/technicals/.test(feed) && /objectif/.test(feed), 'le compte des objectifs techniques manque dans la cloche');
   // notifFeed n'expose QUE positives/negatives/technicals/updatedAt
   assert.ok(!/meFb\.injury|meFb\.feedback\.(?!positives|negatives|technicals|updatedAt)/.test(feed));
