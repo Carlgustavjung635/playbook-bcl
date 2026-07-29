@@ -150,12 +150,24 @@ t('cleanup IDEMPOTENT : un 2e passage ne change plus rien', () => {
   ctx.cleanupOrphanMatchConvocs();
   assert(JSON.stringify(matchConvocs().map(c => c.id).sort()) === snap, 'le cleanup rebouge à chaque passage');
 });
-t('un match SANS convocation en reçoit une (comportement conservé)', () => {
+t('un match SANS convocation en reçoit une APRÈS la 1re sync', () => {
   reset();
+  ctx.window._pbFirstSyncDone = true;   // v.85 : la création est gardée par ce drapeau
   ctx.state.convocations = ctx.state.convocations.filter(c => c.type !== 'match');
   ctx.cleanupOrphanMatchConvocs();
   assert(matchConvocs().length === 2, 'attendu 2 convocs créées, reçu ' + matchConvocs().length);
   assert(ctx.state.matches.every(m => m.convocId), 'match sans convocId après création');
+});
+t('...mais AVANT la 1re sync, rien n\'est créé (anti-prolifération v.85)', () => {
+  // Un appareil au cache vide créait une convoc neuve par match, poussée au
+  // flush : 9 convocs pour 4 matchs en production. On adopte et on dédoublonne
+  // avant la sync, on ne crée qu'après.
+  reset();
+  ctx.window._pbFirstSyncDone = false;
+  ctx.state.convocations = ctx.state.convocations.filter(c => c.type !== 'match');
+  ctx.cleanupOrphanMatchConvocs();
+  assert(matchConvocs().length === 0, 'doublons fabriqués avant la sync : ' + matchConvocs().length);
+  ctx.window._pbFirstSyncDone = true;
 });
 t('une convocation match ORPHELINE (match supprimé) est supprimée', () => {
   reset();

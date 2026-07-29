@@ -13343,6 +13343,16 @@ function deleteMatch(id) {
 //      recopiés sur la survivante AVANT de le supprimer (sinon une présence
 //      déclarée disparaîtrait avec la ligne).
 //   3. ORPHELINES — convocations 'match' dont le match n'existe plus : out.
+//
+// QUAND — deux passages, et les deux comptent :
+//   • au boot, sur l'état local (réactif, l'app est utilisable hors ligne) ;
+//   • À NOUVEAU après PbSync.fetchAll (cf. _postSyncCleanup). Sans ce second
+//     passage, le nettoyage ne voyait JAMAIS les données du serveur : il tournait
+//     au premier render, puis l'apply de `convocations` remplaçait le tableau par
+//     les lignes distantes — doublons compris — et le verrou _bootCleanupDone
+//     l'empêchait de repasser. 9 convocations pour 4 matchs en production, et un
+//     désistement invisible à l'écran parce que m.convocId pointait sur la
+//     mauvaise ligne (cf. migration 20260729_003).
 function cleanupOrphanMatchConvocs() {
   if (!state.convocations) return;
   const before = state.convocations.length;
@@ -13353,7 +13363,20 @@ function cleanupOrphanMatchConvocs() {
   (state.matches || []).forEach(m => {
     const cands = _convocsForMatch(m, claimed);
     if (!cands.length) {
-      // Aucune candidate : le match n'a réellement pas de convocation.
+      // MOTEUR DE LA PROLIFÉRATION — « aucune candidate » est ambigu : soit le
+      // match n'a vraiment pas de convocation, soit elle existe sur le serveur
+      // et n'est simplement pas encore arrivée. Créer dans le second cas
+      // fabrique un doublon, poussé au flush, définitif. Sur un appareil au
+      // cache vide c'est systématique : une convoc neuve par match, à chaque
+      // nouvel appareil. Tant que la première sync n'a pas eu lieu, on ADOPTE
+      // et on dédoublonne, mais on ne CRÉE rien.
+      //
+      // Pas d'exception pour « aucune convocation en local » : c'est justement
+      // l'état d'un appareil neuf, le cas qui fabriquait les doublons. Le
+      // nettoyage post-sync créera ce qui manque vraiment, une fois qu'on sait
+      // ce que le serveur contient. La création directe à la création d'un
+      // match (syncConvocFromMatch) n'est PAS concernée par cette garde.
+      if (!window._pbFirstSyncDone) return;
       m.convocId = null;
       syncConvocFromMatch(m);
       if (m.convocId) { claimed.add(m.convocId); created++; }
@@ -34478,6 +34501,13 @@ function _initPlayersSync() {
     .finally(() => {
       // --- B) Toutes les autres entités via PbSync ---
       PbSync.fetchAll(state).then(() => {
+        // Les données du serveur sont là : c'est MAINTENANT que le
+        // dédoublonnage des convocations de match a un sens (cf.
+        // cleanupOrphanMatchConvocs). Avant ce point, la création de convoc est
+        // volontairement inhibée pour ne pas fabriquer de doublon.
+        window._pbFirstSyncDone = true;
+        try { if (typeof cleanupOrphanMatchConvocs === 'function') cleanupOrphanMatchConvocs(); }
+        catch (e) { console.warn('[cleanup] convocs post-sync:', e && e.message); }
         // SAISON : après la 1re sync, on a state.seasons / seasonPlayers /
         // seasonPlays. Valide / fixe state.currentSeasonId selon le rôle :
         // - coach garde son choix s'il est valide, sinon fallback active
@@ -35571,7 +35601,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-29.84';
+const APP_VERSION = '2026-07-29.85';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
