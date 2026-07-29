@@ -3591,6 +3591,53 @@ function _stableJson(o) {
 // ce relais, une convocation nouvelle pour le client repart avec des RSVP vides.
 const _lastConvocResponses = {};
 
+// Fusionne les overrides d'instance LOCAUX et DISTANTS d'une convocation
+// récurrente. `instance_overrides` est un jsonb monolithique : le dump renvoie
+// TOUT l'objet, donc le dernier client qui écrit écrase l'objet entier.
+//
+// BUG (2026-07-29) — une absence déclarée sur un entraînement RÉCURRENT
+// disparaissait sans laisser de trace en base. Contrairement à `responses`,
+// l'apply reprenait `instance_overrides` tel quel du serveur. Entre le clic de
+// la joueuse et le flush (debounce 400 ms) il suffisait qu'un événement realtime
+// sur `convocations` arrive — et il y en a en rafale, un simple re-push touchant
+// les 7 lignes suffit — pour que l'override local soit remplacé par le {} du
+// serveur AVANT d'avoir été poussé. L'écriture était perdue, silencieusement.
+//
+// La fusion est conservatrice : on part du distant, on garde les dates que lui
+// seul connaît côté local, et les RSVP sont arbitrés en dernier-écrivain-gagne
+// sur `at` (posé par _rsvpStamp depuis v.80). Une réponse ne peut plus être
+// perdue par une simple course ; « je redeviens présente » n'est plus une
+// suppression mais un statut 'present' horodaté, donc la fusion ne ressuscite
+// rien (cf. _rsvpPresent).
+function _mergeInstanceOverrides(localOv, remoteOv) {
+  const local = (localOv && typeof localOv === 'object') ? localOv : {};
+  const remote = (remoteOv && typeof remoteOv === 'object') ? remoteOv : {};
+  const out = {};
+  new Set([...Object.keys(remote), ...Object.keys(local)]).forEach(date => {
+    const l = local[date], r = remote[date];
+    if (!l) { out[date] = r; return; }
+    if (!r) { out[date] = l; return; }
+    // Base distante, puis on réintroduit les clés que le distant ignore
+    // (plan d'entraînement / feuille d'appel pas encore flushés).
+    const day = { ...l, ...r };
+    const lResp = (l.responses && typeof l.responses === 'object') ? l.responses : null;
+    const rResp = (r.responses && typeof r.responses === 'object') ? r.responses : null;
+    if (lResp || rResp) {
+      const resp = { ...(rResp || {}) };
+      Object.entries(lResp || {}).forEach(([pid, lr]) => {
+        const rr = resp[pid];
+        if (!rr) { resp[pid] = lr; return; }
+        // Les deux côtés ont répondu : le plus récent gagne. Sans horodatage
+        // (RSVP antérieur à v.80) on garde le distant, qui fait autorité.
+        if (Number(lr && lr.at) > Number(rr && rr.at)) resp[pid] = lr;
+      });
+      day.responses = resp;
+    }
+    out[date] = day;
+  });
+  return out;
+}
+
 const ENTITIES = [
   {
     key: 'plays', table: 'plays', pk: 'id', realtime: true, auth: 'anon',
@@ -3944,7 +3991,10 @@ const ENTITIES = [
         time: r.time || '', location: r.location || '', note: r.note || '',
         recurrence: r.recurrence || null,
         cancelledInstances: r.cancelled_instances || [],
-        instanceOverrides: r.instance_overrides || {},
+        // Fusion locale/distante — cf. _mergeInstanceOverrides. Reprendre le
+        // distant tel quel effaçait les absences déclarées sur une occurrence
+        // récurrente avant qu'elles aient été poussées.
+        instanceOverrides: _mergeInstanceOverrides((byId[r.id] || {}).instanceOverrides, r.instance_overrides),
         attachments: r.attachments || [],
         // Les RSVP ne sont PAS portés par cette table : ils vivent dans
         // `convocation_responses` (entité séparée, juste en dessous). Cet apply
@@ -35627,7 +35677,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-29.86';
+const APP_VERSION = '2026-07-29.87';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {

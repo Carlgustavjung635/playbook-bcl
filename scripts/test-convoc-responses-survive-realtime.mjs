@@ -27,6 +27,18 @@ const R = [];
 const t = (label, fn) => { try { fn(); R.push('✓ ' + label); } catch (e) { R.push('✗ ' + label + ' → ' + e.message); } };
 const ok = (c, m) => { if (!c) throw new Error(m || 'assertion'); };
 
+// Extrait une fonction nommée (comptage d'accolades).
+function extractFn(name) {
+  const start = html.indexOf('function ' + name + '(');
+  assert.ok(start >= 0, 'introuvable : ' + name);
+  let depth = 0, began = false;
+  for (let j = html.indexOf('{', start); j < html.length; j++) {
+    if (html[j] === '{') { depth++; began = true; }
+    else if (html[j] === '}') { depth--; if (began && depth === 0) return html.slice(start, j + 1); }
+  }
+  throw new Error('déséquilibré : ' + name);
+}
+
 // Extrait le corps de `apply:` de l'entité `key` (comptage d'accolades).
 function extractApply(key) {
   const anchor = html.indexOf("key: '" + key + "'");
@@ -46,6 +58,7 @@ function extractApply(key) {
 // exactement comme dans le bloc module.
 const factory = new Function(`
   const _lastConvocResponses = {};
+  ${extractFn('_mergeInstanceOverrides')}
   const applyConvocs = ${extractApply('convocations')};
   const applyResponses = ${extractApply('convocationResponses')};
   return { applyConvocs, applyResponses, _lastConvocResponses };
