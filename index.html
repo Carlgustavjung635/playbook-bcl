@@ -5055,8 +5055,9 @@ function _dumpTrainingCompletionRow(c) {
 function _dumpLicenceRow(l) {
   return {
     id: l.id, player_id: l.playerId || null, season_id: l.seasonId || null,
-    status: ['not_started', 'in_progress', 'certif_missing', 'validated'].includes(l.status) ? l.status : 'not_started',
+    status: ['email_received_todo', 'email_missing', 'in_progress', 'done'].includes(l.status) ? l.status : null,
     notes: l.notes || null,
+    updated_by: ['player', 'coach'].includes(l.updatedBy) ? l.updatedBy : null,
     deleted_at: l.deletedAt ? new Date(l.deletedAt).toISOString() : null,
     updated_at: l.updatedAt ? new Date(l.updatedAt).toISOString() : (l.createdAt ? new Date(l.createdAt).toISOString() : null)
   };
@@ -5064,8 +5065,9 @@ function _dumpLicenceRow(l) {
 function _licenceFromRow(r) {
   return {
     id: r.id, playerId: r.player_id || null, seasonId: r.season_id || null,
-    status: ['not_started', 'in_progress', 'certif_missing', 'validated'].includes(r.status) ? r.status : 'not_started',
+    status: ['email_received_todo', 'email_missing', 'in_progress', 'done'].includes(r.status) ? r.status : null,
     notes: r.notes || '',
+    updatedBy: ['player', 'coach'].includes(r.updated_by) ? r.updated_by : null,
     createdAt: r.created_at ? Date.parse(r.created_at) : null,
     updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
     deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
@@ -8462,6 +8464,7 @@ function _effectifSeasonBody() {
 
   return `
       ${_archivedSeasonBanner()}
+      ${renderLicenceSummary()}
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
         <div><span class="eyebrow-muted">${esc(seasonLabel)} · ${active.length} joueuse${active.length>1?'s':''}</span></div>
         ${statusTag}
@@ -8496,6 +8499,7 @@ function _effectifSeasonBody() {
                 <div style="display:flex;align-items:center;gap:6px"><div style="font-family:'Anton';text-transform:uppercase;font-size:13px">${esc(p.name)}</div>${teamTagBadge(link.teamTag)}</div>
                 ${(() => { const ls = _lastSeenBadge(p.lastSeenAt); return `<div style="font-size:9px;color:${ls.color};font-family:'JetBrains Mono';margin-top:2px"${ls.exact ? ` title="Dernière connexion : ${ls.exact}"` : ''}><span style="font-size:7px;vertical-align:middle">${ls.dot}</span> ${ls.label}</div>`; })()}
                 ${readOnly ? '' : renderPlayerTeamTagToggle(p.id, link.teamTag)}
+                ${renderLicenceRosterBadge(p.id)}
               </div>
               ${readOnly ? '' : `<button class="btn btn-ghost" style="font-size:10px;color:var(--red);padding:6px 8px" onclick="removePlayerFromSeason('${esc(p.id)}')" title="Retirer de la saison">↗ Partir</button>`}
             </div>
@@ -17133,24 +17137,35 @@ function confirmInvalidateGage(drawId, choiceOverride, reasonOverride) {
 // ============================================================
 // Doit rester aligné avec la contrainte CHECK de la migration 20260729_001 ET
 // avec la liste inline des sérialiseurs du bloc module (_dumpLicenceRow).
-const LICENCE_STATUSES = ['not_started', 'in_progress', 'certif_missing', 'validated'];
+// Doit rester aligné avec la contrainte CHECK de 20260729_002 ET avec la liste
+// inline des sérialiseurs du bloc module (_dumpLicenceRow) — ce bloc-ci est le
+// <script> classique, sa portée ne franchit pas la frontière des blocs.
+const LICENCE_STATUSES = ['email_received_todo', 'email_missing', 'in_progress', 'done'];
+// Libellés repris MOT POUR MOT du vécu terrain : la joueuse doit se reconnaître
+// dans l'une des quatre phrases sans avoir à interpréter du jargon administratif.
 const LICENCE_META = {
-  not_started:    { label: 'Pas commencée', short: 'À faire',  dot: '🔴', color: '#dc2626' },
-  in_progress:    { label: 'En cours',      short: 'En cours', dot: '🟠', color: '#ea580c' },
-  certif_missing: { label: 'Certif manquant', short: 'Certif', dot: '🟡', color: '#ca8a04' },
-  validated:      { label: 'Validée',       short: 'Validée',  dot: '🟢', color: '#16a34a' },
+  email_received_todo: { icon: '📬', label: "J'ai reçu l'e-mail, faut que je m'en occupe", short: 'E-mail reçu, à faire', dot: '📬', color: '#ea580c' },
+  email_missing:       { icon: '📭', label: "J'ai pas reçu l'e-mail de la FFBB", short: 'E-mail pas reçu',      dot: '📭', color: '#dc2626' },
+  in_progress:         { icon: '⏳', label: "C'est en cours",                    short: 'En cours',             dot: '⏳', color: '#ca8a04' },
+  done:                { icon: '✅', label: "C'est fait !",                      short: 'Fait',                 dot: '🟢', color: '#16a34a' },
 };
-const LICENCE_ORDER = ['not_started', 'certif_missing', 'in_progress', 'validated'];
+// « Pas encore répondu » n'est PAS un statut stocké : c'est l'absence de ligne.
+// Le coach doit quand même le voir, d'où cette pseudo-entrée d'affichage.
+const LICENCE_NONE = { icon: '⚪', label: 'Pas encore répondu', short: 'Sans réponse', dot: '⚪', color: '#9ca3af' };
+// Ordre d'urgence pour le coach : ce qui bloque d'abord, ce qui est fait en dernier.
+const LICENCE_ORDER = ['email_missing', null, 'email_received_todo', 'in_progress', 'done'];
 
 function _licenceIsCoach() { return !!(state.auth && state.auth.role === 'coach'); }
 function _licenceFlush() { try { if (window.PbSync && PbSync.flushNow) PbSync.flushNow(state).catch(() => {}); } catch (e) {} }
-function _licenceStatusOf(l) { return (l && LICENCE_STATUSES.includes(l.status)) ? l.status : 'not_started'; }
+// null = jamais déclaré. Ne JAMAIS retomber sur une valeur par défaut ici : le
+// coach doit distinguer « n'a pas répondu » de « a répondu quelque chose ».
+function _licenceStatusOf(l) { return (l && LICENCE_STATUSES.includes(l.status)) ? l.status : null; }
+function _licenceMeta(status) { return LICENCE_META[status] || LICENCE_NONE; }
 
-// La licence VIVANTE d'une joueuse pour une saison. null = jamais saisie, ce qui
-// se lit « pas commencée » sans créer de ligne fantôme (on n'écrit qu'au 1er
-// changement de statut : inutile de peupler la table pour tout l'effectif).
+// La licence VIVANTE d'une joueuse pour une saison (null = jamais déclarée).
 function _licenceFor(playerId, seasonId) {
   const sid = seasonId || getActiveSeasonId();
+  if (!sid) return null;
   return (state.playerLicences || []).find(l => !l.deletedAt && l.playerId === playerId && l.seasonId === sid) || null;
 }
 // L'effectif concerné : joueuses de la saison ACTIVE, scopé équipe du coach.
@@ -17159,8 +17174,6 @@ function _licencePool() {
   const pool = (_seasonsLoaded() && sid) ? getSeasonPlayers(sid, { team: 'all' }) : (state.players || []);
   return visiblePlayersForUser(pool).slice().sort((a, b) => (a.num || 0) - (b.num || 0));
 }
-// Lignes { player, status, licence } de la saison active, triées par urgence
-// (pas commencée d'abord) puis par numéro : le coach veut voir qui relancer.
 function _licenceRows() {
   const sid = getActiveSeasonId();
   return _licencePool().map(p => {
@@ -17171,76 +17184,90 @@ function _licenceRows() {
 }
 function _licenceStats(rows) {
   const r = rows || _licenceRows();
-  const out = { total: r.length, not_started: 0, in_progress: 0, certif_missing: 0, validated: 0 };
-  r.forEach(x => { out[x.status]++; });
+  const out = { total: r.length, none: 0, email_received_todo: 0, email_missing: 0, in_progress: 0, done: 0 };
+  r.forEach(x => { out[x.status || 'none']++; });
   return out;
 }
 
-function openLicences(filter) {
-  if (!_licenceIsCoach()) return;
-  if (filter !== undefined) window._licenceFilter = filter;
-  const active = window._licenceFilter || 'all';
-  const rows = _licenceRows();
-  const st = _licenceStats(rows);
-  const shown = active === 'all' ? rows : rows.filter(r => r.status === active);
-  const sid = getActiveSeasonId() || '—';
-  const chip = (val, label, n) => `
-    <button class="btn ${active === val ? 'btn-primary' : 'btn-secondary'}" style="padding:5px 9px;font-size:11px"
-      onclick="openLicences('${val}')">${label}${n !== undefined ? ' · ' + n : ''}</button>`;
-  openModal(`
-    <div class="modal-header">
-      <div>
-        <div class="eyebrow">Saison ${esc(sid)}</div>
-        <div class="modal-title">🎫 Licences</div>
-      </div>
-      <button class="modal-close" onclick="closeModal()">✕</button>
-    </div>
-    <div class="modal-body">
-      <div class="stat-grid" style="padding:0;margin-bottom:14px">
-        <div class="stat-tile"><div class="stat-tile-label">Validées</div><div class="stat-tile-value" style="color:${LICENCE_META.validated.color}">${st.validated}</div><div class="stat-tile-sub">sur ${st.total} joueuse${st.total > 1 ? 's' : ''}</div></div>
-        <div class="stat-tile"><div class="stat-tile-label">En cours</div><div class="stat-tile-value" style="color:${LICENCE_META.in_progress.color}">${st.in_progress + st.certif_missing}</div><div class="stat-tile-sub">dont ${st.certif_missing} sans certif</div></div>
-        <div class="stat-tile"><div class="stat-tile-label">À faire</div><div class="stat-tile-value" style="color:${LICENCE_META.not_started.color}">${st.not_started}</div><div class="stat-tile-sub">pas commencée${st.not_started > 1 ? 's' : ''}</div></div>
-        <div class="stat-tile"><div class="stat-tile-label">Avancement</div><div class="stat-tile-value">${st.total ? Math.round((st.validated / st.total) * 100) : 0}%</div><div class="stat-tile-sub">de l'effectif</div></div>
-      </div>
-      <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:12px">
-        ${chip('all', 'Toutes', st.total)}
-        ${chip('not_started', '🔴 À faire', st.not_started)}
-        ${chip('in_progress', '🟠 En cours', st.in_progress)}
-        ${chip('certif_missing', '🟡 Certif', st.certif_missing)}
-        ${chip('validated', '🟢 Validées', st.validated)}
-      </div>
-      ${st.not_started > 0 ? `<button class="btn btn-secondary btn-block mb-2" style="font-size:12px" onclick="remindLicences()">🔔 Relancer les ${st.not_started} joueuse${st.not_started > 1 ? 's' : ''} qui n'ont pas commencé</button>` : ''}
-      ${shown.length ? shown.map(r => {
-        const m = LICENCE_META[r.status];
-        const note = (r.licence && r.licence.notes) ? r.licence.notes : '';
-        return `
-          <div style="display:flex;align-items:center;gap:10px;border:1px solid var(--border-soft);border-left:3px solid ${m.color};border-radius:8px;padding:10px;margin-bottom:6px;background:var(--surface)">
-            <div style="flex:1;min-width:0">
-              <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">#${r.player.num} ${esc(r.player.name)}</div>
-              <div style="font-size:10px;color:${m.color};font-family:'JetBrains Mono';text-transform:uppercase;margin-top:2px">${m.dot} ${m.label}</div>
-              ${note ? `<div style="font-size:11px;color:var(--ink-3);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(note)}</div>` : ''}
-            </div>
-            <button class="btn btn-secondary" style="padding:5px 9px;font-size:11px;flex:none" onclick="openLicenceEditor('${r.player.id}')">Modifier</button>
-          </div>`;
-      }).join('') : `<div class="empty"><div class="empty-icon">🎫</div><div class="empty-title">Aucune joueuse</div><div class="empty-desc">${active === 'all' ? "L'effectif de la saison est vide." : 'Aucune joueuse dans ce statut.'}</div></div>`}
-    </div>
-  `);
+// --- Écriture ---------------------------------------------------------------
+// `by` = 'player' | 'coach'. Une ligne n'est créée qu'à la première déclaration :
+// tant que personne n'a répondu, il n'y a rien en base, et ça se lit « pas
+// encore répondu » sans peupler la table pour tout l'effectif.
+function _licenceSet(playerId, status, by) {
+  const sid = getActiveSeasonId();
+  if (!sid || !LICENCE_STATUSES.includes(status) || !playerId) return false;
+  const now = Date.now();
+  const existing = _licenceFor(playerId, sid);
+  if (existing) {
+    if (existing.status === status && existing.updatedBy === by) return true; // no-op idempotent
+    existing.status = status; existing.updatedBy = by; existing.updatedAt = now;
+  } else {
+    state.playerLicences = state.playerLicences || [];
+    state.playerLicences.push({ id: uid(), playerId, seasonId: sid, status, notes: '',
+      updatedBy: by, createdAt: now, updatedAt: now, deletedAt: null });
+  }
+  persist(); _licenceFlush();
+  return true;
 }
 
+// LA JOUEUSE déclare son propre état. Elle ne peut toucher QUE sa ligne.
+function setMyLicenceStatus(status) {
+  const a = state.auth;
+  if (!a || a.role !== 'player' || !a.playerId) return false;
+  if (!_licenceSet(a.playerId, status, 'player')) return false;
+  // « Pas reçu l'e-mail » est le seul état que la joueuse ne peut pas débloquer
+  // seule : c'est la coach qui relance la FFBB. On la prévient, sinon ce statut
+  // serait un cul-de-sac — la joueuse déclare dans le vide et attend.
+  if (status === 'email_missing') {
+    try {
+      const me = currentPlayer();
+      notifyPush([_pushCoachKey()], {
+        title: '📭 Licence : e-mail FFBB pas reçu',
+        body: (me ? ('#' + me.num + ' ' + me.name) : 'Une joueuse') + " n'a pas reçu l'e-mail de licence",
+        url: '/', tag: 'licence-missing-' + a.playerId, type: 'licence_email_missing'
+      });
+    } catch (e) {}
+  }
+  try { showToast('🎫 ' + _licenceMeta(status).short + ' · état enregistré'); } catch (e) {}
+  render();
+  return true;
+}
+
+// LE COACH peut corriger l'état de n'importe quelle joueuse — typiquement
+// marquer « c'est fait » après vérification dans le portail FFBB officiel,
+// même si la joueuse n'a jamais répondu dans l'app.
+function setLicenceStatusAsCoach(playerId, status) {
+  if (!_licenceIsCoach()) return false;
+  if (!_licenceSet(playerId, status, 'coach')) return false;
+  const p = (state.players || []).find(x => x.id === playerId);
+  try {
+    notifyPush(_pushPlayerKeys([playerId]), {
+      title: '🎫 Licence mise à jour',
+      body: 'Ta coach a marqué ta licence : ' + _licenceMeta(status).label,
+      url: '/', tag: 'licence-coach-' + playerId, type: 'licence_coach_update'
+    });
+  } catch (e) {}
+  try { showToast('🎫 ' + ((p && p.name) || 'Joueuse') + ' · ' + _licenceMeta(status).short); } catch (e) {}
+  try { if (state._effectifOpen) openEffectif(state._effectifTab || 'season'); else render(); } catch (e) { render(); }
+  return true;
+}
+// Raccourci du roster : « ✅ Marquer fait », avec confirmation.
+function markLicenceDone(playerId) {
+  if (!_licenceIsCoach()) return false;
+  const p = (state.players || []).find(x => x.id === playerId);
+  let ok = false;
+  try { ok = confirm('Confirmer que ' + ((p && p.name) || 'cette joueuse') + ' a bien fait sa licence ' + (getActiveSeasonId() || '') + ' ?'); }
+  catch (e) { ok = true; }
+  if (!ok) return false;
+  return setLicenceStatusAsCoach(playerId, 'done');
+}
+// Modale coach : les 4 états en radio, pour corriger un « fait » posé par erreur.
 function openLicenceEditor(playerId) {
   if (!_licenceIsCoach()) return;
   const p = (state.players || []).find(x => x.id === playerId);
   if (!p) return;
+  const cur = _licenceStatusOf(_licenceFor(playerId));
   const l = _licenceFor(playerId);
-  const cur = _licenceStatusOf(l);
-  const opt = (val) => {
-    const m = LICENCE_META[val];
-    return `
-      <label style="display:flex;gap:9px;align-items:center;padding:9px 10px;border:1px solid ${cur === val ? m.color : 'var(--border-soft)'};border-radius:8px;margin-bottom:6px;cursor:pointer">
-        <input type="radio" name="lic-status" value="${val}" ${cur === val ? 'checked' : ''} style="flex:none">
-        <span style="font-size:13px">${m.dot} ${m.label}</span>
-      </label>`;
-  };
   openModal(`
     <div class="modal-header">
       <div>
@@ -17250,94 +17277,119 @@ function openLicenceEditor(playerId) {
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <div class="modal-body">
-      ${LICENCE_STATUSES.map(opt).join('')}
-      <div class="fld" style="margin-top:8px">
-        <label class="fld-label">Notes (optionnel)</label>
-        <textarea id="lic-notes" placeholder="Ex : certificat reçu le 12/08, relancée par SMS…">${esc((l && l.notes) || '')}</textarea>
-      </div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-secondary" onclick="openLicences()">Retour</button>
-      <button class="btn btn-primary" onclick="saveLicence('${playerId}')">Enregistrer</button>
+      <div style="font-size:11px;color:var(--ink-3);margin-bottom:10px;line-height:1.5">C'est normalement la joueuse qui déclare son état depuis son accueil. Tu peux le corriger ici (par exemple après vérification dans le portail FFBB).</div>
+      ${LICENCE_STATUSES.map(v => {
+        const m = LICENCE_META[v];
+        return `
+        <button class="btn ${cur === v ? 'btn-primary' : 'btn-secondary'} btn-block mb-2" style="text-align:left;font-size:12px;padding:10px"
+          onclick="setLicenceStatusAsCoach('${playerId}','${v}')">${m.icon} ${esc(m.label)}</button>`;
+      }).join('')}
+      ${l ? `<div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:10px">Déclaré par ${l.updatedBy === 'coach' ? 'la coach' : 'la joueuse'}${l.updatedAt ? ' · ' + _notifAgo(l.updatedAt) : ''}</div>` : ''}
     </div>
   `);
 }
 
-// Écrit (ou crée) la licence de la saison ACTIVE. La ligne n'existe qu'à partir
-// du 1er changement : inutile de pré-remplir la table pour tout l'effectif,
-// « pas de ligne » se lit déjà « pas commencée ».
-function saveLicence(playerId, statusOverride, notesOverride) {
-  if (!_licenceIsCoach()) return false;
-  const sid = getActiveSeasonId();
-  if (!sid) { try { showToast('⚠️ Aucune saison active'); } catch (e) {} return false; }
-  let status = statusOverride;
-  if (!status) {
-    try {
-      const el = document.querySelector('input[name="lic-status"]:checked');
-      status = el ? el.value : null;
-    } catch (e) { status = null; }
-  }
-  if (!LICENCE_STATUSES.includes(status)) status = 'not_started';
-  let notes = notesOverride;
-  if (notes === undefined) {
-    try { notes = (document.getElementById('lic-notes') || {}).value || ''; } catch (e) { notes = ''; }
-  }
-  notes = (notes || '').trim().slice(0, 500);
-  const now = Date.now();
-  const existing = _licenceFor(playerId, sid);
-  if (existing) {
-    existing.status = status; existing.notes = notes; existing.updatedAt = now;
-  } else {
-    state.playerLicences = state.playerLicences || [];
-    state.playerLicences.push({ id: uid(), playerId, seasonId: sid, status, notes,
-      createdAt: now, updatedAt: now, deletedAt: null });
-  }
-  persist(); _licenceFlush();
-  try { showToast('🎫 Licence mise à jour'); } catch (e) {}
-  try { openLicences(); } catch (e) { render(); }
-  return true;
-}
-
-// Relance les joueuses qui n'ont pas commencé. S'appuie sur le push existant.
-function remindLicences() {
-  if (!_licenceIsCoach()) return 0;
-  const targets = _licenceRows().filter(r => r.status === 'not_started').map(r => r.player.id);
-  if (!targets.length) return 0;
-  try {
-    notifyPush(_pushPlayerKeys(targets), {
-      title: '🎫 Licence à faire',
-      body: 'Pense à faire ta licence pour la saison ' + (getActiveSeasonId() || '') + ' 🙏',
-      url: '/', tag: 'licence-remind', type: 'licence_remind'
-    });
-  } catch (e) {}
-  try { showToast('🔔 Relance envoyée à ' + targets.length + ' joueuse' + (targets.length > 1 ? 's' : '')); } catch (e) {}
-  return targets.length;
-}
-
-// Carte joueuse : son propre statut, en lecture seule (elle ne le modifie pas).
-function renderLicencePlayerCard() {
-  if (!(state.auth && state.auth.role === 'player')) return '';
-  const pid = state.auth.playerId;
+// --- Coach : bandeau + badge, DANS l'écran Effectif (pas d'onglet dédié) -----
+// Bandeau de synthèse en tête de l'onglet « Saison en cours ».
+function renderLicenceSummary() {
+  if (!_licenceIsCoach()) return '';
   const sid = getActiveSeasonId();
   if (!sid) return '';
-  const l = _licenceFor(pid, sid);
-  // Rien de saisi ET aucune licence suivie dans l'équipe → le coach n'utilise
-  // pas encore le module : ne pas afficher une carte « à faire » anxiogène.
-  if (!l && !(state.playerLicences || []).some(x => !x.deletedAt && x.seasonId === sid)) return '';
+  const st = _licenceStats();
+  if (!st.total) return '';
+  const bit = (n, meta) => n ? `<span style="color:${meta.color};white-space:nowrap">${meta.dot} ${n} ${esc(meta.short.toLowerCase())}</span>` : '';
+  const bits = [
+    bit(st.done, LICENCE_META.done),
+    bit(st.in_progress, LICENCE_META.in_progress),
+    bit(st.email_received_todo, LICENCE_META.email_received_todo),
+    bit(st.email_missing, LICENCE_META.email_missing),
+    bit(st.none, LICENCE_NONE),
+  ].filter(Boolean);
+  return `
+    <div style="padding:9px 11px;background:var(--bg-3);border-radius:8px;margin-bottom:12px">
+      <div style="font-size:9px;font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em;color:var(--ink-3);margin-bottom:4px">🎫 Licences ${esc(sid)} · ${st.done}/${st.total}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:4px 10px;font-size:11px">${bits.join('')}</div>
+    </div>`;
+}
+// Badge + action rapide sur une ligne de l'effectif.
+function renderLicenceRosterBadge(playerId) {
+  if (!_licenceIsCoach() || !getActiveSeasonId()) return '';
+  const status = _licenceStatusOf(_licenceFor(playerId));
+  const m = _licenceMeta(status);
+  return `
+    <div style="display:flex;align-items:center;gap:4px;margin-top:3px">
+      <button class="btn btn-ghost" style="font-size:9px;padding:2px 5px;color:${m.color};font-family:'JetBrains Mono';text-transform:uppercase"
+        onclick="event.stopPropagation();openLicenceEditor('${playerId}')" title="Licence : ${esc(m.label)}">🎫 ${m.dot} ${esc(m.short)}</button>
+      ${status === 'done' ? '' : `<button class="btn btn-ghost" style="font-size:9px;padding:2px 5px;color:${LICENCE_META.done.color}"
+        onclick="event.stopPropagation();markLicenceDone('${playerId}')" title="Marquer sa licence comme faite">✅ Marquer fait</button>`}
+    </div>`;
+}
+
+// --- Joueuse : la carte d'accueil EST le rappel ------------------------------
+// Visible tant que ce n'est pas fait. Une fois « c'est fait ! », une ligne
+// discrète de confirmation reste (elle a le droit de vérifier ce qu'elle a
+// déclaré), mais le rappel disparaît.
+function renderLicencePlayerCard() {
+  const a = state.auth;
+  if (!a || a.role !== 'player' || !a.playerId) return '';
+  const sid = getActiveSeasonId();
+  if (!sid) return '';
+  const l = _licenceFor(a.playerId, sid);
   const status = _licenceStatusOf(l);
-  const m = LICENCE_META[status];
+  if (status === 'done') {
+    const byCoach = l && l.updatedBy === 'coach';
+    return `
+      <div style="padding:0 18px;margin-bottom:18px">
+        <div style="border:1px solid var(--border-soft);border-left:3px solid ${LICENCE_META.done.color};border-radius:10px;padding:10px 12px;background:var(--surface);display:flex;align-items:center;gap:9px">
+          <div style="font-size:17px;flex:none">🎫</div>
+          <div style="flex:1;min-width:0">
+            <div style="font-family:'Anton';font-size:12px;text-transform:uppercase">Licence ${esc(sid)} · ✅ c'est fait</div>
+            <div style="font-size:10px;color:var(--ink-3);margin-top:2px">${byCoach ? 'Ta coach a marqué ta licence comme faite' : 'Tu as déclaré avoir fait ta licence'}${l && l.updatedAt ? ' · ' + _notifAgo(l.updatedAt) : ''}</div>
+          </div>
+          <button class="btn btn-ghost" style="font-size:10px;padding:3px 6px;flex:none" onclick="openMyLicence()">Modifier</button>
+        </div>
+      </div>`;
+  }
+  const opt = (v) => {
+    const m = LICENCE_META[v];
+    const on = status === v;
+    return `
+      <button class="btn ${on ? 'btn-primary' : 'btn-secondary'} btn-block mb-2" style="text-align:left;font-size:12px;padding:10px;white-space:normal;line-height:1.35"
+        onclick="setMyLicenceStatus('${v}')">${on ? '◉' : '○'} ${m.icon} ${esc(m.label)}${v === 'email_missing' ? '<span style="display:block;font-size:10px;opacity:0.75;margin-top:2px">(vérifie tes spams — ta coach sera prévenue)</span>' : ''}</button>`;
+  };
   return `
     <div style="padding:0 18px;margin-bottom:18px">
-      <div style="border:1px solid var(--border-soft);border-left:3px solid ${m.color};border-radius:10px;padding:12px;background:var(--surface);display:flex;align-items:center;gap:10px">
-        <div style="font-size:20px;flex:none">🎫</div>
-        <div style="flex:1;min-width:0">
-          <div style="font-family:'Anton';font-size:13px;text-transform:uppercase">Ma licence</div>
-          <div style="font-size:11px;color:${m.color};font-family:'JetBrains Mono';text-transform:uppercase;margin-top:2px">${m.dot} ${m.label}</div>
-          ${status === 'not_started' ? `<div style="font-size:11px;color:var(--ink-3);margin-top:3px">Pense à faire ta licence pour la saison ${esc(sid)}.</div>`
-            : status === 'certif_missing' ? `<div style="font-size:11px;color:var(--ink-3);margin-top:3px">Il manque ton certificat médical.</div>` : ''}
+      <div style="border:1px solid var(--orange);border-radius:10px;padding:12px;background:var(--surface)">
+        <div style="display:flex;align-items:center;gap:9px;margin-bottom:9px">
+          <div style="font-size:19px;flex:none">🎫</div>
+          <div style="flex:1;min-width:0">
+            <div style="font-family:'Anton';font-size:13px;text-transform:uppercase">Licence ${esc(sid)}</div>
+            <div style="font-size:11px;color:var(--ink-3);margin-top:1px">${status ? 'Où tu en es — tu peux changer à tout moment' : 'Dis-nous où tu en es 👇'}</div>
+          </div>
         </div>
+        ${LICENCE_STATUSES.map(opt).join('')}
       </div>
     </div>`;
+}
+// Rouvre le choix après un « c'est fait » (erreur de clic, ou statut posé par
+// la coach que la joueuse veut corriger).
+function openMyLicence() {
+  const a = state.auth;
+  if (!a || a.role !== 'player' || !a.playerId) return;
+  const status = _licenceStatusOf(_licenceFor(a.playerId));
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">🎫 Ma licence ${esc(getActiveSeasonId() || '')}</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      ${LICENCE_STATUSES.map(v => {
+        const m = LICENCE_META[v];
+        return `<button class="btn ${status === v ? 'btn-primary' : 'btn-secondary'} btn-block mb-2" style="text-align:left;font-size:12px;padding:10px;white-space:normal;line-height:1.35"
+          onclick="setMyLicenceStatus('${v}');closeModal()">${status === v ? '◉' : '○'} ${m.icon} ${esc(m.label)}</button>`;
+      }).join('')}
+    </div>
+  `);
 }
 
 function renderTeam() {
@@ -17360,7 +17412,6 @@ function renderTeam() {
           <div style="display:flex;gap:6px;flex-wrap:wrap">
             ${_seasonsLoaded() ? `<button class="section-action-btn" onclick="openSeasonRosterEditor()" aria-label="Gérer l'effectif de la saison">👥 Effectif</button>` : ''}
             <button class="section-action-btn" onclick="openGagesCoach()" aria-label="Boîte à gages">🎁 Gages${(() => { const n = gagesPendingCount(); return n ? ` <span style="background:var(--orange);color:#fff;border-radius:10px;padding:0 5px;font-size:10px">${n}</span>` : ''; })()}</button>
-            <button class="section-action-btn" onclick="openLicences()" aria-label="Suivi des licences">🎫 Licences${(() => { const st = _licenceStats(); return st.not_started ? ` <span style="background:var(--orange);color:#fff;border-radius:10px;padding:0 5px;font-size:10px">${st.not_started}</span>` : ''; })()}</button>
             <button class="section-action-btn" onclick="managePlayers()" aria-label="Gérer les joueuses">⚙ Gérer</button>
           </div>
         ` : ''}
@@ -35520,7 +35571,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-29.82';
+const APP_VERSION = '2026-07-29.83';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {

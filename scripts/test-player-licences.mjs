@@ -1,12 +1,18 @@
-// Test SUIVI DES LICENCES (cf. migration 20260729_001_player_licences).
+// Test SUIVI DES LICENCES — auto-déclaré par la joueuse, override coach.
+// (migrations 20260729_001 + _002_licences_self_declared)
 //
-// Le point sensible est le SCOPING PAR SAISON : une licence est un objet par
-// saison. C'est pour ça qu'elle vit dans sa propre table et non en colonnes sur
-// `players` — sinon le changement de saison écraserait l'historique et
-// afficherait silencieusement le statut de l'an dernier (le mode de panne
-// « cumul cross-saison » déjà corrigé 4 fois ici). Ce test le verrouille.
+// Le statut est déclaré par LA JOUEUSE depuis sa carte d'accueil (4 états repris
+// du vécu terrain), pas saisi par le coach. Le coach voit l'agrégat dans
+// l'écran Effectif et peut corriger — typiquement « c'est fait » après
+// vérification dans le portail FFBB.
 //
-// Évalue les <script> classiques du VRAI index.html dans un vm à DOM stubé.
+// Deux points sensibles verrouillés ici :
+//   1. « pas encore répondu » = ABSENCE DE LIGNE, jamais un statut stocké. Le
+//      coach doit distinguer « n'a jamais répondu » de « a répondu quelque
+//      chose ». Tout repli sur une valeur par défaut casse cette distinction.
+//   2. le SCOPING PAR SAISON — raison d'être de la table dédiée plutôt que de
+//      colonnes licence_* sur `players` (qui écraseraient l'historique au
+//      changement de saison : le « cumul cross-saison » déjà corrigé 4× ici).
 import fs from 'node:fs';
 import vm from 'node:vm';
 
@@ -23,12 +29,9 @@ const mkEl = () => ({
   querySelector: () => null, querySelectorAll: () => [], classList: { add() {}, remove() {}, toggle() {} },
   getContext: () => null, setAttribute() {}, focus() {},
 });
-const ui = { checked: null, fields: {} };
 const doc = {
-  getElementById: (id) => (id in ui.fields ? { value: ui.fields[id] } : mkEl()),
-  createElement: mkEl,
-  querySelector: (sel) => (sel.includes('lic-status') && ui.checked ? { value: ui.checked } : null),
-  querySelectorAll: () => [],
+  getElementById: () => mkEl(), createElement: mkEl,
+  querySelector: () => null, querySelectorAll: () => [],
   addEventListener() {}, removeEventListener() {},
   body: mkEl(), documentElement: mkEl(), head: mkEl(), visibilityState: 'visible',
 };
@@ -70,8 +73,7 @@ ctx.openModal = h => { ctx.__lastModal = h; };
 ctx.closeModal = () => {};
 
 function seed() {
-  pushed = []; ui.checked = null; ui.fields = {};
-  ctx.window._licenceFilter = 'all';
+  pushed = [];
   S.auth = { role: 'coach', coachId: 'admin' };
   S.coaches = [{ id: 'admin', name: 'Admin', coachRole: 'admin_coach', teams: ['e1', 'e2'] }];
   S.seasons = [
@@ -84,185 +86,261 @@ function seed() {
   ];
   S.seasonPlayers = ['pA', 'pB', 'pC'].map(id => ({ seasonId: '2026-2027', playerId: id, teamTag: 'both', joinedAt: '2026-07-01', leftAt: null }));
   S.playerLicences = [];
-  S.gages = []; S.gageDraws = []; S.convocations = []; S.matches = []; S.trainingCompletions = []; S.trainingPrograms = [];
+  S.gages = []; S.gageDraws = []; S.convocations = []; S.matches = [];
+  S.trainingCompletions = []; S.trainingPrograms = [];
 }
 const lic = (pid, sid) => ctx._licenceFor(pid, sid);
+const asPlayer = (pid) => { S.auth = { role: 'player', playerId: pid }; };
+const asCoach = () => { S.auth = { role: 'coach', coachId: 'admin' }; };
 
-// --- 1) état initial --------------------------------------------------------
-t('sans ligne, une joueuse est « pas commencée » (aucune ligne fantôme créée)', () => {
+// --- 1) « pas encore répondu » = absence de ligne ---------------------------
+t('les 4 états sont ceux de la demande', () => {
+  assert(JSON.stringify(ctx.LICENCE_STATUSES) ===
+    JSON.stringify(['email_received_todo', 'email_missing', 'in_progress', 'done']),
+    'vocabulaire = ' + JSON.stringify(ctx.LICENCE_STATUSES));
+});
+t('sans déclaration : statut null, aucune ligne créée', () => {
   seed();
-  assert(lic('pA') === null, 'ligne créée sans raison');
+  assert(lic('pA') === null, 'ligne fantôme');
   const rows = ctx._licenceRows();
   assert(rows.length === 3, 'effectif = ' + rows.length);
-  assert(rows.every(r => r.status === 'not_started'), 'statut par défaut KO');
-  assert(S.playerLicences.length === 0, 'la table a été pré-remplie');
+  assert(rows.every(r => r.status === null), 'un repli par défaut masque « pas répondu »');
+  assert(S.playerLicences.length === 0, 'table pré-remplie');
 });
-t('les compteurs partent à 0 validée / 3 à faire', () => {
+t('les compteurs comptent les « sans réponse » à part', () => {
   const st = ctx._licenceStats();
-  assert(st.total === 3 && st.not_started === 3 && st.validated === 0, JSON.stringify(st));
+  assert(st.total === 3 && st.none === 3 && st.done === 0, JSON.stringify(st));
 });
 
-// --- 2) écriture ------------------------------------------------------------
-t('enregistrer un statut crée UNE ligne sur la saison active', () => {
-  seed();
-  assert(ctx.saveLicence('pA', 'validated', 'reçue le 12/08') === true, 'refusé');
-  assert(S.playerLicences.length === 1, 'lignes = ' + S.playerLicences.length);
+// --- 2) la JOUEUSE déclare ---------------------------------------------------
+t('la joueuse déclare son état depuis sa carte', () => {
+  seed(); asPlayer('pA');
+  assert(ctx.setMyLicenceStatus('in_progress') === true, 'refusé');
   const l = lic('pA');
-  assert(l.status === 'validated', 'statut = ' + l.status);
+  assert(l.status === 'in_progress', 'statut = ' + l.status);
+  assert(l.updatedBy === 'player', 'auteur = ' + l.updatedBy);
   assert(l.seasonId === '2026-2027', 'saison = ' + l.seasonId);
-  assert(l.notes === 'reçue le 12/08', 'notes = ' + l.notes);
-  assert(typeof l.updatedAt === 'number', 'updatedAt manquant');
+  asCoach();
 });
-t('ré-enregistrer MET À JOUR la même ligne (pas de doublon)', () => {
-  ctx.saveLicence('pA', 'certif_missing', 'il manque le certif');
-  assert(S.playerLicences.length === 1, 'doublon : ' + S.playerLicences.length);
-  assert(lic('pA').status === 'certif_missing', 'statut = ' + lic('pA').status);
+t('les 4 états sont mutuellement exclusifs (une seule ligne, écrasée)', () => {
+  seed(); asPlayer('pA');
+  ctx.setMyLicenceStatus('email_received_todo');
+  ctx.setMyLicenceStatus('in_progress');
+  ctx.setMyLicenceStatus('done');
+  assert(S.playerLicences.length === 1, 'lignes = ' + S.playerLicences.length);
+  assert(lic('pA').status === 'done', 'statut = ' + lic('pA').status);
+  asCoach();
 });
-t('un statut inconnu retombe sur « pas commencée »', () => {
+t('une joueuse ne peut PAS déclarer pour une autre', () => {
+  seed(); asPlayer('pA');
+  ctx.setMyLicenceStatus('done');
+  assert(lic('pB') === null, 'ligne écrite sur une autre joueuse');
+  asCoach();
+});
+t('le coach ne passe pas par setMyLicenceStatus', () => {
   seed();
-  ctx.saveLicence('pA', 'n_importe_quoi', '');
-  assert(lic('pA').status === 'not_started', 'statut = ' + lic('pA').status);
+  assert(ctx.setMyLicenceStatus('done') === false, 'écriture acceptée hors rôle joueuse');
+  assert(S.playerLicences.length === 0, 'ligne écrite');
 });
-t('le statut vient du radio coché quand il n\'est pas passé en argument', () => {
-  seed();
-  ui.checked = 'in_progress'; ui.fields['lic-notes'] = 'dossier envoyé';
-  ctx.saveLicence('pB');
-  assert(lic('pB').status === 'in_progress', 'statut = ' + lic('pB').status);
-  assert(lic('pB').notes === 'dossier envoyé', 'notes = ' + lic('pB').notes);
+t('un statut inconnu est refusé (pas de ligne bidon)', () => {
+  seed(); asPlayer('pA');
+  assert(ctx.setMyLicenceStatus('n_importe_quoi') === false, 'accepté');
+  assert(S.playerLicences.length === 0, 'ligne écrite');
+  asCoach();
+});
+t('« pas reçu l\'e-mail » prévient la coach (sinon cul-de-sac)', () => {
+  seed(); asPlayer('pA');
+  ctx.setMyLicenceStatus('email_missing');
+  const p = pushed.find(x => x.payload && x.payload.type === 'licence_email_missing');
+  assert(p, 'aucune alerte coach');
+  assert(/#13 Candice/.test(p.payload.body), 'joueuse absente : ' + p.payload.body);
+  asCoach();
+});
+t('les autres états n\'alertent PAS la coach', () => {
+  seed(); asPlayer('pA');
+  ctx.setMyLicenceStatus('in_progress');
+  assert(!pushed.some(x => x.payload && x.payload.type === 'licence_email_missing'), 'alerte parasite');
+  asCoach();
 });
 
-// --- 3) SCOPING SAISON (la raison d'être de la table séparée) ---------------
-t('la licence de la saison précédente n\'écrase PAS celle de la saison active', () => {
+// --- 3) override COACH -------------------------------------------------------
+t('le coach peut marquer « c\'est fait » sans déclaration de la joueuse', () => {
   seed();
-  S.playerLicences.push({ id: 'old', playerId: 'pA', seasonId: '2025-2026', status: 'validated',
-    notes: 'saison dernière', createdAt: 1, updatedAt: 1, deletedAt: null });
-  assert(lic('pA', '2026-2027') === null, 'la licence 2025-2026 fuit sur 2026-2027');
-  assert(ctx._licenceRows().find(r => r.player.id === 'pA').status === 'not_started',
-    'statut de l\'an dernier affiché sur la saison active');
+  assert(ctx.markLicenceDone('pA') === true, 'refusé');
+  const l = lic('pA');
+  assert(l.status === 'done', 'statut = ' + l.status);
+  assert(l.updatedBy === 'coach', 'auteur = ' + l.updatedBy);
+});
+t('le coach peut CORRIGER un « fait » posé par erreur', () => {
+  seed();
+  ctx.markLicenceDone('pA');
+  ctx.setLicenceStatusAsCoach('pA', 'in_progress');
+  assert(lic('pA').status === 'in_progress', 'statut = ' + lic('pA').status);
+  assert(S.playerLicences.length === 1, 'doublon : ' + S.playerLicences.length);
+});
+t('la joueuse est prévenue quand la coach change son statut', () => {
+  seed();
+  ctx.markLicenceDone('pA');
+  const p = pushed.find(x => x.payload && x.payload.type === 'licence_coach_update');
+  assert(p, 'aucun push joueuse');
+  assert(/fait/i.test(p.payload.body), 'message = ' + p.payload.body);
+});
+t('une joueuse ne peut pas se servir de l\'override coach', () => {
+  seed(); asPlayer('pA');
+  assert(ctx.setLicenceStatusAsCoach('pB', 'done') === false, 'override accepté');
+  assert(ctx.markLicenceDone('pB') === false, 'raccourci accepté');
+  assert(S.playerLicences.length === 0, 'ligne écrite');
+  asCoach();
+});
+t('la joueuse peut reprendre la main après un override coach', () => {
+  seed();
+  ctx.markLicenceDone('pA');
+  asPlayer('pA');
+  ctx.setMyLicenceStatus('in_progress');
+  assert(lic('pA').status === 'in_progress', 'statut = ' + lic('pA').status);
+  assert(lic('pA').updatedBy === 'player', 'auteur = ' + lic('pA').updatedBy);
+  asCoach();
+});
+
+// --- 4) SCOPING SAISON -------------------------------------------------------
+t('la licence de la saison précédente ne fuit PAS sur la saison active', () => {
+  seed();
+  S.playerLicences.push({ id: 'old', playerId: 'pA', seasonId: '2025-2026', status: 'done',
+    notes: '', updatedBy: 'player', createdAt: 1, updatedAt: 1, deletedAt: null });
+  assert(lic('pA', '2026-2027') === null, 'fuite cross-saison');
+  assert(ctx._licenceRows().find(r => r.player.id === 'pA').status === null,
+    'statut de l\'an dernier affiché comme courant');
 });
 t('l\'historique de la saison précédente est CONSERVÉ', () => {
-  ctx.saveLicence('pA', 'in_progress', '');
-  assert(lic('pA', '2025-2026').status === 'validated', 'historique écrasé');
+  asPlayer('pA'); ctx.setMyLicenceStatus('in_progress'); asCoach();
+  assert(lic('pA', '2025-2026').status === 'done', 'historique écrasé');
   assert(lic('pA', '2026-2027').status === 'in_progress', 'saison active KO');
   assert(S.playerLicences.length === 2, 'lignes = ' + S.playerLicences.length);
 });
 t('une ligne soft-deleted est ignorée', () => {
-  seed();
-  ctx.saveLicence('pA', 'validated', '');
+  seed(); asPlayer('pA'); ctx.setMyLicenceStatus('done'); asCoach();
   lic('pA').deletedAt = Date.now();
   assert(lic('pA') === null, 'ligne supprimée encore lue');
 });
 
-// --- 4) permissions ---------------------------------------------------------
-t('une joueuse ne peut PAS écrire de licence', () => {
-  seed();
-  S.auth = { role: 'player', playerId: 'pA' };
-  assert(ctx.saveLicence('pA', 'validated', 'triche') === false, 'écriture acceptée');
-  assert(S.playerLicences.length === 0, 'ligne écrite quand même');
-  S.auth = { role: 'coach', coachId: 'admin' };
-});
-t('openLicences est un no-op côté joueuse', () => {
-  seed();
-  S.auth = { role: 'player', playerId: 'pA' };
-  ctx.__lastModal = null;
-  ctx.openLicences();
-  assert(!ctx.__lastModal, 'modale coach ouverte pour une joueuse');
-  S.auth = { role: 'coach', coachId: 'admin' };
-});
-
-// --- 5) UI coach ------------------------------------------------------------
-t('la modale liste l\'effectif avec les statuts', () => {
-  seed();
-  ctx.saveLicence('pA', 'validated', '');
-  ctx.openLicences('all');
-  const m = ctx.__lastModal || '';
-  assert(m.includes('#13 Candice') && m.includes('#6 Delph') && m.includes('#15 Noellie'), 'effectif incomplet');
-  assert(m.includes('Validée'), 'statut absent');
-  assert(/openLicenceEditor\('pA'\)/.test(m), 'bouton Modifier non câblé');
-});
-t('les joueuses à relancer sont EN TÊTE (tri par urgence)', () => {
-  seed();
-  ctx.saveLicence('pA', 'validated', '');   // #13 validée
-  const rows = ctx._licenceRows();
-  assert(rows[0].status === 'not_started', 'tri KO : ' + rows.map(r => r.status).join(','));
-  assert(rows[rows.length - 1].player.id === 'pA', 'la validée devrait être en dernier');
-});
-t('le filtre ne montre que le statut demandé', () => {
-  seed();
-  ctx.saveLicence('pA', 'validated', '');
-  ctx.openLicences('validated');
-  const m = ctx.__lastModal || '';
-  assert(m.includes('#13 Candice'), 'la validée manque');
-  assert(!m.includes('#6 Delph'), 'fuite d\'un autre statut');
-});
-t('l\'éditeur pré-coche le statut courant et affiche les notes', () => {
-  seed();
-  ctx.saveLicence('pA', 'certif_missing', 'relancée par SMS');
-  ctx.openLicenceEditor('pA');
-  const m = ctx.__lastModal || '';
-  assert(/value="certif_missing" checked/.test(m), 'statut non pré-coché');
-  assert(m.includes('relancée par SMS'), 'notes absentes');
-});
-t('la modale rend même avec un effectif vide', () => {
-  seed();
-  S.seasonPlayers = [];
-  ctx.openLicences('all');
-  assert(/Aucune joueuse/.test(ctx.__lastModal || ''), 'état vide manquant');
-});
-
-// --- 6) relance -------------------------------------------------------------
-t('la relance ne cible QUE les « pas commencée »', () => {
-  seed();
-  ctx.saveLicence('pA', 'validated', '');
-  ctx.saveLicence('pB', 'in_progress', '');
-  const n = ctx.remindLicences();
-  assert(n === 1, 'ciblé ' + n + ' joueuse(s) au lieu de 1');
-  assert(pushed.length === 1, 'push = ' + pushed.length);
-  assert(/licence/i.test(pushed[0].payload.title), 'titre = ' + pushed[0].payload.title);
-});
-t('rien à relancer → aucun push', () => {
-  seed();
-  ['pA', 'pB', 'pC'].forEach(id => ctx.saveLicence(id, 'validated', ''));
-  pushed = [];
-  assert(ctx.remindLicences() === 0, 'relance envoyée à tort');
-  assert(pushed.length === 0, 'push parasite');
-});
-
-// --- 7) carte joueuse -------------------------------------------------------
-t('la joueuse voit SON statut', () => {
-  seed();
-  ctx.saveLicence('pA', 'certif_missing', '');
-  S.auth = { role: 'player', playerId: 'pA' };
+// --- 5) carte joueuse (= le rappel) -----------------------------------------
+t('sans déclaration : la carte propose les 4 choix', () => {
+  seed(); asPlayer('pA');
   const c = ctx.renderLicencePlayerCard();
-  assert(c && c.includes('Ma licence'), 'carte absente');
-  assert(c.includes('Certif manquant'), 'statut absent');
-  assert(/certificat m.dical/i.test(c), 'consigne absente');
-  S.auth = { role: 'coach', coachId: 'admin' };
+  assert(c && c.includes('Licence 2026-2027'), 'carte absente');
+  assert(/Dis-nous o. tu en es/.test(c), 'appel à l\'action absent');
+  ctx.LICENCE_STATUSES.forEach(v => assert(c.includes("setMyLicenceStatus('" + v + "')"), 'choix ' + v + ' absent'));
+  asCoach();
 });
-t('la carte ne fuite pas le statut des autres', () => {
-  seed();
-  ctx.saveLicence('pA', 'validated', 'notes privées coach');
-  S.auth = { role: 'player', playerId: 'pB' };
+t('les libellés sont ceux demandés, mot pour mot', () => {
+  seed(); asPlayer('pA');
+  // esc() encode les apostrophes en &#39; : on dé-échappe avant de comparer, pour
+  // que le test porte sur le TEXTE LU par la joueuse et pas sur l'encodage.
+  const c = ctx.renderLicencePlayerCard().split('&#39;').join("'");
+  assert(c.includes("J'ai reçu l'e-mail, faut que je m'en occupe"), 'libellé 1 absent');
+  assert(c.includes("J'ai pas reçu l'e-mail de la FFBB"), 'libellé 2 absent');
+  assert(c.includes("C'est en cours"), 'libellé 3 absent');
+  assert(c.includes("C'est fait !"), 'libellé 4 absent');
+  asCoach();
+});
+t('« vérifie tes spams » est affiché sur le bon choix', () => {
+  seed(); asPlayer('pA');
+  assert(/v.rifie tes spams/i.test(ctx.renderLicencePlayerCard()), 'aide spams absente');
+  asCoach();
+});
+t('le choix courant est marqué comme sélectionné', () => {
+  seed(); asPlayer('pA');
+  ctx.setMyLicenceStatus('in_progress');
   const c = ctx.renderLicencePlayerCard();
-  assert(!c.includes('notes privées coach'), 'notes coach exposées');
-  assert(!c.includes('Validée'), 'statut d\'une autre joueuse affiché');
-  S.auth = { role: 'coach', coachId: 'admin' };
+  assert(c.includes('◉'), 'aucune sélection visible');
+  asCoach();
 });
-t('aucune carte tant que le coach n\'utilise pas le module', () => {
+t('une fois « c\'est fait », le rappel disparaît au profit d\'une confirmation', () => {
+  seed(); asPlayer('pA');
+  ctx.setMyLicenceStatus('done');
+  const c = ctx.renderLicencePlayerCard();
+  assert(/c&#039;est fait|c'est fait/i.test(c), 'confirmation absente');
+  assert(!c.includes("setMyLicenceStatus('in_progress')"), 'les 4 choix sont encore affichés');
+  assert(c.includes('openMyLicence()'), 'plus moyen de corriger');
+  asCoach();
+});
+t('après un override coach, la joueuse lit « ta coach a marqué… »', () => {
   seed();
-  S.auth = { role: 'player', playerId: 'pA' };
-  assert(ctx.renderLicencePlayerCard() === '', 'carte anxiogène affichée sans donnée');
-  S.auth = { role: 'coach', coachId: 'admin' };
+  ctx.markLicenceDone('pA');
+  asPlayer('pA');
+  assert(/coach a marqu/i.test(ctx.renderLicencePlayerCard()), 'auteur non indiqué');
+  asCoach();
 });
-t('la carte coach est vide côté coach (c\'est une carte joueuse)', () => {
+t('aucune carte côté coach', () => {
   seed();
   assert(ctx.renderLicencePlayerCard() === '', 'carte joueuse rendue pour le coach');
 });
+t('la carte ne fuite pas le statut des autres', () => {
+  seed(); asPlayer('pA'); ctx.setMyLicenceStatus('done');
+  asPlayer('pB');
+  const c = ctx.renderLicencePlayerCard();
+  assert(!/c&#039;est fait|c'est fait/i.test(c) || c.includes('setMyLicenceStatus'), 'statut d\'une autre joueuse affiché');
+  asCoach();
+});
 
-// --- 8) round-trip de sérialisation ----------------------------------------
-// _dumpLicenceRow / _licenceFromRow vivent dans le bloc <script type="module">
-// (PbSync), que le vm ci-dessus n'évalue PAS. On les extrait du source et on les
-// évalue à part — même approche que test-training-programs.mjs §8.
+// --- 6) vue coach DANS l'effectif (pas d'écran dédié) -----------------------
+t('plus aucun écran licences dédié', () => {
+  assert(!/function openLicences\b/.test(html), 'openLicences existe encore');
+  assert(!/openLicences\(\)/.test(html), 'un bouton pointe encore vers openLicences');
+});
+t('le bandeau de synthèse compte tous les états', () => {
+  seed();
+  ctx.markLicenceDone('pA');
+  asPlayer('pB'); ctx.setMyLicenceStatus('email_missing'); asCoach();
+  const s = ctx.renderLicenceSummary();
+  assert(s.includes('🎫 Licences 2026-2027'), 'titre absent');
+  assert(/1\/3/.test(s), 'ratio fait/total absent : ' + s.slice(0, 200));
+  assert(/1 fait/.test(s), 'compteur fait absent');
+  assert(/1 e-mail pas re.u/i.test(s), 'compteur bloqué absent');
+  assert(/1 sans r.ponse/i.test(s), 'compteur sans réponse absent');
+});
+t('le bandeau est vide côté joueuse', () => {
+  seed(); asPlayer('pA');
+  assert(ctx.renderLicenceSummary() === '', 'bandeau coach exposé à la joueuse');
+  asCoach();
+});
+t('le badge de ligne porte le statut et l\'action « marquer fait »', () => {
+  seed();
+  const b = ctx.renderLicenceRosterBadge('pA');
+  assert(/Sans r.ponse/i.test(b), 'statut absent : ' + b);
+  assert(b.includes("markLicenceDone('pA')"), 'action rapide absente');
+  assert(b.includes("openLicenceEditor('pA')"), 'accès au détail absent');
+});
+t('« marquer fait » disparaît quand c\'est déjà fait', () => {
+  seed();
+  ctx.markLicenceDone('pA');
+  const b = ctx.renderLicenceRosterBadge('pA');
+  assert(!b.includes('markLicenceDone'), 'action redondante encore affichée');
+  assert(/Fait/.test(b), 'statut fait absent');
+});
+t('le badge est vide côté joueuse', () => {
+  seed(); asPlayer('pA');
+  assert(ctx.renderLicenceRosterBadge('pB') === '', 'badge coach exposé à la joueuse');
+  asCoach();
+});
+t('l\'écran Effectif rend avec le bandeau et les badges', () => {
+  seed();
+  ctx.markLicenceDone('pA');
+  ctx.openEffectif('season');
+  const m = ctx.__lastModal || '';
+  assert(m.includes('🎫 Licences'), 'bandeau absent de l\'effectif');
+  assert(m.includes("markLicenceDone('pB')"), 'badge absent des lignes');
+});
+t('la modale de détail liste les 4 états et l\'auteur', () => {
+  seed();
+  ctx.markLicenceDone('pA');
+  ctx.openLicenceEditor('pA');
+  const m = ctx.__lastModal || '';
+  ctx.LICENCE_STATUSES.forEach(v => assert(m.includes("setLicenceStatusAsCoach('pA','" + v + "')"), 'état ' + v + ' absent'));
+  assert(/D.clar. par la coach/i.test(m), 'auteur absent');
+});
+
+// --- 7) sérialisation (bloc module, hors portée du vm) ----------------------
 function extractFn(name) {
   const start = html.indexOf('function ' + name + '(');
   if (start < 0) throw new Error('introuvable : ' + name);
@@ -273,31 +351,31 @@ function extractFn(name) {
   }
   throw new Error('déséquilibré : ' + name);
 }
-const ser = new Function(
-  extractFn('_dumpLicenceRow') + '\n' + extractFn('_licenceFromRow') +
-  '\nreturn { _dumpLicenceRow, _licenceFromRow };')();
+const ser = new Function(extractFn('_dumpLicenceRow') + '\n' + extractFn('_licenceFromRow')
+  + '\nreturn { _dumpLicenceRow, _licenceFromRow };')();
 
-t('les sérialiseurs du bloc module sont autonomes (aucune const hors portée)', () => {
-  // Le piège cross-<script> : LICENCE_STATUSES est déclaré dans le bloc
-  // classique. Si le module y faisait référence, il throwerait en prod.
-  assert(typeof ser._dumpLicenceRow === 'function' && typeof ser._licenceFromRow === 'function');
-  ser._dumpLicenceRow({ id: 'x', playerId: 'p', seasonId: 's', status: 'validated' });
+t('les sérialiseurs du bloc module sont autonomes (piège cross-<script>)', () => {
+  // LICENCE_STATUSES est déclaré dans le bloc classique : y référer depuis le
+  // bloc module throwerait en prod.
+  ser._dumpLicenceRow({ id: 'x', playerId: 'p', seasonId: 's', status: 'done', updatedBy: 'coach' });
 });
-t('dump → row → client conserve tout', () => {
-  seed();
-  ctx.saveLicence('pA', 'in_progress', 'dossier parti');
+t('round-trip dump → row → client', () => {
+  seed(); asPlayer('pA'); ctx.setMyLicenceStatus('email_missing'); asCoach();
   const l = lic('pA');
   const row = ser._dumpLicenceRow(l);
   assert(row.player_id === 'pA' && row.season_id === '2026-2027', JSON.stringify(row));
-  assert(row.status === 'in_progress' && row.notes === 'dossier parti', JSON.stringify(row));
-  assert(row.deleted_at === null, 'deleted_at KO');
+  assert(row.status === 'email_missing', 'statut = ' + row.status);
+  assert(row.updated_by === 'player', 'auteur = ' + row.updated_by);
   const back = ser._licenceFromRow(Object.assign({ created_at: new Date().toISOString() }, row));
-  assert(back.status === l.status && back.notes === l.notes && back.playerId === l.playerId, JSON.stringify(back));
+  assert(back.status === l.status && back.updatedBy === 'player' && back.playerId === 'pA', JSON.stringify(back));
 });
-t('un statut hors contrainte SQL est neutralisé au dump', () => {
-  seed();
-  S.playerLicences = [{ id: 'x1', playerId: 'pA', seasonId: '2026-2027', status: 'bidon', notes: '', updatedAt: 1 }];
-  assert(ser._dumpLicenceRow(S.playerLicences[0]).status === 'not_started', 'statut invalide envoyé en base');
+t('un statut hors contrainte SQL part à null (jamais un repli inventé)', () => {
+  const row = ser._dumpLicenceRow({ id: 'x1', playerId: 'pA', seasonId: 's', status: 'validated' });
+  assert(row.status === null, 'statut envoyé = ' + row.status);
+});
+t('un auteur hors contrainte SQL part à null', () => {
+  const row = ser._dumpLicenceRow({ id: 'x1', playerId: 'pA', seasonId: 's', status: 'done', updatedBy: 'hacker' });
+  assert(row.updated_by === null, 'auteur envoyé = ' + row.updated_by);
 });
 
 console.log(R.join('\n'));
