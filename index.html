@@ -3583,6 +3583,14 @@ function _stableJson(o) {
 // pk : nom de colonne PK ou tableau de colonnes (composite)
 // realtime : bool, auto-subscribe
 // auth : 'anon' (toutes les entités équipe) ou 'l2' (perso)
+// Dernier état connu des RSVP, indexé par id de convocation :
+// { convocId: { playerId: {status, reason, lateMinutes, instanceDate, at} } }.
+// Alimenté par l'apply de `convocationResponses`, lu par celui de `convocations`
+// — les deux entités décrivent le même objet métier mais arrivent par deux
+// canaux indépendants, et un événement realtime ne rejoue QUE son entité. Sans
+// ce relais, une convocation nouvelle pour le client repart avec des RSVP vides.
+const _lastConvocResponses = {};
+
 const ENTITIES = [
   {
     key: 'plays', table: 'plays', pk: 'id', realtime: true, auth: 'anon',
@@ -3938,7 +3946,21 @@ const ENTITIES = [
         cancelledInstances: r.cancelled_instances || [],
         instanceOverrides: r.instance_overrides || {},
         attachments: r.attachments || [],
-        responses: (byId[r.id] || {}).responses || {},
+        // Les RSVP ne sont PAS portés par cette table : ils vivent dans
+        // `convocation_responses` (entité séparée, juste en dessous). Cet apply
+        // doit donc les reconduire, jamais les fabriquer.
+        //
+        // BUG (2026-07-29) — « je ne vois plus l'absence d'Ophélie ». Reconduire
+        // depuis le SEUL état local suffit tant que le client connaît déjà la
+        // convocation. Mais un événement realtime sur `convocations` rejoue cet
+        // apply TOUT SEUL : si la ligne est nouvelle POUR CE CLIENT (id jamais vu
+        // — typiquement après un dédoublonnage où la survivante n'était pas celle
+        // qu'il avait en cache), `byId[r.id]` est vide et les RSVP tombent à {}.
+        // L'entité convocationResponses n'étant pas rejouée dans la foulée,
+        // l'absence disparaît de l'écran jusqu'au prochain rechargement complet.
+        // D'où le repli sur le dernier état connu des réponses, qui survit à la
+        // rotation des ids de convocation.
+        responses: (byId[r.id] || {}).responses || _lastConvocResponses[r.id] || {},
         seasonId: r.season_id || (byId[r.id] || {}).seasonId || null,
         // #2 : clôture persistée. Colonne absente (rétrocompat avant migration) →
         // r.closed undefined → on conserve le flag local existant.
@@ -3981,6 +4003,10 @@ const ENTITIES = [
           at: r.updated_at ? Date.parse(r.updated_at) : null
         };
       });
+      // Relais pour l'apply de `convocations` : un événement realtime ne rejoue
+      // QUE son entité, donc une convocation nouvelle pour ce client repartirait
+      // sans RSVP. On mémorise l'état complet, indexé par convocation.
+      Object.keys(byConv).forEach(cid => { _lastConvocResponses[cid] = byConv[cid]; });
       (state.convocations || []).forEach(c => { if (byConv[c.id]) c.responses = byConv[c.id]; });
     }
   },
@@ -35601,7 +35627,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-29.85';
+const APP_VERSION = '2026-07-29.86';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
