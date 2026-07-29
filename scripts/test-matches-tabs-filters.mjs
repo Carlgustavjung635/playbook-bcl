@@ -69,7 +69,8 @@ function seed(matches) {
   S.activeSeasonId = '2026-2027'; S.currentSeasonId = '2026-2027';
   S.players = []; S.seasonPlayers = []; S.convocations = [];
   S.matches = matches || [];
-  S.view = null; S._matchTab = null; S._matchRange = 'all';
+  // null = aucun choix explicite → c'est la cascade de _matchDefaultRange qui décide.
+  S.view = null; S._matchTab = null; S._matchRange = null;
 }
 
 // --- 1) découpage à venir / joués -------------------------------------------
@@ -176,6 +177,42 @@ t('un match passé SANS score reste visible dans « joués »', () => {
   seed([M('oubli', '2026-05-12')]);
   ctx.setMatchTab('played');
   ok(ctx.renderMatches().includes('Adv oubli'), 'match passé sans score escamoté');
+});
+
+// --- 3bis) période par défaut : la plus courte qui montre quelque chose ------
+t('un match cette semaine → on ouvre sur « cette semaine »', () => {
+  ok(ctx._matchDefaultRange([M('a', '2026-08-01')], TODAY) === 'week', 'défaut KO');
+});
+t('rien cette semaine mais la suivante → « semaine prochaine »', () => {
+  ok(ctx._matchDefaultRange([M('a', '2026-08-05')], TODAY) === 'next', 'défaut KO');
+});
+t('rien avant la fin du mois... → « ce mois-ci »', () => {
+  ok(ctx._matchDefaultRange([M('a', '2026-07-31')], TODAY) === 'week', 'le 31/07 est dans la semaine en cours');
+  // 2026-08-31 : hors semaine, hors semaine prochaine, hors juillet → all
+  ok(ctx._matchDefaultRange([M('a', '2026-08-31')], TODAY) === 'all', 'défaut KO');
+});
+t('rien de proche → repli sur « toute la saison » (jamais un écran vide)', () => {
+  ok(ctx._matchDefaultRange([M('a', '2026-09-09')], TODAY) === 'all', 'défaut KO');
+});
+t('aucun match à venir → « toute la saison »', () => {
+  ok(ctx._matchDefaultRange([], TODAY) === 'all', 'défaut KO');
+});
+t('la cascade prend le match le plus proche, pas le premier de la liste', () => {
+  ok(ctx._matchDefaultRange([M('loin', '2026-09-09'), M('proche', '2026-08-01')], TODAY) === 'week',
+    'un match lointain a masqué un match proche');
+});
+t('au rendu, la période retenue est bien active', () => {
+  seed([M('a', '2026-08-01')]);   // cette semaine
+  const h = ctx.renderMatches();
+  ok(/btn-primary[^>]*onclick="setMatchRange\('week'\)/.test(h), '« cette semaine » pas sélectionnée');
+  ok(!/btn-primary[^>]*onclick="setMatchRange\('all'\)/.test(h), '« toute la saison » encore sélectionnée');
+});
+t('un choix EXPLICITE est respecté, même s\'il ne donne rien', () => {
+  seed([M('a', '2026-09-09')]);   // rien cette semaine
+  ctx.setMatchRange('week');      // le coach choisit quand même
+  const h = ctx.renderMatches();
+  ok(/Aucun match à venir/.test(h), 'la cascade a écrasé un choix explicite');
+  ok(/btn-primary[^>]*onclick="setMatchRange\('week'\)/.test(h), 'le chip choisi n\'est plus actif');
 });
 
 // --- 4) états vides ----------------------------------------------------------

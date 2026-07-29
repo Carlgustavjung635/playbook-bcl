@@ -11886,6 +11886,20 @@ function _matchInRange(m, key, todayISO) {
   if (!r) return true;
   return m.date >= r.from && m.date <= r.to;
 }
+// Période retenue à l'ouverture : la PLUS COURTE qui a quelque chose à montrer.
+// « Toute la saison » par défaut noyait l'échéance proche au milieu de tout ;
+// « cette semaine » en dur ouvrait sur un écran vide dès qu'il n'y a pas de
+// match cette semaine. La cascade donne le meilleur des deux : on resserre
+// autant que possible, sans jamais ouvrir sur du vide.
+// Ne s'applique QU'À DÉFAUT : un choix explicite du coach est respecté, même
+// s'il ne donne rien (sinon un clic sur « cette semaine » sauterait ailleurs).
+function _matchDefaultRange(upcoming, todayISO) {
+  const cascade = ['week', 'next', 'month'];
+  for (const key of cascade) {
+    if ((upcoming || []).some(m => _matchInRange(m, key, todayISO))) return key;
+  }
+  return 'all';
+}
 function setMatchTab(tab) {
   state._matchTab = (tab === 'played') ? 'played' : 'upcoming';
   render();
@@ -11916,7 +11930,9 @@ function renderMatches() {
   const played = matches.filter(m => !_matchIsUpcoming(m, todayISO)); // déjà trié desc
   // Onglet par défaut : « à venir » s'il y a de quoi se projeter, sinon « joués ».
   const tab = (state._matchTab === 'played' || (!state._matchTab && !upcoming.length)) ? 'played' : 'upcoming';
-  const range = MATCH_RANGES.some(r => r.id === state._matchRange) ? state._matchRange : 'all';
+  const range = MATCH_RANGES.some(r => r.id === state._matchRange)
+    ? state._matchRange
+    : _matchDefaultRange(upcoming, todayISO);
   const shown = tab === 'upcoming'
     ? upcoming.filter(m => _matchInRange(m, range, todayISO))
     : played;
@@ -35760,7 +35776,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-29.88';
+const APP_VERSION = '2026-07-29.89';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
