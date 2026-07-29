@@ -140,7 +140,7 @@ console.log('SCÉNARIO 4 — modale détail : qualités/axes via mdToHtml + marq
     assert.ok(log.modalHtml.includes('Tes qualités'));
     assert.ok(log.modalHtml.includes('Axes de progression'));
     assert.ok(log.modalHtml.includes('Objectifs techniques de saison'));
-    assert.ok(/compétences techniques sur lesquelles ta coach/.test(log.modalHtml));
+    assert.ok(/compétences techniques sur lesquelles ton coach/.test(log.modalHtml));
   });
   t('chaque item (dont technicals) passé par mdToHtml (rendu markdown XSS-safe)', () => {
     assert.ok(log.mdCalls.includes('**Énergie** défensive'));
@@ -149,7 +149,7 @@ console.log('SCÉNARIO 4 — modale détail : qualités/axes via mdToHtml + marq
     assert.ok(log.mdCalls.includes('Saut de recul'));
     assert.ok(log.modalHtml.includes('MD<Eurostep>'));
   });
-  t('texte d\'aide présent', () => assert.ok(/retours de ta coach pour t'aider à progresser/.test(log.modalHtml)));
+  t('texte d\'aide présent', () => assert.ok(/retours de ton coach pour t'aider à progresser/.test(log.modalHtml)));
   t('marquage lu : setNotifSeenAt appelé + badge mis à jour', () => {
     assert.ok(log.seenSet.length === 1 && log.seenSet[0] > 0);
     assert.strictEqual(log.badgeUpdated, 1);

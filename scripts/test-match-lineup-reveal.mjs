@@ -32,7 +32,7 @@ function render(role, m) {
 console.log('SCÉNARIO 1 — joueuse : compo masquée tant que non révélée');
 {
   const notRevealed = render('player', { id: 'm1', lineupRevealed: false, roster: { included: ['a'] } });
-  t('message d\'attente affiché', () => assert.ok(/pas encore été annoncée par la coach/.test(notRevealed)));
+  t('message d\'attente affiché', () => assert.ok(/pas encore été annoncée par le coach/.test(notRevealed)));
   t('la joueuse ne voit AUCUN nom de la compo', () => assert.ok(!notRevealed.includes('Lea')));
 }
 {

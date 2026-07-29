@@ -148,7 +148,7 @@ t('un statut inconnu est refusé (pas de ligne bidon)', () => {
   assert(S.playerLicences.length === 0, 'ligne écrite');
   asCoach();
 });
-t('« pas reçu l\'e-mail » prévient la coach (sinon cul-de-sac)', () => {
+t('« pas reçu l\'e-mail » prévient le coach (sinon cul-de-sac)', () => {
   seed(); asPlayer('pA');
   ctx.setMyLicenceStatus('email_missing');
   const p = pushed.find(x => x.payload && x.payload.type === 'licence_email_missing');
@@ -156,7 +156,7 @@ t('« pas reçu l\'e-mail » prévient la coach (sinon cul-de-sac)', () => {
   assert(/#13 Candice/.test(p.payload.body), 'joueuse absente : ' + p.payload.body);
   asCoach();
 });
-t('les autres états n\'alertent PAS la coach', () => {
+t('les autres états n\'alertent PAS le coach', () => {
   seed(); asPlayer('pA');
   ctx.setMyLicenceStatus('in_progress');
   assert(!pushed.some(x => x.payload && x.payload.type === 'licence_email_missing'), 'alerte parasite');
@@ -178,7 +178,7 @@ t('le coach peut CORRIGER un « fait » posé par erreur', () => {
   assert(lic('pA').status === 'in_progress', 'statut = ' + lic('pA').status);
   assert(S.playerLicences.length === 1, 'doublon : ' + S.playerLicences.length);
 });
-t('la joueuse est prévenue quand la coach change son statut', () => {
+t('la joueuse est prévenue quand le coach change son statut', () => {
   seed();
   ctx.markLicenceDone('pA');
   const p = pushed.find(x => x.payload && x.payload.type === 'licence_coach_update');
@@ -264,7 +264,7 @@ t('une fois « c\'est fait », le rappel disparaît au profit d\'une confirmatio
   assert(c.includes('openMyLicence()'), 'plus moyen de corriger');
   asCoach();
 });
-t('après un override coach, la joueuse lit « ta coach a marqué… »', () => {
+t('après un override coach, la joueuse lit « ton coach a marqué… »', () => {
   seed();
   ctx.markLicenceDone('pA');
   asPlayer('pA');
@@ -337,7 +337,7 @@ t('la modale de détail liste les 4 états et l\'auteur', () => {
   ctx.openLicenceEditor('pA');
   const m = ctx.__lastModal || '';
   ctx.LICENCE_STATUSES.forEach(v => assert(m.includes("setLicenceStatusAsCoach('pA','" + v + "')"), 'état ' + v + ' absent'));
-  assert(/D.clar. par la coach/i.test(m), 'auteur absent');
+  assert(/D.clar. par le coach/i.test(m), 'auteur absent');
 });
 
 // --- 7) sérialisation (bloc module, hors portée du vm) ----------------------

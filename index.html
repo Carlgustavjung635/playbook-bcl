@@ -5860,11 +5860,11 @@ function renderPlayerGuide() {
   const body = collapsed ? '' : `
     <div style="padding:4px 16px 14px">
       ${section('👤', 'Ton profil', "Tes stats persos : présences entraînement, présences match, retards, défis débloqués. Filtre <strong>Mois / Trimestre / Saison</strong> au-dessus des compteurs.")}
-      ${section('🏆', 'Tes défis', "Deux types : les <strong>Auto</strong> (qui se remplissent tout seuls grâce à la coach) et les <strong>Manuels</strong> (à valider toi-même quand tu accomplis l'objectif).")}
-      ${section('📨', 'Messages', "Les annonces de la coach atterrissent ici. Tu peux réagir.")}
+      ${section('🏆', 'Tes défis', "Deux types : les <strong>Auto</strong> (qui se remplissent tout seuls grâce au coach) et les <strong>Manuels</strong> (à valider toi-même quand tu accomplis l'objectif).")}
+      ${section('📨', 'Messages', "Les annonces du coach atterrissent ici. Tu peux réagir.")}
       ${section('⚙', 'Personnaliser', "Onglet <strong>🎨 Personnalisation</strong> : choisis ton thème couleur ET le son du chronomètre. Ça reste actif jusqu'à ce que tu en changes.")}
       ${section('🔒', 'Tes données restent sur ton téléphone', "Personne ne voit ton activité tant que tu ne partages rien.")}
-      <div style="margin-top:10px;font-size:12px;color:var(--ink-3);font-style:italic">Une question ? Demande à la coach 👋</div>
+      <div style="margin-top:10px;font-size:12px;color:var(--ink-3);font-style:italic">Une question ? Demande au coach 👋</div>
     </div>`;
   return `
     <div style="padding:0 18px;margin-bottom:14px">
@@ -15064,7 +15064,7 @@ function renderMatchComposition(m) {
   if (!isCoach && !revealed) {
     return `
       <div class="section-header"><div><div class="eyebrow">Effectif</div><h2 class="display-md mt-2">🏀 Composition</h2></div></div>
-      <div class="list-section" style="margin-top:0"><div style="padding:18px;text-align:center;color:var(--ink-3);font-size:12px;font-style:italic;line-height:1.5">⏳ La compo n'a pas encore été annoncée par la coach.</div></div>
+      <div class="list-section" style="margin-top:0"><div style="padding:18px;text-align:center;color:var(--ink-3);font-size:12px;font-style:italic;line-height:1.5">⏳ La compo n'a pas encore été annoncée par le coach.</div></div>
     `;
   }
   const comp = getMatchComposition(m, viewerId);
@@ -16197,7 +16197,7 @@ function openProposeGage() {
     </div>
     <div class="modal-body">
       <div style="font-size:12px;color:var(--ink-3);line-height:1.5;margin-bottom:10px">
-        Propose une idée de gage rigolo. La coach la validera avant qu'elle entre dans la boîte. <strong>C'est anonyme</strong> : personne ne saura que ça vient de toi.
+        Propose une idée de gage rigolo. Le coach la validera avant qu'elle entre dans la boîte. <strong>C'est anonyme</strong> : personne ne saura que ça vient de toi.
       </div>
       <textarea id="gage-text" maxlength="${GAGE_TEXT_MAX}" rows="3" placeholder="Ex : chanter l'hymne du club à l'échauffement…" style="width:100%"></textarea>
       <div style="display:flex;justify-content:flex-end;margin-top:10px">
@@ -16221,7 +16221,7 @@ function submitGageFromModal() {
   if (!el || !el.value.trim()) return;
   submitGageProposal(el.value);
   closeModal();
-  if (typeof showToast === 'function') showToast('🎁 Proposition envoyée à la coach');
+  if (typeof showToast === 'function') showToast('🎁 Proposition envoyée au coach');
 }
 
 // --- PROPOSITION D'UN COACH NON-ADMIN ---
@@ -16955,7 +16955,7 @@ function markGageDone(drawId) {
   persist(); _gageFlush();
   _notifyCoachGageEvent(pid, 'player_done');
   try { if (typeof _pbModalOpen === 'function' && _pbModalOpen()) closeModal(); } catch (e) {}
-  if (typeof showToast === 'function') showToast('✓ Marqué fait · en attente de la coach');
+  if (typeof showToast === 'function') showToast('✓ Marqué fait · en attente du coach');
   render();
 }
 function openPlayerGageInProgress() {
@@ -16991,7 +16991,7 @@ function confirmGage(drawId) {
   const g = _gageById(d.gageId);
   if (g && !g.completedAt) { g.completedAt = now; _gageTouch(g); }
   persist(); _gageFlush();
-  try { notifyPush(_pushPlayerKeys([d.playerId]), { title: '✅ Gage validé', body: 'Ta coach a confirmé ton gage', url: '/', tag: 'gage-confirmed', type: 'gage_confirmed' }); } catch (e) {}
+  try { notifyPush(_pushPlayerKeys([d.playerId]), { title: '✅ Gage validé', body: 'Ton coach a confirmé ton gage', url: '/', tag: 'gage-confirmed', type: 'gage_confirmed' }); } catch (e) {}
   if (typeof showToast === 'function') showToast('✅ Gage confirmé · retiré du pool');
   render();
 }
@@ -17089,7 +17089,7 @@ function confirmInvalidateGage(drawId, choiceOverride, reasonOverride) {
     d.completedAt = now; d.updatedAt = now;
   } else {
     d.status = 'invalidated'; d.invalidatedAt = now; d.updatedAt = now;
-    d.invalidationReason = reason || (choice === 'redraw' ? 'Nouveau tirage' : 'Annulé par la coach');
+    d.invalidationReason = reason || (choice === 'redraw' ? 'Nouveau tirage' : 'Annulé par le coach');
     if (choice === 'redraw') {
       // 1 seul tirage, SANS la dette : invalider n'est pas une sanction
       // (contrairement à assignDrawsToPlayer qui ajoute 1 + dette).
@@ -17108,9 +17108,9 @@ function confirmInvalidateGage(drawId, choiceOverride, reasonOverride) {
   // La joueuse était la grande absente : aucune notif ne partait à
   // l'invalidation manuelle. Elle doit savoir, surtout si elle doit repiocher.
   try {
-    const body = choice === 'redraw' ? 'Ta coach a invalidé ton gage — tu as un nouveau tirage à faire'
-      : choice === 'keep' ? 'Ta coach a invalidé ta validation — le gage est toujours à faire'
-      : 'Ta coach a annulé ton gage — tu ne dois plus rien';
+    const body = choice === 'redraw' ? 'Ton coach a invalidé ton gage — tu as un nouveau tirage à faire'
+      : choice === 'keep' ? 'Ton coach a invalidé ta validation — le gage est toujours à faire'
+      : 'Ton coach a annulé ton gage — tu ne dois plus rien';
     notifyPush(_pushPlayerKeys([d.playerId]), {
       title: choice === 'cancel' ? '❌ Gage annulé' : '❌ Gage invalidé',
       body: body + (reason ? ' (' + reason + ')' : ''),
@@ -17216,7 +17216,7 @@ function setMyLicenceStatus(status) {
   if (!a || a.role !== 'player' || !a.playerId) return false;
   if (!_licenceSet(a.playerId, status, 'player')) return false;
   // « Pas reçu l'e-mail » est le seul état que la joueuse ne peut pas débloquer
-  // seule : c'est la coach qui relance la FFBB. On la prévient, sinon ce statut
+  // seule : c'est le coach qui relance la FFBB. On la prévient, sinon ce statut
   // serait un cul-de-sac — la joueuse déclare dans le vide et attend.
   if (status === 'email_missing') {
     try {
@@ -17243,7 +17243,7 @@ function setLicenceStatusAsCoach(playerId, status) {
   try {
     notifyPush(_pushPlayerKeys([playerId]), {
       title: '🎫 Licence mise à jour',
-      body: 'Ta coach a marqué ta licence : ' + _licenceMeta(status).label,
+      body: 'Ton coach a marqué ta licence : ' + _licenceMeta(status).label,
       url: '/', tag: 'licence-coach-' + playerId, type: 'licence_coach_update'
     });
   } catch (e) {}
@@ -17284,7 +17284,7 @@ function openLicenceEditor(playerId) {
         <button class="btn ${cur === v ? 'btn-primary' : 'btn-secondary'} btn-block mb-2" style="text-align:left;font-size:12px;padding:10px"
           onclick="setLicenceStatusAsCoach('${playerId}','${v}')">${m.icon} ${esc(m.label)}</button>`;
       }).join('')}
-      ${l ? `<div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:10px">Déclaré par ${l.updatedBy === 'coach' ? 'la coach' : 'la joueuse'}${l.updatedAt ? ' · ' + _notifAgo(l.updatedAt) : ''}</div>` : ''}
+      ${l ? `<div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:10px">Déclaré par ${l.updatedBy === 'coach' ? 'le coach' : 'la joueuse'}${l.updatedAt ? ' · ' + _notifAgo(l.updatedAt) : ''}</div>` : ''}
     </div>
   `);
 }
@@ -17344,7 +17344,7 @@ function renderLicencePlayerCard() {
           <div style="font-size:17px;flex:none">🎫</div>
           <div style="flex:1;min-width:0">
             <div style="font-family:'Anton';font-size:12px;text-transform:uppercase">Licence ${esc(sid)} · ✅ c'est fait</div>
-            <div style="font-size:10px;color:var(--ink-3);margin-top:2px">${byCoach ? 'Ta coach a marqué ta licence comme faite' : 'Tu as déclaré avoir fait ta licence'}${l && l.updatedAt ? ' · ' + _notifAgo(l.updatedAt) : ''}</div>
+            <div style="font-size:10px;color:var(--ink-3);margin-top:2px">${byCoach ? 'Ton coach a marqué ta licence comme faite' : 'Tu as déclaré avoir fait ta licence'}${l && l.updatedAt ? ' · ' + _notifAgo(l.updatedAt) : ''}</div>
           </div>
           <button class="btn btn-ghost" style="font-size:10px;padding:3px 6px;flex:none" onclick="openMyLicence()">Modifier</button>
         </div>
@@ -17355,7 +17355,7 @@ function renderLicencePlayerCard() {
     const on = status === v;
     return `
       <button class="btn ${on ? 'btn-primary' : 'btn-secondary'} btn-block mb-2" style="text-align:left;font-size:12px;padding:10px;white-space:normal;line-height:1.35"
-        onclick="setMyLicenceStatus('${v}')">${on ? '◉' : '○'} ${m.icon} ${esc(m.label)}${v === 'email_missing' ? '<span style="display:block;font-size:10px;opacity:0.75;margin-top:2px">(vérifie tes spams — ta coach sera prévenue)</span>' : ''}</button>`;
+        onclick="setMyLicenceStatus('${v}')">${on ? '◉' : '○'} ${m.icon} ${esc(m.label)}${v === 'email_missing' ? '<span style="display:block;font-size:10px;opacity:0.75;margin-top:2px">(vérifie tes spams — ton coach sera prévenue)</span>' : ''}</button>`;
   };
   return `
     <div style="padding:0 18px;margin-bottom:18px">
@@ -17372,7 +17372,7 @@ function renderLicencePlayerCard() {
     </div>`;
 }
 // Rouvre le choix après un « c'est fait » (erreur de clic, ou statut posé par
-// la coach que la joueuse veut corriger).
+// le coach que la joueuse veut corriger).
 function openMyLicence() {
   const a = state.auth;
   if (!a || a.role !== 'player' || !a.playerId) return;
@@ -23498,7 +23498,7 @@ function renderPlayerFeedbackCard() {
       <div class="list-row" onclick="openMyFeedback()">
         <div style="font-size:20px;flex:0 0 auto;width:30px;text-align:center">📝</div>
         <div class="list-row-content">
-          <div class="list-row-title" style="${isNew ? 'font-weight:700' : ''}">Retours de ta coach</div>
+          <div class="list-row-title" style="${isNew ? 'font-weight:700' : ''}">Retours de ton coach</div>
           <div class="list-row-subtitle" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(parts.join(' · '))}${updatedAt ? ' · maj ' + _notifAgo(updatedAt) : ''}</div>
         </div>
         ${isNew
@@ -23538,10 +23538,10 @@ function openMyFeedback() {
       ${tech.length ? `
         <div class="eyebrow" style="color:#8b5cf6;margin-bottom:4px">🎯 Objectifs techniques de saison</div>
         <div style="margin-bottom:8px">${itemList(tech, '#8b5cf6')}</div>
-        <div style="font-size:11px;color:var(--ink-3);font-style:italic;margin-bottom:18px;line-height:1.5">Les compétences techniques sur lesquelles ta coach veut que tu progresses cette saison.</div>
+        <div style="font-size:11px;color:var(--ink-3);font-style:italic;margin-bottom:18px;line-height:1.5">Les compétences techniques sur lesquelles ton coach veut que tu progresses cette saison.</div>
       ` : ''}
       <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:12px;color:var(--ink-2);line-height:1.5">
-        Ce sont les retours de ta coach pour t'aider à progresser. Ils sont mis à jour régulièrement.
+        Ce sont les retours de ton coach pour t'aider à progresser. Ils sont mis à jour régulièrement.
       </div>
     </div>
     <div class="modal-footer">
@@ -35571,7 +35571,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-29.83';
+const APP_VERSION = '2026-07-29.84';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
