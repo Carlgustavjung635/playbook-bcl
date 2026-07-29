@@ -26,7 +26,9 @@ function extractFn(name) {
 // n'a pas de date et ne peut pas entrer dans le feed de notifs) et écrivent un
 // statut 'present' explicite au lieu de supprimer la ligne. Extraits eux aussi :
 // matchSaveAbsence/matchRestorePresence les appellent.
-const src = ['_rsvpStamp', '_rsvpPresent', '_effectiveConvocStatus', '_matchConvoc', 'matchSaveAbsence', 'matchRestorePresence']
+// _effectiveConvocStatus délègue à _convocResp (v.91), qui lit les
+// indisponibilités : ses dépendances doivent être extraites avec lui.
+const src = ['_unavailMeta', '_unavailOn', '_convocResp', '_rsvpStamp', '_rsvpPresent', '_effectiveConvocStatus', '_matchConvoc', 'matchSaveAbsence', 'matchRestorePresence']
   .map(extractFn).join('\n\n');
 function build(state, formValues = { 'ab-reason': 'Blessure', 'ab-msg': 'désolée' }) {
   const log = { notified: [], persisted: 0, closed: 0, rendered: 0 };

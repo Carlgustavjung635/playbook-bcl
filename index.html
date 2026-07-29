@@ -4892,6 +4892,29 @@ const ENTITIES = [
     // licence est un objet par saison, `players` est global. Cf. l'en-tête de
     // la migration pour le raisonnement complet.
     // ==========================================================================
+    // ==========================================================================
+    // INDISPONIBILITÉS (cf. migration 20260729_004) — périodes saisies par le
+    // coach. Aucune season_id : la période porte ses propres dates.
+    // ==========================================================================
+    key: 'playerUnavailabilities', table: 'player_unavailabilities', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.playerUnavailabilities || []).map(u => [u.id, _dumpUnavailRow(u)])),
+    apply: (state, rows) => {
+      const local = state.playerUnavailabilities || [];
+      const localById = Object.fromEntries(local.map(u => [u.id, u]));
+      const remoteIds = new Set(rows.map(r => r.id));
+      const ahead = [];
+      const fromRemote = rows.map(r => {
+        const mapped = _unavailFromRow(r);
+        const loc = localById[r.id];
+        if (loc && (loc.updatedAt || 0) > (mapped.updatedAt || 0)) { ahead.push(loc); return loc; }
+        return mapped;
+      });
+      const pendingLocal = local.filter(u => !remoteIds.has(u.id) && typeof u.id === 'string' && u.id.startsWith('x'));
+      state.playerUnavailabilities = [...pendingLocal, ...fromRemote];
+      if (ahead.length) _reassertRows('player_unavailabilities', ahead.map(_dumpUnavailRow));
+    }
+  },
+  {
     key: 'playerLicences', table: 'player_licences', pk: 'id', realtime: true, auth: 'anon',
     dump: (state) => Object.fromEntries((state.playerLicences || []).map(l => [l.id, _dumpLicenceRow(l)])),
     apply: (state, rows) => {
@@ -5122,6 +5145,37 @@ function _dumpTrainingCompletionRow(c) {
     updated_at: c.updatedAt ? new Date(c.updatedAt).toISOString() : (c.createdAt ? new Date(c.createdAt).toISOString() : null)
   };
 }
+// --- INDISPONIBILITÉS : sérialisation (module) ------------------------------
+// Motifs et statuts écrits EN DUR : les constantes vivent dans le bloc <script>
+// classique, hors de portée d'ici (même pattern que les licences et la prépa).
+// À garder aligné avec la contrainte CHECK de la migration 20260729_004.
+function _dumpUnavailRow(u) {
+  return {
+    id: u.id, player_id: u.playerId || null,
+    starts_at: u.startsAt || null,
+    // '' → null : une chaîne vide violerait le type `date` côté Postgres.
+    ends_at: u.endsAt || null,
+    reason: ['vacances', 'blessure', 'perso', 'exams', 'autre'].includes(u.reason) ? u.reason : 'autre',
+    notes: u.notes || null,
+    created_by: u.createdBy || null,
+    deleted_at: u.deletedAt ? new Date(u.deletedAt).toISOString() : null,
+    updated_at: u.updatedAt ? new Date(u.updatedAt).toISOString() : (u.createdAt ? new Date(u.createdAt).toISOString() : null)
+  };
+}
+function _unavailFromRow(r) {
+  return {
+    id: r.id, playerId: r.player_id || null,
+    startsAt: r.starts_at || null,
+    endsAt: r.ends_at || null,
+    reason: ['vacances', 'blessure', 'perso', 'exams', 'autre'].includes(r.reason) ? r.reason : 'autre',
+    notes: r.notes || '',
+    createdBy: r.created_by || null,
+    createdAt: r.created_at ? Date.parse(r.created_at) : null,
+    updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
+    deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
+  };
+}
+
 // --- LICENCES : sérialisation (module) --------------------------------------
 // La liste des statuts est écrite EN DUR ici (et non via LICENCE_STATUSES) :
 // cette constante vit dans le bloc <script> classique, hors de portée de ce
@@ -5657,6 +5711,7 @@ const K = {
   trainingPrograms: 'pb8_training_programs', // [{ id, name, startDate, endDate, daysActive[], scoringConfig{}, ... }]
   trainingSessions: 'pb8_training_sessions', // [{ id, programId, dayOfWeek, name, blocks[], isTemplate, ... }]
   trainingCompletions: 'pb8_training_completions', // [{ id, programId, sessionId, playerId, datePlanned, contractLevel, pointsTotal, ... }]
+  playerUnavailabilities: 'pb8_player_unavail',        // [{ id, playerId, startsAt, endsAt, reason, notes }] — saisi par le coach
   playerLicences: 'pb8_player_licences',           // [{ id, playerId, seasonId, status, notes, updatedAt }] — 1 par (joueuse, saison)
   trainingRemind: 'pb8_training_remind', // map { "<role>:<playerId|->": "YYYY-MM-DD" } — filigrane anti-doublon du rappel quotidien (local)
 };
@@ -6085,6 +6140,7 @@ let state = {
   trainingPrograms: load(K.trainingPrograms, []),
   trainingSessions: load(K.trainingSessions, []),
   trainingCompletions: load(K.trainingCompletions, []),
+  playerUnavailabilities: load(K.playerUnavailabilities, []),
   playerLicences: load(K.playerLicences, []),
 
   // === JOUEUSES GUESTS (Phase 5 — cf. migration 20260524_009_guest_players) ===
@@ -6193,6 +6249,7 @@ function persist() {
   save(K.trainingPrograms, state.trainingPrograms);
   save(K.trainingSessions, state.trainingSessions);
   save(K.trainingCompletions, state.trainingCompletions);
+  save(K.playerUnavailabilities, state.playerUnavailabilities);
   save(K.playerLicences, state.playerLicences);
   // FIX Option B : pendant l'édition d'un plan, bumper updatedAt de l'entrée
   // courante AVANT le save → la garde anti-écho de l'apply() trainingPlans peut
@@ -10064,6 +10121,7 @@ function renderHomePlayer() {
 
       <!-- 1quater. Prépa physique : séance du jour / anticipation 24 h / rattrapage 48 h -->
       ${renderTrainingPlayerCard()}
+      ${renderUnavailPlayerBanner()}
       ${renderLicencePlayerCard()}
 
       <!-- 2. Challenges actifs (preview 2-3, lien Tout → onglet) -->
@@ -15277,9 +15335,8 @@ function getMatchRoster(m) {
     c.type === 'match' && c.date === m.date
   );
   if (sameDayConvoc) {
-    const responses = sameDayConvoc.responses || {};
-    // Présentes = ceux sans réponse ou avec status 'present'
-    return _seasonPool.filter(p => !responses[p.id] || responses[p.id].status === 'present');
+    // Présentes = ni réponse d'absence, ni indisponibilité couvrant la date.
+    return _seasonPool.filter(p => _convocResp(sameDayConvoc, m.date, p.id).status === 'present');
   }
   // Fallback : tout l'effectif de la saison
   return _seasonPool;
@@ -17384,8 +17441,265 @@ function confirmInvalidateGage(drawId, choiceOverride, reasonOverride) {
 // « cumul cross-saison » déjà corrigés dans ce projet).
 // CRUD coach-only appliqué CÔTÉ FRONT (RLS = anon sandbox équipe, comme partout).
 // ============================================================
-// Doit rester aligné avec la contrainte CHECK de la migration 20260729_001 ET
-// avec la liste inline des sérialiseurs du bloc module (_dumpLicenceRow).
+// ============================================================
+// INDISPONIBILITÉS (cf. migration 20260729_004)
+// ------------------------------------------------------------
+// Période pendant laquelle une joueuse n'est pas disponible. SAISIE PAR LE
+// COACH (la joueuse le prévient par un autre canal). Deux effets :
+//   • elle est comptée absente par défaut sur toute convocation couverte ;
+//   • elle ne reçoit plus les rappels push sur cette période.
+//
+// DÉRIVÉE, PAS MATÉRIALISÉE — on ne crée AUCUNE ligne convocation_responses.
+// La demande proposait de pré-remplir les RSVP ; le comportement visible est
+// identique, mais matérialiser voudrait dire écrire des centaines de lignes
+// qu'il faudrait ensuite tenir synchrones à chaque modification de période, et
+// nettoyer à chaque suppression. Trois pertes d'écriture viennent d'être
+// corrigées sur ce chemin exact : moins on y écrit, mieux on se porte. Ici
+// l'indisponibilité est la SEULE vérité, et la règle tient en une ligne :
+//   RSVP explicite s'il existe → sinon indisponibilité couvrante → sinon présente.
+// Corollaire : modifier ou supprimer une période met l'affichage à jour partout,
+// immédiatement, sans reprise de données.
+const UNAVAIL_REASONS = [
+  { id: 'blessure', label: 'Blessure', icon: '🤕' },
+  { id: 'vacances', label: 'Vacances', icon: '🏖️' },
+  { id: 'exams',    label: 'Examens',  icon: '📚' },
+  { id: 'perso',    label: 'Perso',    icon: '🔒' },
+  { id: 'autre',    label: 'Autre',    icon: '•'  },
+];
+function _unavailMeta(reason) {
+  return UNAVAIL_REASONS.find(r => r.id === reason) || UNAVAIL_REASONS[UNAVAIL_REASONS.length - 1];
+}
+function _unavailIsCoach() { return !!(state.auth && state.auth.role === 'coach'); }
+function _unavailFlush() { try { if (window.PbSync && PbSync.flushNow) PbSync.flushNow(state).catch(() => {}); } catch (e) {} }
+
+// Toutes les périodes vivantes d'une joueuse, la plus récente d'abord.
+function _unavailsOf(playerId) {
+  return (state.playerUnavailabilities || [])
+    .filter(u => !u.deletedAt && u.playerId === playerId)
+    .sort((a, b) => String(b.startsAt || '').localeCompare(String(a.startsAt || '')));
+}
+// La période qui couvre une date, s'il y en a une. Comparaison sur des chaînes
+// 'YYYY-MM-DD' : ordre lexicographique = ordre chronologique, et aucun risque de
+// décalage de fuseau. `endsAt` vide = sans fin connue, donc couvre indéfiniment.
+function _unavailOn(playerId, dateISO) {
+  if (!playerId || !dateISO) return null;
+  return (state.playerUnavailabilities || []).find(u =>
+    !u.deletedAt && u.playerId === playerId &&
+    u.startsAt && u.startsAt <= dateISO &&
+    (!u.endsAt || u.endsAt >= dateISO)
+  ) || null;
+}
+function _unavailActive(playerId, todayISO) {
+  return _unavailOn(playerId, todayISO || isoDate(new Date()));
+}
+function _unavailRangeLabel(u) {
+  if (!u) return '';
+  const f = d => { try { return formatDate(d, 'short'); } catch (e) { return d || ''; } };
+  return u.endsAt ? (f(u.startsAt) + ' → ' + f(u.endsAt)) : ('depuis le ' + f(u.startsAt));
+}
+
+// --- Écriture (coach only) ---------------------------------------------------
+function saveUnavailability(playerId, id) {
+  if (!_unavailIsCoach()) return false;
+  const v = k => { try { return (document.getElementById(k) || {}).value || ''; } catch (e) { return ''; } };
+  const startsAt = v('un-start').trim();
+  const endsAt = v('un-end').trim();
+  const reason = UNAVAIL_REASONS.some(r => r.id === v('un-reason')) ? v('un-reason') : 'autre';
+  const notes = v('un-notes').trim().slice(0, 300);
+  if (!startsAt) { try { showToast('⚠️ Indique au moins une date de début'); } catch (e) {} return false; }
+  // Une fin antérieure au début est une faute de frappe, pas une donnée : la
+  // contrainte SQL la rejetterait de toute façon, autant le dire tout de suite.
+  if (endsAt && endsAt < startsAt) { try { showToast('⚠️ La fin est avant le début'); } catch (e) {} return false; }
+  const now = Date.now();
+  const existing = id ? (state.playerUnavailabilities || []).find(u => u.id === id && !u.deletedAt) : null;
+  if (existing) {
+    Object.assign(existing, { startsAt, endsAt: endsAt || null, reason, notes, updatedAt: now });
+  } else {
+    state.playerUnavailabilities = state.playerUnavailabilities || [];
+    state.playerUnavailabilities.push({
+      id: uid(), playerId, startsAt, endsAt: endsAt || null, reason, notes,
+      createdBy: (state.auth && state.auth.coachId) || null,
+      createdAt: now, updatedAt: now, deletedAt: null,
+    });
+  }
+  persist(); _unavailFlush();
+  try { showToast('🏖️ Indisponibilité enregistrée'); } catch (e) {}
+  try { openPlayerSeasonPanel(playerId); } catch (e) { render(); }
+  return true;
+}
+function deleteUnavailability(id) {
+  if (!_unavailIsCoach()) return false;
+  const u = (state.playerUnavailabilities || []).find(x => x.id === id && !x.deletedAt);
+  if (!u) return false;
+  let ok = false;
+  try { ok = confirm('Supprimer cette indisponibilité ? La joueuse redeviendra convocable sur la période.'); }
+  catch (e) { ok = true; }
+  if (!ok) return false;
+  // Soft-delete : un hard delete d'un id 'x…' serait repoussé au flush par les
+  // autres clients (cf. architecture PbSync).
+  u.deletedAt = Date.now(); u.updatedAt = u.deletedAt;
+  persist(); _unavailFlush();
+  try { showToast('🗑 Indisponibilité supprimée'); } catch (e) {}
+  try { openPlayerSeasonPanel(u.playerId); } catch (e) { render(); }
+  return true;
+}
+
+// Convoquer quand même une joueuse indisponible. L'indisponibilité N'EST PAS
+// touchée (elle reste vraie pour toutes les autres dates) : on pose seulement
+// un RSVP explicite 'present' sur CETTE date, et l'explicite prime toujours sur
+// le dérivé. Réversible : supprimer le RSVP fait revenir l'absence auto.
+function overrideUnavailPresence(parentId, dateStr, playerId) {
+  if (!_unavailIsCoach()) return false;
+  const c = (state.convocations || []).find(x => x.id === parentId);
+  if (!c) return false;
+  const u = _unavailOn(playerId, dateStr || c.date);
+  const p = (state.players || []).find(x => x.id === playerId);
+  const meta = u ? _unavailMeta(u.reason) : null;
+  let ok = false;
+  try {
+    ok = confirm(((p && p.name) || 'Cette joueuse') + ' est indisponible'
+      + (meta ? ' (' + meta.label.toLowerCase() + ')' : '')
+      + (u ? ' — ' + _unavailRangeLabel(u) : '')
+      + '.\n\nLa convoquer quand même pour cette date ?');
+  } catch (e) { ok = true; }
+  if (!ok) return false;
+  const d = dateStr || c.date;
+  if (c.recurrence && d) {
+    c.instanceOverrides = c.instanceOverrides || {};
+    c.instanceOverrides[d] = c.instanceOverrides[d] || { responses: {} };
+    c.instanceOverrides[d].responses = c.instanceOverrides[d].responses || {};
+    c.instanceOverrides[d].responses[playerId] = _rsvpPresent();
+  } else {
+    c.responses = c.responses || {};
+    c.responses[playerId] = _rsvpPresent();
+  }
+  persist();
+  try { if (window.PbSync && PbSync.flushNow) PbSync.flushNow(state).catch(() => {}); } catch (e) {}
+  try { showToast('✓ Convoquée malgré son indisponibilité'); } catch (e) {}
+  try { openEventInstance(parentId, dateStr); } catch (e) { render(); }
+  return true;
+}
+
+// Formulaire d'ajout / d'édition, ouvert depuis le panneau joueuse.
+function openUnavailForm(playerId, id) {
+  if (!_unavailIsCoach()) return;
+  const p = (state.players || []).find(x => x.id === playerId);
+  if (!p) return;
+  const u = id ? (state.playerUnavailabilities || []).find(x => x.id === id && !x.deletedAt) : null;
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow-muted">#${p.num} ${esc(p.name)}</div>
+        <div class="modal-title" style="font-size:15px">🏖️ ${u ? 'Modifier' : 'Nouvelle'} indisponibilité</div>
+      </div>
+      <button class="modal-close" onclick="openPlayerSeasonPanel('${esc(playerId)}')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="fld">
+        <label class="fld-label">Du</label>
+        <input id="un-start" type="date" value="${esc((u && u.startsAt) || isoDate(new Date()))}">
+      </div>
+      <div class="fld">
+        <label class="fld-label">Au (vide = sans date de fin connue)</label>
+        <input id="un-end" type="date" value="${esc((u && u.endsAt) || '')}">
+      </div>
+      <div class="fld">
+        <label class="fld-label">Motif</label>
+        <select id="un-reason">
+          ${UNAVAIL_REASONS.map(r => `<option value="${r.id}"${u && u.reason === r.id ? ' selected' : ''}>${r.icon} ${esc(r.label)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="fld">
+        <label class="fld-label">Notes (optionnel)</label>
+        <textarea id="un-notes" placeholder="Ex : entorse cheville, revoir avec le kiné">${esc((u && u.notes) || '')}</textarea>
+      </div>
+      <div style="font-size:11px;color:var(--ink-3);line-height:1.5">Sur cette période, elle sera comptée absente par défaut et ne recevra plus les rappels.</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="openPlayerSeasonPanel('${esc(playerId)}')">Annuler</button>
+      <button class="btn btn-primary" onclick="saveUnavailability('${esc(playerId)}'${u ? ",'" + esc(u.id) + "'" : ''})">Enregistrer</button>
+    </div>
+  `);
+}
+
+// Section « Indisponibilités » du panneau joueuse (coach).
+function renderUnavailSection(playerId) {
+  if (!_unavailIsCoach()) return '';
+  const today = isoDate(new Date());
+  const all = _unavailsOf(playerId);
+  const row = (u) => {
+    const meta = _unavailMeta(u.reason);
+    const current = u.startsAt <= today && (!u.endsAt || u.endsAt >= today);
+    const past = u.endsAt && u.endsAt < today;
+    return `
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--border-soft);border-left:3px solid ${current ? 'var(--orange)' : 'var(--border)'};border-radius:8px;margin-bottom:6px${past ? ';opacity:0.55' : ''}">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12px">${meta.icon} ${esc(meta.label)}${current ? ' <span style="font-size:9px;color:var(--orange);font-family:\'JetBrains Mono\'">EN COURS</span>' : ''}</div>
+          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">${esc(_unavailRangeLabel(u))}</div>
+          ${u.notes ? `<div style="font-size:11px;color:var(--ink-3);margin-top:3px;font-style:italic">${esc(u.notes)}</div>` : ''}
+        </div>
+        <button class="btn btn-ghost" style="font-size:10px;padding:4px 6px;flex:none" onclick="openUnavailForm('${esc(playerId)}','${esc(u.id)}')">✎</button>
+        <button class="btn btn-ghost" style="font-size:10px;padding:4px 6px;color:var(--red);flex:none" onclick="deleteUnavailability('${esc(u.id)}')">✕</button>
+      </div>`;
+  };
+  const current = all.filter(u => u.startsAt <= today && (!u.endsAt || u.endsAt >= today));
+  const future = all.filter(u => u.startsAt > today);
+  const past = all.filter(u => u.endsAt && u.endsAt < today);
+  return `
+    <div class="eyebrow-muted mb-2" style="margin-top:16px">🏖️ Indisponibilités</div>
+    ${current.length ? current.map(row).join('') : ''}
+    ${future.length ? `<div style="font-size:9px;font-family:'JetBrains Mono';color:var(--ink-3);text-transform:uppercase;margin:8px 0 4px">À venir</div>${future.map(row).join('')}` : ''}
+    ${past.length ? `<div style="font-size:9px;font-family:'JetBrains Mono';color:var(--ink-3);text-transform:uppercase;margin:8px 0 4px">Passées</div>${past.map(row).join('')}` : ''}
+    ${all.length ? '' : '<div style="font-size:11px;color:var(--ink-3);margin-bottom:6px">Aucune indisponibilité déclarée.</div>'}
+    <button class="btn btn-secondary btn-block" style="font-size:11px;padding:7px" onclick="openUnavailForm('${esc(playerId)}')">＋ Ajouter une indisponibilité</button>`;
+}
+
+// Bandeau discret sur l'accueil de la joueuse, uniquement si elle est
+// indisponible AUJOURD'HUI. Lecture seule : c'est le coach qui saisit.
+function renderUnavailPlayerBanner() {
+  const a = state.auth;
+  if (!a || a.role !== 'player' || !a.playerId) return '';
+  const u = _unavailActive(a.playerId);
+  if (!u) return '';
+  const meta = _unavailMeta(u.reason);
+  return `
+    <div style="padding:0 18px;margin-bottom:14px">
+      <div style="border:1px solid var(--border-soft);border-left:3px solid var(--orange);border-radius:10px;padding:10px 12px;background:var(--surface);display:flex;align-items:center;gap:9px">
+        <div style="font-size:17px;flex:none">${meta.icon}</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-family:'Anton';font-size:12px;text-transform:uppercase">Indisponible · ${esc(meta.label)}</div>
+          <div style="font-size:10px;color:var(--ink-3);margin-top:2px">${u.endsAt ? 'Jusqu\'au ' + esc((() => { try { return formatDate(u.endsAt, 'short'); } catch (e) { return u.endsAt; } })()) : 'Sans date de fin'} · tu n\'es pas convoquée et tu ne reçois plus les rappels.</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+// LE point d'entrée unique du statut de présence. Renvoie toujours un objet :
+//   { status, reason, message, auto, unavail }
+// `auto: true` = dérivé d'une indisponibilité, aucune réponse explicite.
+// Toutes les vues doivent passer par ici plutôt que de lire `responses[pid]`
+// directement, sinon une joueuse indisponible s'afficherait présente.
+function _convocResp(c, dateISO, pid) {
+  if (!c || !pid) return { status: 'present', reason: '', message: '', auto: false, unavail: null };
+  const d = dateISO || c.date;
+  let resp = null;
+  if (c.recurrence && d && c.instanceOverrides && c.instanceOverrides[d] && c.instanceOverrides[d].responses) {
+    resp = c.instanceOverrides[d].responses[pid];
+  } else {
+    resp = (c.responses || {})[pid];
+  }
+  if (resp && resp.status) {
+    return { status: resp.status, reason: resp.reason || '', message: resp.message || '',
+      auto: false, unavail: null };
+  }
+  const u = _unavailOn(pid, d);
+  if (u) {
+    const meta = _unavailMeta(u.reason);
+    return { status: 'absent', reason: meta.label, message: u.notes || '', auto: true, unavail: u };
+  }
+  return { status: 'present', reason: '', message: '', auto: false, unavail: null };
+}
+
 // Doit rester aligné avec la contrainte CHECK de 20260729_002 ET avec la liste
 // inline des sérialiseurs du bloc module (_dumpLicenceRow) — ce bloc-ci est le
 // <script> classique, sa portée ne franchit pas la frontière des blocs.
@@ -17626,6 +17940,8 @@ function openPlayerSeasonPanel(playerId) {
         ${_licenceStatusOf(_licenceFor(playerId)) === 'done' ? '' : `<button class="btn btn-secondary" style="font-size:11px;padding:6px 10px" onclick="markLicenceDone('${esc(playerId)}')">✅ Marquer fait</button>`}
         <button class="btn btn-secondary" style="font-size:11px;padding:6px 10px" onclick="openLicenceEditor('${esc(playerId)}')">✎ Modifier le statut</button>
       </div>
+
+      ${renderUnavailSection(playerId)}
     </div>
     ${link && !readOnly ? `
       <div class="modal-footer">
@@ -18184,8 +18500,8 @@ function convocCard(c, isPast, isCoach) {
   const _seasonPool = _seasonsLoaded() && _seasonId
     ? getSeasonPlayers(_seasonId)
     : (state.players || []);
-  const present = _seasonPool.filter(p => !responses[p.id] || responses[p.id].status === 'present');
-  const absent = _seasonPool.filter(p => responses[p.id] && responses[p.id].status === 'absent');
+  const present = _seasonPool.filter(p => _convocResp(c, dateStr, p.id).status === 'present');
+  const absent = _seasonPool.filter(p => _convocResp(c, dateStr, p.id).status === 'absent');
   const days = daysUntil(c.date);
   let dateLabel;
   if (isPast) dateLabel = formatDate(c.date, 'long');
@@ -18525,7 +18841,7 @@ function saveConvoc(id, isNew) {
     const team = obj.teamTag === 'e1' || obj.teamTag === 'e2' ? obj.teamTag : 'all';
     const sid = obj.seasonId || getActiveSeasonId();
     const pool = (_seasonsLoaded() && sid) ? getSeasonPlayers(sid, { team }) : (state.players || []);
-    notifyPush(_pushPlayerKeys(pool.map(p => p.id)), {
+    notifyPush(_pushPlayerKeysOn(pool.map(p => p.id), obj.date), {
       title: isMatch ? '🏀 Nouveau match' : '🗓 Nouvel entraînement',
       body: (obj.title || (isMatch ? 'Match' : 'Entraînement')) + (obj.date ? ' · ' + formatDate(obj.date, 'short') : '') + (obj.location ? ' · ' + obj.location : ''),
       url: '/', tag: 'convoc', type: 'convoc'
@@ -18579,7 +18895,8 @@ function _applyConvocClosure(c, instanceDate) {
   const ch = getAutoChallenge(targetType, _seasonId);
   const credit = (responses) => {
     if (!ch) return;
-    const presentPlayers = _seasonPool.filter(p => !responses[p.id] || responses[p.id].status === 'present');
+    // Une joueuse indisponible n'était pas là : elle ne doit pas être créditée.
+    const presentPlayers = _seasonPool.filter(p => _convocResp(c, instanceDate, p.id).status === 'present');
     ch.scores = ch.scores || {};
     presentPlayers.forEach(p => { ch.scores[p.id] = (ch.scores[p.id] || 0) + 1; });
   };
@@ -18843,9 +19160,8 @@ function openOverdueTrainingsModal() {
     const _seasonId = (c && c.seasonId) || state.currentSeasonId;
     const _convTeam = c && c.teamTag === 'both' ? 'all' : (c && c.teamTag === 'e2' ? 'e2' : 'e1');
     const pool = _seasonsLoaded() && _seasonId ? getSeasonPlayers(_seasonId, { team: _convTeam }) : (state.players || []);
-    const responses = inst.responses || {};
-    const present = pool.filter(p => !responses[p.id] || responses[p.id].status === 'present').length;
-    const absent = pool.filter(p => responses[p.id] && responses[p.id].status === 'absent').length;
+    const present = pool.filter(p => _convocResp(c, o.date, p.id).status === 'present').length;
+    const absent = pool.filter(p => _convocResp(c, o.date, p.id).status === 'absent').length;
     return `
       <div style="padding:12px;border:1px solid var(--border-soft);border-radius:10px;margin-bottom:8px;background:var(--surface)">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">
@@ -20698,7 +21014,7 @@ function _trainingRemindCheck(nowMs) {
       if (!s) return;
       const late = _trainingPoolFor(p).filter(pl => !_trainingCompletionFor(s.id, pl.id, todayISO));
       if (!late.length) return;
-      notifyPush(_pushPlayerKeys(late.map(pl => pl.id)), {
+      notifyPush(_pushPlayerKeysOn(late.map(pl => pl.id), todayISO), {
         title: '💪 Ta prépa',
         body: 'N\'oublie pas ta séance de ' + (TRAINING_DAY_LABELS[dow] || '').toLowerCase() + ' : ' + (s.name || 'prépa'),
         url: '/',
@@ -25583,7 +25899,7 @@ function validateTrainingPlan() {
   const team = c.teamTag === 'e1' || c.teamTag === 'e2' ? c.teamTag : 'all';
   const sid = c.seasonId || getActiveSeasonId();
   const pool = (_seasonsLoaded() && sid) ? getSeasonPlayers(sid, { team }) : (state.players || []);
-  notifyPush(_pushPlayerKeys(pool.map(p => p.id)), { title: '✅ Plan d\'entraînement prêt', body: (c.title || 'Entraînement') + (c.date ? ' · ' + formatDate(c.date, 'short') : ''), url: '/', tag: 'plan', type: 'plan' });
+  notifyPush(_pushPlayerKeysOn(pool.map(p => p.id), c.date), { title: '✅ Plan d\'entraînement prêt', body: (c.title || 'Entraînement') + (c.date ? ' · ' + formatDate(c.date, 'short') : ''), url: '/', tag: 'plan', type: 'plan' });
 }
 
 function unvalidateTrainingPlan() {
@@ -26735,8 +27051,8 @@ function openEventInstance(parentId, dateStr) {
   const _seasonPool = _seasonsLoaded() && _seasonId
     ? getSeasonPlayers(_seasonId)
     : (state.players || []);
-  const present = _seasonPool.filter(p => !responses[p.id] || responses[p.id].status === 'present');
-  const absent = _seasonPool.filter(p => responses[p.id] && responses[p.id].status === 'absent');
+  const present = _seasonPool.filter(p => _convocResp(c, dateStr, p.id).status === 'present');
+  const absent = _seasonPool.filter(p => _convocResp(c, dateStr, p.id).status === 'absent');
   const ovKey = '__inst_' + parentId + '_' + dateStr;
 
   openModal(`
@@ -26860,16 +27176,22 @@ function openEventInstance(parentId, dateStr) {
             <div style="margin-top:10px">
               <div class="eyebrow-muted mb-2" style="color:var(--red)">Absentes</div>
               ${absent.map(p => {
-                const r = responses[p.id];
+                const r = _convocResp(c, dateStr, p.id);
+                // Une absence DÉRIVÉE d'une indisponibilité se distingue d'un
+                // désistement : le coach doit voir qu'elle n'a rien décidé pour
+                // cette date-là, et jusqu'à quand la période court.
                 return `<div class="convoc-absent-row">
                   <div style="flex:1">
                     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
                       <span style="font-family:'Anton';font-size:14px;text-transform:uppercase">${esc(p.name)}</span>
-                      <span class="chip chip-red">${esc(r.reason || 'Indisponible')}</span>
+                      ${r.auto
+                        ? `<span class="chip" style="background:rgba(255,107,0,0.15);color:var(--orange)">${_unavailMeta(r.unavail.reason).icon} Indispo · auto</span>`
+                        : `<span class="chip chip-red">${esc(r.reason || 'Indisponible')}</span>`}
                     </div>
+                    ${r.auto ? `<div style="font-size:11px;color:var(--ink-3);margin-top:3px;font-family:'JetBrains Mono'">${esc(_unavailRangeLabel(r.unavail))}</div>` : ''}
                     ${r.message ? `<div style="font-size:12px;color:var(--ink-2);margin-top:4px;font-style:italic">"${esc(r.message)}"</div>` : ''}
                   </div>
-                  <button class="btn btn-icon" onclick="restoreInstancePresent('${parentId}','${dateStr}','${p.id}')">↺</button>
+                  <button class="btn btn-icon" title="${r.auto ? 'Convoquer quand même' : 'Remettre présente'}" onclick="${r.auto ? `overrideUnavailPresence('${parentId}','${dateStr}','${p.id}')` : `restoreInstancePresent('${parentId}','${dateStr}','${p.id}')`}">↺</button>
                 </div>`;
               }).join('')}
             </div>
@@ -26972,8 +27294,8 @@ function openCallSheet(parentId, dateStr) {
   const _seasonPool = _seasonsLoaded() && _seasonId
     ? getSeasonPlayers(_seasonId)
     : (state.players || []);
-  const present = _seasonPool.filter(p => !responses[p.id] || responses[p.id].status === 'present');
-  const absent = _seasonPool.filter(p => responses[p.id] && responses[p.id].status === 'absent');
+  const present = _seasonPool.filter(p => _convocResp(c, dateStr, p.id).status === 'present');
+  const absent = _seasonPool.filter(p => _convocResp(c, dateStr, p.id).status === 'absent');
   const sheet = getCallSheet(c, c.recurrence ? dateStr : null);
   const arrivals = sheet.arrivals || {};
 
@@ -35531,6 +35853,19 @@ async function _pushDeleteSubscription(sub) {
 }
 // Helpers cibles (ownerKey "role:playerId").
 function _pushPlayerKeys(pids) { return (pids || []).filter(Boolean).map(p => 'player:' + p); }
+// Destinataires d'un rappel DATÉ : on retire celles qui sont indisponibles ce
+// jour-là. Une joueuse blessée ou en vacances n'a pas à être relancée pour un
+// entraînement auquel elle ne peut pas venir — c'est la première chose qui rend
+// les notifications insupportables. dateISO absent → aucun filtrage (le rappel
+// n'est rattaché à aucune date, on ne devine pas).
+function _pushPlayerKeysOn(pids, dateISO) {
+  const list = (pids || []).filter(Boolean);
+  if (!dateISO) return _pushPlayerKeys(list);
+  const kept = list.filter(pid => !_unavailOn(pid, dateISO));
+  const skipped = list.length - kept.length;
+  if (skipped) { try { console.log('[push] ' + skipped + ' destinataire(s) ignore(s) — indisponibles le ' + dateISO); } catch (e) {} }
+  return _pushPlayerKeys(kept);
+}
 function _pushCoachKey() { return 'coach:-'; }
 function _pushAllPlayerKeys() {
   const sid = getActiveSeasonId();
@@ -35573,12 +35908,10 @@ function notifyPush(ownerKeys, payload) {
 }
 // --- Type A : changement de réponse à une convoc (push coach). Pas de "maybe"
 // dans le modèle (présent par défaut ↔ absent) → directions présent↔absent. ---
+// Délègue à _convocResp : le statut tient compte des indisponibilités, sans quoi
+// une joueuse indisponible passerait pour présente partout où ce helper est lu.
 function _effectiveConvocStatus(c, instanceDate, pid) {
-  let resp = null;
-  if (c && c.recurrence && instanceDate && c.instanceOverrides && c.instanceOverrides[instanceDate] && c.instanceOverrides[instanceDate].responses) {
-    resp = c.instanceOverrides[instanceDate].responses[pid];
-  } else { resp = (c && c.responses || {})[pid]; }
-  return (resp && resp.status) || 'present';
+  return _convocResp(c, instanceDate, pid).status;
 }
 function _notifyCoachConvocResponse(c, instanceDate, prevStatus, newStatus) {
   if (!c || !state.auth || state.auth.role !== 'player') return; // seulement quand la joueuse change SA réponse
@@ -35964,7 +36297,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-29.90';
+const APP_VERSION = '2026-07-29.91';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {

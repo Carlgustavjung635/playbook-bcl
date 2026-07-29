@@ -23,7 +23,9 @@ function extractFn(name) {
   throw new Error('déséquilibré : ' + name);
 }
 
-const src = ['getMatchRoster', 'getMatchComposition', 'ensureMatchRoster', 'toggleRosterPlayer']
+// getMatchRoster passe par _convocResp (v.91) pour tenir compte des
+// indisponibilités : on extrait la chaîne complète.
+const src = ['_unavailMeta', '_unavailOn', '_convocResp', 'getMatchRoster', 'getMatchComposition', 'ensureMatchRoster', 'toggleRosterPlayer']
   .map(extractFn).join('\n\n');
 const players = [{ id: 'a', num: 4, name: 'Lea' }, { id: 'b', num: 7, name: 'Mia' }, { id: 'c', num: 9, name: 'Zoe' }];
 function build(state) {
