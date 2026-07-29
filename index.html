@@ -11839,6 +11839,62 @@ function deletePlay(id) {
 // ============================================================
 // MATCHES
 // ============================================================
+// --- Onglet MATCHS (coach/stat) : à venir / joués ---------------------------
+// La liste s'appelait « Historique » et contenait… les matchs À VENIR. Deux
+// onglets, et un sous-filtre de période sur « à venir » seulement — c'est là que
+// le coach a besoin de se projeter (« qu'est-ce que j'ai cette semaine ? »).
+//
+// Un match est « à venir » s'il n'a PAS de score ET que sa date n'est pas
+// passée. Tout le reste va dans « joués » — y compris un match passé dont le
+// score n'a jamais été saisi : il doit rester visible pour être complété, pas
+// disparaître entre deux onglets.
+const MATCH_RANGES = [
+  { id: 'all', label: 'Toute la saison' },
+  { id: 'week', label: 'Cette semaine' },
+  { id: 'next', label: 'Semaine prochaine' },
+  { id: 'month', label: 'Ce mois-ci' },
+];
+function _matchIsPlayed(m) { return (m && ((m.scoreUs || 0) > 0 || (m.scoreOpp || 0) > 0)); }
+function _matchIsUpcoming(m, todayISO) {
+  return !!m && !_matchIsPlayed(m) && m.date >= (todayISO || isoDate(new Date()));
+}
+// Bornes INCLUSIVES {from, to} d'une période, ou null pour « toute la saison ».
+// Semaine à la française : lundi = 1 … dimanche = 7. Tout est calculé en UTC sur
+// des dates 'YYYY-MM-DD' — les matchs n'ont pas d'heure dans ce calcul, et
+// passer par l'heure locale ferait basculer la semaine selon le fuseau.
+function _matchRangeFor(key, todayISO) {
+  const today = todayISO || isoDate(new Date());
+  const ms = Date.parse(today + 'T00:00:00Z');
+  if (!Number.isFinite(ms)) return null;
+  const DAY = 86400000;
+  const iso = t => new Date(t).toISOString().slice(0, 10);
+  const d = new Date(ms);
+  const dow = d.getUTCDay() === 0 ? 7 : d.getUTCDay();
+  if (key === 'week') return { from: today, to: iso(ms + (7 - dow) * DAY) };
+  if (key === 'next') {
+    const monday = ms + (8 - dow) * DAY;
+    return { from: iso(monday), to: iso(monday + 6 * DAY) };
+  }
+  if (key === 'month') {
+    const last = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0));
+    return { from: today, to: last.toISOString().slice(0, 10) };
+  }
+  return null;
+}
+function _matchInRange(m, key, todayISO) {
+  const r = _matchRangeFor(key, todayISO);
+  if (!r) return true;
+  return m.date >= r.from && m.date <= r.to;
+}
+function setMatchTab(tab) {
+  state._matchTab = (tab === 'played') ? 'played' : 'upcoming';
+  render();
+}
+function setMatchRange(key) {
+  state._matchRange = MATCH_RANGES.some(r => r.id === key) ? key : 'all';
+  render();
+}
+
 function renderMatches() {
   if (state.view && state.view.type === 'match') return renderMatchDetail();
 
@@ -11854,11 +11910,22 @@ function renderMatches() {
   const isCoach = state.auth.role === 'coach';
   const isStat = state.auth.role === 'stat';
 
+  const todayISO = isoDate(new Date());
+  const upcoming = matches.filter(m => _matchIsUpcoming(m, todayISO))
+    .sort((a, b) => a.date.localeCompare(b.date));   // le plus proche d'abord
+  const played = matches.filter(m => !_matchIsUpcoming(m, todayISO)); // déjà trié desc
+  // Onglet par défaut : « à venir » s'il y a de quoi se projeter, sinon « joués ».
+  const tab = (state._matchTab === 'played' || (!state._matchTab && !upcoming.length)) ? 'played' : 'upcoming';
+  const range = MATCH_RANGES.some(r => r.id === state._matchRange) ? state._matchRange : 'all';
+  const shown = tab === 'upcoming'
+    ? upcoming.filter(m => _matchInRange(m, range, todayISO))
+    : played;
+
   return `
     <div class="fade-up">
       <div class="section-header">
         <div>
-          <div class="eyebrow-muted">${matches.length} match${matches.length > 1 ? 's' : ''}</div>
+          <div class="eyebrow-muted">${upcoming.length} à venir · ${played.length} joué${played.length > 1 ? 's' : ''}</div>
           <h2 class="display-lg mt-2">Saison</h2>
         </div>
         <div style="display:flex;gap:6px">
@@ -11878,17 +11945,33 @@ function renderMatches() {
         </div>
       </div>
 
-      <div class="section-header">
-        <h2 class="display-md">Historique</h2>
-      </div>
-
       ${matches.length === 0 ? `
         <div class="empty">
           <div class="empty-icon">○</div>
           <div class="empty-title">Aucun match</div>
         </div>
       ` : `
-        <div class="list-section">${matches.map(m => matchRow(m)).join('')}</div>
+        <div class="segmented" style="margin:0 0 10px">
+          <button class="segmented-btn ${tab === 'upcoming' ? 'active' : ''}" onclick="setMatchTab('upcoming')">📅 À venir${upcoming.length ? ' · ' + upcoming.length : ''}</button>
+          <button class="segmented-btn ${tab === 'played' ? 'active' : ''}" onclick="setMatchTab('played')">🏀 Joués${played.length ? ' · ' + played.length : ''}</button>
+        </div>
+
+        ${tab === 'upcoming' ? `
+          <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:12px">
+            ${MATCH_RANGES.map(r => `<button class="btn ${range === r.id ? 'btn-primary' : 'btn-secondary'}" style="min-height:32px;padding:0 10px;font-size:11px" onclick="setMatchRange('${r.id}')">${r.label}</button>`).join('')}
+          </div>` : ''}
+
+        ${shown.length === 0 ? `
+          <div class="empty">
+            <div class="empty-icon">${tab === 'upcoming' ? '📅' : '🏀'}</div>
+            <div class="empty-title">${tab === 'upcoming' ? 'Aucun match à venir' : 'Aucun match joué'}</div>
+            <div class="empty-desc">${tab === 'upcoming'
+              ? (range === 'all' ? 'Rien de programmé sur cette saison.' : 'Rien sur cette période — essaie « Toute la saison ».')
+              : 'Aucun match disputé sur cette saison.'}</div>
+          </div>
+        ` : `
+          <div class="list-section">${shown.map(m => matchRow(m)).join('')}</div>
+        `}
       `}
     </div>
   `;
@@ -35677,7 +35760,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-29.87';
+const APP_VERSION = '2026-07-29.88';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
