@@ -34322,6 +34322,42 @@ function notifFeed() {
       if (typeof currentSeasonMatches === 'function') {
         currentSeasonMatches().filter(m => m.playerStats && Object.keys(m.playerStats).length).forEach(m => info('stats-' + m.id, m.updatedAt || 0, '📊', 'Stats de match saisies', 'vs ' + (m.opponent || '')));
       }
+      // Séances de prépa validées — informationnel.
+      // Le push partait déjà (_trainingNotifyCoachCompletion), mais RIEN ne le
+      // matérialisait ici : le coach recevait la notif système puis, en ouvrant
+      // l'app, ne retrouvait aucune trace (cloche vide, badge à 0). La donnée
+      // était pourtant bien en base et bien affichée — mais seulement en allant
+      // manuellement dans Prépa physique → 📊 Suivi. Toute notif poussée doit
+      // avoir son pendant dans le feed, sinon la notif mène à une impasse.
+      if (typeof _coachTrainingPrograms === 'function' && typeof _trainingCompletionsOf === 'function') {
+        _coachTrainingPrograms().forEach(p => {
+          // Scoping : un coach non-admin ne voit que les joueuses de son effectif.
+          const pool = new Set(_trainingPoolFor(p).map(x => x.id));
+          _trainingCompletionsOf(p.id)
+            .filter(c => pool.has(c.playerId))
+            .sort((a, b) => (b.dateCompleted || 0) - (a.dateCompleted || 0))
+            // Borne : 20 joueuses × 3 séances/sem × 3 sem ≈ 180 validations, et
+            // notifFeed() est rappelé à CHAQUE render (via appBadgeCount).
+            .slice(0, 30)
+            .forEach(c => {
+              const pl = (state.players || []).find(x => x.id === c.playerId);
+              const who = pl ? ('#' + pl.num + ' ' + pl.name) : 'Une joueuse';
+              // Le jour PRÉVU est dans le détail : sans lui, deux validations de
+              // la même joueuse s'affichent à l'identique et passent pour un
+              // doublon — même piège que _notifDrawDetail sur les gages.
+              let day = c.datePlanned || '';
+              try { day = formatDate(c.datePlanned, 'short'); } catch (e) {}
+              const ts = c.dateCompleted || c.createdAt || 0;
+              if (!ts) return;
+              items.push({
+                id: 'trdone-' + c.id, ts, icon: '💪', title: 'Séance validée',
+                detail: who + ' · ' + day + ' · ' + _completionSummary(c),
+                count: 1, unread: ts > seen,
+                action: "openTrainingDashboard('" + p.id + "')"
+              });
+            });
+        });
+      }
     }
   } catch (e) { /* feed best-effort */ }
   return items.sort((x, y) => (y.ts || 0) - (x.ts || 0));
@@ -34909,7 +34945,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-21.78';
+const APP_VERSION = '2026-07-29.79';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 async function checkForUpdate(opts) {
