@@ -5202,6 +5202,13 @@ function _dumpTrainingCompletionRow(c) {
     running_distance_km: Number.isFinite(c.runningDistanceKm) ? c.runningDistanceKm : null,
     points_total: Number.isFinite(c.pointsTotal) ? c.pointsTotal : 0,
     notes: c.notes || null,
+    // AUDIT COACH (migration 20260730_002). `edited_at` est distinct de
+    // `updated_at` : ce dernier est l'horloge LWW de PbSync, bumpée par tout
+    // re-upsert, donc inutilisable comme trace « un coach a corrigé ».
+    updated_by: c.updatedBy || null,
+    edited_at: c.editedAt ? new Date(c.editedAt).toISOString() : null,
+    coach_note: c.coachNote || null,
+    coach_note_at: c.coachNoteAt ? new Date(c.coachNoteAt).toISOString() : null,
     deleted_at: c.deletedAt ? new Date(c.deletedAt).toISOString() : null,
     updated_at: c.updatedAt ? new Date(c.updatedAt).toISOString() : (c.createdAt ? new Date(c.createdAt).toISOString() : null)
   };
@@ -5320,6 +5327,11 @@ function _trainingCompletionFromRow(r) {
     runningDistanceKm: Number.isFinite(km) ? km : null,
     pointsTotal: Number.isFinite(r.points_total) ? r.points_total : 0,
     notes: r.notes || '',
+    // AUDIT COACH (migration 20260730_002).
+    updatedBy: r.updated_by || null,
+    editedAt: r.edited_at ? Date.parse(r.edited_at) : null,
+    coachNote: r.coach_note || '',
+    coachNoteAt: r.coach_note_at ? Date.parse(r.coach_note_at) : null,
     createdAt: r.created_at ? Date.parse(r.created_at) : null,
     updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
     deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
@@ -20711,7 +20723,7 @@ function renderTrainingCoachCard() {
         const done = _trainingCompletionsOf(p.id).length;
         const pool = _trainingPoolFor(p);
         return `
-          <div onclick="openTrainingDashboard('${p.id}')" style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;background:var(--surface);cursor:pointer;display:flex;align-items:center;gap:10px">
+          <div onclick="openTrainingDashboard('${p.id}','detail')" style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;background:var(--surface);cursor:pointer;display:flex;align-items:center;gap:10px">
             <div style="flex:1;min-width:0">
               <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p.name || 'Programme')}</div>
               <div style="font-size:11px;color:var(--ink-3)">${esc(_trainingPeriodLabel(p))} · ${p.daysActive.map(d => TRAINING_DAY_LABELS[d].slice(0, 3)).join(' ')}</div>
@@ -20770,7 +20782,8 @@ function openTrainingPrograms() {
             </div>
             ${p.description ? `<div style="font-size:11px;color:var(--ink-2);margin-bottom:8px">${esc(p.description)}</div>` : ''}
             <div style="display:flex;gap:6px;flex-wrap:wrap">
-              <button class="btn btn-secondary" onclick="openTrainingDashboard('${p.id}')" style="padding:6px 10px;font-size:11px">📊 Suivi</button>
+              <button class="btn btn-secondary" onclick="openTrainingDashboard('${p.id}')" style="padding:6px 10px;font-size:11px">🏆 Classement</button>
+              <button class="btn btn-secondary" onclick="openTrainingDashboard('${p.id}','detail')" style="padding:6px 10px;font-size:11px">📊 Suivi détaillé</button>
               ${scoped ? '' : `
                 <button class="btn btn-secondary" onclick="openTrainingWizard('${p.id}')" style="padding:6px 10px;font-size:11px">✎ Éditer</button>
                 <button class="btn btn-secondary" onclick="toggleTrainingProgramActive('${p.id}')" style="padding:6px 10px;font-size:11px">${p.isActive === false ? '▶ Publier' : '⏸ Dépublier'}</button>
@@ -20820,25 +20833,95 @@ function _trainingPlannedToDate(p, todayISO) {
   return _dateRangeForProgram(p.startDate, end, p.daysActive).length;
 }
 
-function openTrainingDashboard(programId) {
+// ============================================================
+// PRÉPA — DASHBOARD (classement + suivi coach détaillé)
+// ============================================================
+// Le dashboard a DEUX onglets :
+//   • « Classement » — visible par TOUS. Une joueuse arrive ici depuis sa séance
+//     validée ou depuis son feed de notifs. Contenu inchangé.
+//   • « Suivi détaillé » — COACH UNIQUEMENT : toutes les validations avec leurs
+//     photos, distances et messages, l'évolution des km, et la correction.
+// L'onglet détaillé n'est JAMAIS rendu pour une joueuse : il exposerait les
+// photos et les posts des autres (même règle d'étanchéité que l'allow-list des
+// feedbacks côté joueuse, cf. openMyFeedback). La garde est dans
+// renderTrainingDashboard(), pas seulement sur le bouton d'onglet.
+//
+// L'état d'écran vit dans `state._trainingDash` (transient, préfixe `_` → jamais
+// persisté, comme `state._trainingView`) : onglet courant + filtres.
+function openTrainingDashboard(programId, tab) {
   const p = activeTrainingPrograms().find(x => x.id === programId);
   if (!p) return;
-  const rows = _trainingLeaderboard(programId);
-  const planned = _trainingPlannedToDate(p);
-  const max = Math.max(...rows.map(r => r.points), 1);
-  const anyScore = rows.some(r => r.points > 0);
-  const myPid = (state.auth && state.auth.role === 'player') ? state.auth.playerId : null;
-  const totalDone = rows.reduce((a, r) => a + r.sessions, 0);
-  const totalKm = rows.reduce((a, r) => a + r.km, 0);
+  state._trainingDash = {
+    programId,
+    tab: (tab === 'detail' && _trainingIsCoach()) ? 'detail' : 'rank',
+    playerId: '', sessionId: '', period: 'all',
+    // Pagination de la timeline. Sur 6 semaines × 20 joueuses × 3 séances, il y a
+    // ~360 lignes à rendre, chacune avec 2 <img> : tout sortir d'un coup fige
+    // l'iPhone. On coupe à 40 et on affiche un compteur explicite du reste (règle
+    // « no silent caps »).
+    limit: 40
+  };
+  renderTrainingDashboard();
+}
+function _td() { return state._trainingDash; }
+// Tout changement de filtre remet la pagination à zéro : garder un limit de 200
+// après avoir filtré sur une seule joueuse n'aurait aucun sens.
+function _tdSet(k, v) { const d = _td(); if (!d) return; d[k] = v; d.limit = 40; renderTrainingDashboard(); }
+function _tdTab(t) { const d = _td(); if (!d) return; d.tab = t; renderTrainingDashboard(); }
+function _tdMore() { const d = _td(); if (!d) return; d.limit = (d.limit || 40) + 40; renderTrainingDashboard(); }
+// Retour au dashboard depuis un sous-écran (détail, photo, correction). Si l'état
+// d'écran a été perdu — atterrissage direct sur un détail, ou modale rouverte
+// après un reload — on le RECRÉE : sans ça renderTrainingDashboard() sortirait
+// en silence et laisserait une modale morte, sans bouton de sortie.
+function _tdBack(programId) {
+  if (!_td() && programId) { openTrainingDashboard(programId, 'detail'); return; }
+  renderTrainingDashboard();
+}
+
+function renderTrainingDashboard() {
+  const d = _td(); if (!d) return;
+  const p = activeTrainingPrograms().find(x => x.id === d.programId);
+  if (!p) { closeModal(); return; }
+  const coach = _trainingIsCoach();
+  if (!coach) d.tab = 'rank';   // garde-fou : jamais le détail chez une joueuse
+  const detail = d.tab === 'detail';
+  const scrollKey = 'trainingDash-' + d.tab + '-' + (d.playerId || 'all');
   openModal(`
     <div class="modal-header">
       <div>
         <div class="eyebrow">${esc(_trainingPeriodLabel(p))}</div>
         <div class="modal-title">${esc(p.name || 'Programme')}</div>
       </div>
-      <button class="modal-close" onclick="closeModal()">✕</button>
+      <button class="modal-close" onclick="state._trainingDash=null;closeModal()">✕</button>
     </div>
-    <div class="modal-body">
+    <div class="modal-body" ${_modalScrollAttr(scrollKey)}>
+      ${coach ? `
+        <div class="segmented" style="margin-bottom:14px">
+          <button class="segmented-btn ${detail ? '' : 'active'}" onclick="_tdTab('rank')">🏆 Classement</button>
+          <button class="segmented-btn ${detail ? 'active' : ''}" onclick="_tdTab('detail')">📊 Suivi détaillé</button>
+        </div>` : ''}
+      ${detail ? renderCoachTrainingDetail(p.id) : _renderTrainingRankTab(p)}
+    </div>
+    <div class="modal-footer">
+      ${detail
+        ? `<button class="btn btn-secondary btn-block" onclick="exportTrainingCompletionsCsv('${p.id}')">⬇ Exporter en CSV</button>`
+        : (coach && !isScopedCoach() ? `<button class="btn btn-secondary btn-block" onclick="openTrainingWizard('${p.id}')">✎ Éditer le programme</button>` : '')}
+    </div>
+  `);
+  try { _restoreModalScroll(scrollKey); } catch (e) {}
+}
+
+// --- Onglet 1 : classement (contenu historique, inchangé) -------------------
+function _renderTrainingRankTab(p) {
+  const rows = _trainingLeaderboard(p.id);
+  const planned = _trainingPlannedToDate(p);
+  const max = Math.max(...rows.map(r => r.points), 1);
+  const anyScore = rows.some(r => r.points > 0);
+  const myPid = (state.auth && state.auth.role === 'player') ? state.auth.playerId : null;
+  const coach = _trainingIsCoach();
+  const totalDone = rows.reduce((a, r) => a + r.sessions, 0);
+  const totalKm = rows.reduce((a, r) => a + r.km, 0);
+  return `
       <div class="stat-grid" style="padding:0;margin-bottom:16px">
         <div class="stat-tile"><div class="stat-tile-label">Séances faites</div><div class="stat-tile-value">${totalDone}</div><div class="stat-tile-sub">sur ${planned} prévue${planned > 1 ? 's' : ''} à ce jour</div></div>
         <div class="stat-tile"><div class="stat-tile-label">Joueuses actives</div><div class="stat-tile-value">${rows.filter(r => r.sessions > 0).length}<span style="color:var(--ink-4)"> · ${rows.length}</span></div><div class="stat-tile-sub">au moins 1 séance</div></div>
@@ -20853,8 +20936,12 @@ function openTrainingDashboard(programId) {
           const medal = (e.points > 0 && anyScore) ? (i === 0 ? 'gold' : i === 1 ? 'silver' : i === 2 ? 'bronze' : '') : '';
           const isMine = myPid && myPid === e.id;
           const pct = planned ? Math.min(100, Math.round((e.sessions / planned) * 100)) : 0;
+          // Côté coach chaque ligne est cliquable : elle ouvre le suivi détaillé
+          // filtré sur la joueuse. C'est le chemin naturel « je vois un 0, je
+          // veux savoir pourquoi » — un cul-de-sac sinon.
           return `
-            <div class="lb-row${isMine ? ' lb-row-me' : ''}" style="cursor:default">
+            <div class="lb-row${isMine ? ' lb-row-me' : ''}" style="cursor:${coach ? 'pointer' : 'default'}"
+                 ${coach ? `onclick="_td().playerId='${e.id}';_td().tab='detail';_td().limit=40;renderTrainingDashboard()"` : ''}>
               <div class="lb-medal ${medal}">${i + 1}</div>
               <div>
                 <div style="font-family:'Anton';font-size:14px;text-transform:uppercase">${isMine ? '⭐ ' : ''}#${e.num} ${esc(e.name)}${isMine ? ' · TOI' : ''}</div>
@@ -20869,12 +20956,736 @@ function openTrainingDashboard(programId) {
               </div>
             </div>`;
         }).join('') : `<div class="empty"><div class="empty-icon">👥</div><div class="empty-title">Effectif vide</div><div class="empty-desc">Aucune joueuse ne correspond à l'effectif de ce programme.</div></div>`}
+      </div>`;
+}
+
+// --- Fenêtre du filtre de période -------------------------------------------
+// `from` borne le filtre ET le dénominateur d'assiduité. `to` vaut TOUJOURS la
+// fin du programme pour le filtre : une séance validée en avance (fenêtre H-24)
+// a un datePlanned dans le futur, la couper à aujourd'hui la ferait disparaître
+// de sa propre période. Le dénominateur, lui, s'arrête à aujourd'hui (compter les
+// séances futures ferait chuter l'assiduité dès le 1er jour).
+function _tdPeriodBounds(p, period) {
+  const today = isoDate(new Date());
+  const back = period === 'w' ? 6 : period === 'm' ? 29 : null;
+  let from = p.startDate;
+  if (back !== null) {
+    const win = isoDate(new Date(Date.now() - back * 86400000));
+    if (win > from) from = win;
+  }
+  const plannedTo = (p.endDate && p.endDate < today) ? p.endDate : today;
+  return { from, to: p.endDate, plannedTo };
+}
+const TD_PERIODS = [['w', '7 j'], ['m', '30 j'], ['all', 'Tout']];
+
+// Validations retenues par les filtres courants, plus récentes en tête.
+// Le pool fait foi : une validation d'une joueuse hors effectif du coach (autre
+// équipe) ne doit jamais remonter — ceinture au-dessus de _trainingPoolFor.
+function _tdFilteredCompletions(p) {
+  const d = _td() || {};
+  const pool = new Set(_trainingPoolFor(p).map(x => x.id));
+  const b = _tdPeriodBounds(p, d.period);
+  return _trainingCompletionsOf(p.id)
+    .filter(c => pool.has(c.playerId))
+    .filter(c => !d.playerId || c.playerId === d.playerId)
+    .filter(c => !d.sessionId || c.sessionId === d.sessionId)
+    .filter(c => !c.datePlanned || (c.datePlanned >= b.from && c.datePlanned <= b.to))
+    .sort((x, y) => (y.datePlanned || '').localeCompare(x.datePlanned || '')
+      || (y.dateCompleted || 0) - (x.dateCompleted || 0));
+}
+
+// --- Onglet 2 : suivi détaillé (coach) --------------------------------------
+function renderCoachTrainingDetail(programId) {
+  const d = _td() || {};
+  const p = activeTrainingPrograms().find(x => x.id === programId);
+  if (!p) return '';
+  const pool = _trainingPoolFor(p);
+  const sessions = _trainingSessionsOf(p.id);
+  const comps = _tdFilteredCompletions(p);
+  const b = _tdPeriodBounds(p, d.period);
+  // Compteurs sur l'ensemble FILTRÉ (et pas sur tout le programme) : un compteur
+  // qui ignore les filtres affichés juste au-dessus de lui est un mensonge.
+  const who = new Set(comps.map(c => c.playerId)).size;
+  const km = comps.reduce((a, c) => a + (Number.isFinite(c.runningDistanceKm) ? c.runningDistanceKm : 0), 0);
+  const pts = comps.reduce((a, c) => a + (Number(c.pointsTotal) || 0), 0);
+  const periodLabel = d.period === 'w' ? 'ces 7 derniers jours' : d.period === 'm' ? 'ces 30 derniers jours' : 'tout le programme';
+  const shown = comps.slice(0, d.limit || 40);
+  const rest = comps.length - shown.length;
+
+  return `
+    <!-- FILTRES -->
+    <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px">
+      <div class="segmented">
+        ${TD_PERIODS.map(([k, lab]) => `<button class="segmented-btn ${(d.period || 'all') === k ? 'active' : ''}" onclick="_tdSet('period','${k}')">${lab}</button>`).join('')}
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <select onchange="_tdSet('playerId',this.value)" style="flex:1 1 140px;min-width:0">
+          <option value="">👥 Toutes les joueuses</option>
+          ${pool.map(pl => `<option value="${esc(pl.id)}" ${d.playerId === pl.id ? 'selected' : ''}>#${pl.num} ${esc(pl.name)}</option>`).join('')}
+        </select>
+        <select onchange="_tdSet('sessionId',this.value)" style="flex:1 1 140px;min-width:0">
+          <option value="">📋 Toutes les séances</option>
+          ${sessions.map(s => `<option value="${esc(s.id)}" ${d.sessionId === s.id ? 'selected' : ''}>${esc((TRAINING_DAY_LABELS[s.dayOfWeek] || '').slice(0, 3))} · ${esc(s.name || 'Séance')}</option>`).join('')}
+        </select>
       </div>
     </div>
-    <div class="modal-footer">
-      ${_trainingIsCoach() && !isScopedCoach() ? `<button class="btn btn-secondary btn-block" onclick="openTrainingWizard('${p.id}')">✎ Éditer le programme</button>` : ''}
+
+    <!-- COMPTEURS -->
+    <div style="display:flex;gap:6px;flex-wrap:wrap;font-size:11px;color:var(--ink-2);background:var(--bg-3);border-radius:8px;padding:9px 11px;margin-bottom:14px;line-height:1.5">
+      <span><b>${who}</b> joueuse${who > 1 ? 's' : ''}</span><span style="color:var(--ink-4)">·</span>
+      <span><b>${comps.length}</b> séance${comps.length > 1 ? 's' : ''}</span><span style="color:var(--ink-4)">·</span>
+      <span><b>${Math.round(km * 10) / 10}</b> km</span><span style="color:var(--ink-4)">·</span>
+      <span><b>${pts}</b> pts</span>
+    </div>
+
+    ${d.playerId ? renderPlayerProgression(d.playerId, p.id) : ''}
+
+    ${comps.length ? `
+      ${_tdKmBlock(p, comps, pool)}
+      <div class="eyebrow-muted" style="margin-bottom:8px">${d.playerId ? 'Ses validations' : 'Toutes les validations'} · ${comps.length}</div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        ${renderCompletionsTimeline(shown, { showPlayer: !d.playerId })}
+      </div>
+      ${rest > 0 ? `<button class="btn btn-secondary btn-block" onclick="_tdMore()" style="margin-top:10px">↓ Afficher ${Math.min(40, rest)} de plus <span style="color:var(--ink-3)">(${rest} restante${rest > 1 ? 's' : ''})</span></button>` : ''}
+    ` : `
+      <div class="empty">
+        <div class="empty-icon">🗓</div>
+        <div class="empty-title">Aucune validation</div>
+        <div class="empty-desc">Rien ${esc(periodLabel)}${d.playerId ? ' pour cette joueuse' : ''}${d.sessionId ? ' sur cette séance' : ''}.</div>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center">
+        ${(d.period !== 'all') ? `<button class="btn btn-secondary" onclick="_tdSet('period','all')" style="font-size:12px">📆 Voir tout le programme</button>` : ''}
+        ${(d.playerId || d.sessionId) ? `<button class="btn btn-ghost" onclick="_td().playerId='';_td().sessionId='';_tdSet('period','all')" style="font-size:12px">✕ Retirer les filtres</button>` : ''}
+      </div>`}
+
+    <div style="font-size:10px;color:var(--ink-3);margin-top:14px;line-height:1.5">
+      Période analysée : ${esc(formatDate(b.from, 'short'))} → ${esc(formatDate(b.plannedTo, 'short'))}. Touche une ligne pour voir les photos et le détail, ✎ pour corriger.
+    </div>`;
+}
+
+// Bloc « évolution des km » : n'apparaît que si une distance a été saisie. Sans
+// ce garde-fou, un programme sans bloc « course » afficherait un graphique plat
+// à zéro qu'on prendrait pour un bug.
+function _tdKmBlock(p, comps, pool) {
+  const withKm = comps.filter(c => Number.isFinite(c.runningDistanceKm) && c.runningDistanceKm > 0);
+  if (!withKm.length) return '';
+  const d = _td() || {};
+  const series = _tdKmSeries(withKm, pool, d.playerId);
+  if (!series.length) return '';
+  return `
+    <div class="eyebrow-muted" style="margin-bottom:8px">Évolution des km · cumul</div>
+    ${renderKmChart(series)}
+    ${d.playerId ? _tdKmTable(withKm) : ''}
+    <div style="height:14px"></div>`;
+}
+
+// Séries de cumul, une par joueuse. En vue globale on garde les 5 plus grosses
+// distances : au-delà, les courbes se superposent et la légende déborde sur un
+// iPhone SE — les autres restent lisibles en drill-down (filtre joueuse).
+const TD_KM_COLORS = ['#f97316', '#22c55e', '#3b82f6', '#e11d48', '#a855f7'];
+function _tdKmSeries(withKm, pool, onlyPlayerId) {
+  const byPlayer = {};
+  withKm.forEach(c => { (byPlayer[c.playerId] = byPlayer[c.playerId] || []).push(c); });
+  let ids = Object.keys(byPlayer);
+  if (onlyPlayerId) ids = ids.filter(id => id === onlyPlayerId);
+  ids.sort((a, x) => byPlayer[x].reduce((s, c) => s + c.runningDistanceKm, 0) - byPlayer[a].reduce((s, c) => s + c.runningDistanceKm, 0));
+  const kept = ids.slice(0, onlyPlayerId ? 1 : TD_KM_COLORS.length);
+  return kept.map((id, i) => {
+    const pl = (pool || []).find(x => x.id === id) || (state.players || []).find(x => x.id === id);
+    // Cumul chronologique : le tri est indispensable, la timeline est en ordre
+    // inverse et un cumul calculé à l'envers dessinerait une courbe décroissante.
+    const rows = byPlayer[id].slice().sort((a, b) => (a.datePlanned || '').localeCompare(b.datePlanned || ''));
+    let acc = 0;
+    const ptsList = rows.map(c => {
+      acc += c.runningDistanceKm;
+      return { ms: _trainingDayStartMs(c.datePlanned) || 0, km: Math.round(acc * 10) / 10, one: c.runningDistanceKm };
+    }).filter(pt => pt.ms > 0);
+    return { name: pl ? ('#' + pl.num + ' ' + pl.name) : 'Joueuse', color: onlyPlayerId ? 'var(--orange)' : TD_KM_COLORS[i % TD_KM_COLORS.length], pts: ptsList };
+  }).filter(s => s.pts.length);
+}
+
+// Graphique SVG maison — il n'y a AUCUNE lib de charts dans ce projet (pas de
+// Chart.js) et on n'en ajoute pas une pour une courbe : le CSP/offline-first de
+// la PWA interdit un CDN, et un bundle local pèserait plus lourd que tout le
+// module. Même approche que renderScoreSparkline.
+// Un seul point ne fait pas une courbe : on dessine alors un simple marqueur
+// (un <path> à un point est invisible, ce qui passerait pour un graphique vide).
+function renderKmChart(series) {
+  const flat = series.flatMap(s => s.pts);
+  if (!flat.length) return '';
+  const W = 320, H = 130, PADL = 30, PADR = 10, PADT = 12, PADB = 22;
+  const minX = Math.min(...flat.map(pt => pt.ms));
+  let maxX = Math.max(...flat.map(pt => pt.ms));
+  if (maxX === minX) maxX = minX + 86400000;
+  const maxY = Math.max(...flat.map(pt => pt.km), 1);
+  const X = ms => (PADL + ((ms - minX) / (maxX - minX)) * (W - PADL - PADR)).toFixed(1);
+  const Y = km => (H - PADB - (km / maxY) * (H - PADT - PADB)).toFixed(1);
+  const grid = [0, 0.5, 1].map(f => `<line x1="${PADL}" y1="${Y(maxY * f)}" x2="${W - PADR}" y2="${Y(maxY * f)}" stroke="var(--border-soft)" stroke-width="0.5"/>`).join('');
+  const labels = [0, 0.5, 1].map(f => `<text x="${PADL - 4}" y="${Number(Y(maxY * f)) + 3}" text-anchor="end" font-size="7" fill="var(--ink-3)" font-family="monospace">${Math.round(maxY * f * 10) / 10}</text>`).join('');
+  const paths = series.map(s => {
+    const dd = s.pts.map((pt, i) => (i ? 'L' : 'M') + X(pt.ms) + ',' + Y(pt.km)).join(' ');
+    const dots = s.pts.map(pt => `<circle cx="${X(pt.ms)}" cy="${Y(pt.km)}" r="${s.pts.length === 1 ? 3.5 : 2.2}" fill="${s.color}"/>`).join('');
+    return (s.pts.length > 1 ? `<path d="${dd}" stroke="${s.color}" stroke-width="1.8" fill="none" stroke-linejoin="round"/>` : '') + dots;
+  }).join('');
+  return `
+    <div style="background:var(--bg-2);border:1px solid var(--border);border-radius:8px;padding:8px 6px 6px">
+      <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block" role="img" aria-label="Évolution des kilomètres cumulés">
+        ${grid}${labels}${paths}
+        <text x="${PADL}" y="${H - 6}" font-size="7" fill="var(--ink-3)" font-family="monospace">${esc(formatDate(new Date(minX).toISOString().slice(0, 10), 'short'))}</text>
+        <text x="${W - PADR}" y="${H - 6}" text-anchor="end" font-size="7" fill="var(--ink-3)" font-family="monospace">${esc(formatDate(new Date(maxX).toISOString().slice(0, 10), 'short'))}</text>
+      </svg>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-top:4px;font-size:9px;font-family:'JetBrains Mono'">
+        ${series.map(s => `<span style="color:${s.color};white-space:nowrap">━ ${esc(s.name)} · ${s.pts[s.pts.length - 1].km} km</span>`).join('')}
+      </div>
+    </div>`;
+}
+
+// Repli tabulaire du graphique en drill-down : le graphique donne la tendance,
+// le tableau donne les valeurs exactes (le coach veut les deux).
+function _tdKmTable(withKm) {
+  const rows = withKm.slice().sort((a, b) => (a.datePlanned || '').localeCompare(b.datePlanned || ''));
+  let acc = 0;
+  return `
+    <div style="overflow-x:auto;margin-top:8px">
+      <table style="width:100%;border-collapse:collapse;font-size:11px">
+        <thead><tr style="color:var(--ink-3);text-align:left">
+          <th style="padding:4px 6px;font-weight:normal">Date</th><th style="padding:4px 6px;font-weight:normal">Séance</th>
+          <th style="padding:4px 6px;font-weight:normal;text-align:right">Km</th><th style="padding:4px 6px;font-weight:normal;text-align:right">Cumul</th>
+        </tr></thead>
+        <tbody>
+          ${rows.map(c => {
+            acc += c.runningDistanceKm;
+            const s = (state.trainingSessions || []).find(x => x.id === c.sessionId);
+            return `<tr style="border-top:1px solid var(--border-soft)">
+              <td style="padding:4px 6px;white-space:nowrap">${esc(formatDate(c.datePlanned, 'short'))}</td>
+              <td style="padding:4px 6px">${esc((s && s.name) || '—')}</td>
+              <td style="padding:4px 6px;text-align:right;font-family:'JetBrains Mono'">${c.runningDistanceKm}</td>
+              <td style="padding:4px 6px;text-align:right;font-family:'JetBrains Mono';color:var(--orange)">${Math.round(acc * 10) / 10}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+// --- Drill-down joueuse -----------------------------------------------------
+// Ses chiffres sur la PÉRIODE filtrée (le dénominateur d'assiduité suit la même
+// fenêtre, sinon « 2 séances sur 18 prévues » s'afficherait alors qu'on regarde
+// les 7 derniers jours).
+function renderPlayerProgression(playerId, programId) {
+  const p = activeTrainingPrograms().find(x => x.id === programId);
+  if (!p) return '';
+  const pl = (state.players || []).find(x => x.id === playerId);
+  if (!pl) return '';
+  const d = _td() || {};
+  const b = _tdPeriodBounds(p, d.period);
+  const mine = _trainingCompletionsOf(programId, playerId)
+    .filter(c => !c.datePlanned || (c.datePlanned >= b.from && c.datePlanned <= b.to));
+  const planned = _dateRangeForProgram(b.from, b.plannedTo, p.daysActive).length;
+  const pts = mine.reduce((a, c) => a + (Number(c.pointsTotal) || 0), 0);
+  const km = mine.reduce((a, c) => a + (Number.isFinite(c.runningDistanceKm) ? c.runningDistanceKm : 0), 0);
+  const pct = planned ? Math.min(100, Math.round((mine.length / planned) * 100)) : 0;
+  const lvl = { min: 0, med: 0, ultra: 0 };
+  mine.forEach(c => { if (lvl[c.contractLevel] !== undefined) lvl[c.contractLevel]++; });
+  return `
+    <div style="border:1px solid var(--border-soft);border-radius:10px;padding:12px;background:var(--surface);margin-bottom:14px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        ${_trPlayerAvatar(pl, 40)}
+        <div style="flex:1;min-width:0">
+          <div style="font-family:'Anton';font-size:15px;text-transform:uppercase;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">#${pl.num} ${esc(pl.name)}</div>
+          <div style="font-size:10px;color:var(--ink-3)">🟢 ${lvl.min} · 🟠 ${lvl.med} · 🔴 ${lvl.ultra}</div>
+        </div>
+        <button class="btn btn-ghost" onclick="_tdSet('playerId','')" style="padding:5px 8px;font-size:11px;flex:none">✕</button>
+      </div>
+      <div class="stat-grid" style="padding:0;margin:0 0 10px">
+        <div class="stat-tile"><div class="stat-tile-label">Points</div><div class="stat-tile-value">${pts}</div><div class="stat-tile-sub">sur la période</div></div>
+        <div class="stat-tile"><div class="stat-tile-label">Assiduité</div><div class="stat-tile-value">${pct}<span style="font-size:14px">%</span></div><div class="stat-tile-sub">${mine.length}/${planned} séance${planned > 1 ? 's' : ''}</div></div>
+        <div class="stat-tile"><div class="stat-tile-label">Distance</div><div class="stat-tile-value">${Math.round(km * 10) / 10}</div><div class="stat-tile-sub">km cumulés</div></div>
+        <div class="stat-tile"><div class="stat-tile-label">Squad</div><div class="stat-tile-value">${mine.filter(c => c.squadTeammateId).length}</div><div class="stat-tile-sub">séances à deux</div></div>
+      </div>
+      <button class="btn btn-secondary btn-block" onclick="openTrainingCoachNoteForPlayer('${esc(playerId)}','${esc(programId)}')" style="font-size:12px">📣 Envoyer un mot d'encouragement</button>
+    </div>`;
+}
+
+// Avatar joueuse (photo ou initiale) — répété assez souvent dans ce module pour
+// mériter un helper local.
+function _trPlayerAvatar(pl, size) {
+  const s = size || 36;
+  if (!pl) return `<div style="width:${s}px;height:${s}px;border-radius:50%;background:var(--bg-3);flex:none"></div>`;
+  return pl.photo
+    ? `<img src="${esc(pl.photo)}" loading="lazy" alt="" style="width:${s}px;height:${s}px;border-radius:50%;object-fit:cover;border:1.5px solid var(--border);flex:none">`
+    : `<div style="width:${s}px;height:${s}px;border-radius:50%;background:var(--bg-3);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:${Math.round(s * 0.38)}px;color:var(--orange);border:1.5px solid var(--border);flex:none">${esc((pl.name || '?').charAt(0).toUpperCase())}</div>`;
+}
+
+// --- Timeline chronologique -------------------------------------------------
+// Une ligne = une validation. Les vignettes sont en `loading="lazy"` : sur 40
+// lignes il y a jusqu'à 80 images Storage, toutes chargées d'un coup saturerait
+// la connexion d'un téléphone en 4G.
+function renderCompletionsTimeline(comps, opts) {
+  const o = opts || {};
+  return (comps || []).map(c => {
+    const pl = (state.players || []).find(x => x.id === c.playerId);
+    const s = (state.trainingSessions || []).find(x => x.id === c.sessionId);
+    const mate = c.squadTeammateId ? (state.players || []).find(x => x.id === c.squadTeammateId) : null;
+    let day = c.datePlanned || '';
+    try { day = formatDate(c.datePlanned, 'short'); } catch (e) {}
+    const lateBadge = (c.datePlanned && c.dateCompleted && _isRattrapage(c.datePlanned, c.dateCompleted)) ? ' · ⏰ rattrapage' : '';
+    const lvlIcon = c.contractLevel === 'ultra' ? '🔴' : c.contractLevel === 'med' ? '🟠' : '🟢';
+    const thumbs = [
+      c.squadPhotoUrl ? { url: c.squadPhotoUrl, kind: 'squad' } : null,
+      c.postPhotoUrl ? { url: c.postPhotoUrl, kind: 'post' } : null
+    ].filter(Boolean);
+    return `
+      <div onclick="openTrainingCompletionDetail('${esc(c.id)}')"
+           style="border:1px solid var(--border-soft);border-radius:10px;padding:10px;background:var(--surface);cursor:pointer;display:flex;gap:9px;align-items:flex-start">
+        ${o.showPlayer !== false ? _trPlayerAvatar(pl, 34) : ''}
+        <div style="flex:1;min-width:0">
+          ${o.showPlayer !== false ? `<div style="font-family:'Anton';font-size:13px;text-transform:uppercase;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">#${pl ? pl.num : '?'} ${esc(pl ? pl.name : 'Joueuse')}</div>` : ''}
+          <div style="font-size:11px;color:var(--ink-2);overflow-wrap:break-word">${esc((s && s.name) || 'Séance')}</div>
+          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">${esc(day)} · ${lvlIcon} ${esc(TRAINING_LEVEL_LABEL[c.contractLevel] || '')}${esc(lateBadge)}</div>
+          <div style="font-size:10px;color:var(--ink-3);margin-top:2px;overflow-wrap:break-word">
+            ${mate ? '👯 ' + esc(mate.name) + ' ' : ''}${Number.isFinite(c.runningDistanceKm) && c.runningDistanceKm > 0 ? '🏃 ' + c.runningDistanceKm + ' km ' : ''}${c.postMessage ? '💬 ' : ''}${c.editedAt ? '✎ corrigée ' : ''}${c.coachNote ? '📣 ' : ''}
+          </div>
+          ${thumbs.length ? `<div style="display:flex;gap:4px;margin-top:6px">
+            ${thumbs.map(t => `<img src="${esc(t.url)}" loading="lazy" alt="" style="width:42px;height:42px;object-fit:cover;border-radius:5px;background:var(--bg-3)">`).join('')}
+          </div>` : ''}
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex:none">
+          <div style="font-family:'Anton';font-size:17px;color:var(--orange);line-height:1">${c.pointsTotal || 0}</div>
+          <div style="font-size:8px;color:var(--ink-3);font-family:'JetBrains Mono'">PTS</div>
+          <button class="btn btn-ghost" onclick="event.stopPropagation();openEditCompletionModal('${esc(c.id)}')" style="padding:3px 7px;font-size:12px;margin-top:2px" title="Corriger">✎</button>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+// --- Détail d'une validation ------------------------------------------------
+function _trainingCompletionById(id) {
+  return (state.trainingCompletions || []).find(c => c.id === id && !c.deletedAt) || null;
+}
+// Une correction n'est permise que sur une joueuse DANS la portée du coach.
+// C'est volontairement plus fin que _denyIfScopedCoach (réservé aux ressources
+// PARTAGÉES : programmes, playbook) : corriger la validation d'une de ses propres
+// joueuses fait partie du travail d'un coach d'équipe, pas de l'admin seul.
+function _trainingCanEditCompletion(c) {
+  if (!c || !_trainingIsCoach()) return false;
+  return _playerVisibleToUser(c.playerId);
+}
+
+function openTrainingCompletionDetail(id) {
+  const c = _trainingCompletionById(id);
+  if (!c || !_trainingIsCoach()) return;
+  const p = activeTrainingPrograms().find(x => x.id === c.programId);
+  const pl = (state.players || []).find(x => x.id === c.playerId);
+  const s = (state.trainingSessions || []).find(x => x.id === c.sessionId);
+  const mate = c.squadTeammateId ? (state.players || []).find(x => x.id === c.squadTeammateId) : null;
+  const cfg = _trainingConfig(p);
+  const editable = _trainingCanEditCompletion(c);
+  let editor = c.updatedBy || '';
+  const ec = (state.coaches || []).find(x => x.id === c.updatedBy);
+  if (ec) editor = ec.name || editor;
+  const line = (label, val) => val ? `<div style="display:flex;gap:8px;padding:6px 0;border-top:1px solid var(--border-soft);font-size:12px">
+      <div style="color:var(--ink-3);flex:0 0 96px">${label}</div><div style="flex:1;min-width:0;overflow-wrap:break-word">${val}</div></div>` : '';
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">${esc(pl ? '#' + pl.num + ' ' + pl.name : 'Joueuse')}</div>
+        <div class="modal-title">${esc((s && s.name) || 'Séance')}</div>
+      </div>
+      <button class="modal-close" onclick="_tdBack('${esc(c.programId)}')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="text-align:center;padding:12px;background:var(--bg-3);border-radius:10px;margin-bottom:14px">
+        <div style="font-family:'Anton';font-size:34px;color:var(--orange);line-height:1">${c.pointsTotal || 0}</div>
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">points</div>
+        <div style="font-size:10px;color:var(--ink-3);margin-top:5px">
+          base ${c.basePoints || 0}${c.squadTeammateId ? ' × ' + cfg.squad_multiplier + ' (squad)' : ''}${c.postPhotoUrl ? ' + ' + cfg.post_bonus + ' (post)' : ''}
+        </div>
+      </div>
+
+      ${line('Jour prévu', esc(formatDate(c.datePlanned, 'long')))}
+      ${line('Validée le', c.dateCompleted ? esc(new Date(c.dateCompleted).toLocaleString('fr-FR')) : '—')}
+      ${line('Contrat', esc(TRAINING_LEVEL_LABEL[c.contractLevel] || c.contractLevel))}
+      ${line('Squad', mate ? '👯 #' + mate.num + ' ' + esc(mate.name) : (c.squadTeammateId ? 'Coéquipière inconnue' : ''))}
+      ${line('Distance', (Number.isFinite(c.runningDistanceKm) && c.runningDistanceKm > 0) ? '🏃 ' + c.runningDistanceKm + ' km' : '')}
+      ${line('Notes coach', c.notes ? esc(c.notes) : '')}
+      ${c.editedAt ? line('Correction', '✎ ' + esc(new Date(c.editedAt).toLocaleString('fr-FR')) + (editor ? ' · ' + esc(editor) : '')) : ''}
+
+      ${c.postMessage ? `
+        <div style="border:1px solid var(--border-soft);border-radius:10px;padding:11px;background:var(--surface);margin-top:14px">
+          <div class="eyebrow-muted" style="margin-bottom:5px">💬 Son message</div>
+          <div style="font-size:12px;color:var(--ink-2);overflow-wrap:break-word;white-space:pre-wrap">${esc(c.postMessage)}</div>
+        </div>` : ''}
+
+      ${(c.squadPhotoUrl || c.postPhotoUrl) ? `
+        <div class="eyebrow-muted" style="margin:14px 0 6px">Photos · touche pour agrandir</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          ${c.squadPhotoUrl ? `<div style="flex:1 1 120px;min-width:0">
+            <img src="${esc(c.squadPhotoUrl)}" loading="lazy" alt="Photo squad" onclick="openTrainingPhoto('${esc(c.id)}','squad')" style="width:100%;height:120px;object-fit:cover;border-radius:8px;cursor:zoom-in;background:var(--bg-3)">
+            <div style="font-size:9px;color:var(--ink-3);text-align:center;margin-top:3px;font-family:'JetBrains Mono'">👯 SQUAD</div></div>` : ''}
+          ${c.postPhotoUrl ? `<div style="flex:1 1 120px;min-width:0">
+            <img src="${esc(c.postPhotoUrl)}" loading="lazy" alt="Photo du post" onclick="openTrainingPhoto('${esc(c.id)}','post')" style="width:100%;height:120px;object-fit:cover;border-radius:8px;cursor:zoom-in;background:var(--bg-3)">
+            <div style="font-size:9px;color:var(--ink-3);text-align:center;margin-top:3px;font-family:'JetBrains Mono'">📸 POST</div></div>` : ''}
+        </div>` : ''}
+
+      <div style="border:1px solid ${c.coachNote ? 'var(--orange)' : 'var(--border-soft)'};border-radius:10px;padding:11px;background:var(--surface);margin-top:14px">
+        <div class="eyebrow-muted" style="margin-bottom:5px">📣 Mon mot pour elle</div>
+        ${c.coachNote
+          ? `<div style="font-size:12px;color:var(--ink-2);overflow-wrap:break-word;white-space:pre-wrap;margin-bottom:8px">${esc(c.coachNote)}</div>
+             <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';margin-bottom:8px">envoyé le ${esc(c.coachNoteAt ? new Date(c.coachNoteAt).toLocaleString('fr-FR') : '—')}</div>`
+          : `<div style="font-size:11px;color:var(--ink-3);margin-bottom:8px">Elle le verra sur sa séance et dans ses notifs.</div>`}
+        <button class="btn btn-secondary btn-block" onclick="openTrainingCoachNote('${esc(c.id)}')" style="font-size:12px">${c.coachNote ? '✎ Modifier le mot' : '📣 Écrire un mot'}</button>
+      </div>
+    </div>
+    <div class="modal-footer" style="display:flex;gap:6px">
+      <button class="btn btn-secondary" onclick="_tdBack('${esc(c.programId)}')">← Retour</button>
+      ${editable ? `<button class="btn btn-primary" style="flex:1" onclick="openEditCompletionModal('${esc(c.id)}')">✎ Modifier</button>
+        <button class="btn btn-ghost" onclick="deleteTrainingCompletion('${esc(c.id)}')" title="Supprimer">🗑</button>` : ''}
     </div>
   `);
+}
+
+// Photo plein écran. On ne passe PAS l'URL dans l'attribut onclick (une URL
+// signée Storage contient des quotes et des & qui casseraient le HTML) : on passe
+// l'id de la validation et le type, et on relit la donnée en state.
+function openTrainingPhoto(id, kind) {
+  const c = _trainingCompletionById(id);
+  if (!c || !_trainingIsCoach()) return;
+  const url = kind === 'post' ? c.postPhotoUrl : c.squadPhotoUrl;
+  if (!url) return;
+  const pl = (state.players || []).find(x => x.id === c.playerId);
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">${esc(pl ? '#' + pl.num + ' ' + pl.name : '')} · ${esc(formatDate(c.datePlanned, 'short'))}</div>
+        <div class="modal-title">${kind === 'post' ? '📸 Photo du post' : '👯 Photo squad'}</div>
+      </div>
+      <button class="modal-close" onclick="openTrainingCompletionDetail('${esc(c.id)}')">✕</button>
+    </div>
+    <div class="modal-body" style="padding:0;background:#000;display:flex;align-items:center;justify-content:center;min-height:50vh">
+      <img src="${esc(url)}" alt="" style="max-width:100%;max-height:70vh;display:block">
+    </div>
+    <div class="modal-footer" style="display:flex;gap:6px">
+      <button class="btn btn-secondary" style="flex:1" onclick="openTrainingCompletionDetail('${esc(c.id)}')">← Retour</button>
+      <a href="${esc(url)}" target="_blank" rel="noopener" class="btn btn-ghost" style="text-decoration:none">↗ Ouvrir</a>
+    </div>
+  `);
+}
+
+// --- Correction coach -------------------------------------------------------
+// L'édition ne touche JAMAIS aux photos existantes autrement que pour les
+// RETIRER (le coach ne peut pas uploader à la place de la joueuse), et le total
+// est recalculé avec le barème COURANT — avec le total d'origine affiché à côté,
+// pour que la conséquence du recalcul soit visible avant d'enregistrer.
+//
+// DIFFÉRENCE ASSUMÉE AVEC LA VALIDATION JOUEUSE : côté joueuse, le multiplicateur
+// squad exige photo + coéquipière (_tvaSquadOk). Côté coach non : le cas d'usage
+// d'une correction est justement « elle était bien en squad mais la photo n'est
+// pas passée ». C'est un override, il est tracé (updated_by / edited_at).
+function openEditCompletionModal(id) {
+  const c = _trainingCompletionById(id);
+  if (!c) return;
+  if (!_trainingCanEditCompletion(c)) { try { showToast('🔒 Cette joueuse n\'est pas dans ton effectif'); } catch (e) {} return; }
+  state._trainingEdit = {
+    id: c.id,
+    level: TRAINING_LEVELS.includes(c.contractLevel) ? c.contractLevel : 'min',
+    squadTeammateId: c.squadTeammateId || '',
+    squadPhotoUrl: c.squadPhotoUrl || '',
+    postPhotoUrl: c.postPhotoUrl || '',
+    postMessage: c.postMessage || '',
+    distanceKm: Number.isFinite(c.runningDistanceKm) ? String(c.runningDistanceKm) : '',
+    notes: c.notes || '',
+    points: Number(c.pointsTotal) || 0,
+    // Tant que le coach n'a pas touché au champ points, il suit le recalcul auto.
+    // Dès qu'il le touche, sa valeur est verrouillée (un coach qui écrit 35 ne
+    // veut pas le voir sauter à 40 parce qu'il a coché « squad » ensuite).
+    pointsTouched: false,
+    original: Number(c.pointsTotal) || 0
+  };
+  renderEditCompletionModal();
+}
+function _tce() { return state._trainingEdit; }
+function _tceSet(k, v) { const e = _tce(); if (!e) return; e[k] = v; renderEditCompletionModal(); }
+function _tcePoints(k, v) { const e = _tce(); if (!e) return; e.points = Math.max(0, Math.round(Number(v) || 0)); e.pointsTouched = true; renderEditCompletionModal(); }
+function _tceAuto() { const e = _tce(); if (!e) return; e.pointsTouched = false; renderEditCompletionModal(); }
+// Recalcul auto : squad compté dès qu'une coéquipière est désignée (cf. override
+// documenté ci-dessus), post compté dès qu'il y a une photo OU un message.
+function _tceComputed() {
+  const e = _tce(); if (!e) return { base: 0, total: 0 };
+  const c = _trainingCompletionById(e.id);
+  const p = c ? activeTrainingPrograms().find(x => x.id === c.programId) : null;
+  return _computePoints({
+    level: e.level,
+    hasSquad: !!e.squadTeammateId,
+    hasPost: !!(e.postPhotoUrl || (e.postMessage || '').trim()),
+    config: p ? p.scoringConfig : {}
+  });
+}
+
+function renderEditCompletionModal() {
+  const e = _tce(); if (!e) return;
+  const c = _trainingCompletionById(e.id);
+  if (!c) { state._trainingEdit = null; _tdBack(null); return; }
+  const p = activeTrainingPrograms().find(x => x.id === c.programId);
+  const pl = (state.players || []).find(x => x.id === c.playerId);
+  const s = (state.trainingSessions || []).find(x => x.id === c.sessionId);
+  const cfg = _trainingConfig(p);
+  const auto = _tceComputed();
+  const shown = e.pointsTouched ? e.points : auto.total;
+  const mates = _trainingPoolFor(p).filter(x => x.id !== c.playerId);
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">${esc(pl ? '#' + pl.num + ' ' + pl.name : '')} · ${esc(formatDate(c.datePlanned, 'short'))}</div>
+        <div class="modal-title">Corriger la séance</div>
+      </div>
+      <button class="modal-close" onclick="state._trainingEdit=null;openTrainingCompletionDetail('${esc(c.id)}')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:11px;color:var(--ink-3);margin-bottom:12px">${esc((s && s.name) || 'Séance')} · toute correction est tracée (auteur + date) et visible par la joueuse.</div>
+
+      <div class="eyebrow-muted" style="margin-bottom:6px">Contrat réalisé</div>
+      <div class="segmented" style="margin-bottom:14px">
+        ${[['min', '🟢 Min'], ['med', '🟠 Med'], ['ultra', '🔴 Ultra']].map(([l, lab]) =>
+          `<button class="segmented-btn ${e.level === l ? 'active' : ''}" onclick="_tceSet('level','${l}')">${lab}</button>`).join('')}
+      </div>
+
+      <div class="eyebrow-muted" style="margin-bottom:6px">👯 Squad <span style="color:var(--ink-3);text-transform:none">(×${cfg.squad_multiplier})</span></div>
+      <select onchange="_tceSet('squadTeammateId',this.value)" style="width:100%;margin-bottom:6px">
+        <option value="">— Seule —</option>
+        ${mates.map(m => `<option value="${esc(m.id)}" ${e.squadTeammateId === m.id ? 'selected' : ''}>#${m.num} ${esc(m.name)}</option>`).join('')}
+      </select>
+      ${e.squadPhotoUrl
+        ? `<div style="display:flex;gap:8px;align-items:center;margin-bottom:14px">
+             <img src="${esc(e.squadPhotoUrl)}" loading="lazy" alt="" style="width:52px;height:52px;object-fit:cover;border-radius:6px;flex:none">
+             <button class="btn btn-ghost" onclick="_tceSet('squadPhotoUrl','')" style="font-size:11px;flex:1">🗑 Retirer la photo squad</button>
+           </div>`
+        : `<div style="font-size:10px;color:var(--ink-3);margin-bottom:14px">Aucune photo squad.${c.squadPhotoUrl ? ' <b>Sera retirée</b> à l\'enregistrement.' : ''}</div>`}
+
+      <div class="eyebrow-muted" style="margin-bottom:6px">📸 Post <span style="color:var(--ink-3);text-transform:none">(+${cfg.post_bonus})</span></div>
+      <textarea rows="2" placeholder="Son message…" onchange="_tceSet('postMessage',this.value)" style="margin-bottom:6px">${esc(e.postMessage)}</textarea>
+      ${e.postPhotoUrl
+        ? `<div style="display:flex;gap:8px;align-items:center;margin-bottom:14px">
+             <img src="${esc(e.postPhotoUrl)}" loading="lazy" alt="" style="width:52px;height:52px;object-fit:cover;border-radius:6px;flex:none">
+             <button class="btn btn-ghost" onclick="_tceSet('postPhotoUrl','')" style="font-size:11px;flex:1">🗑 Retirer la photo du post</button>
+           </div>`
+        : `<div style="font-size:10px;color:var(--ink-3);margin-bottom:14px">Aucune photo de post.${c.postPhotoUrl ? ' <b>Sera retirée</b> à l\'enregistrement.' : ''}</div>`}
+
+      <div class="fld">
+        <label class="fld-label">🏃 Distance (km)</label>
+        <input type="number" min="0" step="0.1" value="${esc(String(e.distanceKm))}" placeholder="5.2" onchange="_tceSet('distanceKm',this.value)">
+      </div>
+
+      <div class="fld">
+        <label class="fld-label">📝 Notes (coach — privées)</label>
+        <textarea rows="2" placeholder="Ex : distance corrigée d'après sa montre." onchange="_tceSet('notes',this.value)">${esc(e.notes)}</textarea>
+      </div>
+
+      <div class="eyebrow-muted" style="margin:14px 0 6px">Points attribués</div>
+      <div style="border:1px solid var(--border-soft);border-radius:10px;padding:11px;background:var(--bg-3)">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+          <input type="number" min="0" step="1" value="${shown}" onchange="_tcePoints('total',this.value)" style="flex:1;min-width:0;font-family:'Anton';font-size:18px;text-align:center">
+          <div style="font-size:11px;color:var(--ink-3);flex:none">pts</div>
+        </div>
+        <div style="font-size:10px;color:var(--ink-3);line-height:1.5">
+          Barème actuel : ${auto.base}${e.squadTeammateId ? ' × ' + cfg.squad_multiplier : ''}${(e.postPhotoUrl || (e.postMessage || '').trim()) ? ' + ' + cfg.post_bonus : ''} = <b>${auto.total}</b> pts.
+          ${e.pointsTouched
+            ? ` Valeur forcée. <a href="javascript:void(0)" onclick="_tceAuto()" style="color:var(--orange)">↺ revenir à ${auto.total}</a>`
+            : ' Suit le recalcul automatique.'}
+        </div>
+        ${shown !== e.original ? `<div style="font-size:11px;color:var(--orange);margin-top:8px">⚠ ${e.original} pts → <b>${shown} pts</b> — le classement sera recalculé.</div>` : ''}
+      </div>
+    </div>
+    <div class="modal-footer" style="display:flex;gap:6px">
+      <button class="btn btn-secondary" onclick="state._trainingEdit=null;openTrainingCompletionDetail('${esc(c.id)}')">Annuler</button>
+      <button class="btn btn-primary" style="flex:1" onclick="saveCompletionEdit('${esc(c.id)}')">✓ Enregistrer</button>
+    </div>
+  `);
+}
+
+function saveCompletionEdit(id) {
+  const e = _tce();
+  const c = _trainingCompletionById(id);
+  if (!e || !c || e.id !== id) return;
+  if (!_trainingCanEditCompletion(c)) { try { showToast('🔒 Cette joueuse n\'est pas dans ton effectif'); } catch (e2) {} return; }
+  const auto = _tceComputed();
+  const km = Number(e.distanceKm);
+  const now = Date.now();
+  c.contractLevel = e.level;
+  c.squadTeammateId = e.squadTeammateId || null;
+  c.squadPhotoUrl = e.squadPhotoUrl || null;
+  c.postPhotoUrl = e.postPhotoUrl || null;
+  c.postMessage = (e.postMessage || '').trim() || null;
+  c.runningDistanceKm = (Number.isFinite(km) && km > 0) ? km : null;
+  c.notes = (e.notes || '').trim();
+  // base_points reste le barème du niveau (figé au niveau CHOISI, pas au niveau
+  // d'origine : c'est justement ce qu'on corrige). points_total suit la valeur
+  // forcée si le coach en a saisi une.
+  c.basePoints = auto.base;
+  c.pointsTotal = e.pointsTouched ? Math.max(0, Math.round(Number(e.points) || 0)) : auto.total;
+  c.updatedBy = (state.auth && state.auth.coachId) || 'coach';
+  c.editedAt = now;
+  c.updatedAt = now;
+  state._trainingEdit = null;
+  persist(); _trainingFlush();
+  try { showToast('✓ Séance corrigée · ' + c.pointsTotal + ' pts'); } catch (e2) {}
+  openTrainingCompletionDetail(id);
+}
+
+// SOFT-delete (jamais un hard delete : tout client qui a encore la ligne en
+// cache la repousserait au flush suivant — heuristique pendingLocal de PbSync).
+// L'index unique partiel en base est `where deleted_at is null` : la joueuse peut
+// donc re-valider si elle est encore dans la fenêtre de 48 h.
+function deleteTrainingCompletion(id) {
+  const c = _trainingCompletionById(id);
+  if (!c) return;
+  if (!_trainingCanEditCompletion(c)) { try { showToast('🔒 Cette joueuse n\'est pas dans ton effectif'); } catch (e) {} return; }
+  const pl = (state.players || []).find(x => x.id === c.playerId);
+  const msg = 'Supprimer cette validation ?'
+    + '\n\n' + (pl ? '#' + pl.num + ' ' + pl.name : 'Joueuse') + ' · ' + (c.datePlanned || '') + ' · ' + (c.pointsTotal || 0) + ' pts'
+    + '\n\nSes points seront retirés du classement. Si la séance est encore dans la fenêtre de 48 h, elle pourra la re-valider.';
+  let ok = false;
+  try { ok = confirm(msg); } catch (e) { ok = false; }
+  if (!ok) return;
+  const now = Date.now();
+  c.deletedAt = now;
+  c.updatedAt = now;
+  c.editedAt = now;
+  c.updatedBy = (state.auth && state.auth.coachId) || 'coach';
+  state._trainingEdit = null;
+  persist(); _trainingFlush();
+  try { showToast('🗑 Validation supprimée'); } catch (e) {}
+  _tdBack(c.programId);
+}
+
+// --- Mot du coach sur une séance --------------------------------------------
+// Ancré sur la validation (et non sur un canal de messagerie générique) : le mot
+// porte toujours sur une séance précise, ce qui lui donne son contexte, sa portée
+// (la joueuse concernée, personne d'autre) et son entrée dans notifFeed().
+function openTrainingCoachNote(id) {
+  const c = _trainingCompletionById(id);
+  if (!c || !_trainingCanEditCompletion(c)) return;
+  const pl = (state.players || []).find(x => x.id === c.playerId);
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">${esc(pl ? '#' + pl.num + ' ' + pl.name : '')} · ${esc(formatDate(c.datePlanned, 'short'))}</div>
+        <div class="modal-title">📣 Un mot pour elle</div>
+      </div>
+      <button class="modal-close" onclick="openTrainingCompletionDetail('${esc(c.id)}')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="fld">
+        <label class="fld-label">Ton message</label>
+        <textarea id="tcn-text" rows="4" placeholder="Ex : 6 km sous la pluie, chapeau. Continue comme ça.">${esc(c.coachNote || '')}</textarea>
+        <div style="font-size:10px;color:var(--ink-3);margin-top:4px">Elle le verra sur sa séance et dans ses notifications. Elle seule.</div>
+      </div>
+    </div>
+    <div class="modal-footer" style="display:flex;gap:6px">
+      <button class="btn btn-secondary" onclick="openTrainingCompletionDetail('${esc(c.id)}')">Annuler</button>
+      ${c.coachNote ? `<button class="btn btn-ghost" onclick="saveTrainingCoachNote('${esc(c.id)}',true)">🗑 Retirer</button>` : ''}
+      <button class="btn btn-primary" style="flex:1" onclick="saveTrainingCoachNote('${esc(c.id)}')">✓ Envoyer</button>
+    </div>
+  `);
+}
+// Raccourci depuis le drill-down joueuse : le mot se pose sur sa validation la
+// PLUS RÉCENTE. Sans validation, il n'y a rien où l'accrocher — on le dit au lieu
+// d'ouvrir un formulaire qui n'aboutirait pas.
+function openTrainingCoachNoteForPlayer(playerId, programId) {
+  const list = _trainingCompletionsOf(programId, playerId)
+    .slice().sort((a, b) => (b.dateCompleted || 0) - (a.dateCompleted || 0));
+  if (!list.length) { try { showToast('Aucune séance validée où accrocher un mot'); } catch (e) {} return; }
+  openTrainingCoachNote(list[0].id);
+}
+function saveTrainingCoachNote(id, clear) {
+  const c = _trainingCompletionById(id);
+  if (!c || !_trainingCanEditCompletion(c)) return;
+  let txt = '';
+  if (!clear) {
+    const el = document.getElementById('tcn-text');
+    txt = el ? String(el.value || '').trim() : '';
+    if (!txt) { try { showToast('Écris ton message d\'abord'); } catch (e) {} return; }
+  }
+  const now = Date.now();
+  c.coachNote = txt || null;
+  c.coachNoteAt = txt ? now : null;
+  c.updatedAt = now;
+  persist(); _trainingFlush();
+  if (txt) {
+    // Push réel vers la joueuse. Le pendant dans notifFeed() (source
+    // « prepa-mot-coach ») existe : une notif push sans entrée de feed serait un
+    // cul-de-sac (règle du projet).
+    try {
+      const p = activeTrainingPrograms().find(x => x.id === c.programId);
+      notifyPush(_pushPlayerKeys([c.playerId]), {
+        title: '📣 Un mot du coach',
+        body: (p && p.name ? p.name + ' · ' : '') + txt.slice(0, 110),
+        url: '/', tag: 'training-note-' + c.id, type: 'training_coach_note'
+      });
+    } catch (e) {}
+  }
+  try { showToast(txt ? '📣 Mot envoyé' : '🗑 Mot retiré'); } catch (e) {}
+  openTrainingCompletionDetail(id);
+}
+
+// --- Export CSV -------------------------------------------------------------
+// Séparateur `;` et BOM UTF-8 : c'est ce qu'attend Excel en configuration
+// française (une virgule y produit une seule colonne, et sans BOM les accents
+// sortent en mojibake). Le périmètre exporté est celui des FILTRES à l'écran —
+// exporter autre chose que ce qu'on voit serait un piège.
+function exportTrainingCompletionsCsv(programId) {
+  if (!_trainingIsCoach()) return;
+  const p = activeTrainingPrograms().find(x => x.id === programId);
+  if (!p) return;
+  const comps = _tdFilteredCompletions(p);
+  if (!comps.length) { try { showToast('Rien à exporter sur cette période'); } catch (e) {} return; }
+  const cell = v => {
+    const s = (v === null || v === undefined) ? '' : String(v);
+    return /[";\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const head = ['Numéro', 'Joueuse', 'Jour prévu', 'Validée le', 'Séance', 'Contrat', 'Points', 'Squad avec', 'Distance km', 'Photo squad', 'Photo post', 'Message', 'Notes coach', 'Mot du coach', 'Corrigée le', 'Corrigée par'];
+  const lines = [head.map(cell).join(';')];
+  comps.forEach(c => {
+    const pl = (state.players || []).find(x => x.id === c.playerId);
+    const s = (state.trainingSessions || []).find(x => x.id === c.sessionId);
+    const mate = c.squadTeammateId ? (state.players || []).find(x => x.id === c.squadTeammateId) : null;
+    const ec = (state.coaches || []).find(x => x.id === c.updatedBy);
+    lines.push([
+      pl ? pl.num : '', pl ? pl.name : '(inconnue)',
+      c.datePlanned || '',
+      c.dateCompleted ? new Date(c.dateCompleted).toISOString() : '',
+      (s && s.name) || '',
+      TRAINING_LEVEL_LABEL[c.contractLevel] || c.contractLevel || '',
+      c.pointsTotal || 0,
+      mate ? ('#' + mate.num + ' ' + mate.name) : '',
+      Number.isFinite(c.runningDistanceKm) ? c.runningDistanceKm : '',
+      c.squadPhotoUrl || '', c.postPhotoUrl || '',
+      (c.postMessage || '').replace(/\r?\n/g, ' '),
+      (c.notes || '').replace(/\r?\n/g, ' '),
+      (c.coachNote || '').replace(/\r?\n/g, ' '),
+      c.editedAt ? new Date(c.editedAt).toISOString() : '',
+      (ec && ec.name) || c.updatedBy || ''
+    ].map(cell).join(';'));
+  });
+  const slug = String(p.name || 'prepa').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'prepa';
+  const fname = 'prepa-' + slug + '-' + isoDate(new Date()) + '.csv';
+  // Environnement sans Blob/URL (tests headless) : on ne casse pas, on le dit.
+  if (typeof Blob === 'undefined' || typeof URL === 'undefined' || !URL.createObjectURL) {
+    try { showToast('⚠ Export indisponible ici'); } catch (e) {}
+    return;
+  }
+  try {
+    const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = fname;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => { try { URL.revokeObjectURL(url); } catch (e) {} }, 5000);
+    try { showToast('⬇ ' + comps.length + ' ligne' + (comps.length > 1 ? 's' : '') + ' exportée' + (comps.length > 1 ? 's' : '')); } catch (e) {}
+  } catch (e) {
+    console.error('[training] export csv', e && e.message ? e.message : e);
+    try { showToast('⚠ Export impossible'); } catch (e2) {}
+  }
 }
 
 // ============================================================
@@ -21179,9 +21990,19 @@ function renderTrainingSession() {
     </div>
     <div class="modal-body">
       ${done ? `
-        <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--green,#15803d);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:14px">
+        <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--green,#15803d);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:${done.coachNote || done.editedAt ? '8px' : '14px'}">
           ✓ <b>Séance validée</b> — ${esc(_completionSummary(done))}
-        </div>` : isPreview ? `
+        </div>
+        ${done.coachNote ? `
+          <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:8px">
+            <div style="font-family:'Anton';font-size:11px;text-transform:uppercase;margin-bottom:4px">📣 Un mot du coach</div>
+            <div style="white-space:pre-wrap;overflow-wrap:break-word">${esc(done.coachNote)}</div>
+          </div>` : ''}
+        ${done.editedAt ? `
+          <div style="padding:8px 12px;background:var(--bg-3);border-left:3px solid var(--ink-3);border-radius:6px;font-size:11px;color:var(--ink-3);margin-bottom:8px">
+            ✎ Le coach a corrigé cette validation le ${esc(formatDate(isoDate(new Date(done.editedAt)), 'short'))}.
+          </div>` : ''}
+        ${done.coachNote || done.editedAt ? '<div style="height:6px"></div>' : ''}` : isPreview ? `
         <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:14px">
           🔭 <b>Aperçu</b> — le programme démarre le ${esc(formatDate(p.startDate, 'long'))}. Découvre la séance dès maintenant ; tu pourras la valider le jour venu.
         </div>` : !stillValid ? `
@@ -36138,6 +36959,35 @@ function notifFeed(opts) {
           action: "openTrainingDashboard('" + p.id + "')" });
       });
   });
+  // Retours du coach sur SES séances : mot d'encouragement, et correction d'une
+  // validation. La joueuse ne voit JAMAIS `notes` (bloc-notes privé du coach) —
+  // seulement le mot écrit pour elle et le fait qu'une correction a eu lieu.
+  // Même allow-list que les feedbacks (cf. openMyFeedback).
+  src('player', 'prepa-retour-coach', () => {
+    (state.trainingCompletions || [])
+      .filter(c => !c.deletedAt && c.playerId === pid && (c.coachNote || c.editedAt))
+      .sort((x, y) => (y.coachNoteAt || y.editedAt || 0) - (x.coachNoteAt || x.editedAt || 0))
+      .slice(0, 20)
+      .forEach(c => {
+        const p = (state.trainingPrograms || []).find(x => x.id === c.programId && !x.deletedAt);
+        if (!p) return;
+        let day = c.datePlanned || '';
+        try { day = formatDate(c.datePlanned, 'short'); } catch (e) {}
+        const act = "openTrainingSession('" + c.programId + "','" + c.sessionId + "','" + (c.datePlanned || '') + "')";
+        if (c.coachNote) {
+          add('player', { id: 'trnote-' + c.id, ts: c.coachNoteAt || 0, icon: '📣',
+            title: 'Un mot du coach', detail: day + ' · ' + String(c.coachNote).replace(/\s+/g, ' ').slice(0, 80),
+            action: act });
+        }
+        if (c.editedAt) {
+          // Id distinct du mot : une correction PUIS un mot sont deux événements,
+          // les fondre en un seul en masquerait un des deux comme « déjà lu ».
+          add('player', { id: 'tredit-' + c.id, ts: c.editedAt, icon: '✎',
+            title: 'Séance corrigée par le coach', detail: day + ' · ' + (c.pointsTotal || 0) + ' pts',
+            action: act });
+        }
+      });
+  });
 
   // ======================== COACH ========================
   src('coach', 'gages-a-moderer', () => {
@@ -36227,9 +37077,11 @@ function notifFeed(opts) {
           // même piège que _notifDrawDetail sur les gages.
           let day = c.datePlanned || '';
           try { day = formatDate(c.datePlanned, 'short'); } catch (e) {}
+          // Atterrissage direct sur le suivi détaillé : le coach qui touche
+          // « séance validée » veut voir la photo et la distance, pas le classement.
           add('coach', { id: 'trdone-' + c.id, ts: c.dateCompleted || c.createdAt || 0, icon: '💪',
             title: 'Séance validée', detail: who + ' · ' + day + ' · ' + _completionSummary(c),
-            action: "openTrainingDashboard('" + p.id + "')" });
+            action: "openTrainingDashboard('" + p.id + "','detail')" });
         });
     });
   });
@@ -36844,7 +37696,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-30.94';
+const APP_VERSION = '2026-07-30.95';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Une seule tentative de rechargement AUTOMATIQUE par session : si le HTML servi

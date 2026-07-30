@@ -138,13 +138,20 @@ t('le détail porte joueuse + points + distance (comme le push)', () => {
   assert(d.includes('20 pts'), 'points absents : ' + d);
   assert(d.includes('2.92'), 'distance absente : ' + d);
 });
-t('l\'entrée est actionnable → ouvre le suivi du bon programme', () => {
-  assert(trItems()[0].action === "openTrainingDashboard('prog1')", 'action = ' + trItems()[0].action);
+// Depuis le suivi coach détaillé (v.95), l'action atterrit directement sur
+// l'onglet « Suivi détaillé » : le coach qui touche « séance validée » veut la
+// photo et la distance, pas le classement.
+t('l\'entrée est actionnable → ouvre le suivi détaillé du bon programme', () => {
+  assert(trItems()[0].action === "openTrainingDashboard('prog1','detail')", 'action = ' + trItems()[0].action);
 });
 t('l\'action pointe une fonction qui existe et rend sans throw', () => {
   assert(typeof ctx.openTrainingDashboard === 'function', 'openTrainingDashboard absent');
+  ctx.openTrainingDashboard('prog1', 'detail');
+  assert(ctx.__lastModal && ctx.__lastModal.includes('2.92'), 'le suivi ne montre pas la distance');
+});
+t('l\'onglet classement montre toujours le cumul km', () => {
   ctx.openTrainingDashboard('prog1');
-  assert(ctx.__lastModal && ctx.__lastModal.includes('2.9km'), 'le suivi ne montre pas la distance');
+  assert(ctx.__lastModal && ctx.__lastModal.includes('2.9km'), 'le classement ne montre pas la distance');
 });
 
 // --- 2) filigrane : marquer lu → DISPARAÎT (demande explicite du coach) -----
