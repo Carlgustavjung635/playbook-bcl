@@ -714,8 +714,8 @@ t('feed joueuse : le mot du coach et la correction remontent', () => {
   S.auth = { role: 'player', playerId: 'pA' };
   ctx.setNotifSeenAt(0);
   const feed = ctx.notifFeed({ showRead: true });
-  const note = feed.find(i => i.id === 'trnote-cA1');
-  const edit = feed.find(i => i.id === 'tredit-cA1');
+  const note = feed.find(i => String(i.id).startsWith('trnote-cA1'));
+  const edit = feed.find(i => String(i.id).startsWith('tredit-cA1'));
   assert(note, 'entrée « mot du coach » absente');
   assert(note.detail.includes('Chapeau'), 'détail du mot absent');
   assert(note.action.includes('openTrainingSession('), 'action non actionnable : ' + note.action);
@@ -727,8 +727,8 @@ t('feed joueuse : le mot du coach et la correction remontent', () => {
 t('feed joueuse : elle ne voit ni le mot ni la correction des AUTRES', () => {
   S.auth = { role: 'player', playerId: 'pB' };
   const feed = ctx.notifFeed({ showRead: true });
-  assert(!feed.some(i => i.id === 'trnote-cA1'), 'mot d\'une autre joueuse exposé');
-  assert(!feed.some(i => i.id === 'tredit-cA1'), 'correction d\'une autre joueuse exposée');
+  assert(!feed.some(i => String(i.id).startsWith('trnote-cA1')), 'mot d\'une autre joueuse exposé');
+  assert(!feed.some(i => String(i.id).startsWith('tredit-cA1')), 'correction d\'une autre joueuse exposée');
   S.auth = { role: 'coach', coachId: 'admin' };
 });
 

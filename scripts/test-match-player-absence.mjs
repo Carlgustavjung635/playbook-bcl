@@ -28,7 +28,10 @@ function extractFn(name) {
 // matchSaveAbsence/matchRestorePresence les appellent.
 // _effectiveConvocStatus délègue à _convocResp (v.91), qui lit les
 // indisponibilités : ses dépendances doivent être extraites avec lui.
-const src = ['_unavailMeta', '_unavailOn', '_convocResp', '_rsvpStamp', '_rsvpPresent', '_effectiveConvocStatus', '_matchConvoc', 'matchSaveAbsence', 'matchRestorePresence']
+// v.97 : _convocResp délègue à resolveEffectivePresence, qui interroge les DEUX
+// gisements d'indisponibilité (période saisie + statut médical de la fiche).
+const src = ['_unavailMeta', '_unavailOn', '_medicalUnavailOn', '_unavailEffectiveOn', 'resolveEffectivePresence',
+  '_convocResp', '_rsvpStamp', '_rsvpPresent', '_effectiveConvocStatus', '_matchConvoc', 'matchSaveAbsence', 'matchRestorePresence']
   .map(extractFn).join('\n\n');
 function build(state, formValues = { 'ab-reason': 'Blessure', 'ab-msg': 'désolée' }) {
   const log = { notified: [], persisted: 0, closed: 0, rendered: 0 };

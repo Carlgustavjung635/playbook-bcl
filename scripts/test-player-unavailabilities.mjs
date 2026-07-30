@@ -329,6 +329,110 @@ t('un motif hors contrainte SQL est neutralisé au dump', () => {
   ok(ser._dumpUnavailRow({ id: 'x', playerId: 'pA', startsAt: '2026-08-10', reason: 'bidon' }).reason === 'autre');
 });
 
+// ============================================================================
+// 8) v.97 — LE STATUT MÉDICAL EST LA SECONDE SOURCE D'INDISPONIBILITÉ
+// ----------------------------------------------------------------------------
+// Sur le terrain la coach déclare une blessure depuis la FICHE JOUEUSE
+// (`p.injury`), pas via une période. Ce gisement était ignoré : la joueuse
+// portait un badge « ✕ Indispo » sur la vue match ET restait comptée présente,
+// donc le compteur du haut ne bougeait pas (19/1 au lieu de 16/4).
+// ============================================================================
+const TODAY = ctx.isoDate(new Date());
+const AFTER = (n) => ctx.isoDate(new Date(Date.now() + n * 86400000));
+function setInjury(pid, injury) {
+  S.players.find(p => p.id === pid).injury = injury;
+}
+
+t('un statut médical « indispo » rend absente, comme une période', () => {
+  seed(); setInjury('pA', { status: 'indispo', description: 'entorse' });
+  const r = ctx._convocResp(conv(), AFTER(3), 'pA');
+  ok(r.status === 'absent', 'statut = ' + r.status);
+  ok(r.auto === true, 'non marquée dérivée');
+  ok(r.unavail && r.unavail.medical === true, 'source médicale non tracée');
+});
+t('« aménagée » et « en soin » restent PRÉSENTES (elles s\'entraînent)', () => {
+  seed(); setInjury('pA', { status: 'amenage' });
+  ok(ctx._convocResp(conv(), AFTER(3), 'pA').status === 'present', 'aménagée comptée absente');
+  setInjury('pA', { status: 'soin' });
+  ok(ctx._convocResp(conv(), AFTER(3), 'pA').status === 'present', 'en soin comptée absente');
+});
+t('le retour prévu borne le statut médical', () => {
+  seed(); setInjury('pA', { status: 'indispo', returnDate: AFTER(5) });
+  ok(ctx._convocResp(conv(), AFTER(3), 'pA').status === 'absent', 'avant le retour, devrait être absente');
+  ok(ctx._convocResp(conv(), AFTER(9), 'pA').status === 'present', 'encore absente après le retour prévu');
+});
+t('un statut médical NE RÉÉCRIT PAS le passé', () => {
+  // Sinon la clôture d'un entraînement déjà joué recompterait les présences, et
+  // les compteurs de défis (dérivés de là) partiraient en vrille.
+  seed(); setInjury('pA', { status: 'indispo', startDate: '2020-01-01' });
+  ok(ctx._convocResp(conv(), '2026-07-01', 'pA').status === 'present', 'le passé a été réécrit');
+  ok(ctx._convocResp(conv(), TODAY, 'pA').status === 'absent', 'aujourd\'hui non couvert');
+});
+t('un RSVP explicite prime AUSSI sur le statut médical', () => {
+  seed(); setInjury('pA', { status: 'indispo' });
+  conv().instanceOverrides[AFTER(3)] = { responses: { pA: { status: 'present', at: 1 } } };
+  ok(ctx._convocResp(conv(), AFTER(3), 'pA').status === 'present', 'la coach ne peut plus la convoquer');
+});
+t('une période saisie prime sur le statut médical (motif le plus précis)', () => {
+  seed(); addUnavail('pA', TODAY, AFTER(30), 'exams');
+  setInjury('pA', { status: 'indispo' });
+  const r = ctx._convocResp(conv(), AFTER(3), 'pA');
+  ok(r.reason === 'Examens', 'motif = ' + r.reason);
+  ok(!r.unavail.medical, 'la source médicale a doublé la période saisie');
+});
+t('le motif prêt-à-afficher est « INDISPO (raison) »', () => {
+  seed(); addUnavail('pA', TODAY, AFTER(30), 'vacances');
+  const r = ctx._convocResp(conv(), AFTER(3), 'pA');
+  ok(r.motif === 'INDISPO (Vacances)', 'motif = ' + r.motif);
+  ok(r.reason === 'Vacances', 'le motif nu doit rester nu : ' + r.reason);
+  ok(r.source === 'unavailability', 'source = ' + r.source);
+});
+t('un désistement explicite ne porte pas le préfixe INDISPO', () => {
+  seed();
+  conv().instanceOverrides[DATE] = { responses: { pA: { status: 'absent', reason: 'Boulot', at: 1 } } };
+  const r = ctx._convocResp(conv(), DATE, 'pA');
+  ok(r.motif === 'Boulot' && r.source === 'manual', JSON.stringify(r));
+});
+t('la joueuse voit son statut médical dans « mon statut » (vue entraînement)', () => {
+  // Elle lisait « ✓ Présente · par défaut tu es comptée présente » pendant que
+  // la coach la comptait absente : deux vérités pour le même événement.
+  seed(); setInjury('pA', { status: 'indispo' });
+  S.auth = { role: 'player', playerId: 'pA' };
+  ctx.openEventInstance(CID, AFTER(3));
+  const m = ctx.__lastModal || '';
+  ok(/Absente/.test(m), 'la joueuse se croit encore présente');
+  ok(/INDISPO \(Blessure\)/.test(m), 'motif hérité absent');
+});
+t('la feuille d\'appel s\'ouvre malgré une absence DÉRIVÉE', () => {
+  // Elle lisait `responses[p.id].reason` en direct → TypeError sur une absence
+  // sans ligne de réponse, et l'écran d'appel ne s'ouvrait plus du tout.
+  seed(); addUnavail('pA', TODAY, AFTER(30), 'blessure');
+  ctx.openCallSheet(CID, AFTER(3));
+  const m = ctx.__lastModal || '';
+  ok(/Appel/.test(m), 'la feuille d\'appel ne s\'est pas ouverte');
+  ok(/INDISPO \(Blessure\)/.test(m), 'motif absent de la liste des absentes');
+});
+t('l\'effectif du match n\'affiche plus « présente » sous un badge indispo', () => {
+  seed();
+  const MD = AFTER(3);
+  S.matches = [{ id: 'm1', date: MD, opponent: 'X', teamTag: 'e1', seasonId: '2026-2027', roster: { included: ['pA', 'pB'] } }];
+  S.convocations.push({ id: 'cvM', type: 'match', title: 'vs X', date: MD, recurrence: null,
+    cancelledInstances: [], instanceOverrides: {}, attachments: [], responses: {},
+    seasonId: '2026-2027', teamTag: 'e1', closed: false });
+  setInjury('pA', { status: 'indispo' });
+  ctx.openRosterManager('m1');
+  const m = ctx.__lastModal || '';
+  const row = m.slice(m.indexOf('Ophelie'), m.indexOf('Ophelie') + 500);
+  ok(/absente/.test(row), 'toujours annoncée présente : ' + row.slice(-200));
+  ok(/INDISPO \(Blessure\)/.test(m), 'motif hérité absent de la vue match');
+});
+t('convocCard ne lève plus de ReferenceError (dateStr fantôme)', () => {
+  seed(); addUnavail('pA', TODAY, AFTER(30), 'blessure');
+  const out = ctx.convocCard(conv(), false, true);
+  ok(typeof out === 'string' && out.length > 0, 'rendu vide');
+  ok(/INDISPO \(Blessure\)/.test(out), 'motif hérité absent');
+});
+
 console.log(R.join('\n'));
 const fails = R.filter(l => l.startsWith('✗'));
 console.log(`\n${R.length - fails.length}/${R.length} OK`);

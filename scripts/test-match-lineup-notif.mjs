@@ -76,9 +76,14 @@ console.log('SCÉNARIO 3 — calendrier joueuse : non retenue (révélé) = even
   function row(playerId, match) {
     const state = { auth: { role: 'player', playerId }, matches: [match], players: [{ id: 'a' }, { id: 'b' }], convocations: [], currentSeasonId: 's1' };
     const ev = { type: 'match', matchId: match.id, date: match.date, time: match.time, title: 'vs ' + match.opponent, responses: {} };
-    return new Function('state', 'esc', 'getSeasonPlayers', '_seasonsLoaded',
+    // v.97 : playerEventRow lit le statut via _convocResp (résolveur commun).
+    // Le sujet du scénario est l'affichage NEUTRE d'une non-retenue, pas la
+    // résolution de présence → stub « présente », sans indispo au décor.
+    return new Function('state', 'esc', 'getSeasonPlayers', '_seasonsLoaded', '_convocResp',
       src + '\nreturn (pid,ev)=>playerEventRow(ev,pid);'
-    )(state, s => String(s), () => [{ id: 'a' }, { id: 'b' }], () => true)(playerId, ev);
+    )(state, s => String(s), () => [{ id: 'a' }, { id: 'b' }], () => true,
+      () => ({ status: 'present', reason: '', motif: '', message: '', auto: false, unavail: null, source: 'default' })
+    )(playerId, ev);
   }
   const match = { id: 'm1', opponent: 'X', date: '2026-12-31', time: '18:00', lineupRevealed: true, roster: { included: ['a'] } };
   const outIn = row('a', match);   // retenue

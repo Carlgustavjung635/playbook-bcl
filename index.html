@@ -4261,18 +4261,40 @@ const ENTITIES = [
     },
     apply: (state, rows) => {
       const byConv = {};
+      const _prevOf = (cid, pid) => {
+        const c = (state.convocations || []).find(x => x.id === cid);
+        return (c && c.responses && c.responses[pid])
+          || (_lastConvocResponses[cid] && _lastConvocResponses[cid][pid])
+          || null;
+      };
       rows.forEach(r => {
+        const status = r.status, reason = r.reason;
+        const lateMinutes = r.late_minutes != null ? Number(r.late_minutes) : null;
+        // `at` (horodatage du RSVP) est posé côté client par _rsvpStamp mais
+        // n'est PAS dans le dump → sur l'appareil du COACH, qui ne fait que
+        // recevoir, il serait toujours absent. On le reconstruit depuis
+        // `updated_at` (trigger serveur, déjà en base) : sans ça, aucun
+        // désistement d'une joueuse ne peut apparaître dans le feed coach.
+        //
+        // MAIS `updated_at` N'EST PAS L'HEURE DE L'ÉVÉNEMENT. Le cache de deltas
+        // (`_lastSeen`) est en mémoire et repart vide à CHAQUE ouverture de
+        // l'app : le premier flush ré-upserte alors TOUTES les lignes, et le
+        // trigger `cr_set_updated_at` les réhorodate en bloc à now(). Vérifié en
+        // base : deux désistements de dates différentes portaient le même
+        // `updated_at` à la microseconde près.
+        // Conséquence : `at` sautait à « maintenant » à chaque sync, donc
+        // `ts > filigrane` redevenait vrai et le désistement déjà lu remontait
+        // en non-lu — indéfiniment. C'est LE bug « je marque lu, ça revient ».
+        //
+        // On ne retient donc `updated_at` que si le CONTENU a bougé. À contenu
+        // identique, c'est le même événement : on garde l'horodatage connu.
+        const prev = _prevOf(r.convocation_id, r.player_id);
+        const same = prev && prev.status === status && (prev.reason || null) === (reason || null)
+          && (prev.lateMinutes == null ? null : prev.lateMinutes) === lateMinutes;
+        const at = (same && prev.at) ? prev.at : (r.updated_at ? Date.parse(r.updated_at) : null);
         byConv[r.convocation_id] = byConv[r.convocation_id] || {};
         byConv[r.convocation_id][r.player_id] = {
-          status: r.status, reason: r.reason,
-          lateMinutes: r.late_minutes != null ? Number(r.late_minutes) : null,
-          instanceDate: r.instance_date,
-          // `at` (horodatage du RSVP) est posé côté client par _rsvpStamp mais
-          // n'est PAS dans le dump → sur l'appareil du COACH, qui ne fait que
-          // recevoir, il serait toujours absent. On le reconstruit depuis
-          // `updated_at` (trigger serveur, déjà en base) : sans ça, aucun
-          // désistement d'une joueuse ne peut apparaître dans le feed coach.
-          at: r.updated_at ? Date.parse(r.updated_at) : null
+          status, reason, lateMinutes, instanceDate: r.instance_date, at
         };
       });
       // Relais pour l'apply de `convocations` : un événement realtime ne rejoue
@@ -10668,11 +10690,14 @@ function eventInstanceRow(ev, isCoach, opts) {
 function heroCard(ev) {
   const days = daysUntil(ev.date);
   const daysLabel = days === 0 ? "Aujourd'hui" : days === 1 ? 'Demain' : `Dans ${days} jours`;
-  const responses = ev.responses || {};
-  // SAISON : compte les absentes parmi l'effectif courant.
-  const absent = currentSeasonPlayers().filter(p => responses[p.id] && responses[p.id].status === 'absent').length;
   const parentId = ev._parentId || ev.id;
   const instanceDate = ev._instanceDate || ev.date;
+  // SAISON : compte les absentes parmi l'effectif courant. Passe par le
+  // résolveur, sinon la carte d'accueil et le détail affichent deux chiffres
+  // différents pour le même événement — c'est exactement le bug qu'on paie ici.
+  const _parentConv = state.convocations.find(x => x.id === parentId) || null;
+  const absent = currentSeasonPlayers()
+    .filter(p => _convocResp(_parentConv, instanceDate, p.id).status === 'absent').length;
 
   return `
     <div class="hero-card fade-up" onclick="openEventInstance('${parentId}','${instanceDate}')">
@@ -11692,14 +11717,15 @@ function openAllChallenges() {
 }
 
 function playerEventRow(ev, playerId) {
-  const responses = ev.responses || {};
-  const r = responses[playerId];
-  const isPresent = !r || r.status === 'present';
   const d = new Date(ev.date + 'T00:00:00');
   const day = d.getDate();
   const month = d.toLocaleDateString('fr-FR', { month: 'short' });
   const parentId = ev._parentId || ev.id;
   const instanceDate = ev._instanceDate || ev.date;
+  // Résolveur commun : une joueuse en indispo ne doit pas lire « ✓ Présente »
+  // dans son agenda pendant que la coach la compte absente.
+  const isPresent = _convocResp(
+    state.convocations.find(x => x.id === parentId) || null, instanceDate, playerId).status !== 'absent';
   const isMatch = ev.type === 'match';
   // Si match avec un matchId lié, on route vers la vue détail Match riche
   // (stats + selfie + vidéo + ressenti joueuse). Sinon (entraînement / match
@@ -13154,7 +13180,11 @@ function getMatchPrepStatus(m) {
   const plays = getMatchPlayLinks(m.id).length;
   const convoc = m.convocId ? (state.convocations || []).find(c => c.id === m.convocId) : null;
   const responses = convoc ? Object.keys(convoc.responses || {}).length : 0;
-  const absents = convoc ? Object.values(convoc.responses || {}).filter(r => r && r.status === 'absent').length : 0;
+  // Absentes = statut EFFECTIF (les indispos en font partie), pas seulement les
+  // lignes de réponse écrites.
+  const absents = convoc
+    ? (currentSeasonPlayers() || []).filter(p => _convocResp(convoc, m.date, p.id).status === 'absent').length
+    : 0;
   const notes = !!(m.prepComment && m.prepComment.trim());
   const videos = Array.isArray(m.prepVideos) ? m.prepVideos.length : 0;
   const roster = !!(m.roster && Array.isArray(m.roster.included));
@@ -16253,9 +16283,12 @@ function openRosterManager(matchId) {
         ${included.length === 0 ? `<div style="padding:14px;text-align:center;color:var(--ink-3);font-size:12px;font-style:italic">Aucune joueuse retenue</div>` : included.map(p => {
           // Badge « convoquée » informatif (présence déclarée à la convoc du jour),
           // indépendant du fait qu'elle soit dans la compo (le coach décide).
-          const resp = sameDayConvoc && sameDayConvoc.responses && sameDayConvoc.responses[p.id];
-          const convBadge = !sameDayConvoc ? '' : (resp && resp.status === 'absent'
-            ? `<span style="font-size:8px;font-family:'JetBrains Mono';color:var(--red);background:var(--red-soft);padding:1px 5px;border-radius:4px;text-transform:uppercase;letter-spacing:0.04em">✗ absente${resp.reason ? ' · ' + esc(resp.reason) : ''}</span>`
+          // Le statut passe par resolveEffectivePresence (via _convocResp) : lire
+          // `responses[p.id]` en direct laissait une joueuse INDISPO affichée
+          // « ✓ présente » juste sous son propre badge « ⚠ Indispo ».
+          const resp = sameDayConvoc ? _convocResp(sameDayConvoc, m.date, p.id) : null;
+          const convBadge = !resp ? '' : (resp.status === 'absent'
+            ? `<span style="font-size:8px;font-family:'JetBrains Mono';color:var(--red);background:var(--red-soft);padding:1px 5px;border-radius:4px;text-transform:uppercase;letter-spacing:0.04em">✗ absente${(resp.auto ? resp.motif : resp.reason) ? ' · ' + esc(resp.auto ? resp.motif : resp.reason) : ''}</span>`
             : `<span style="font-size:8px;font-family:'JetBrains Mono';color:#22c55e;background:rgba(34,197,94,0.10);padding:1px 5px;border-radius:4px;text-transform:uppercase;letter-spacing:0.04em">✓ présente</span>`);
           return `
           <div class="roster-row">
@@ -16275,9 +16308,9 @@ function openRosterManager(matchId) {
         <div class="eyebrow-muted" style="margin-bottom:8px;color:var(--ink-4)">○ Pas sur la feuille (${excluded.length})</div>
         <div style="display:flex;flex-direction:column;gap:4px">
           ${excluded.map(p => {
-            // Récupérer raison absence si dispo
-            const resp = sameDayConvoc && sameDayConvoc.responses && sameDayConvoc.responses[p.id];
-            const reason = resp && resp.status === 'absent' ? resp.reason : null;
+            // Récupérer raison absence si dispo (même résolveur que ci-dessus)
+            const resp = sameDayConvoc ? _convocResp(sameDayConvoc, m.date, p.id) : null;
+            const reason = resp && resp.status === 'absent' ? (resp.auto ? resp.motif : resp.reason) : null;
             return `
               <div class="roster-row" style="opacity:0.7">
                 ${p.photo ? `<img src="${p.photo}" style="width:32px;height:32px;border-radius:50%;object-fit:cover;border:1.5px solid var(--border);filter:grayscale(0.5)">` : `<div style="width:32px;height:32px;border-radius:50%;background:var(--bg-3);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:12px;color:var(--ink-3)">${esc(p.name.charAt(0).toUpperCase())}</div>`}
@@ -18188,8 +18221,42 @@ function _unavailOn(playerId, dateISO) {
     (!u.endsAt || u.endsAt >= dateISO)
   ) || null;
 }
+// DEUXIÈME GISEMENT — le statut médical « indispo » de la fiche joueuse
+// (`p.injury`). C'est de LOIN le plus utilisé sur le terrain : la coach déclare
+// une blessure depuis la fiche, pas une période. Il porte déjà les mêmes dates
+// (`startDate` / `returnDate`), donc il se lit exactement comme une période et
+// se range derrière la même règle. Sans ça, une joueuse déclarée « ✕ Indispo »
+// restait comptée PRÉSENTE partout, et le compteur du haut ne bougeait pas.
+//
+// SEUL 'indispo' compte. 'amenage' et 'soin' s'entraînent — aménagées, mais
+// présentes : les compter absentes serait faux et vexant.
+//
+// BORNE BASSE = aujourd'hui quand `startDate` est vide ou passée. Un statut
+// médical décrit un état COURANT, pas un historique : sans cette borne il
+// réécrirait le passé, et la clôture d'un entraînement déjà joué recompterait
+// les présences (les compteurs de défis sont dérivés de là).
+function _medicalUnavailOn(playerId, dateISO) {
+  if (!playerId || !dateISO) return null;
+  const p = (state.players || []).find(x => x.id === playerId);
+  const inj = p && p.injury;
+  if (!inj || inj.status !== 'indispo') return null;
+  const today = isoDate(new Date());
+  const from = (inj.startDate && inj.startDate > today) ? inj.startDate : today;
+  if (dateISO < from) return null;
+  if (inj.returnDate && dateISO > inj.returnDate) return null;
+  // Forme d'une période, pour que _unavailMeta / _unavailRangeLabel marchent
+  // tels quels. `medical: true` distingue la source à l'affichage.
+  return { id: 'med:' + playerId, playerId, startsAt: from, endsAt: inj.returnDate || null,
+    reason: 'blessure', notes: inj.description || '', medical: true };
+}
+// L'indisponibilité EFFECTIVE : période saisie, sinon statut médical. Aucune
+// vue ne doit lire l'un des deux gisements seul — c'est exactement comme ça que
+// le badge s'affichait d'un côté et pas de l'autre.
+function _unavailEffectiveOn(playerId, dateISO) {
+  return _unavailOn(playerId, dateISO) || _medicalUnavailOn(playerId, dateISO);
+}
 function _unavailActive(playerId, todayISO) {
-  return _unavailOn(playerId, todayISO || isoDate(new Date()));
+  return _unavailEffectiveOn(playerId, todayISO || isoDate(new Date()));
 }
 function _unavailRangeLabel(u) {
   if (!u) return '';
@@ -18251,7 +18318,7 @@ function overrideUnavailPresence(parentId, dateStr, playerId) {
   if (!_unavailIsCoach()) return false;
   const c = (state.convocations || []).find(x => x.id === parentId);
   if (!c) return false;
-  const u = _unavailOn(playerId, dateStr || c.date);
+  const u = _unavailEffectiveOn(playerId, dateStr || c.date);
   const p = (state.players || []).find(x => x.id === playerId);
   const meta = u ? _unavailMeta(u.reason) : null;
   let ok = false;
@@ -18378,8 +18445,33 @@ function renderUnavailPlayerBanner() {
 // `auto: true` = dérivé d'une indisponibilité, aucune réponse explicite.
 // Toutes les vues doivent passer par ici plutôt que de lire `responses[pid]`
 // directement, sinon une joueuse indisponible s'afficherait présente.
+// Le cœur, PUR : ni convoc, ni DOM, juste (joueuse, date, réponse existante).
+// Trois priorités, dans cet ordre et jamais un autre :
+//   1. réponse explicite (la joueuse ou la coach a cliqué) → elle prime TOUJOURS ;
+//   2. indisponibilité couvrant la date (période OU statut médical) → absente ;
+//   3. présente par défaut.
+// Retour : { status, reason, motif, message, auto, unavail, source }.
+//   • `reason` = motif nu ('Blessure') — c'est lui que lisent le chip et les tests ;
+//   • `motif`  = ligne prête à afficher ('INDISPO (Blessure)') là où une vue n'a
+//     la place que pour UNE chaîne (feuille d'appel, effectif du match) ;
+//   • `source` = 'manual' | 'unavailability' | 'default'.
+function resolveEffectivePresence(playerId, dateISO, existingResponse) {
+  const r = existingResponse;
+  if (r && r.status) {
+    return { status: r.status, reason: r.reason || '', motif: r.reason || '',
+      message: r.message || '', auto: false, unavail: null, source: 'manual' };
+  }
+  const u = _unavailEffectiveOn(playerId, dateISO);
+  if (u) {
+    const meta = _unavailMeta(u.reason);
+    return { status: 'absent', reason: meta.label, motif: 'INDISPO (' + meta.label + ')',
+      message: u.notes || '', auto: true, unavail: u, source: 'unavailability' };
+  }
+  return { status: 'present', reason: '', motif: '', message: '', auto: false, unavail: null, source: 'default' };
+}
+
 function _convocResp(c, dateISO, pid) {
-  if (!c || !pid) return { status: 'present', reason: '', message: '', auto: false, unavail: null };
+  if (!c || !pid) return resolveEffectivePresence(pid, dateISO, null);
   const d = dateISO || c.date;
   let resp = null;
   if (c.recurrence && d && c.instanceOverrides && c.instanceOverrides[d] && c.instanceOverrides[d].responses) {
@@ -18387,16 +18479,7 @@ function _convocResp(c, dateISO, pid) {
   } else {
     resp = (c.responses || {})[pid];
   }
-  if (resp && resp.status) {
-    return { status: resp.status, reason: resp.reason || '', message: resp.message || '',
-      auto: false, unavail: null };
-  }
-  const u = _unavailOn(pid, d);
-  if (u) {
-    const meta = _unavailMeta(u.reason);
-    return { status: 'absent', reason: meta.label, message: u.notes || '', auto: true, unavail: u };
-  }
-  return { status: 'present', reason: '', message: '', auto: false, unavail: null };
+  return resolveEffectivePresence(pid, d, resp);
 }
 
 // Doit rester aligné avec la contrainte CHECK de 20260729_002 ET avec la liste
@@ -18741,15 +18824,24 @@ function snoozeLicencePrompt() {
   } catch (e) {}
   try { closeModal(); } catch (e) {}
 }
+// Chaque refus est TRACÉ. Le rappel ne s'affichait pas pour une joueuse et rien
+// ne permettait de dire lequel des cinq verrous avait mordu : sans trace, la
+// seule méthode restante est de deviner. `[licence]` en console donne la réponse
+// en une ligne, depuis l'appareil de la joueuse.
+function _licenceSkip(why) {
+  try { console.info('[licence] rappel non affiché — ' + why); } catch (e) {}
+  return false;
+}
 // Affiche le rappel si — et seulement si — il a quelque chose à demander.
-function maybeShowLicencePrompt(force) {
+// `attempt` = numéro de réessai (cf. la file de boot plus bas).
+function maybeShowLicencePrompt(force, attempt) {
   const a = state.auth;
-  if (!a || a.role !== 'player' || !a.playerId) return false;
-  if (!getActiveSeasonId()) return false;
+  if (!a || a.role !== 'player' || !a.playerId) return _licenceSkip('pas une joueuse connectée');
+  if (!getActiveSeasonId()) return _licenceSkip('aucune saison active chargée');
   const status = _licenceStatusOf(_licenceFor(a.playerId));
-  if (status === 'done') return false;             // plus jamais une fois fait
+  if (status === 'done') return _licenceSkip('licence déjà déclarée faite');  // plus jamais une fois fait
   if (!force) {
-    if (_licenceSnoozedToday()) return false;
+    if (_licenceSnoozedToday()) return _licenceSkip('reporté à aujourd\'hui (« Plus tard »)');
     // Ne pas passer devant une popup déjà ouverte (diffusion, tirage de gage) :
     // elles attendent une action, ce rappel non.
     //
@@ -18758,7 +18850,23 @@ function maybeShowLicencePrompt(force) {
     // modale avait été ouverte UNE fois dans la session, la garde renvoyait
     // toujours « occupé » et le rappel n'est jamais parti. _pbModalOpen teste le
     // contenu, c'est la seule mesure fiable.
-    try { if (_pbModalOpen()) return false; } catch (e) {}
+    //
+    // …mais céder le passage ne doit pas valoir RENONCER. Le boot ne tirait
+    // qu'une fois, à 2200 ms : si la popup de diffusion ou le tirage de gage
+    // était encore ouvert à cet instant précis, le rappel était perdu pour toute
+    // la session — et une PWA ne se ferme jamais vraiment. On repasse donc
+    // toutes les 3 s, six fois au plus, comme la célébration d'anniversaire.
+    // Le tirage de gage vit dans #gage-overlay, HORS #modal-root : sans ce
+    // second test, le rappel s'affichait par-dessus.
+    let busy = false;
+    try {
+      busy = _pbModalOpen() || !!document.querySelector('#gage-overlay .gage-screen');
+    } catch (e) {}
+    if (busy) {
+      const n = (attempt || 0) + 1;
+      if (n <= 6) { try { setTimeout(() => { try { maybeShowLicencePrompt(false, n); } catch (e) {} }, 3000); } catch (e) {} }
+      return _licenceSkip('une autre popup est ouverte — réessai ' + n + '/6');
+    }
   }
   openMyLicence({ prompt: true });
   return true;
@@ -19198,7 +19306,11 @@ function groupEventsByWeek(events, today) {
 }
 
 function convocCard(c, isPast, isCoach) {
-  const responses = c.responses || {};
+  // `dateStr` n'a JAMAIS existé dans cette fonction : la ligne levait un
+  // ReferenceError. La carte n'est plus référencée nulle part (remplacée par
+  // eventInstanceRow + openEventInstance), mais on ne laisse pas une mine
+  // amorcée derrière soi — la date d'une convoc non récurrente, c'est c.date.
+  const dateStr = c.date;
   // SAISON : on calcule présents/absents parmi l'effectif de la saison de
   // la convoc (ou saison courante en fallback).
   const _seasonId = c.seasonId || state.currentSeasonId;
@@ -19267,12 +19379,12 @@ function convocCard(c, isPast, isCoach) {
             <div style="margin-top:12px">
               <div class="eyebrow-muted mb-2" style="color:var(--red)">Absentes</div>
               ${absent.map(p => {
-                const r = responses[p.id];
+                const r = _convocResp(c, dateStr, p.id);
                 return `<div class="convoc-absent-row">
                   <div style="flex:1">
                     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
                       <span style="font-family:'Anton';font-size:14px;text-transform:uppercase">${esc(p.name)}</span>
-                      <span class="chip chip-red">${esc(r.reason || 'Indisponible')}</span>
+                      <span class="chip chip-red">${esc((r.auto ? r.motif : r.reason) || 'Indisponible')}</span>
                     </div>
                     ${r.message ? `<div style="font-size:12px;color:var(--ink-2);margin-top:4px;font-style:italic">"${esc(r.message)}"</div>` : ''}
                   </div>
@@ -27771,15 +27883,13 @@ function renderExerciseDetail() {
   const { dateStr } = state._editingTraining;
   const _instDate = dateStr || c.date;
   const instance = makeConvocInstance(c, _instDate);
-  const responses = instance.responses || {};
   const _seasonId = c.seasonId || state.currentSeasonId;
   const _seasonPool = _seasonsLoaded() && _seasonId
     ? getSeasonPlayers(_seasonId)
     : (state.players || []);
-  const presentPlayers = _seasonPool.filter(p => {
-    const r = responses[p.id];
-    return !r || r.status !== 'absent';
-  });
+  // Résolveur commun : une joueuse indisponible ne doit pas être proposée dans
+  // les groupes d'un exercice qu'elle ne fera pas.
+  const presentPlayers = _seasonPool.filter(p => _convocResp(c, _instDate, p.id).status !== 'absent');
 
   // INVITÉES de l'instance — ajoutées au pool sélectionnable comme les régulières.
   // Clé interne préfixée pour distinguer dans `g.players` (rétrocompat : les IDs
@@ -28091,14 +28201,12 @@ function groupAllRemaining() {
   // Recalculer les non assignées (parmi présentes + invitées)
   // SAISON : effectif scopé à la saison de la convoc
   const _instDate = dateStr || c.date;
-  const instance = makeConvocInstance(c, _instDate);
-  const responses = instance.responses || {};
   const _seasonId = c.seasonId || state.currentSeasonId;
   const _seasonPool = _seasonsLoaded() && _seasonId
     ? getSeasonPlayers(_seasonId)
     : (state.players || []);
   const presentKeys = _seasonPool
-    .filter(p => { const r = responses[p.id]; return !r || r.status !== 'absent'; })
+    .filter(p => _convocResp(c, _instDate, p.id).status !== 'absent')
     .map(p => p.id);
   const guestKeys = (c.type === 'training')
     ? getTrainingGuests(c.id, _instDate).map(g => 'guest:' + g.id)
@@ -28350,12 +28458,9 @@ function applyLineupToGroups(lineupId) {
   }
 
   // Filtrer celles qui sont PRÉSENTES à l'événement (pas absentes)
-  const instance = makeConvocInstance(c, dateStr || c.date);
-  const responses = instance.responses || {};
-  const presentLineupIds = lineupPlayerIds.filter(pid => {
-    const r = responses[pid];
-    return !r || r.status !== 'absent';
-  });
+  const _lineupDate = dateStr || c.date;
+  const presentLineupIds = lineupPlayerIds
+    .filter(pid => _convocResp(c, _lineupDate, pid).status !== 'absent');
 
   if (presentLineupIds.length === 0) {
     alert('Aucune joueuse de cette compo n\'est présente aujourd\'hui.');
@@ -28657,8 +28762,11 @@ function openEventInstance(parentId, dateStr) {
         const myPid = state.auth.playerId;
         const me = state.players.find(p => p.id === myPid);
         if (!me) return '';
-        const myResp = responses[myPid];
-        const iAmAbsent = myResp && myResp.status === 'absent';
+        // Même résolveur que le compteur du haut : sans ça, une joueuse en
+        // indispo lisait « ✓ Présente · par défaut tu es comptée présente »
+        // alors que la coach, elle, la voyait dans les absentes.
+        const myResp = _convocResp(c, dateStr, myPid);
+        const iAmAbsent = myResp.status === 'absent';
         return `
           <div style="margin-top:14px;padding:14px;background:linear-gradient(135deg,${iAmAbsent?'rgba(239,68,68,0.10)':'rgba(34,197,94,0.10)'},var(--surface));border:1.5px solid ${iAmAbsent?'var(--red)':'var(--green)'};border-radius:var(--radius)">
             <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px">Mon statut</div>
@@ -28667,7 +28775,7 @@ function openEventInstance(parentId, dateStr) {
                 <span style="font-size:24px">✕</span>
                 <div style="flex:1">
                   <div style="font-family:'Anton';font-size:13px;color:var(--red);text-transform:uppercase">Absente</div>
-                  <div style="font-size:11px;color:var(--ink-2);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${esc(myResp.reason || 'Indisponible')}</div>
+                  <div style="font-size:11px;color:var(--ink-2);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${esc((myResp.auto ? myResp.motif : myResp.reason) || 'Indisponible')}</div>
                   ${myResp.message ? `<div style="font-size:11px;color:var(--ink-3);margin-top:4px;font-style:italic">« ${esc(myResp.message)} »</div>` : ''}
                 </div>
               </div>
@@ -28693,7 +28801,16 @@ function openEventInstance(parentId, dateStr) {
         <div style="margin-top:14px">
           <div class="eyebrow-muted mb-2">Présentes par défaut · tap pour signaler absence</div>
           <div style="display:flex;flex-wrap:wrap;gap:6px">
-            ${present.map(p => `<button class="convoc-chip" onclick="declareInstanceAbsence('${parentId}','${dateStr}','${p.id}')">${esc(p.name)}</button>`).join('')}
+            ${present.map(p => {
+              // Parité avec la vue match : un statut médical non « apte » se voit
+              // AUSSI sur l'entraînement. Aménagée / en soin restent présentes —
+              // seule 'indispo' bascule en absente (via le résolveur), donc une
+              // joueuse taguée ici est bien attendue, avec une réserve.
+              const inj = p.injury;
+              const atRisk = inj && inj.status && inj.status !== 'apte';
+              const cfg = atRisk ? (INJURY_STATUS[inj.status] || {}) : null;
+              return `<button class="convoc-chip${atRisk ? ' convoc-chip-at-risk' : ''}" onclick="declareInstanceAbsence('${parentId}','${dateStr}','${p.id}')" title="${atRisk ? esc(inj.description || cfg.label || '') : ''}">${atRisk ? esc((cfg.icon || '') + ' ') : ''}${esc(p.name)}</button>`;
+            }).join('')}
           </div>
           ${absent.length > 0 ? `
             <div style="margin-top:10px">
@@ -28708,7 +28825,7 @@ function openEventInstance(parentId, dateStr) {
                     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
                       <span style="font-family:'Anton';font-size:14px;text-transform:uppercase">${esc(p.name)}</span>
                       ${r.auto
-                        ? `<span class="chip" style="background:rgba(255,107,0,0.15);color:var(--orange)">${_unavailMeta(r.unavail.reason).icon} Indispo · auto</span>`
+                        ? `<span class="chip" style="background:rgba(255,107,0,0.15);color:var(--orange)">${_unavailMeta(r.unavail.reason).icon} Indispo · ${r.unavail.medical ? 'médical' : 'auto'}</span>`
                         : `<span class="chip chip-red">${esc(r.reason || 'Indisponible')}</span>`}
                     </div>
                     ${r.auto ? `<div style="font-size:11px;color:var(--ink-3);margin-top:3px;font-family:'JetBrains Mono'">${esc(_unavailRangeLabel(r.unavail))}</div>` : ''}
@@ -28909,8 +29026,11 @@ function openCallSheet(parentId, dateStr) {
         <div class="eyebrow-muted mb-2" style="margin-top:14px;color:var(--ink-4)">Absentes (${absent.length})</div>
         <div style="display:flex;flex-wrap:wrap;gap:4px">
           ${absent.map(p => {
-            const r = responses[p.id];
-            return `<span style="padding:6px 10px;background:var(--bg-2);border:1px solid var(--border);border-radius:16px;font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono'">#${p.num} ${esc(p.name)} · ${esc(r.reason || '?')}</span>`;
+            // `responses[p.id]` était lu en direct : sur une absence DÉRIVÉE
+            // (indispo) il n'y a aucune ligne → `r.reason` levait un TypeError
+            // et la feuille d'appel ne s'ouvrait plus du tout.
+            const r = _convocResp(c, dateStr, p.id);
+            return `<span style="padding:6px 10px;background:var(--bg-2);border:1px solid var(--border);border-radius:16px;font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono'">#${p.num} ${esc(p.name)} · ${esc((r.auto ? r.motif : r.reason) || '?')}</span>`;
           }).join('')}
         </div>
       ` : ''}
@@ -36904,6 +37024,44 @@ function setNotifSeenAt(ts) {
   } catch (e) {}
 }
 
+// --- Registre des notifs ONE-SHOT déjà lues ---------------------------------
+// Le filigrane seul suppose que le `ts` d'un événement ne bouge plus. Ce n'est
+// pas garanti : un horodatage reconstruit depuis une colonne serveur peut être
+// réécrit par une simple ré-écriture de la ligne (cf. l'apply de
+// convocationResponses). Le filigrane repasse alors sous le ts, et une notif
+// déjà lue redevient non-lue à chaque sync.
+//
+// Deuxième verrou, complémentaire et volontairement ÉTROIT : uniquement pour
+// les items dont l'id encode l'événement ENTIER — un désistement daté, un
+// tirage de gage terminé, une séance validée. Ceux-là ne peuvent pas se
+// reproduire sous le même id : lus une fois, lus pour toujours.
+//
+// Les items qui se METTENT À JOUR (convocation modifiée, stats de match
+// re-saisies, feedback réécrit) n'y entrent PAS : eux doivent bien resonner
+// quand leur contenu change, et c'est le filigrane qui en décide.
+const NOTIF_READ_IDS_KEY = 'pb8_notif_read_ids';
+const NOTIF_READ_IDS_MAX = 400;   // ~ 6 mois de flux ; borné pour ne pas gonfler
+function getNotifReadIds() {
+  try {
+    const m = JSON.parse(localStorage.getItem(NOTIF_READ_IDS_KEY) || '{}');
+    const l = m[themeIdentityKey()];
+    return Array.isArray(l) ? l : [];
+  } catch (e) { return []; }
+}
+function addNotifReadIds(ids) {
+  const fresh = (ids || []).filter(Boolean).map(String);
+  if (!fresh.length) return;
+  try {
+    const m = JSON.parse(localStorage.getItem(NOTIF_READ_IDS_KEY) || '{}');
+    const k = themeIdentityKey();
+    const prev = Array.isArray(m[k]) ? m[k] : [];
+    // Les plus récents en tête : la troncature sacrifie les plus vieux, dont
+    // l'événement est de toute façon sorti des bornes .slice() des sources.
+    m[k] = [...new Set([...fresh, ...prev])].slice(0, NOTIF_READ_IDS_MAX);
+    localStorage.setItem(NOTIF_READ_IDS_KEY, JSON.stringify(m));
+  } catch (e) {}
+}
+
 // Construit le flux de notifs de l'identité courante. Chaque item :
 // { id, ts, icon, title, detail, count, unread, action? }. count = poids pour le
 // badge (agrégats : N à faire). Items triés du + récent au + ancien.
@@ -37015,12 +37173,15 @@ function notifFeed(opts) {
   if (role === 'player' && !pid) return [];
   const seen = getNotifSeenAt();
   const showRead = !!(opts && opts.showRead);
+  const readIds = new Set(getNotifReadIds());
   const items = [];
 
+  // `oneShot: true` → l'id encode l'événement entier, donc « lu » est définitif
+  // et survit à un ts réécrit par une resynchro (cf. NOTIF_READ_IDS_KEY).
   const add = (audience, o) => {
     if (!o || !o.id || !o.ts) return;
-    items.push(Object.assign({ count: 1, icon: '🔔', title: '', detail: '' }, o,
-      { audience, unread: o.ts > seen }));
+    items.push(Object.assign({ count: 1, icon: '🔔', title: '', detail: '', oneShot: false }, o,
+      { audience, unread: o.ts > seen && !(o.oneShot && readIds.has(o.id)) }));
   };
   const todo = (audience, o) => {
     if (!o || !o.id) return;
@@ -37133,7 +37294,7 @@ function notifFeed(opts) {
     const me = (state.players || []).find(p => p.id === pid);
     ((me && me.badges) || []).forEach((b, i) => add('player', {
       id: 'badge-' + i + '-' + (b.date || ''), ts: b.date ? Date.parse(b.date + 'T12:00:00') : 0,
-      icon: '🏅', title: 'Trophée débloqué', detail: b.challengeTitle || '' }));
+      oneShot: true, icon: '🏅', title: 'Trophée débloqué', detail: b.challengeTitle || '' }));
   });
   src('player', 'recap-match', () => {
     if (typeof currentSeasonMatches !== 'function') return;
@@ -37150,7 +37311,7 @@ function notifFeed(opts) {
       .forEach(c => {
         const p = (state.trainingPrograms || []).find(x => x.id === c.programId && !x.deletedAt);
         if (!p) return;
-        add('player', { id: 'trmine-' + c.id, ts: c.dateCompleted || c.createdAt || 0, icon: '💪',
+        add('player', { id: 'trmine-' + c.id, ts: c.dateCompleted || c.createdAt || 0, oneShot: true, icon: '💪',
           title: 'Séance validée', detail: (p.name || 'Prépa') + ' · ' + _completionSummary(c),
           action: "openTrainingDashboard('" + p.id + "')" });
       });
@@ -37171,14 +37332,18 @@ function notifFeed(opts) {
         try { day = formatDate(c.datePlanned, 'short'); } catch (e) {}
         const act = "openTrainingSession('" + c.programId + "','" + c.sessionId + "','" + (c.datePlanned || '') + "')";
         if (c.coachNote) {
-          add('player', { id: 'trnote-' + c.id, ts: c.coachNoteAt || 0, icon: '📣',
+          // L'horodatage entre dans l'id : un second mot du coach sur la même
+          // séance est un nouvel événement, et doit resonner. Avec l'id nu, il
+          // aurait hérité du « déjà lu » du précédent.
+          add('player', { id: 'trnote-' + c.id + '-' + (c.coachNoteAt || 0), ts: c.coachNoteAt || 0,
+            oneShot: true, icon: '📣',
             title: 'Un mot du coach', detail: day + ' · ' + String(c.coachNote).replace(/\s+/g, ' ').slice(0, 80),
             action: act });
         }
         if (c.editedAt) {
           // Id distinct du mot : une correction PUIS un mot sont deux événements,
           // les fondre en un seul en masquerait un des deux comme « déjà lu ».
-          add('player', { id: 'tredit-' + c.id, ts: c.editedAt, icon: '✎',
+          add('player', { id: 'tredit-' + c.id + '-' + c.editedAt, ts: c.editedAt, oneShot: true, icon: '✎',
             title: 'Séance corrigée par le coach', detail: day + ' · ' + (c.pointsTotal || 0) + ' pts',
             action: act });
         }
@@ -37211,7 +37376,7 @@ function notifFeed(opts) {
         // Le statut est dans l'id : un désistement puis un retour sont deux
         // événements distincts et ne doivent pas se recouvrir silencieusement.
         id: 'rsvp-' + e.convocId + '-' + e.playerId + '-' + e.date + '-' + e.status,
-        ts: e.ts,
+        ts: e.ts, oneShot: true,
         icon: e.status === 'absent' ? '🚫' : '🙋',
         title: e.status === 'absent' ? (isMatch ? 'Désistement match' : 'Désistement entraînement') : 'Retour de présence',
         detail: who + ' · ' + when + ' · ' + quoi + (e.status === 'absent' && e.reason ? ' · ' + e.reason : ''),
@@ -37224,7 +37389,7 @@ function notifFeed(opts) {
       if (!((d.status === 'accepted' || d.status === 'skipped') && d.completedAt)) return;
       const p = (state.players || []).find(x => x.id === d.playerId);
       const g = (typeof _gageById === 'function' && d.gageId) ? _gageById(d.gageId) : null;
-      add('coach', { id: 'draw-' + d.id, ts: d.completedAt,
+      add('coach', { id: 'draw-' + d.id + '-' + d.status, ts: d.completedAt, oneShot: true,
         icon: d.status === 'accepted' ? '💪' : '🙈',
         title: d.status === 'accepted' ? 'Gage accepté' : 'Gage passé',
         detail: _notifDrawDetail(p, g) });
@@ -37241,7 +37406,7 @@ function notifFeed(opts) {
       const pl = (state.players || []).find(x => x.id === d.playerId);
       const what = (g && g.text) ? String(g.text).replace(/\s+/g, ' ').slice(0, 45) : '';
       add('all', {
-        id: 'ginval-' + d.id, ts: d.invalidatedAt, icon: '❌', title: 'Gage invalidé',
+        id: 'ginval-' + d.id, ts: d.invalidatedAt, oneShot: true, icon: '❌', title: 'Gage invalidé',
         detail: [role === 'coach' ? _notifDrawDetail(pl, g) : what, d.invalidationReason]
           .filter(Boolean).join(' · ')
       });
@@ -37275,7 +37440,7 @@ function notifFeed(opts) {
           try { day = formatDate(c.datePlanned, 'short'); } catch (e) {}
           // Atterrissage direct sur le suivi détaillé : le coach qui touche
           // « séance validée » veut voir la photo et la distance, pas le classement.
-          add('coach', { id: 'trdone-' + c.id, ts: c.dateCompleted || c.createdAt || 0, icon: '💪',
+          add('coach', { id: 'trdone-' + c.id, ts: c.dateCompleted || c.createdAt || 0, oneShot: true, icon: '💪',
             title: 'Séance validée', detail: who + ' · ' + day + ' · ' + _completionSummary(c),
             action: "openTrainingDashboard('" + p.id + "','detail')" });
         });
@@ -37304,7 +37469,11 @@ function renderNotifBell() {
   return `<button class="role-badge tb-act" style="cursor:pointer;position:relative" onclick="openNotifCenter()" title="Notifications" aria-label="Notifications${n ? ' (' + n + ' non lues)' : ''}">🔔${n ? `<span style="position:absolute;top:-4px;right:-4px;background:var(--orange);color:#fff;border-radius:9px;min-width:16px;height:16px;font-size:10px;font-family:'Anton';display:flex;align-items:center;justify-content:center;padding:0 3px">${n > 99 ? '99+' : n}</span>` : ''}</button>`;
 }
 function markAllNotifsRead() {
+  // Le filigrane d'abord — il porte tout le flux informationnel…
   setNotifSeenAt(Date.now());
+  // …puis le registre, qui verrouille les one-shot même si leur horodatage est
+  // réécrit par une resynchro ultérieure.
+  try { addNotifReadIds(notifFeed({ showRead: true }).filter(i => i.oneShot).map(i => i.id)); } catch (e) {}
   // Messages : marquer aussi les broadcasts vus (sinon ils restent "actionnables").
   const a = state.auth;
   if (a && a.role === 'player' && a.playerId && typeof playerInboxBroadcasts === 'function') {
@@ -37456,7 +37625,7 @@ function _pushPlayerKeys(pids) { return (pids || []).filter(Boolean).map(p => 'p
 function _pushPlayerKeysOn(pids, dateISO) {
   const list = (pids || []).filter(Boolean);
   if (!dateISO) return _pushPlayerKeys(list);
-  const kept = list.filter(pid => !_unavailOn(pid, dateISO));
+  const kept = list.filter(pid => !_unavailEffectiveOn(pid, dateISO));
   const skipped = list.length - kept.length;
   if (skipped) { try { console.log('[push] ' + skipped + ' destinataire(s) ignore(s) — indisponibles le ' + dateISO); } catch (e) {} }
   return _pushPlayerKeys(kept);
@@ -37892,7 +38061,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-30.96';
+const APP_VERSION = '2026-07-30.97';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Une seule tentative de rechargement AUTOMATIQUE par session : si le HTML servi

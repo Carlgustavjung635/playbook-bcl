@@ -29,9 +29,13 @@ const mkEl = () => ({
   querySelector: () => null, querySelectorAll: () => [], classList: { add() {}, remove() {}, toggle() {} },
   getContext: () => null, setAttribute() {}, focus() {},
 });
+const modalRoot = { innerHTML: '', trim() { return this.innerHTML.trim(); } };
 const doc = {
-  // 'modal-root' absent par défaut = aucune modale ouverte (comportement réel).
-  getElementById: (id) => (id === 'modal-root' ? null : mkEl()),
+  // FIDÈLE AU VRAI DOM : closeModal() ne retire PAS #modal-root, il vide son
+  // contenu. L'élément EXISTE donc en permanence dès la 1re modale ; seul son
+  // innerHTML dit si une modale est ouverte. Le harnais modélisait l'inverse —
+  // c'est ce qui avait laissé passer le bug du rappel jamais affiché (v.93).
+  getElementById: (id) => (id === 'modal-root' ? modalRoot : mkEl()),
   createElement: mkEl,
   querySelector: () => null, querySelectorAll: () => [],
   addEventListener() {}, removeEventListener() {},
@@ -71,11 +75,13 @@ const S = ctx.state;
 let pushed = [];
 ctx.render = () => {}; ctx.showToast = () => {};
 ctx.notifyPush = (keys, payload) => { pushed.push({ keys, payload }); };
-ctx.openModal = h => { ctx.__lastModal = h; };
-ctx.closeModal = () => {};
+ctx.openModal = h => { ctx.__lastModal = h; modalRoot.innerHTML = h; };
+ctx.closeModal = () => { modalRoot.innerHTML = ''; };   // vide, mais l'élément reste
 
 function seed() {
   pushed = [];
+  modalRoot.innerHTML = '';        // aucune modale ouverte au départ
+  ctx.__lastModal = null;
   S.auth = { role: 'coach', coachId: 'admin' };
   S.coaches = [{ id: 'admin', name: 'Admin', coachRole: 'admin_coach', teams: ['e1', 'e2'] }];
   S.seasons = [
@@ -436,10 +442,9 @@ t('...mais il revient le lendemain (report DATÉ, pas un flag de session)', () =
 });
 t('le rappel ne passe pas devant une popup déjà ouverte', () => {
   seed(); clearSnooze(); asPlayer('pA');
-  const realGet = doc.getElementById;
-  doc.getElementById = (id) => mkEl();   // une modale est ouverte
+  modalRoot.innerHTML = '<div>une autre popup est ouverte</div>';
   assert(ctx.maybeShowLicencePrompt() === false, 'le rappel a doublé une popup en cours');
-  doc.getElementById = realGet;
+  modalRoot.innerHTML = '';
   asCoach();
 });
 t('...sauf en ouverture manuelle (force)', () => {
@@ -464,6 +469,26 @@ t('l\'ouverture normale n\'affiche NI « Rappel » ni « Plus tard »', () => {
   const m = ctx.__lastModal || '';
   assert(!/snoozeLicencePrompt/.test(m), '« Plus tard » proposé hors rappel');
   asCoach();
+});
+t('LE BUG v.93 : une modale FERMÉE ne bloque plus le rappel', () => {
+  // closeModal() vide #modal-root sans le retirer. Tester l'existence de
+  // l'élément renvoyait « occupé » pour le reste de la session, et le rappel
+  // ne partait jamais.
+  seed(); clearSnooze(); asPlayer('pA');
+  ctx.openModal('<div>une popup</div>');
+  ctx.closeModal();                       // l'élément #modal-root existe encore
+  assert(ctx.maybeShowLicencePrompt() === true, 'une modale fermée bloque encore le rappel');
+  asCoach();
+});
+t('le rappel est relancé au retour au premier plan', () => {
+  // ANCRAGE — `maybeShowGageReveal(); } catch (e) {}` apparaît SIX fois dans le
+  // fichier, et indexOf tombait sur la première (un enchaînement de popup sans
+  // rapport) : l'assertion échouait quoi qu'il arrive. On ancre sur le handler
+  // visibilitychange lui-même, qui est unique.
+  const i = html.indexOf('checkForUpdate({ foreground: true })');
+  assert(i > 0, 'handler visibilitychange introuvable');
+  const fg = html.slice(i, i + 1400);
+  assert(/maybeShowLicencePrompt\(/.test(fg), 'aucune seconde chance au foreground');
 });
 t('le rappel est branché au boot, après gages et diffusions', () => {
   // On ancre sur le hook de boot lui-même : '_gageBootChecked' apparaît AUSSI
