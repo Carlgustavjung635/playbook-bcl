@@ -534,6 +534,43 @@
     margin-top: 10px; line-height: 1.4; text-align: center;
   }
 
+  /* ========== ANNIVERSAIRE : ANIMATION DU JOUR J ========== */
+  /* Confettis 100 % CSS + DOM, AUCUNE librairie externe : l'app est un fichier
+     unique servi en PWA offline-first, une dépendance CDN ne serait pas
+     disponible hors ligne (et le service worker ne la cacherait pas). */
+  .bday-confetti {
+    position: fixed; inset: 0; z-index: 12000; overflow: hidden;
+    /* Purement décoratif : ne doit JAMAIS voler un clic à la modale en dessous. */
+    pointer-events: none;
+  }
+  .bday-confetti i {
+    position: absolute; top: -12px; width: 9px; height: 14px; border-radius: 2px;
+    opacity: 0; animation: bdayFall linear forwards;
+  }
+  @keyframes bdayFall {
+    0%   { opacity: 0; transform: translateY(-20px) rotate(0deg); }
+    10%  { opacity: 1; }
+    100% { opacity: 0; transform: translateY(102vh) rotate(720deg); }
+  }
+  /* Gâteau qui « rebondit » en tête de la modale de célébration. */
+  .bday-cake { font-size: 54px; line-height: 1; animation: bdayPop 0.9s ease-out; }
+  @keyframes bdayPop {
+    0%   { transform: scale(0.3) rotate(-12deg); opacity: 0; }
+    45%  { transform: scale(1.18) rotate(6deg); opacity: 1; }
+    70%  { transform: scale(0.95) rotate(-3deg); }
+    100% { transform: scale(1) rotate(0deg); }
+  }
+  /* Carte d'un mot reçu (modale de célébration). */
+  .bday-msg {
+    background: var(--surface); border: 1px solid var(--border-soft);
+    border-left: 3px solid var(--orange); border-radius: 10px;
+    padding: 10px 12px; margin-bottom: 8px; animation: slideUp 0.35s ease-out both;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .bday-confetti { display: none; }
+    .bday-cake, .bday-msg { animation: none; }
+  }
+
   /* ========== PULL-TO-REFRESH (PWA standalone) ========== */
   /* Indicateur de tirage. Posé en position fixe sous la status bar (safe-area),
      hors du .app (survit aux re-render). Masqué par défaut (opacity 0). */
@@ -4915,6 +4952,30 @@ const ENTITIES = [
     }
   },
   {
+    // ==========================================================================
+    // MOTS D'ANNIVERSAIRE (cf. migration 20260730_001) — écrits à l'avance par
+    // les coéquipières, lus par la fêtée le jour J. L'anniversaire lui-même
+    // n'est pas stocké : il se dérive de players.date_naissance.
+    // ==========================================================================
+    key: 'birthdayMessages', table: 'birthday_messages', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.birthdayMessages || []).map(m => [m.id, _dumpBirthdayMsgRow(m)])),
+    apply: (state, rows) => {
+      const local = state.birthdayMessages || [];
+      const localById = Object.fromEntries(local.map(m => [m.id, m]));
+      const remoteIds = new Set(rows.map(r => r.id));
+      const ahead = [];
+      const fromRemote = rows.map(r => {
+        const mapped = _birthdayMsgFromRow(r);
+        const loc = localById[r.id];
+        if (loc && (loc.updatedAt || 0) > (mapped.updatedAt || 0)) { ahead.push(loc); return loc; }
+        return mapped;
+      });
+      const pendingLocal = local.filter(m => !remoteIds.has(m.id) && typeof m.id === 'string' && m.id.startsWith('x'));
+      state.birthdayMessages = [...pendingLocal, ...fromRemote];
+      if (ahead.length) _reassertRows('birthday_messages', ahead.map(_dumpBirthdayMsgRow));
+    }
+  },
+  {
     key: 'playerLicences', table: 'player_licences', pk: 'id', realtime: true, auth: 'anon',
     dump: (state) => Object.fromEntries((state.playerLicences || []).map(l => [l.id, _dumpLicenceRow(l)])),
     apply: (state, rows) => {
@@ -5170,6 +5231,38 @@ function _unavailFromRow(r) {
     reason: ['vacances', 'blessure', 'perso', 'exams', 'autre'].includes(r.reason) ? r.reason : 'autre',
     notes: r.notes || '',
     createdBy: r.created_by || null,
+    createdAt: r.created_at ? Date.parse(r.created_at) : null,
+    updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
+    deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
+  };
+}
+
+// --- MOTS D'ANNIVERSAIRE : sérialisation (module) ---------------------------
+// cf. migration 20260730_001_birthday_messages. La limite de 500 caractères est
+// écrite EN DUR ici (BIRTHDAY_MSG_MAX vit dans le bloc <script> classique, hors
+// de portée de ce bloc module — même pattern que les licences). À garder
+// alignée avec la contrainte CHECK de la migration : un message plus long
+// ferait échouer TOUT le lot d'upsert de la table, on tronque donc ici aussi.
+function _dumpBirthdayMsgRow(m) {
+  return {
+    id: m.id,
+    birthday_player_id: m.birthdayPlayerId || null,
+    author_player_id: m.authorPlayerId || null,
+    birthday_year: Number.isFinite(m.birthdayYear) ? m.birthdayYear : null,
+    message: String(m.message || '').slice(0, 500),
+    read_at: m.readAt ? new Date(m.readAt).toISOString() : null,
+    deleted_at: m.deletedAt ? new Date(m.deletedAt).toISOString() : null,
+    updated_at: m.updatedAt ? new Date(m.updatedAt).toISOString() : (m.createdAt ? new Date(m.createdAt).toISOString() : null)
+  };
+}
+function _birthdayMsgFromRow(r) {
+  return {
+    id: r.id,
+    birthdayPlayerId: r.birthday_player_id || null,
+    authorPlayerId: r.author_player_id || null,
+    birthdayYear: Number.isFinite(r.birthday_year) ? r.birthday_year : parseInt(r.birthday_year, 10) || null,
+    message: r.message || '',
+    readAt: r.read_at ? Date.parse(r.read_at) : null,
     createdAt: r.created_at ? Date.parse(r.created_at) : null,
     updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
     deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
@@ -5713,6 +5806,8 @@ const K = {
   trainingCompletions: 'pb8_training_completions', // [{ id, programId, sessionId, playerId, datePlanned, contractLevel, pointsTotal, ... }]
   playerUnavailabilities: 'pb8_player_unavail',        // [{ id, playerId, startsAt, endsAt, reason, notes }] — saisi par le coach
   playerLicences: 'pb8_player_licences',           // [{ id, playerId, seasonId, status, notes, updatedAt }] — 1 par (joueuse, saison)
+  birthdayMessages: 'pb8_birthday_messages',       // [{ id, birthdayPlayerId, authorPlayerId, birthdayYear, message, readAt }] — écrits par les coéquipières
+  birthdayCelebrated: 'pb8_bday_celebrated',       // map { "<playerId>:YYYY-MM-DD": ts } — animation du jour J déjà jouée (local, jamais sync)
   trainingRemind: 'pb8_training_remind', // map { "<role>:<playerId|->": "YYYY-MM-DD" } — filigrane anti-doublon du rappel quotidien (local)
 };
 function load(k, d) { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : d; } catch { return d; } }
@@ -6142,6 +6237,7 @@ let state = {
   trainingCompletions: load(K.trainingCompletions, []),
   playerUnavailabilities: load(K.playerUnavailabilities, []),
   playerLicences: load(K.playerLicences, []),
+  birthdayMessages: load(K.birthdayMessages, []),
 
   // === JOUEUSES GUESTS (Phase 5 — cf. migration 20260524_009_guest_players) ===
   // guestPlayers : humains temporaires identifiés par leur nom (copine d'une
@@ -6251,6 +6347,7 @@ function persist() {
   save(K.trainingCompletions, state.trainingCompletions);
   save(K.playerUnavailabilities, state.playerUnavailabilities);
   save(K.playerLicences, state.playerLicences);
+  save(K.birthdayMessages, state.birthdayMessages);
   // FIX Option B : pendant l'édition d'un plan, bumper updatedAt de l'entrée
   // courante AVANT le save → la garde anti-écho de l'apply() trainingPlans peut
   // distinguer une édition locale fraîche d'un écho realtime obsolète (qui
@@ -9717,14 +9814,21 @@ function renderBirthdayCoachCard() {
   if (!isAdminCoach()) return '';
   const list = getUpcomingBirthdays(_clubPeopleWithDob(), 7);
   if (!list.length) return '';
-  const row = (b, i) => `
+  const row = (b, i) => {
+    // Mots écrits par les joueuses (cf. birthday_messages). Le coach voit le
+    // COMPTEUR ; le contenu n'apparaît que s'il ouvre la modération.
+    const n = (b.kind === 'player' && typeof birthdayMessagesFor === 'function')
+      ? birthdayMessagesFor(b.id, b.nextBirthdayYear).length : 0;
+    return `
     <div style="display:flex;align-items:center;gap:10px;padding:8px 0;${i ? 'border-top:1px solid var(--border-soft)' : ''}">
       <div style="font-size:20px;flex:0 0 auto">${b.daysUntil === 0 ? '🎉' : '🎂'}</div>
       <div style="flex:1;min-width:0">
         <div style="font-family:'Anton';text-transform:uppercase;font-size:14px;letter-spacing:0.02em">${esc(b.name)}${b.kind === 'coach' ? ` <span style="font-size:9px;font-family:'JetBrains Mono';color:var(--ink-3);text-transform:uppercase">coach</span>` : ''}</div>
-        <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">${b.monthDay} · ${_bdayWhen(b.daysUntil)} · ${b.turningAge} ans</div>
+        <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">${b.monthDay} · ${_bdayWhen(b.daysUntil)} · ${b.turningAge} ans${n ? ' · ' + n + ' mot' + (n > 1 ? 's' : '') : ''}</div>
       </div>
+      ${n ? `<button class="btn btn-ghost" style="font-size:10px;padding:4px 6px;flex:none" title="Modérer les mots" onclick="openBirthdayModeration('${esc(b.id)}',${b.nextBirthdayYear})">🛡</button>` : ''}
     </div>`;
+  };
   return `
     <div style="padding:0 18px;margin-bottom:18px">
       <div style="border:1.5px solid rgba(var(--accent-rgb),0.35);border-radius:var(--radius);background:linear-gradient(135deg,rgba(var(--accent-rgb),0.10),var(--surface));padding:14px 16px">
@@ -9759,6 +9863,398 @@ function _maybeNotifyBirthdays() {
     });
     try { localStorage.setItem('pb8_bday_notified', JSON.stringify(seen)); } catch (e) {}
   }).catch(() => {});
+}
+
+// ============================================================
+// ANNIVERSAIRES CÔTÉ JOUEUSES — mots écrits à l'avance, lus le jour J
+// ============================================================
+// cf. migration 20260730_001_birthday_messages. Trois temps :
+//   1. AVANT (J-14 → J-1) : la section « Prochains anniversaires » de l'accueil
+//      joueuse montre qui va fêter. Chacune écrit son mot, modifiable.
+//   2. LE JOUR J, pour la fêtée : au premier boot du jour, confettis + modale
+//      « Joyeux anniversaire » avec tous les mots reçus.
+//   3. LE JOUR J, pour les autres : la fêtée reste affichée (« 🎉 C'est
+//      aujourd'hui ! ») et celles qui n'ont rien écrit peuvent encore le faire —
+//      mais les mots déjà postés sont VERROUILLÉS (ils sont peut-être déjà lus).
+//
+// La fêtée ne voit JAMAIS son propre anniversaire dans la section : c'est toute
+// la surprise. Elle ne voit ses mots que dans la modale du jour J.
+const BIRTHDAY_LOOKAHEAD_DAYS = 14;   // fenêtre de la section « prochains »
+const BIRTHDAY_NOTIF_DAYS = 7;        // fenêtre du rappel dans la cloche (moins bavard)
+const BIRTHDAY_MSG_MAX = 500;         // aligné sur le CHECK de la migration
+
+function _bdayIsPlayer() {
+  const a = state.auth;
+  return !!(a && a.role === 'player' && a.playerId);
+}
+function _bdayFlush() {
+  try { if (window.PbSync && PbSync.flushNow) PbSync.flushNow(state).catch(() => {}); } catch (e) {}
+}
+// Vivier : les joueuses de la saison active (toutes équipes — un anniversaire
+// n'est pas une affaire d'effectif E1/E2), avec une date de naissance renseignée.
+// Repli sur state.players si les saisons ne sont pas encore chargées.
+function _bdayPlayersPool() {
+  const sid = getActiveSeasonId();
+  const list = (sid && _seasonsLoaded()) ? getSeasonPlayers(sid, { team: 'all' }) : (state.players || []);
+  return list.filter(p => p && p.dateNaissance)
+    .map(p => ({ id: p.id, name: p.name || '', num: p.num, kind: 'player', dateNaissance: p.dateNaissance }));
+}
+// Anniversaires à venir VUS PAR LA JOUEUSE CONNECTÉE : le sien est retiré.
+// Réutilise getUpcomingBirthdays (déjà testé) et ré-attache le numéro de maillot.
+function upcomingBirthdays(daysAhead, ref) {
+  const pool = _bdayPlayersPool();
+  const me = _bdayIsPlayer() ? state.auth.playerId : null;
+  const byId = Object.fromEntries(pool.map(p => [p.id, p]));
+  const days = Number.isFinite(daysAhead) ? daysAhead : BIRTHDAY_LOOKAHEAD_DAYS;
+  return getUpcomingBirthdays(pool.filter(p => p.id !== me), days, ref)
+    .map(b => Object.assign({}, b, { num: (byId[b.id] || {}).num }));
+}
+// Nombre de jours avant le prochain anniversaire d'une joueuse (0 = aujourd'hui).
+// Recalculé à chaque écriture plutôt que passé en paramètre : une modale laissée
+// ouverte jusqu'à minuit ne doit pas pouvoir contourner le verrou du jour J.
+function _bdayDaysUntil(playerId, ref) {
+  const p = (state.players || []).find(x => x.id === playerId);
+  if (!p || !p.dateNaissance) return null;
+  const e = getUpcomingBirthdays([{ id: p.id, name: p.name, kind: 'player', dateNaissance: p.dateNaissance }], 366, ref)[0];
+  return e ? e.daysUntil : null;
+}
+// L'entrée d'anniversaire d'une joueuse (année visée, âge fêté, JJ/MM).
+function _bdayEntryFor(playerId, ref) {
+  const p = (state.players || []).find(x => x.id === playerId);
+  if (!p || !p.dateNaissance) return null;
+  return getUpcomingBirthdays([{ id: p.id, name: p.name, num: p.num, kind: 'player', dateNaissance: p.dateNaissance }], 366, ref)[0] || null;
+}
+// L'anniversaire de la joueuse connectée, uniquement s'il tombe AUJOURD'HUI.
+function _myBirthdayToday(ref) {
+  if (!_bdayIsPlayer()) return null;
+  const e = _bdayEntryFor(state.auth.playerId, ref);
+  return (e && e.daysUntil === 0) ? e : null;
+}
+
+// --- Lecture des mots -------------------------------------------------------
+function _bdayRowsFor(playerId, year) {
+  const y = Number(year);
+  return (state.birthdayMessages || []).filter(m => m && m.birthdayPlayerId === playerId && Number(m.birthdayYear) === y);
+}
+// Les mots vivants d'un anniversaire, UN SEUL par autrice. Il n'y a pas de
+// contrainte UNIQUE en base (cf. en-tête de la migration : elle empoisonnerait
+// le lot d'upsert PbSync) : le dédoublonnage se fait ici, et la survivante est
+// déterministe (id le plus petit) pour que tous les appareils voient la même.
+function birthdayMessagesFor(playerId, year) {
+  const byAuthor = new Map();
+  _bdayRowsFor(playerId, year).filter(m => !m.deletedAt).forEach(m => {
+    const k = m.authorPlayerId || '?';
+    const cur = byAuthor.get(k);
+    if (!cur || String(m.id) < String(cur.id)) byAuthor.set(k, m);
+  });
+  return [...byAuthor.values()].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+}
+function myBirthdayMessage(playerId, year) {
+  if (!_bdayIsPlayer()) return null;
+  return birthdayMessagesFor(playerId, year).find(m => m.authorPlayerId === state.auth.playerId) || null;
+}
+// Un mot est modifiable jusqu'à la VEILLE. Le jour J il est figé : la fêtée l'a
+// peut-être déjà lu, voir le texte changer après coup serait absurde.
+function _bdayCanEdit(daysUntil) { return Number(daysUntil) >= 1; }
+function _bdayAuthorLabel(m) {
+  const p = (state.players || []).find(x => x.id === m.authorPlayerId);
+  if (!p) return 'Une coéquipière';
+  return (p.num ? '#' + p.num + ' ' : '') + (p.name || '');
+}
+
+// --- Écriture (joueuse autrice) ---------------------------------------------
+function saveBirthdayMessage(playerId, year) {
+  if (!_bdayIsPlayer()) return false;
+  const a = state.auth;
+  if (playerId === a.playerId) return false;                 // pas de mot à soi-même
+  const el = document.getElementById('bm-text');
+  const text = String((el && el.value) || '').trim().slice(0, BIRTHDAY_MSG_MAX);
+  if (!text) { try { showToast('⚠️ Écris ton mot avant d\'envoyer'); } catch (e) {} return false; }
+  const y = Number(year);
+  const daysUntil = _bdayDaysUntil(playerId);
+  // Réutilise la ligne du triplet (fêtée, autrice, année), même soft-deletée :
+  // c'est ce qui tient la règle « 1 mot par autrice » sans contrainte UNIQUE.
+  const existing = _bdayRowsFor(playerId, y)
+    .filter(m => m.authorPlayerId === a.playerId)
+    .sort((x, z) => String(x.id).localeCompare(String(z.id)))[0];
+  const now = Date.now();
+  if (existing && !existing.deletedAt && !_bdayCanEdit(daysUntil)) {
+    try { showToast('🔒 C\'est le jour J — ton mot est déjà parti'); } catch (e) {}
+    return false;
+  }
+  if (existing) {
+    Object.assign(existing, { message: text, deletedAt: null, updatedAt: now });
+  } else {
+    state.birthdayMessages = state.birthdayMessages || [];
+    state.birthdayMessages.push({
+      id: uid(), birthdayPlayerId: playerId, authorPlayerId: a.playerId,
+      birthdayYear: y, message: text, readAt: null,
+      createdAt: now, updatedAt: now, deletedAt: null,
+    });
+  }
+  persist(); _bdayFlush();
+  try { showToast('Message envoyé ! 🎁'); } catch (e) {}
+  closeModal(); render();
+  return true;
+}
+function deleteMyBirthdayMessage(playerId, year) {
+  if (!_bdayIsPlayer()) return false;
+  const m = myBirthdayMessage(playerId, year);
+  if (!m) return false;
+  if (!_bdayCanEdit(_bdayDaysUntil(playerId))) {
+    try { showToast('🔒 C\'est le jour J — ton mot est déjà parti'); } catch (e) {}
+    return false;
+  }
+  let ok = false;
+  try { ok = confirm('Supprimer ton mot ? Tu pourras en écrire un autre.'); } catch (e) { ok = true; }
+  if (!ok) return false;
+  // Soft-delete : un hard delete d'un id 'x…' serait repoussé au flush par les
+  // autres appareils (cf. architecture PbSync).
+  m.deletedAt = Date.now(); m.updatedAt = m.deletedAt;
+  persist(); _bdayFlush();
+  try { showToast('🗑 Mot supprimé'); } catch (e) {}
+  closeModal(); render();
+  return true;
+}
+
+// --- Section « Prochains anniversaires » (accueil joueuse) -------------------
+function renderBirthdaysSection() {
+  if (!_bdayIsPlayer()) return '';
+  const list = upcomingBirthdays();
+  if (!list.length) return '';
+  const row = (b, i) => {
+    const mine = myBirthdayMessage(b.id, b.nextBirthdayYear);
+    const n = birthdayMessagesFor(b.id, b.nextBirthdayYear).length;
+    const today = b.daysUntil === 0;
+    const locked = mine && !_bdayCanEdit(b.daysUntil);
+    return `
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 0;${i ? 'border-top:1px solid var(--border-soft)' : ''}">
+        <div style="font-size:20px;flex:0 0 auto">${today ? '🎉' : '🎂'}</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-family:'Anton';text-transform:uppercase;font-size:14px;letter-spacing:0.02em">${b.num ? '#' + esc(String(b.num)) + ' ' : ''}${esc(b.name)}</div>
+          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">
+            ${b.monthDay} · ${today ? "C'est aujourd'hui !" : _bdayWhen(b.daysUntil)} · ${b.turningAge} ans${n ? ' · ' + n + ' mot' + (n > 1 ? 's' : '') : ''}
+          </div>
+        </div>
+        <button class="btn ${mine ? 'btn-ghost' : 'btn-secondary'}" style="font-size:10px;padding:6px 8px;flex:none;white-space:nowrap"
+          onclick="openBirthdayMessageModal('${esc(b.id)}',${b.nextBirthdayYear})">
+          ${mine ? (locked ? '🔒 Mon mot' : '✎ Mon mot') : '✍️ Écrire un mot'}
+        </button>
+      </div>`;
+  };
+  return `
+    <div style="padding:0 18px;margin-bottom:18px">
+      <div style="border:1.5px solid rgba(var(--accent-rgb),0.35);border-radius:var(--radius);background:linear-gradient(135deg,rgba(var(--accent-rgb),0.10),var(--surface));padding:14px 16px">
+        <div style="font-family:'Anton';font-size:15px;text-transform:uppercase;letter-spacing:0.02em">🎂 Prochains anniversaires</div>
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;margin-top:2px;margin-bottom:4px">Ton mot lui sera montré le jour J</div>
+        ${list.map(row).join('')}
+      </div>
+    </div>`;
+}
+
+// Compteur de caractères de la modale d'écriture (mis à jour à la frappe).
+function _bdayCount() {
+  try {
+    const el = document.getElementById('bm-text');
+    const out = document.getElementById('bm-count');
+    if (el && out) out.textContent = (el.value || '').length + ' / ' + BIRTHDAY_MSG_MAX;
+  } catch (e) {}
+}
+
+function openBirthdayMessageModal(playerId, year) {
+  if (!_bdayIsPlayer()) return;
+  const p = (state.players || []).find(x => x.id === playerId);
+  if (!p) return;
+  const entry = _bdayEntryFor(playerId);
+  const y = Number(year) || (entry && entry.nextBirthdayYear) || new Date().getFullYear();
+  const daysUntil = entry ? entry.daysUntil : null;
+  const mine = myBirthdayMessage(playerId, y);
+  const first = String(p.name || '').split(' ')[0] || (p.name || '');
+  // Verrouillé = un mot existe DÉJÀ et on est le jour J. Sans mot posté, écrire
+  // reste possible le jour J : c'est la dernière chance.
+  const locked = !!mine && !_bdayCanEdit(daysUntil);
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow-muted">${entry ? esc(entry.monthDay) + ' · ' + esc(daysUntil === 0 ? "aujourd'hui !" : _bdayWhen(daysUntil)) : ''}</div>
+        <div class="modal-title" style="font-size:15px">🎂 Un mot pour ${esc(first)}</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:12px;color:var(--ink-2);line-height:1.5;margin-bottom:12px">
+        ${locked
+          ? `C'est son anniversaire aujourd'hui : ton mot est parti, il ne peut plus être modifié.`
+          : `Écris ton mot pour <strong>${esc(first)}</strong> qui a 🎂 le ${entry ? esc(entry.monthDay) : ''}. Elle le découvrira <strong>le jour J</strong>, avec ceux des autres.`}
+      </div>
+      ${locked ? `
+        <div class="bday-msg" style="animation:none">${esc(mine.message)}</div>
+      ` : `
+        <div class="fld">
+          <textarea id="bm-text" maxlength="${BIRTHDAY_MSG_MAX}" rows="5" oninput="_bdayCount()"
+            placeholder="Joyeux anniversaire ${esc(first)} ! 🎉">${esc((mine && mine.message) || '')}</textarea>
+          <div id="bm-count" style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-align:right;margin-top:4px">${((mine && mine.message) || '').length} / ${BIRTHDAY_MSG_MAX}</div>
+        </div>
+        ${mine ? `<div style="font-size:11px;color:var(--ink-3);line-height:1.5">Tu as déjà écrit : tu peux modifier ton mot jusqu'à la veille.${mine.readAt ? ' Il a été lu ✓' : ''}</div>` : ''}
+      `}
+    </div>
+    <div class="modal-footer">
+      ${locked ? `<button class="btn btn-secondary btn-block" onclick="closeModal()">Fermer</button>` : `
+        ${mine ? `<button class="btn btn-ghost" style="color:var(--red)" onclick="deleteMyBirthdayMessage('${esc(playerId)}',${y})">🗑</button>` : ''}
+        <button class="btn btn-primary" style="flex:1" onclick="saveBirthdayMessage('${esc(playerId)}',${y})">${mine ? 'Enregistrer' : 'Envoyer'}</button>
+      `}
+    </div>
+  `);
+  try { const t = document.getElementById('bm-text'); if (t && !mine) t.focus(); } catch (e) {}
+}
+
+// --- Jour J : animation + modale de célébration (la fêtée) ------------------
+// Confettis en DOM pur (cf. CSS .bday-confetti) : aucune librairie externe, une
+// dépendance CDN ne serait pas disponible en PWA hors ligne.
+function _bdayConfetti() {
+  try {
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    document.querySelectorAll('.bday-confetti').forEach(n => n.remove());
+    const host = document.createElement('div');
+    host.className = 'bday-confetti';
+    const colors = ['#ff6b35', '#ffd166', '#06d6a0', '#4cc9f0', '#f72585', '#ffffff'];
+    let html = '';
+    for (let i = 0; i < 44; i++) {
+      const left = Math.round(Math.random() * 100);
+      const dur = (2.6 + Math.random() * 2.2).toFixed(2);
+      const delay = (Math.random() * 1.6).toFixed(2);
+      const c = colors[i % colors.length];
+      const w = 6 + Math.round(Math.random() * 6);
+      html += `<i style="left:${left}%;width:${w}px;background:${c};animation-duration:${dur}s;animation-delay:${delay}s"></i>`;
+    }
+    host.innerHTML = html;
+    document.body.appendChild(host);
+    // Nettoyage : la plus longue animation dure ~4.8 s (+1.6 s de retard).
+    setTimeout(() => { try { host.remove(); } catch (e) {} }, 7000);
+  } catch (e) {}
+}
+
+function _bdayCelebratedMap() { try { return load(K.birthdayCelebrated, {}) || {}; } catch (e) { return {}; } }
+
+// Boot du jour J : une seule fois par journée (filigrane localStorage), et
+// jamais par-dessus une popup déjà ouverte (openModal REMPLACE #modal-root, il
+// n'y a pas d'empilement) → on repasse plus tard plutôt que de perdre la fête.
+function maybeShowBirthdayCelebration(attempt) {
+  if (!_bdayIsPlayer()) return false;
+  const me = _myBirthdayToday();
+  if (!me) return false;
+  const key = state.auth.playerId + ':' + isoDate(new Date());
+  const map = _bdayCelebratedMap();
+  if (map[key]) return false;
+  let busy = false;
+  try {
+    busy = !!document.querySelector('#modal-root .modal') || !!document.querySelector('#gage-overlay .gage-screen');
+  } catch (e) {}
+  if (busy) {
+    const n = (attempt || 0) + 1;
+    if (n <= 6) setTimeout(() => { try { maybeShowBirthdayCelebration(n); } catch (e) {} }, 3000);
+    return false;
+  }
+  map[key] = Date.now();
+  try { save(K.birthdayCelebrated, map); } catch (e) {}
+  showBirthdayCelebration(state.auth.playerId, me.nextBirthdayYear);
+  return true;
+}
+
+// Rejouable à la demande (entrée de cloche) : l'animation n'est pas réservée au
+// premier boot, seul son DÉCLENCHEMENT AUTOMATIQUE l'est.
+function showBirthdayCelebration(playerId, year) {
+  const p = (state.players || []).find(x => x.id === playerId);
+  const entry = _bdayEntryFor(playerId);
+  const y = Number(year) || (entry && entry.nextBirthdayYear) || new Date().getFullYear();
+  const first = String((p && p.name) || '').split(' ')[0] || ((p && p.name) || '');
+  const msgs = birthdayMessagesFor(playerId, y);
+  const age = entry ? entry.turningAge : null;
+  _bdayConfetti();
+  openModal(`
+    <div class="modal-body" style="text-align:center;padding-top:18px">
+      <div class="bday-cake">🎂</div>
+      <div style="font-family:'Anton';font-size:24px;text-transform:uppercase;letter-spacing:0.02em;margin-top:8px;line-height:1.15">Joyeux anniversaire ${esc(first)} !</div>
+      ${age != null ? `<div style="font-family:'JetBrains Mono';font-size:11px;color:var(--orange);text-transform:uppercase;letter-spacing:0.08em;margin-top:6px">${age} ans 🎉</div>` : ''}
+      <div style="text-align:left;margin-top:18px">
+        ${msgs.length ? `
+          <div class="eyebrow-muted mb-2">${msgs.length} mot${msgs.length > 1 ? 's' : ''} de l'équipe</div>
+          ${msgs.map((m, i) => `
+            <div class="bday-msg" style="animation-delay:${Math.min(i, 8) * 0.08}s">
+              <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">${esc(_bdayAuthorLabel(m))}</div>
+              <div style="font-size:13px;line-height:1.5;margin-top:4px;white-space:pre-wrap">${esc(m.message)}</div>
+            </div>`).join('')}
+        ` : `
+          <div style="font-size:12px;color:var(--ink-3);line-height:1.5;text-align:center">Pas encore de mot de l'équipe — mais toute la salle te souhaite une belle journée 🏀</div>
+        `}
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary btn-block" onclick="thankBirthdayMessages('${esc(playerId)}',${y})">Merci 💕</button>
+    </div>
+  `);
+}
+
+// « Merci 💕 » : marque les mots comme lus (l'autrice voit « lu ✓ ») et ferme.
+// Seule la fêtée peut poser cette lecture — sinon n'importe quel appareil
+// pourrait marquer lus des mots que personne n'a vus.
+function thankBirthdayMessages(playerId, year) {
+  const a = state.auth;
+  if (a && a.role === 'player' && a.playerId === playerId) {
+    const now = Date.now();
+    let touched = 0;
+    birthdayMessagesFor(playerId, year).forEach(m => {
+      if (m.readAt) return;
+      m.readAt = now; m.updatedAt = now; touched++;
+    });
+    if (touched) { persist(); _bdayFlush(); }
+  }
+  try { document.querySelectorAll('.bday-confetti').forEach(n => n.remove()); } catch (e) {}
+  closeModal();
+}
+
+// --- Modération (coach) -----------------------------------------------------
+// Filet de sécurité pour un contenu inapproprié. Le coach VOIT les mots : c'est
+// le prix de la modération, et c'est assumé — aucun autre rôle n'y a accès.
+function openBirthdayModeration(playerId, year) {
+  if (!(state.auth && state.auth.role === 'coach')) return;
+  const p = (state.players || []).find(x => x.id === playerId);
+  if (!p) return;
+  const y = Number(year) || ((_bdayEntryFor(playerId) || {}).nextBirthdayYear) || new Date().getFullYear();
+  const msgs = birthdayMessagesFor(playerId, y);
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow-muted">#${esc(String(p.num || ''))} ${esc(p.name || '')} · ${y}</div>
+        <div class="modal-title" style="font-size:15px">🛡 Mots d'anniversaire</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:11px;color:var(--ink-3);line-height:1.5;margin-bottom:12px">Modération uniquement : supprime un mot déplacé avant qu'elle ne le lise. Elle ne verra jamais qu'il a existé.</div>
+      ${msgs.length ? msgs.map(m => `
+        <div class="bday-msg" style="animation:none;display:flex;gap:8px;align-items:flex-start">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">${esc(_bdayAuthorLabel(m))}${m.readAt ? ' · lu ✓' : ''}</div>
+            <div style="font-size:13px;line-height:1.5;margin-top:4px;white-space:pre-wrap">${esc(m.message)}</div>
+          </div>
+          <button class="btn btn-ghost" style="font-size:10px;padding:4px 6px;color:var(--red);flex:none" onclick="moderateBirthdayMessage('${esc(m.id)}')">✕</button>
+        </div>`).join('') : `<div style="font-size:12px;color:var(--ink-3)">Aucun mot pour l'instant.</div>`}
+    </div>
+  `);
+}
+function moderateBirthdayMessage(id) {
+  if (!(state.auth && state.auth.role === 'coach')) return false;
+  const m = (state.birthdayMessages || []).find(x => x.id === id && !x.deletedAt);
+  if (!m) return false;
+  let ok = false;
+  try { ok = confirm('Supprimer ce mot ? L\'autrice ne sera pas prévenue.'); } catch (e) { ok = true; }
+  if (!ok) return false;
+  m.deletedAt = Date.now(); m.updatedAt = m.deletedAt;
+  persist(); _bdayFlush();
+  try { showToast('🗑 Mot supprimé'); } catch (e) {}
+  try { openBirthdayModeration(m.birthdayPlayerId, m.birthdayYear); } catch (e) { render(); }
+  return true;
 }
 
 function renderHomeCoach() {
@@ -10123,6 +10619,10 @@ function renderHomePlayer() {
       ${renderTrainingPlayerCard()}
       ${renderUnavailPlayerBanner()}
       ${renderLicencePlayerCard()}
+
+      <!-- 1quinquies. Anniversaires des coéquipières : voir qui fête, écrire un
+           mot à l'avance. Le sien n'y figure jamais (surprise du jour J). -->
+      ${renderBirthdaysSection()}
 
       <!-- 2. Challenges actifs (preview 2-3, lien Tout → onglet) -->
       ${myActiveChallenges.length > 0 ? `
@@ -18053,7 +18553,13 @@ function maybeShowLicencePrompt(force) {
     if (_licenceSnoozedToday()) return false;
     // Ne pas passer devant une popup déjà ouverte (diffusion, tirage de gage) :
     // elles attendent une action, ce rappel non.
-    try { if (document.getElementById('modal-root')) return false; } catch (e) {}
+    //
+    // PIÈGE — tester l'EXISTENCE de #modal-root ne dit rien : closeModal() vide
+    // son contenu (innerHTML = '') mais ne retire jamais l'élément. Dès qu'une
+    // modale avait été ouverte UNE fois dans la session, la garde renvoyait
+    // toujours « occupé » et le rappel n'est jamais parti. _pbModalOpen teste le
+    // contenu, c'est la seule mesure fiable.
+    try { if (_pbModalOpen()) return false; } catch (e) {}
   }
   openMyLicence({ prompt: true });
   return true;
@@ -35255,6 +35761,16 @@ function _initPlayersSync() {
             setTimeout(() => { try { maybeShowLicencePrompt(); } catch (e) {} }, 2200);
           }
         } catch (e) { console.warn('[licence] boot prompt:', e.message); }
+        // ANNIVERSAIRE : le jour J, confettis + mots reçus pour la fêtée. En
+        // dernier de la file (le rappel licence passe avant, cf. spec), mais
+        // maybeShowBirthdayCelebration repasse toutes les 3 s si une popup est
+        // encore ouverte — la fête ne doit pas être perdue faute de créneau.
+        try {
+          if (state.auth && state.auth.role === 'player' && !window._bdayBootChecked) {
+            window._bdayBootChecked = true;
+            setTimeout(() => { try { maybeShowBirthdayCelebration(); } catch (e) {} }, 2600);
+          }
+        } catch (e) { console.warn('[bday] boot celebration:', e.message); }
         // Subscribe Realtime sur toutes les entités configurées. On utilise
         // scheduleRender (debouncé 100ms) au lieu de render() direct pour
         // collapser plusieurs events Realtime en un seul re-render.
@@ -35536,6 +36052,37 @@ function notifFeed(opts) {
     if (ftech) dParts.push(ftech + ' objectif' + (ftech > 1 ? 's' : '') + ' technique' + (ftech > 1 ? 's' : ''));
     add('player', { id: 'feedback-' + pid, ts: meFb.feedback.updatedAt || 0, icon: '📝',
       title: 'Retour du coach', detail: dParts.join(' · '), action: 'openMyFeedback()' });
+  });
+  // Anniversaire d'une coéquipière pour laquelle elle n'a PAS encore écrit :
+  // actionnable (todo → survit au « lu »), fenêtre réduite à 7 jours pour ne pas
+  // faire sonner la cloche pendant deux semaines. La section de l'accueil, elle,
+  // affiche bien 14 jours.
+  src('player', 'anniversaires-a-souhaiter', () => {
+    if (typeof upcomingBirthdays !== 'function') return;
+    upcomingBirthdays(BIRTHDAY_NOTIF_DAYS).forEach(b => {
+      if (myBirthdayMessage(b.id, b.nextBirthdayYear)) return;
+      todo('player', {
+        id: 'bday-' + b.id + '-' + b.nextBirthdayYear, icon: '🎂',
+        title: b.daysUntil === 0 ? "Anniversaire aujourd'hui" : 'Anniversaire ' + _bdayWhen(b.daysUntil),
+        detail: b.name + ' — écris-lui un mot',
+        action: "openBirthdayMessageModal('" + b.id + "'," + b.nextBirthdayYear + ")"
+      });
+    });
+  });
+  // Son PROPRE anniversaire, le jour J : rejouer la célébration (l'animation du
+  // boot est one-shot, la cloche est le moyen de revoir les mots).
+  src('player', 'mon-anniversaire', () => {
+    if (typeof _myBirthdayToday !== 'function') return;
+    const me = _myBirthdayToday();
+    if (!me) return;
+    const n = birthdayMessagesFor(pid, me.nextBirthdayYear).length;
+    const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
+    add('player', {
+      id: 'bday-me-' + me.nextBirthdayYear, ts: midnight.getTime(), icon: '🎉',
+      title: 'Joyeux anniversaire !',
+      detail: n ? n + ' mot' + (n > 1 ? 's' : '') + ' de l\'équipe' : 'Belle journée à toi 🏀',
+      action: "showBirthdayCelebration('" + pid + "'," + me.nextBirthdayYear + ")"
+    });
   });
   src('player', 'convocs', () => {
     if (typeof currentSeasonConvocations !== 'function') return;
@@ -36297,7 +36844,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-30.92';
+const APP_VERSION = '2026-07-30.94';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Une seule tentative de rechargement AUTOMATIQUE par session : si le HTML servi
@@ -36333,8 +36880,12 @@ async function checkForUpdate(opts) {
     showUpdateBanner(remote);
   } catch (e) { /* hors ligne / fichier absent → on ignore */ }
 }
+// MÊME PIÈGE que pour le rappel de licence : #modal-root survit à closeModal()
+// (seul son contenu est vidé). Tester son existence aurait rendu le
+// rechargement automatique inopérant dès la première modale de la session —
+// c'est-à-dire presque toujours. _pbModalOpen teste le contenu.
 function _hasOpenModal() {
-  try { return !!document.getElementById('modal-root'); } catch (e) { return false; }
+  try { return _pbModalOpen(); } catch (e) { return false; }
 }
 // L'app est un index.html mono-fichier (JS inline) → pas de bundle séparé à
 // cache-buster. En Safari onglet, un simple location.reload() peut resservir le
@@ -36471,6 +37022,11 @@ document.addEventListener('visibilitychange', () => {
     try { _trainingRemindCheck(); } catch (e) {}
     // Retour au 1er plan : un gage a pu être assigné entre-temps → tirage.
     try { maybeShowGageReveal(); } catch (e) {}
+    // Rappel licence : nouvelle chance. Au boot il ne part qu'une fois, et s'il
+    // tombe pendant qu'une autre popup est ouverte il serait perdu pour toute la
+    // session — or une PWA n'est jamais vraiment fermée. Le report du jour et le
+    // « c'est fait » restent évidemment respectés.
+    try { maybeShowLicencePrompt(); } catch (e) {}
     // Rafraîchit le badge d'icône (un signal a pu changer pendant l'absence).
     try { updateAppBadge(); } catch (e) {}
   }
