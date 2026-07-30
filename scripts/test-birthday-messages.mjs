@@ -412,7 +412,67 @@ t('une année non numérique ne part pas en base', () => {
   ok(row.birthday_year === null, 'birthday_year = ' + JSON.stringify(row.birthday_year));
 });
 
-// --- 9) non-régression -------------------------------------------------------
+// --- 9) responsive : breakpoints standards, pas de device de référence -------
+// La règle : small < 480px · medium 480-767px · large ≥ 768px. Vérifiable
+// mentalement à 320 / 375 / 390 / 414 / 428 px — toutes ces largeurs tombent
+// dans « small », donc le même rendu, sans cas particulier par téléphone.
+const css = (html.match(/<style[^>]*>([\s\S]*?)<\/style>/g) || []).join('\n');
+const bdayCss = css.slice(css.indexOf('ANNIVERSAIRE : ANIMATION DU JOUR J'));
+const bdayCssBlock = bdayCss.slice(0, bdayCss.indexOf('PULL-TO-REFRESH'));
+
+t('les breakpoints anniversaire sont standards (480 / 768), pas un device', () => {
+  ok(/min-width:\s*480px/.test(bdayCssBlock), 'pas de borne medium (min-width:480px)');
+  ok(/min-width:\s*768px/.test(bdayCssBlock), 'pas de borne large (min-width:768px)');
+  // 320 / 375 / 390 / 414 / 428 ne doivent JAMAIS apparaître comme breakpoint :
+  // ce serait un calibrage sur un téléphone précis.
+  const devices = bdayCssBlock.match(/(?:max|min)-width:\s*(320|359|375|390|400|414|428)px/g);
+  ok(!devices, 'breakpoint calibré sur un device : ' + JSON.stringify(devices));
+});
+t('la feature est MOBILE-FIRST : aucune media query max-width', () => {
+  // Le cas de base EST le petit écran (< 480 px). Une max-width rétrécirait le
+  // mobile — c'est exactement ce que test-tablet-responsive.mjs interdit à
+  // l'échelle de la feuille de style ; on le verrouille aussi ici, localement.
+  const maxq = bdayCssBlock.match(/@media[^{]*max-width/g);
+  ok(!maxq, 'media query max-width introduite : ' + JSON.stringify(maxq));
+  // Empilé par défaut, remis en ligne seulement à partir de 480 px.
+  ok(/\.bday-row-btn\s*{[^}]*flex:\s*1 1 100%/.test(bdayCssBlock), 'bouton non empilé par défaut');
+  const medium = bdayCssBlock.slice(bdayCssBlock.indexOf('min-width: 480px'));
+  ok(/\.bday-row-btn\s*{[^}]*flex:\s*0 0 auto/.test(medium), 'bouton jamais remis en ligne en medium');
+});
+t('les cibles tactiles de la feature font au moins 44px', () => {
+  ok(/\.bday-row-btn\s*{[^}]*min-height:\s*44px/.test(bdayCssBlock), 'bouton de ligne < 44px');
+  ok(/\.bday-icon-btn\s*{[^}]*min-width:\s*44px[^}]*min-height:\s*44px/.test(bdayCssBlock), 'bouton d\'icône < 44px');
+  seed();
+  // Les boutons posés en inline (footers de modale) portent aussi leur hauteur.
+  ctx.openBirthdayMessageModal('pA', 2026);
+  ok(/min-height:44px/.test(ctx.__lastModal || ''), 'bouton Envoyer sans hauteur minimale');
+  S.auth = { role: 'player', playerId: 'pB' };
+  ctx.showBirthdayCelebration('pB', 2026);
+  ok(/min-height:48px/.test(ctx.__lastModal || ''), 'bouton « Merci » sans hauteur minimale');
+});
+t('rien ne peut déborder horizontalement', () => {
+  // Un nom ou un mot d'un seul tenant (500 « a ») doit casser, pas élargir.
+  ok((bdayCssBlock.match(/overflow-wrap:\s*anywhere/g) || []).length >= 4, 'coupure de mot absente');
+  ok(/\.bday-row\s*{[^}]*flex-wrap:\s*wrap/.test(bdayCssBlock), 'ligne non enroulable');
+  ok(/\.bday-row-main\s*{[^}]*min-width:\s*0/.test(bdayCssBlock), 'min-width:0 absent → le texte pousse la ligne');
+  ok(/\.bday-confetti\s*{[^}]*overflow:\s*hidden/.test(bdayCssBlock), 'confettis non bornés');
+});
+t('la typo de la célébration est fluide (clamp), pas figée', () => {
+  ok(/\.bday-cake\s*{[^}]*clamp\(/.test(bdayCssBlock), 'gâteau à taille fixe');
+  ok(/\.bday-hero-title\s*{[^}]*clamp\(/.test(bdayCssBlock), 'titre à taille fixe');
+});
+t('le markup passe par les classes, plus par des styles calibrés', () => {
+  seed();
+  const h = ctx.renderBirthdaysSection();
+  ok(h.includes('bday-row') && h.includes('bday-row-btn'), 'classes absentes de la section');
+  ok(!/white-space:nowrap/.test(h), 'nowrap réintroduit → écrasement sur petit écran');
+  ok(!/font-size:1[04]px;padding:6px 8px/.test(h), 'ancien bouton compact réintroduit');
+});
+t('les confettis ne volent aucun clic (pointer-events)', () => {
+  ok(/\.bday-confetti\s*{[^}]*pointer-events:\s*none/.test(bdayCssBlock), 'overlay cliquable');
+});
+
+// --- 10) non-régression ------------------------------------------------------
 t('la carte anniversaires du coach reste réservée à l\'admin', () => {
   seed(); S.auth = { role: 'coach', coachId: 'c2' };
   S.coaches.push({ id: 'c2', name: 'Coach 2', coachRole: 'coach', teams: ['e1'] });
