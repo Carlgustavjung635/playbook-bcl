@@ -553,7 +553,7 @@
     100% { opacity: 0; transform: translateY(102vh) rotate(720deg); }
   }
   /* Gâteau qui « rebondit » en tête de la modale de célébration. */
-  .bday-cake { font-size: 54px; line-height: 1; animation: bdayPop 0.9s ease-out; }
+  .bday-cake { font-size: clamp(44px, 13vw, 64px); line-height: 1; animation: bdayPop 0.9s ease-out; }
   @keyframes bdayPop {
     0%   { transform: scale(0.3) rotate(-12deg); opacity: 0; }
     45%  { transform: scale(1.18) rotate(6deg); opacity: 1; }
@@ -569,6 +569,65 @@
   @media (prefers-reduced-motion: reduce) {
     .bday-confetti { display: none; }
     .bday-cake, .bday-msg { animation: none; }
+  }
+  /* ---- Responsive : breakpoints STANDARDS, aucun device de référence ----
+     small < 480px · medium 480-767px · large ≥ 768px.
+     Tenu à 320 / 375 / 390 / 414 / 428 px : cibles tactiles ≥ 44 px, et aucun
+     débordement horizontal — tout texte long casse (overflow-wrap: anywhere)
+     au lieu d'élargir la ligne. */
+  .bday-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; flex-wrap: wrap; }
+  .bday-row + .bday-row { border-top: 1px solid var(--border-soft); }
+  .bday-row-icon { flex: 0 0 auto; font-size: 20px; line-height: 1; }
+  .bday-row-main { flex: 1 1 150px; min-width: 0; }
+  .bday-row-name {
+    font-family: 'Anton', sans-serif; text-transform: uppercase; font-size: 14px;
+    letter-spacing: 0.02em; line-height: 1.2; overflow-wrap: anywhere;
+  }
+  .bday-row-meta {
+    margin-top: 2px; font-family: 'JetBrains Mono', monospace; font-size: 10px;
+    line-height: 1.45; color: var(--ink-3); text-transform: uppercase; overflow-wrap: anywhere;
+  }
+  /* MOBILE-FIRST, comme tout le reste de la feuille : le cas de base EST le
+     petit écran (< 480 px, donc 320 / 375 / 390 / 414 / 428 sans exception), et
+     seules des min-width élargissent ensuite. Aucune media query max-width :
+     elles rétréciraient le mobile, et test-tablet-responsive les refuse.
+     Par défaut le bouton passe SOUS le texte, pleine largeur — à 320 px
+     « ✍️ Écrire un mot » n'a pas la place à côté d'un nom, et un bouton écrasé
+     (ou un nom illisible) serait pire qu'un bouton empilé. */
+  .bday-row-btn { flex: 1 1 100%; min-height: 44px; font-size: 10px; padding: 8px 12px; }
+  @media (min-width: 480px) {
+    .bday-row-name { font-size: 15px; }
+    .bday-row-meta { font-size: 11px; }
+    /* medium : la place existe, le bouton revient sur la ligne. */
+    .bday-row-btn { flex: 0 0 auto; font-size: 11px; }
+  }
+  @media (min-width: 768px) {
+    .bday-row { gap: 12px; }
+    .bday-row-name { font-size: 16px; }
+  }
+  /* Bouton d'icône seule (🛡 modération, ✕ suppression) : carré tactile plein. */
+  .bday-icon-btn { flex: 0 0 auto; min-width: 44px; min-height: 44px; padding: 0 8px; font-size: 12px; }
+  /* Célébration : typo fluide, jamais tronquée, jamais de scroll latéral. */
+  .bday-hero { text-align: center; padding-top: 6px; }
+  .bday-hero-title {
+    font-family: 'Anton', sans-serif; font-size: clamp(19px, 6.4vw, 28px);
+    text-transform: uppercase; letter-spacing: 0.02em; line-height: 1.15;
+    margin-top: 8px; overflow-wrap: anywhere;
+  }
+  .bday-hero-age {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--orange);
+    text-transform: uppercase; letter-spacing: 0.08em; margin-top: 6px;
+  }
+  .bday-msg-author {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--ink-3);
+    text-transform: uppercase; overflow-wrap: anywhere;
+  }
+  /* pre-wrap conserve les retours à la ligne du mot ; anywhere empêche un
+     « aaaa… » de 500 caractères de créer un scroll horizontal. */
+  .bday-msg-body { font-size: 13px; line-height: 1.5; margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  @media (min-width: 480px) {
+    .bday-msg-author { font-size: 11px; }
+    .bday-msg-body { font-size: 14px; }
   }
 
   /* ========== PULL-TO-REFRESH (PWA standalone) ========== */
@@ -1724,6 +1783,132 @@
   .lb-progress-fill {
     height: 100%; background: linear-gradient(90deg, var(--orange), var(--yellow));
     transition: width 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  /* ========== SUIVI COACH DE LA PRÉPA (onglet « Suivi détaillé ») ==========
+     MOBILE-FIRST, PALIERS EN `em`, AUCUN `max-width`.
+     La base est la mise en page la plus étroite : elle doit tenir sur le plus
+     petit téléphone encore en circulation (~320 px de large → 288 px de contenu
+     une fois les paddings de .modal-body retirés). Les paliers `min-width`
+     n'AJOUTENT que de l'aisance ; aucun n'est nécessaire pour que l'écran soit
+     utilisable.
+     POURQUOI `em` ET NON `px` : le palier suit alors la largeur de texte réelle
+     et non une dimension d'appareil. Un utilisateur qui grossit ses polices
+     (réglage d'accessibilité iOS/Android, ou zoom navigateur) retombe
+     automatiquement sur le palier empilé plutôt que de voir deux colonnes se
+     compresser jusqu'au débordement. Corollaire : ne PAS raisonner en modèles de
+     téléphone — 320/360/375/390/414/428 px tombent tous, par construction, dans
+     la base ; aucun n'est un breakpoint.
+
+     LES PALIERS, ET POURQUOI CEUX-LÀ (à taille de police par défaut, 1em = 16px) :
+       • base            → tier « small » (≈320-480px) : tout est empilé ;
+       • 23em (≈368px)   → la ligne libellé/valeur du détail passe en 2 colonnes.
+                           Palier de CONTENU : c'est la largeur à partir de
+                           laquelle une colonne de valeur de 116px cesse de
+                           couper les dates. Pas un appareil ;
+       • 26em (≈416px)   → vignettes 42→52px et photos du détail côte à côte.
+                           Palier de CONTENU également ;
+       • 30em (=480px)   → frontière standard small/medium : les deux <select> de
+                           filtre passent côte à côte.
+     Au-delà, rien : `.modal` est plafonnée à 480px (600px à ≥1024px), donc un
+     palier « tablette » n'élargirait rien ici. Mieux vaut pas de règle qu'une
+     règle morte — le tier large (48em/768px) reste géré globalement par .app.
+     PAS DE NOUVELLE MEDIA QUERY `max-width` : scripts/test-tablet-responsive.mjs
+     n'en autorise que 4 (359/400/480/640) et refuse toute règle qui rétrécirait
+     le mobile. Mobile-first = on n'en a pas besoin. */
+
+  /* Filtres. Empilés par défaut : pleine largeur, un libellé de <select> comme
+     « 👥 Toutes les joueuses » n'est jamais tronqué et la cible tactile fait
+     toute la largeur. Côte à côte seulement à partir de 30em (480px), là où la
+     modale atteint de toute façon son max-width. */
+  .td-filters { display: flex; flex-direction: column; gap: 8px; }
+  .td-filters > select { width: 100%; min-width: 0; }
+  @media (min-width: 30em) {
+    .td-filters { flex-direction: row; }
+    .td-filters > select { flex: 1 1 0; }
+  }
+
+  /* Barre d'onglets / de période : on annule les marges latérales de .segmented
+     (prévues pour un usage pleine page) — dans une modale elles s'ajoutent au
+     padding du body et volent 36px de largeur, ce qui suffit à déclencher un
+     scroll interne du contrôle sur un petit écran. */
+  .segmented.td-seg { margin-left: 0; margin-right: 0; }
+
+  /* Compteurs de tête : wrap naturel, jamais de largeur imposée. */
+  .td-counters {
+    display: flex; flex-wrap: wrap; gap: 4px 6px;
+    align-items: baseline;
+    font-size: 11px; color: var(--ink-2); line-height: 1.5;
+    background: var(--bg-3); border-radius: 8px;
+    padding: 9px 11px; margin-bottom: 14px;
+  }
+  .td-counters .sep { color: var(--ink-4); }
+
+  /* Ligne de timeline. `min-width:0` sur la colonne centrale est ce qui autorise
+     réellement le texte à se replier : sans lui, un mot long (nom de séance,
+     message) impose sa largeur au flex et pousse la ligne hors de l'écran. */
+  .td-row {
+    display: flex; gap: 9px; align-items: flex-start;
+    border: 1px solid var(--border-soft); border-radius: 10px;
+    padding: 10px; background: var(--surface); cursor: pointer;
+  }
+  .td-row:active { background: var(--bg-3); }
+  .td-row-main { flex: 1; min-width: 0; }
+  .td-row-name {
+    font-family: 'Anton', sans-serif; font-size: 13px; text-transform: uppercase;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .td-row-side {
+    display: flex; flex-direction: column; align-items: flex-end;
+    gap: 2px; flex: none;
+  }
+  .td-thumbs { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
+  .td-thumb {
+    width: 42px; height: 42px; object-fit: cover;
+    border-radius: 5px; background: var(--bg-3);
+  }
+  @media (min-width: 26em) { .td-thumb { width: 52px; height: 52px; } }
+
+  /* Cibles tactiles : 44px minimum (recommandation WCAG 2.5.5 / HIG). Le crayon
+     et la croix sont des boutons d'icône DANS une ligne cliquable — trop petits,
+     ils déclenchent l'action de la ligne au lieu de la leur. La surface est
+     agrandie sans grossir le glyphe. */
+  .td-tap {
+    min-width: 44px; min-height: 44px; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 15px; line-height: 1;
+  }
+
+  /* Tableau des km : scroll confiné au tableau (jamais à la page). */
+  .td-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin-top: 8px; }
+  .td-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  .td-table th { padding: 4px 6px; font-weight: normal; color: var(--ink-3); text-align: left; }
+  .td-table td { padding: 5px 6px; border-top: 1px solid var(--border-soft); }
+  .td-table .num { text-align: right; font-family: 'JetBrains Mono', monospace; }
+
+  /* Photos du panneau de détail : 1 colonne par défaut, 2 dès qu'il y a la place. */
+  .td-photos { display: flex; flex-direction: column; gap: 8px; }
+  .td-photos > figure { margin: 0; min-width: 0; }
+  .td-photos img { width: 100%; height: 150px; object-fit: cover; border-radius: 8px; cursor: zoom-in; background: var(--bg-3); }
+  .td-photos figcaption {
+    font-size: 10px; color: var(--ink-3); text-align: center; margin-top: 3px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  @media (min-width: 26em) {
+    .td-photos { flex-direction: row; }
+    .td-photos > figure { flex: 1 1 0; }
+    .td-photos img { height: 130px; }
+  }
+
+  /* Lignes libellé/valeur du détail : empilées en dessous de 23em, sinon la
+     colonne de valeur tombe à ~90px et chaque valeur passe sur 3 lignes. */
+  .td-kv { display: flex; flex-direction: column; gap: 1px; padding: 7px 0; border-top: 1px solid var(--border-soft); font-size: 12px; }
+  .td-kv > dt { color: var(--ink-3); font-size: 11px; }
+  .td-kv > dd { margin: 0; min-width: 0; overflow-wrap: break-word; }
+  @media (min-width: 23em) {
+    .td-kv { flex-direction: row; gap: 8px; }
+    .td-kv > dt { flex: 0 0 40%; max-width: 116px; font-size: 12px; }
+    .td-kv > dd { flex: 1; }
   }
 
   /* ========== CONVOC ========== */
@@ -9838,7 +10023,7 @@ function renderBirthdayCoachCard() {
         <div style="font-family:'Anton';text-transform:uppercase;font-size:14px;letter-spacing:0.02em">${esc(b.name)}${b.kind === 'coach' ? ` <span style="font-size:9px;font-family:'JetBrains Mono';color:var(--ink-3);text-transform:uppercase">coach</span>` : ''}</div>
         <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">${b.monthDay} · ${_bdayWhen(b.daysUntil)} · ${b.turningAge} ans${n ? ' · ' + n + ' mot' + (n > 1 ? 's' : '') : ''}</div>
       </div>
-      ${n ? `<button class="btn btn-ghost" style="font-size:10px;padding:4px 6px;flex:none" title="Modérer les mots" onclick="openBirthdayModeration('${esc(b.id)}',${b.nextBirthdayYear})">🛡</button>` : ''}
+      ${n ? `<button class="btn btn-ghost bday-icon-btn" title="Modérer les mots" aria-label="Modérer les mots d'anniversaire" onclick="openBirthdayModeration('${esc(b.id)}',${b.nextBirthdayYear})">🛡</button>` : ''}
     </div>`;
   };
   return `
@@ -10034,21 +10219,23 @@ function renderBirthdaysSection() {
   if (!_bdayIsPlayer()) return '';
   const list = upcomingBirthdays();
   if (!list.length) return '';
-  const row = (b, i) => {
+  const row = (b) => {
     const mine = myBirthdayMessage(b.id, b.nextBirthdayYear);
     const n = birthdayMessagesFor(b.id, b.nextBirthdayYear).length;
     const today = b.daysUntil === 0;
     const locked = mine && !_bdayCanEdit(b.daysUntil);
+    // Séparateur porté par `.bday-row + .bday-row` : plus d'index à trimballer,
+    // et il reste juste même si une ligne est filtrée en amont.
     return `
-      <div style="display:flex;align-items:center;gap:10px;padding:9px 0;${i ? 'border-top:1px solid var(--border-soft)' : ''}">
-        <div style="font-size:20px;flex:0 0 auto">${today ? '🎉' : '🎂'}</div>
-        <div style="flex:1;min-width:0">
-          <div style="font-family:'Anton';text-transform:uppercase;font-size:14px;letter-spacing:0.02em">${b.num ? '#' + esc(String(b.num)) + ' ' : ''}${esc(b.name)}</div>
-          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">
+      <div class="bday-row">
+        <div class="bday-row-icon">${today ? '🎉' : '🎂'}</div>
+        <div class="bday-row-main">
+          <div class="bday-row-name">${b.num ? '#' + esc(String(b.num)) + ' ' : ''}${esc(b.name)}</div>
+          <div class="bday-row-meta">
             ${b.monthDay} · ${today ? "C'est aujourd'hui !" : _bdayWhen(b.daysUntil)} · ${b.turningAge} ans${n ? ' · ' + n + ' mot' + (n > 1 ? 's' : '') : ''}
           </div>
         </div>
-        <button class="btn ${mine ? 'btn-ghost' : 'btn-secondary'}" style="font-size:10px;padding:6px 8px;flex:none;white-space:nowrap"
+        <button class="btn ${mine ? 'btn-ghost' : 'btn-secondary'} bday-row-btn"
           onclick="openBirthdayMessageModal('${esc(b.id)}',${b.nextBirthdayYear})">
           ${mine ? (locked ? '🔒 Mon mot' : '✎ Mon mot') : '✍️ Écrire un mot'}
         </button>
@@ -10100,7 +10287,7 @@ function openBirthdayMessageModal(playerId, year) {
           : `Écris ton mot pour <strong>${esc(first)}</strong> qui a 🎂 le ${entry ? esc(entry.monthDay) : ''}. Elle le découvrira <strong>le jour J</strong>, avec ceux des autres.`}
       </div>
       ${locked ? `
-        <div class="bday-msg" style="animation:none">${esc(mine.message)}</div>
+        <div class="bday-msg" style="animation:none"><div class="bday-msg-body" style="margin-top:0">${esc(mine.message)}</div></div>
       ` : `
         <div class="fld">
           <textarea id="bm-text" maxlength="${BIRTHDAY_MSG_MAX}" rows="5" oninput="_bdayCount()"
@@ -10111,9 +10298,9 @@ function openBirthdayMessageModal(playerId, year) {
       `}
     </div>
     <div class="modal-footer">
-      ${locked ? `<button class="btn btn-secondary btn-block" onclick="closeModal()">Fermer</button>` : `
-        ${mine ? `<button class="btn btn-ghost" style="color:var(--red)" onclick="deleteMyBirthdayMessage('${esc(playerId)}',${y})">🗑</button>` : ''}
-        <button class="btn btn-primary" style="flex:1" onclick="saveBirthdayMessage('${esc(playerId)}',${y})">${mine ? 'Enregistrer' : 'Envoyer'}</button>
+      ${locked ? `<button class="btn btn-secondary btn-block" style="min-height:44px" onclick="closeModal()">Fermer</button>` : `
+        ${mine ? `<button class="btn btn-ghost bday-icon-btn" style="color:var(--red)" aria-label="Supprimer mon mot" onclick="deleteMyBirthdayMessage('${esc(playerId)}',${y})">🗑</button>` : ''}
+        <button class="btn btn-primary" style="flex:1;min-height:44px" onclick="saveBirthdayMessage('${esc(playerId)}',${y})">${mine ? 'Enregistrer' : 'Envoyer'}</button>
       `}
     </div>
   `);
@@ -10184,17 +10371,17 @@ function showBirthdayCelebration(playerId, year) {
   const age = entry ? entry.turningAge : null;
   _bdayConfetti();
   openModal(`
-    <div class="modal-body" style="text-align:center;padding-top:18px">
+    <div class="modal-body bday-hero">
       <div class="bday-cake">🎂</div>
-      <div style="font-family:'Anton';font-size:24px;text-transform:uppercase;letter-spacing:0.02em;margin-top:8px;line-height:1.15">Joyeux anniversaire ${esc(first)} !</div>
-      ${age != null ? `<div style="font-family:'JetBrains Mono';font-size:11px;color:var(--orange);text-transform:uppercase;letter-spacing:0.08em;margin-top:6px">${age} ans 🎉</div>` : ''}
+      <div class="bday-hero-title">Joyeux anniversaire ${esc(first)} !</div>
+      ${age != null ? `<div class="bday-hero-age">${age} ans 🎉</div>` : ''}
       <div style="text-align:left;margin-top:18px">
         ${msgs.length ? `
           <div class="eyebrow-muted mb-2">${msgs.length} mot${msgs.length > 1 ? 's' : ''} de l'équipe</div>
           ${msgs.map((m, i) => `
             <div class="bday-msg" style="animation-delay:${Math.min(i, 8) * 0.08}s">
-              <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">${esc(_bdayAuthorLabel(m))}</div>
-              <div style="font-size:13px;line-height:1.5;margin-top:4px;white-space:pre-wrap">${esc(m.message)}</div>
+              <div class="bday-msg-author">${esc(_bdayAuthorLabel(m))}</div>
+              <div class="bday-msg-body">${esc(m.message)}</div>
             </div>`).join('')}
         ` : `
           <div style="font-size:12px;color:var(--ink-3);line-height:1.5;text-align:center">Pas encore de mot de l'équipe — mais toute la salle te souhaite une belle journée 🏀</div>
@@ -10202,7 +10389,7 @@ function showBirthdayCelebration(playerId, year) {
       </div>
     </div>
     <div class="modal-footer">
-      <button class="btn btn-primary btn-block" onclick="thankBirthdayMessages('${esc(playerId)}',${y})">Merci 💕</button>
+      <button class="btn btn-primary btn-block" style="min-height:48px;font-size:13px" onclick="thankBirthdayMessages('${esc(playerId)}',${y})">Merci 💕</button>
     </div>
   `);
 }
@@ -10247,10 +10434,10 @@ function openBirthdayModeration(playerId, year) {
       ${msgs.length ? msgs.map(m => `
         <div class="bday-msg" style="animation:none;display:flex;gap:8px;align-items:flex-start">
           <div style="flex:1;min-width:0">
-            <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">${esc(_bdayAuthorLabel(m))}${m.readAt ? ' · lu ✓' : ''}</div>
-            <div style="font-size:13px;line-height:1.5;margin-top:4px;white-space:pre-wrap">${esc(m.message)}</div>
+            <div class="bday-msg-author">${esc(_bdayAuthorLabel(m))}${m.readAt ? ' · lu ✓' : ''}</div>
+            <div class="bday-msg-body">${esc(m.message)}</div>
           </div>
-          <button class="btn btn-ghost" style="font-size:10px;padding:4px 6px;color:var(--red);flex:none" onclick="moderateBirthdayMessage('${esc(m.id)}')">✕</button>
+          <button class="btn btn-ghost bday-icon-btn" style="color:var(--red)" aria-label="Supprimer ce mot" onclick="moderateBirthdayMessage('${esc(m.id)}')">✕</button>
         </div>`).join('') : `<div style="font-size:12px;color:var(--ink-3)">Aucun mot pour l'instant.</div>`}
     </div>
   `);
@@ -20896,7 +21083,7 @@ function renderTrainingDashboard() {
     </div>
     <div class="modal-body" ${_modalScrollAttr(scrollKey)}>
       ${coach ? `
-        <div class="segmented" style="margin-bottom:14px">
+        <div class="segmented td-seg" style="margin-bottom:14px">
           <button class="segmented-btn ${detail ? '' : 'active'}" onclick="_tdTab('rank')">🏆 Classement</button>
           <button class="segmented-btn ${detail ? 'active' : ''}" onclick="_tdTab('detail')">📊 Suivi détaillé</button>
         </div>` : ''}
@@ -21013,17 +21200,17 @@ function renderCoachTrainingDetail(programId) {
   const rest = comps.length - shown.length;
 
   return `
-    <!-- FILTRES -->
-    <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px">
-      <div class="segmented">
+    <!-- FILTRES — empilés par défaut, en ligne à partir de 30em (cf. .td-filters) -->
+    <div style="margin-bottom:12px">
+      <div class="segmented td-seg">
         ${TD_PERIODS.map(([k, lab]) => `<button class="segmented-btn ${(d.period || 'all') === k ? 'active' : ''}" onclick="_tdSet('period','${k}')">${lab}</button>`).join('')}
       </div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap">
-        <select onchange="_tdSet('playerId',this.value)" style="flex:1 1 140px;min-width:0">
+      <div class="td-filters">
+        <select onchange="_tdSet('playerId',this.value)" aria-label="Filtrer par joueuse">
           <option value="">👥 Toutes les joueuses</option>
           ${pool.map(pl => `<option value="${esc(pl.id)}" ${d.playerId === pl.id ? 'selected' : ''}>#${pl.num} ${esc(pl.name)}</option>`).join('')}
         </select>
-        <select onchange="_tdSet('sessionId',this.value)" style="flex:1 1 140px;min-width:0">
+        <select onchange="_tdSet('sessionId',this.value)" aria-label="Filtrer par séance">
           <option value="">📋 Toutes les séances</option>
           ${sessions.map(s => `<option value="${esc(s.id)}" ${d.sessionId === s.id ? 'selected' : ''}>${esc((TRAINING_DAY_LABELS[s.dayOfWeek] || '').slice(0, 3))} · ${esc(s.name || 'Séance')}</option>`).join('')}
         </select>
@@ -21031,10 +21218,10 @@ function renderCoachTrainingDetail(programId) {
     </div>
 
     <!-- COMPTEURS -->
-    <div style="display:flex;gap:6px;flex-wrap:wrap;font-size:11px;color:var(--ink-2);background:var(--bg-3);border-radius:8px;padding:9px 11px;margin-bottom:14px;line-height:1.5">
-      <span><b>${who}</b> joueuse${who > 1 ? 's' : ''}</span><span style="color:var(--ink-4)">·</span>
-      <span><b>${comps.length}</b> séance${comps.length > 1 ? 's' : ''}</span><span style="color:var(--ink-4)">·</span>
-      <span><b>${Math.round(km * 10) / 10}</b> km</span><span style="color:var(--ink-4)">·</span>
+    <div class="td-counters">
+      <span><b>${who}</b> joueuse${who > 1 ? 's' : ''}</span><span class="sep">·</span>
+      <span><b>${comps.length}</b> séance${comps.length > 1 ? 's' : ''}</span><span class="sep">·</span>
+      <span><b>${Math.round(km * 10) / 10}</b> km</span><span class="sep">·</span>
       <span><b>${pts}</b> pts</span>
     </div>
 
@@ -21080,8 +21267,9 @@ function _tdKmBlock(p, comps, pool) {
 }
 
 // Séries de cumul, une par joueuse. En vue globale on garde les 5 plus grosses
-// distances : au-delà, les courbes se superposent et la légende déborde sur un
-// iPhone SE — les autres restent lisibles en drill-down (filtre joueuse).
+// distances : au-delà, les courbes se superposent et la légende passe sur trop de
+// lignes à la largeur d'un mobile, quel qu'il soit. Les autres joueuses restent
+// lisibles une par une en drill-down (filtre joueuse).
 const TD_KM_COLORS = ['#f97316', '#22c55e', '#3b82f6', '#e11d48', '#a855f7'];
 function _tdKmSeries(withKm, pool, onlyPlayerId) {
   const byPlayer = {};
@@ -21110,10 +21298,17 @@ function _tdKmSeries(withKm, pool, onlyPlayerId) {
 // module. Même approche que renderScoreSparkline.
 // Un seul point ne fait pas une courbe : on dessine alors un simple marqueur
 // (un <path> à un point est invisible, ce qui passerait pour un graphique vide).
+// LISIBILITÉ DU TEXTE DANS UN SVG : le graphique est en `width:100%` sur un
+// viewBox de largeur fixe, donc tout le contenu est mis à l'échelle par le
+// rapport (largeur réelle / W). Sur le contenu le plus étroit visé (~288 px de
+// modale) le rapport vaut 0.9 : un `font-size="7"` rendrait 6.3 px à l'écran,
+// illisible. Les tailles ci-dessous sont donc choisies pour rester ≥ 9 px APRÈS
+// mise à l'échelle. Ne pas les baisser « parce que ça tient » : ça tient dans le
+// viewBox, pas sur l'écran.
 function renderKmChart(series) {
   const flat = series.flatMap(s => s.pts);
   if (!flat.length) return '';
-  const W = 320, H = 130, PADL = 30, PADR = 10, PADT = 12, PADB = 22;
+  const W = 320, H = 140, PADL = 34, PADR = 10, PADT = 14, PADB = 26;
   const minX = Math.min(...flat.map(pt => pt.ms));
   let maxX = Math.max(...flat.map(pt => pt.ms));
   if (maxX === minX) maxX = minX + 86400000;
@@ -21121,7 +21316,7 @@ function renderKmChart(series) {
   const X = ms => (PADL + ((ms - minX) / (maxX - minX)) * (W - PADL - PADR)).toFixed(1);
   const Y = km => (H - PADB - (km / maxY) * (H - PADT - PADB)).toFixed(1);
   const grid = [0, 0.5, 1].map(f => `<line x1="${PADL}" y1="${Y(maxY * f)}" x2="${W - PADR}" y2="${Y(maxY * f)}" stroke="var(--border-soft)" stroke-width="0.5"/>`).join('');
-  const labels = [0, 0.5, 1].map(f => `<text x="${PADL - 4}" y="${Number(Y(maxY * f)) + 3}" text-anchor="end" font-size="7" fill="var(--ink-3)" font-family="monospace">${Math.round(maxY * f * 10) / 10}</text>`).join('');
+  const labels = [0, 0.5, 1].map(f => `<text x="${PADL - 4}" y="${Number(Y(maxY * f)) + 3}" text-anchor="end" font-size="11" fill="var(--ink-3)" font-family="monospace">${Math.round(maxY * f * 10) / 10}</text>`).join('');
   const paths = series.map(s => {
     const dd = s.pts.map((pt, i) => (i ? 'L' : 'M') + X(pt.ms) + ',' + Y(pt.km)).join(' ');
     const dots = s.pts.map(pt => `<circle cx="${X(pt.ms)}" cy="${Y(pt.km)}" r="${s.pts.length === 1 ? 3.5 : 2.2}" fill="${s.color}"/>`).join('');
@@ -21131,10 +21326,10 @@ function renderKmChart(series) {
     <div style="background:var(--bg-2);border:1px solid var(--border);border-radius:8px;padding:8px 6px 6px">
       <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block" role="img" aria-label="Évolution des kilomètres cumulés">
         ${grid}${labels}${paths}
-        <text x="${PADL}" y="${H - 6}" font-size="7" fill="var(--ink-3)" font-family="monospace">${esc(formatDate(new Date(minX).toISOString().slice(0, 10), 'short'))}</text>
-        <text x="${W - PADR}" y="${H - 6}" text-anchor="end" font-size="7" fill="var(--ink-3)" font-family="monospace">${esc(formatDate(new Date(maxX).toISOString().slice(0, 10), 'short'))}</text>
+        <text x="${PADL}" y="${H - 7}" font-size="11" fill="var(--ink-3)" font-family="monospace">${esc(formatDate(new Date(minX).toISOString().slice(0, 10), 'short'))}</text>
+        <text x="${W - PADR}" y="${H - 7}" text-anchor="end" font-size="11" fill="var(--ink-3)" font-family="monospace">${esc(formatDate(new Date(maxX).toISOString().slice(0, 10), 'short'))}</text>
       </svg>
-      <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-top:4px;font-size:9px;font-family:'JetBrains Mono'">
+      <div style="display:flex;gap:6px 12px;flex-wrap:wrap;justify-content:center;margin-top:6px;font-size:10px;line-height:1.5;font-family:'JetBrains Mono'">
         ${series.map(s => `<span style="color:${s.color};white-space:nowrap">━ ${esc(s.name)} · ${s.pts[s.pts.length - 1].km} km</span>`).join('')}
       </div>
     </div>`;
@@ -21146,21 +21341,21 @@ function _tdKmTable(withKm) {
   const rows = withKm.slice().sort((a, b) => (a.datePlanned || '').localeCompare(b.datePlanned || ''));
   let acc = 0;
   return `
-    <div style="overflow-x:auto;margin-top:8px">
-      <table style="width:100%;border-collapse:collapse;font-size:11px">
-        <thead><tr style="color:var(--ink-3);text-align:left">
-          <th style="padding:4px 6px;font-weight:normal">Date</th><th style="padding:4px 6px;font-weight:normal">Séance</th>
-          <th style="padding:4px 6px;font-weight:normal;text-align:right">Km</th><th style="padding:4px 6px;font-weight:normal;text-align:right">Cumul</th>
+    <div class="td-table-wrap">
+      <table class="td-table">
+        <thead><tr>
+          <th>Date</th><th>Séance</th>
+          <th class="num">Km</th><th class="num">Cumul</th>
         </tr></thead>
         <tbody>
           ${rows.map(c => {
             acc += c.runningDistanceKm;
             const s = (state.trainingSessions || []).find(x => x.id === c.sessionId);
-            return `<tr style="border-top:1px solid var(--border-soft)">
-              <td style="padding:4px 6px;white-space:nowrap">${esc(formatDate(c.datePlanned, 'short'))}</td>
-              <td style="padding:4px 6px">${esc((s && s.name) || '—')}</td>
-              <td style="padding:4px 6px;text-align:right;font-family:'JetBrains Mono'">${c.runningDistanceKm}</td>
-              <td style="padding:4px 6px;text-align:right;font-family:'JetBrains Mono';color:var(--orange)">${Math.round(acc * 10) / 10}</td>
+            return `<tr>
+              <td style="white-space:nowrap">${esc(formatDate(c.datePlanned, 'short'))}</td>
+              <td>${esc((s && s.name) || '—')}</td>
+              <td class="num">${c.runningDistanceKm}</td>
+              <td class="num" style="color:var(--orange)">${Math.round(acc * 10) / 10}</td>
             </tr>`;
           }).join('')}
         </tbody>
@@ -21195,7 +21390,7 @@ function renderPlayerProgression(playerId, programId) {
           <div style="font-family:'Anton';font-size:15px;text-transform:uppercase;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">#${pl.num} ${esc(pl.name)}</div>
           <div style="font-size:10px;color:var(--ink-3)">🟢 ${lvl.min} · 🟠 ${lvl.med} · 🔴 ${lvl.ultra}</div>
         </div>
-        <button class="btn btn-ghost" onclick="_tdSet('playerId','')" style="padding:5px 8px;font-size:11px;flex:none">✕</button>
+        <button class="btn btn-ghost td-tap" onclick="_tdSet('playerId','')" style="flex:none" title="Retirer le filtre joueuse" aria-label="Retirer le filtre joueuse">✕</button>
       </div>
       <div class="stat-grid" style="padding:0;margin:0 0 10px">
         <div class="stat-tile"><div class="stat-tile-label">Points</div><div class="stat-tile-value">${pts}</div><div class="stat-tile-sub">sur la période</div></div>
@@ -21236,24 +21431,23 @@ function renderCompletionsTimeline(comps, opts) {
       c.postPhotoUrl ? { url: c.postPhotoUrl, kind: 'post' } : null
     ].filter(Boolean);
     return `
-      <div onclick="openTrainingCompletionDetail('${esc(c.id)}')"
-           style="border:1px solid var(--border-soft);border-radius:10px;padding:10px;background:var(--surface);cursor:pointer;display:flex;gap:9px;align-items:flex-start">
+      <div class="td-row" onclick="openTrainingCompletionDetail('${esc(c.id)}')">
         ${o.showPlayer !== false ? _trPlayerAvatar(pl, 34) : ''}
-        <div style="flex:1;min-width:0">
-          ${o.showPlayer !== false ? `<div style="font-family:'Anton';font-size:13px;text-transform:uppercase;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">#${pl ? pl.num : '?'} ${esc(pl ? pl.name : 'Joueuse')}</div>` : ''}
-          <div style="font-size:11px;color:var(--ink-2);overflow-wrap:break-word">${esc((s && s.name) || 'Séance')}</div>
-          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">${esc(day)} · ${lvlIcon} ${esc(TRAINING_LEVEL_LABEL[c.contractLevel] || '')}${esc(lateBadge)}</div>
-          <div style="font-size:10px;color:var(--ink-3);margin-top:2px;overflow-wrap:break-word">
+        <div class="td-row-main">
+          ${o.showPlayer !== false ? `<div class="td-row-name">#${pl ? pl.num : '?'} ${esc(pl ? pl.name : 'Joueuse')}</div>` : ''}
+          <div style="font-size:12px;color:var(--ink-2);overflow-wrap:break-word">${esc((s && s.name) || 'Séance')}</div>
+          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px">${esc(day)} · ${lvlIcon} ${esc(TRAINING_LEVEL_LABEL[c.contractLevel] || '')}${esc(lateBadge)}</div>
+          <div style="font-size:11px;color:var(--ink-3);margin-top:3px;overflow-wrap:break-word">
             ${mate ? '👯 ' + esc(mate.name) + ' ' : ''}${Number.isFinite(c.runningDistanceKm) && c.runningDistanceKm > 0 ? '🏃 ' + c.runningDistanceKm + ' km ' : ''}${c.postMessage ? '💬 ' : ''}${c.editedAt ? '✎ corrigée ' : ''}${c.coachNote ? '📣 ' : ''}
           </div>
-          ${thumbs.length ? `<div style="display:flex;gap:4px;margin-top:6px">
-            ${thumbs.map(t => `<img src="${esc(t.url)}" loading="lazy" alt="" style="width:42px;height:42px;object-fit:cover;border-radius:5px;background:var(--bg-3)">`).join('')}
+          ${thumbs.length ? `<div class="td-thumbs">
+            ${thumbs.map(t => `<img class="td-thumb" src="${esc(t.url)}" loading="lazy" alt="">`).join('')}
           </div>` : ''}
         </div>
-        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex:none">
+        <div class="td-row-side">
           <div style="font-family:'Anton';font-size:17px;color:var(--orange);line-height:1">${c.pointsTotal || 0}</div>
-          <div style="font-size:8px;color:var(--ink-3);font-family:'JetBrains Mono'">PTS</div>
-          <button class="btn btn-ghost" onclick="event.stopPropagation();openEditCompletionModal('${esc(c.id)}')" style="padding:3px 7px;font-size:12px;margin-top:2px" title="Corriger">✎</button>
+          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">PTS</div>
+          <button class="btn btn-ghost td-tap" onclick="event.stopPropagation();openEditCompletionModal('${esc(c.id)}')" title="Corriger" aria-label="Corriger cette validation">✎</button>
         </div>
       </div>`;
   }).join('');
@@ -21284,8 +21478,10 @@ function openTrainingCompletionDetail(id) {
   let editor = c.updatedBy || '';
   const ec = (state.coaches || []).find(x => x.id === c.updatedBy);
   if (ec) editor = ec.name || editor;
-  const line = (label, val) => val ? `<div style="display:flex;gap:8px;padding:6px 0;border-top:1px solid var(--border-soft);font-size:12px">
-      <div style="color:var(--ink-3);flex:0 0 96px">${label}</div><div style="flex:1;min-width:0;overflow-wrap:break-word">${val}</div></div>` : '';
+  // Ligne libellé/valeur. <dl>/<dt>/<dd> plutôt que des <div> : c'est bien une
+  // liste de définitions, et la classe .td-kv l'empile sous 23em (sinon la colonne
+  // de valeur tombe à ~90px et chaque date passe sur trois lignes).
+  const line = (label, val) => val ? `<dl class="td-kv"><dt>${label}</dt><dd>${val}</dd></dl>` : '';
   openModal(`
     <div class="modal-header">
       <div>
@@ -21319,20 +21515,20 @@ function openTrainingCompletionDetail(id) {
 
       ${(c.squadPhotoUrl || c.postPhotoUrl) ? `
         <div class="eyebrow-muted" style="margin:14px 0 6px">Photos · touche pour agrandir</div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          ${c.squadPhotoUrl ? `<div style="flex:1 1 120px;min-width:0">
-            <img src="${esc(c.squadPhotoUrl)}" loading="lazy" alt="Photo squad" onclick="openTrainingPhoto('${esc(c.id)}','squad')" style="width:100%;height:120px;object-fit:cover;border-radius:8px;cursor:zoom-in;background:var(--bg-3)">
-            <div style="font-size:9px;color:var(--ink-3);text-align:center;margin-top:3px;font-family:'JetBrains Mono'">👯 SQUAD</div></div>` : ''}
-          ${c.postPhotoUrl ? `<div style="flex:1 1 120px;min-width:0">
-            <img src="${esc(c.postPhotoUrl)}" loading="lazy" alt="Photo du post" onclick="openTrainingPhoto('${esc(c.id)}','post')" style="width:100%;height:120px;object-fit:cover;border-radius:8px;cursor:zoom-in;background:var(--bg-3)">
-            <div style="font-size:9px;color:var(--ink-3);text-align:center;margin-top:3px;font-family:'JetBrains Mono'">📸 POST</div></div>` : ''}
+        <div class="td-photos">
+          ${c.squadPhotoUrl ? `<figure>
+            <img src="${esc(c.squadPhotoUrl)}" loading="lazy" alt="Photo squad" onclick="openTrainingPhoto('${esc(c.id)}','squad')">
+            <figcaption>👯 SQUAD</figcaption></figure>` : ''}
+          ${c.postPhotoUrl ? `<figure>
+            <img src="${esc(c.postPhotoUrl)}" loading="lazy" alt="Photo du post" onclick="openTrainingPhoto('${esc(c.id)}','post')">
+            <figcaption>📸 POST</figcaption></figure>` : ''}
         </div>` : ''}
 
       <div style="border:1px solid ${c.coachNote ? 'var(--orange)' : 'var(--border-soft)'};border-radius:10px;padding:11px;background:var(--surface);margin-top:14px">
         <div class="eyebrow-muted" style="margin-bottom:5px">📣 Mon mot pour elle</div>
         ${c.coachNote
           ? `<div style="font-size:12px;color:var(--ink-2);overflow-wrap:break-word;white-space:pre-wrap;margin-bottom:8px">${esc(c.coachNote)}</div>
-             <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';margin-bottom:8px">envoyé le ${esc(c.coachNoteAt ? new Date(c.coachNoteAt).toLocaleString('fr-FR') : '—')}</div>`
+             <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-bottom:8px">envoyé le ${esc(c.coachNoteAt ? new Date(c.coachNoteAt).toLocaleString('fr-FR') : '—')}</div>`
           : `<div style="font-size:11px;color:var(--ink-3);margin-bottom:8px">Elle le verra sur sa séance et dans ses notifs.</div>`}
         <button class="btn btn-secondary btn-block" onclick="openTrainingCoachNote('${esc(c.id)}')" style="font-size:12px">${c.coachNote ? '✎ Modifier le mot' : '📣 Écrire un mot'}</button>
       </div>
@@ -21340,7 +21536,7 @@ function openTrainingCompletionDetail(id) {
     <div class="modal-footer" style="display:flex;gap:6px">
       <button class="btn btn-secondary" onclick="_tdBack('${esc(c.programId)}')">← Retour</button>
       ${editable ? `<button class="btn btn-primary" style="flex:1" onclick="openEditCompletionModal('${esc(c.id)}')">✎ Modifier</button>
-        <button class="btn btn-ghost" onclick="deleteTrainingCompletion('${esc(c.id)}')" title="Supprimer">🗑</button>` : ''}
+        <button class="btn btn-ghost td-tap" onclick="deleteTrainingCompletion('${esc(c.id)}')" title="Supprimer" aria-label="Supprimer cette validation">🗑</button>` : ''}
     </div>
   `);
 }
@@ -37696,7 +37892,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-30.95';
+const APP_VERSION = '2026-07-30.96';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Une seule tentative de rechargement AUTOMATIQUE par session : si le HTML servi

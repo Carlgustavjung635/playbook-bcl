@@ -63,7 +63,11 @@ const ctx = {
   fetch: () => Promise.resolve({ ok: true, json: () => Promise.resolve({}) }),
   alert: () => {}, prompt: () => '',
   addEventListener() {}, removeEventListener() {}, dispatchEvent() {},
-  scrollTo() {}, scrollX: 0, scrollY: 0, innerWidth: 375, innerHeight: 667,   // iPhone SE
+  // innerWidth n'a aucune influence sur le rendu ici : la mise en page est faite
+  // par le CSS (paliers en `em`), pas par du JS qui lirait la largeur. Les
+  // assertions responsive du §12 parsent donc le CSS plutôt que de simuler un
+  // appareil — il n'existe pas de « largeur de référence » à simuler.
+  scrollTo() {}, scrollX: 0, scrollY: 0, innerWidth: 360, innerHeight: 740,
   getComputedStyle: () => ({ getPropertyValue: () => '' }),
   CustomEvent: class { constructor(t, o) { this.type = t; Object.assign(this, o || {}); } },
   AudioContext: undefined, speechSynthesis: undefined, Notification: undefined,
@@ -369,9 +373,10 @@ t('timeline : ordre chronologique inverse (le plus récent en tête)', () => {
   }
 });
 
-t('timeline : pas de scroll horizontal (aucune largeur fixe en px sur les lignes)', () => {
+t('timeline : la ligne ne porte aucune largeur fixe (elle suit son conteneur)', () => {
   const rows = M().split('openTrainingCompletionDetail(').slice(1, 2).join('');
-  assert(!/width:\s*\d{3,}px/.test(rows), 'largeur fixe > 100px dans une ligne');
+  assert(!/width:\s*\d{3,}px/.test(rows), 'largeur fixe >= 100px dans une ligne');
+  assert(!/flex:\s*[^;"]*\d{2,}px/.test(rows), 'flex-basis en px inline dans une ligne (la classe doit décider)');
 });
 
 t('renderCompletionsTimeline({showPlayer:false}) masque l\'identité (vue drill-down)', () => {
@@ -403,7 +408,7 @@ t('graphique km : cumul CROISSANT (le tri chronologique est appliqué)', () => {
   assert(Math.abs(ys[ys.length - 1] - 13.7) < 0.001, 'cumul final = ' + ys[ys.length - 1]);
 });
 
-t('graphique km : au plus 5 courbes en vue globale (lisibilité iPhone SE)', () => {
+t('graphique km : au plus 5 courbes en vue globale (légende lisible sur mobile)', () => {
   seed();
   S.trainingCompletions = [];
   S.players = [];
@@ -442,7 +447,9 @@ t('drill-down : tableau Date/Séance/Km/Cumul sous le graphique', () => {
   const h = M();
   assert(h.includes('<table'), 'tableau absent');
   assert(h.includes('Cumul'), 'colonne cumul absente');
-  assert(h.includes('overflow-x:auto'), 'tableau non scrollable → débordement iPhone');
+  // Le scroll est porté par .td-table-wrap (CSS), pas par un style inline — il est
+  // ainsi confiné au tableau et ne peut jamais devenir un scroll de page.
+  assert(h.includes('class="td-table-wrap"'), 'tableau sans conteneur scrollable');
 });
 
 // ============================================================================
@@ -850,6 +857,166 @@ t('_tdMore / _tdSet sans état ouvert → no-op silencieux', () => {
   ctx.state._trainingDash = null;
   ctx._tdMore(); ctx._tdSet('period', 'w'); ctx._tdTab('detail');
   assert(true);
+});
+
+// ============================================================================
+// 12) RESPONSIVE MOBILE UNIVERSEL
+// ============================================================================
+// On PARSE le CSS réel plutôt que de simuler une largeur : la mise en page de cet
+// écran est faite à 100 % par des media queries, jamais par du JS qui lirait
+// window.innerWidth. Simuler « un iPhone 13 » ne prouverait donc rien — et
+// figerait le test sur un modèle. Ce qu'on vérifie, ce sont les INVARIANTS :
+// mobile-first, paliers en `em`, cibles tactiles, aucun débordement possible.
+const CSS = (html.match(/<style>([\s\S]*?)<\/style>/) || [])[1] || '';
+// Les règles/queries du bloc prépa : tout ce qui touche un sélecteur .td-*.
+function tdMediaQueries() {
+  const out = [];
+  const re = /@media\s*\(([^)]*)\)\s*\{/g;
+  let m;
+  while ((m = re.exec(CSS))) {
+    let i = m.index + m[0].length, depth = 1;
+    const start = i;
+    for (; i < CSS.length && depth > 0; i++) { if (CSS[i] === '{') depth++; else if (CSS[i] === '}') depth--; }
+    const body = CSS.slice(start, i - 1);
+    if (/\.td-|\.segmented\.td-seg/.test(body)) out.push({ cond: m[1].trim(), body });
+    re.lastIndex = i;
+  }
+  return out;
+}
+function baseRuleOf(sel) {
+  const noMedia = CSS.replace(/@media[^{]*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}/g, '');
+  const m = new RegExp(sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\{([^}]*)\\}').exec(noMedia);
+  return m ? m[1] : '';
+}
+
+t('le bloc prépa existe bien dans le CSS (et pas seulement en styles inline)', () => {
+  assert(CSS.includes('.td-row'), '.td-row absent du CSS');
+  assert(CSS.includes('.td-filters'), '.td-filters absent du CSS');
+  assert(tdMediaQueries().length >= 3, 'paliers responsive absents : ' + tdMediaQueries().length);
+});
+
+t('MOBILE-FIRST : tous les paliers du bloc sont des min-width (aucun max-width)', () => {
+  tdMediaQueries().forEach(q => {
+    assert(/min-width/.test(q.cond), 'palier non min-width : ' + q.cond);
+    assert(!/max-width/.test(q.cond), 'max-width interdite (rétrécirait le mobile) : ' + q.cond);
+  });
+});
+
+t('les paliers sont exprimés en `em` (ils suivent la taille de police, pas un appareil)', () => {
+  tdMediaQueries().forEach(q => {
+    assert(/\dem\b/.test(q.cond), 'palier pas en em : ' + q.cond);
+    assert(!/\dpx\b/.test(q.cond), 'palier en px : ' + q.cond);
+  });
+});
+
+t('BASE = mise en page la plus étroite : filtres et photos empilés par défaut', () => {
+  assert(/flex-direction:\s*column/.test(baseRuleOf('.td-filters')), '.td-filters pas empilé en base');
+  assert(/flex-direction:\s*column/.test(baseRuleOf('.td-photos')), '.td-photos pas empilé en base');
+  assert(/flex-direction:\s*column/.test(baseRuleOf('.td-kv')), '.td-kv pas empilé en base');
+  // ...et la mise en ligne n'arrive QUE dans un palier.
+  const inRow = tdMediaQueries().map(q => q.body).join('\n');
+  assert(/\.td-filters\s*\{[^}]*flex-direction:\s*row/.test(inRow), '.td-filters ne passe jamais en ligne');
+});
+
+t('la colonne centrale de la timeline a min-width:0 (sinon un mot long pousse la ligne dehors)', () => {
+  assert(/min-width:\s*0/.test(baseRuleOf('.td-row-main')), 'min-width:0 absent de .td-row-main');
+});
+
+t('CIBLES TACTILES : .td-tap fait au moins 44px dans les deux axes', () => {
+  const r = baseRuleOf('.td-tap');
+  const w = Number((r.match(/min-width:\s*(\d+)px/) || [])[1] || 0);
+  const h = Number((r.match(/min-height:\s*(\d+)px/) || [])[1] || 0);
+  assert(w >= 44, 'min-width = ' + w);
+  assert(h >= 44, 'min-height = ' + h);
+});
+
+t('les boutons d\'icône du suivi utilisent bien .td-tap (crayon, croix, corbeille)', () => {
+  seed();
+  ctx.openTrainingDashboard('prog1', 'detail');
+  assert(/class="btn btn-ghost td-tap"[^>]*openEditCompletionModal/.test(M()), 'crayon de timeline sans td-tap');
+  ctx._tdSet('playerId', 'pA');
+  assert(/td-tap"[^>]*_tdSet\('playerId',''\)/.test(M()), 'croix de drill-down sans td-tap');
+  ctx.openTrainingCompletionDetail('cA1');
+  assert(/td-tap"[^>]*deleteTrainingCompletion/.test(M()), 'corbeille sans td-tap');
+});
+
+t('aucun texte sous 10px dans le rendu du suivi (lisible à 100 % de zoom)', () => {
+  seed();
+  ctx.openTrainingDashboard('prog1', 'detail');
+  const detail = M();
+  ctx.openTrainingCompletionDetail('cA1');
+  const both = detail + M();
+  const small = [...both.matchAll(/font-size:\s*(\d+(?:\.\d+)?)px/g)]
+    .map(m => Number(m[1])).filter(n => n < 10);
+  assert(small.length === 0, 'tailles trop petites trouvées : ' + small.join(', '));
+});
+
+t('les textes du SVG restent ≥ 9px après mise à l\'échelle du viewBox', () => {
+  seed();
+  ctx.openTrainingDashboard('prog1', 'detail');
+  const svg = M().slice(M().indexOf('<svg'), M().indexOf('</svg>'));
+  const vb = /viewBox="0 0 (\d+) (\d+)"/.exec(svg);
+  assert(vb, 'viewBox introuvable');
+  // Largeur de contenu la plus étroite visée : ~288px (petit mobile, paddings de
+  // .modal-body retirés) → facteur d'échelle = 288 / largeur du viewBox.
+  const scale = 288 / Number(vb[1]);
+  const sizes = [...svg.matchAll(/font-size="(\d+(?:\.\d+)?)"/g)].map(m => Number(m[1]) * scale);
+  assert(sizes.length >= 2, 'aucun texte dans le SVG ?');
+  sizes.forEach(px => assert(px >= 9, 'texte SVG rendu à ' + px.toFixed(1) + 'px'));
+});
+
+t('le SVG est fluide : width:100% + viewBox, aucune largeur en px', () => {
+  const svg = M().slice(M().indexOf('<svg'), M().indexOf('</svg>'));
+  assert(/width:\s*100%/.test(svg), 'svg pas en largeur fluide');
+  assert(!/\swidth="\d+"/.test(svg), 'attribut width fixe sur le svg');
+});
+
+t('SCROLL HORIZONTAL : seul le tableau des km a le droit de scroller, dans son conteneur', () => {
+  seed();
+  ctx.openTrainingDashboard('prog1', 'detail');
+  ctx._tdSet('playerId', 'pA');
+  const h = M();
+  assert(h.includes('class="td-table-wrap"'), 'conteneur scrollable du tableau absent');
+  assert(/overflow-x:\s*auto/.test(baseRuleOf('.td-table-wrap')), '.td-table-wrap ne scrolle pas');
+  // Aucun overflow-x inline ailleurs dans le rendu : un scroll horizontal doit
+  // toujours être une décision explicite prise dans le CSS, jamais une surprise.
+  assert(!/overflow-x:\s*(auto|scroll)/.test(h), 'overflow-x inline dans le rendu : ' + h.match(/overflow-x:[^;"]*/));
+});
+
+t('aucune largeur ni flex-basis fixe en px dans le rendu (tout suit le conteneur)', () => {
+  seed();
+  ctx.openTrainingDashboard('prog1', 'detail');
+  const detail = M();
+  ctx.openTrainingCompletionDetail('cA1');
+  const both = detail + M();
+  // Les seules dimensions en px admises sont celles des avatars (carrés de 34/40)
+  // et des jauges : on interdit ce qui pourrait dépasser la largeur de contenu.
+  const wide = [...both.matchAll(/\bwidth:\s*(\d+)px/g)].map(m => Number(m[1])).filter(n => n > 120);
+  assert(wide.length === 0, 'largeurs fixes trop grandes : ' + wide.join(', '));
+  assert(!/flex:\s*\d[^;"]*\d{2,}px/.test(both), 'flex-basis en px inline (la classe doit décider)');
+});
+
+t('les <select> de filtre sont pleine largeur et étiquetés (accessibilité + zoom)', () => {
+  seed();
+  ctx.openTrainingDashboard('prog1', 'detail');
+  const h = M();
+  assert(h.includes('class="td-filters"'), 'conteneur de filtres sans classe');
+  assert((h.match(/aria-label="Filtrer par/g) || []).length === 2, 'selects non étiquetés');
+  assert(/width:\s*100%/.test(baseRuleOf('.td-filters > select')), 'select pas en pleine largeur en base');
+});
+
+t('la barre d\'onglets neutralise les marges de .segmented (sinon 36px volés)', () => {
+  seed();
+  ctx.openTrainingDashboard('prog1', 'detail');
+  assert(M().includes('class="segmented td-seg"'), 'classe td-seg absente de la barre d\'onglets');
+  const r = baseRuleOf('.segmented.td-seg');
+  assert(/margin-left:\s*0/.test(r) && /margin-right:\s*0/.test(r), 'marges latérales non annulées');
+});
+
+t('les vignettes sont dimensionnées par CSS (et grossissent au palier supérieur)', () => {
+  assert(/width:\s*42px/.test(baseRuleOf('.td-thumb')), 'vignette de base != 42px');
+  const inRow = tdMediaQueries().map(q => q.body).join('\n');
+  assert(/\.td-thumb\s*\{[^}]*width:\s*52px/.test(inRow), 'vignette jamais agrandie sur écran plus large');
 });
 
 // --- bilan ------------------------------------------------------------------
