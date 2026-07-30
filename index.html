@@ -36297,9 +36297,14 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-29.91';
+const APP_VERSION = '2026-07-30.92';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
+// Une seule tentative de rechargement AUTOMATIQUE par session : si le HTML servi
+// restait périmé (déploiement à moitié propagé, CDN en retard), recharger en
+// boucle transformerait l'app en machine à clignoter. Après cet essai, on
+// retombe sur le bandeau manuel.
+let _autoReloadTried = false;
 async function checkForUpdate(opts) {
   opts = opts || {};
   if (_updateBannerShown) return;
@@ -36311,8 +36316,25 @@ async function checkForUpdate(opts) {
     if (!res.ok) return;
     const data = await res.json();
     const remote = data && (data.v || data.version);
-    if (remote && remote !== APP_VERSION) showUpdateBanner(remote);
+    if (!remote || remote === APP_VERSION) return;
+    // RETOUR AU PREMIER PLAN + version périmée → on recharge TOUT SEUL.
+    // Le bandeau seul ne suffisait pas : il faut le remarquer, puis le taper, et
+    // le fermer d'un ✕ le supprimait jusqu'à la fin de la session — une PWA
+    // n'étant jamais vraiment fermée, ça pouvait durer des jours. Résultat
+    // vécu : des correctifs déployés que l'appareil n'exécutait toujours pas.
+    // Le rechargement n'est tenté QU'AU RETOUR AU PREMIER PLAN (opts.foreground) :
+    // à ce moment personne n'est en train de saisir, et rien n'est perdu — l'état
+    // vit dans localStorage et en base.
+    if (opts.foreground && !_autoReloadTried && !_hasOpenModal()) {
+      _autoReloadTried = true;
+      _cacheBustReload(remote);
+      return;
+    }
+    showUpdateBanner(remote);
   } catch (e) { /* hors ligne / fichier absent → on ignore */ }
+}
+function _hasOpenModal() {
+  try { return !!document.getElementById('modal-root'); } catch (e) { return false; }
 }
 // L'app est un index.html mono-fichier (JS inline) → pas de bundle séparé à
 // cache-buster. En Safari onglet, un simple location.reload() peut resservir le
@@ -36334,7 +36356,19 @@ function showUpdateBanner(remote) {
   el.innerHTML =
     '<span class="ub-text">🔄 Nouvelle version disponible</span>' +
     `<button class="ub-reload" onclick="_cacheBustReload('${v}')">Recharger</button>` +
-    '<button class="ub-close" onclick="this.parentElement.remove()" aria-label="Fermer">✕</button>';
+    '<button class="ub-close" onclick="dismissUpdateBanner()" aria-label="Fermer">✕</button>';
+}
+// Fermer le bandeau le REPOUSSE, il ne l'annule pas. Avant, le ✕ laissait
+// _updateBannerShown à true : checkForUpdate sortait immédiatement pour le reste
+// de la session, et une PWA n'étant jamais vraiment fermée, la mise à jour
+// pouvait ne plus jamais être proposée.
+function dismissUpdateBanner() {
+  try {
+    const el = document.getElementById('update-banner');
+    if (el) el.remove();
+  } catch (e) {}
+  _updateBannerShown = false;
+  _lastUpdateCheck = Date.now();   // laisse passer le throttle d'une minute
 }
 
 function _ptrEnsureIndicator() {
@@ -36429,7 +36463,9 @@ try { _ambientStart(); } catch (e) {} // alertes ambiantes de déroulé (coach)
 try { _trainingRemindStart(); } catch (e) {} // rappel prépa quotidien (cf. la limite documentée sur _trainingRemindCheck)
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) {
-    try { checkForUpdate(); } catch (e) {}
+    // `foreground` autorise le rechargement automatique : c'est le seul moment
+    // où l'on est sûr que personne n'est en train de saisir quelque chose.
+    try { checkForUpdate({ foreground: true }); } catch (e) {}
     try { _ambientCheck(); } catch (e) {} // rattrape une transition franchie en arrière-plan
     // Retour au 1er plan après l'heure du rappel → rattrape le rappel du jour.
     try { _trainingRemindCheck(); } catch (e) {}
