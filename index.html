@@ -16287,9 +16287,13 @@ function openRosterManager(matchId) {
           // `responses[p.id]` en direct laissait une joueuse INDISPO affichée
           // « ✓ présente » juste sous son propre badge « ⚠ Indispo ».
           const resp = sameDayConvoc ? _convocResp(sameDayConvoc, m.date, p.id) : null;
-          const convBadge = !resp ? '' : (resp.status === 'absent'
-            ? `<span style="font-size:8px;font-family:'JetBrains Mono';color:var(--red);background:var(--red-soft);padding:1px 5px;border-radius:4px;text-transform:uppercase;letter-spacing:0.04em">✗ absente${(resp.auto ? resp.motif : resp.reason) ? ' · ' + esc(resp.auto ? resp.motif : resp.reason) : ''}</span>`
-            : `<span style="font-size:8px;font-family:'JetBrains Mono';color:#22c55e;background:rgba(34,197,94,0.10);padding:1px 5px;border-radius:4px;text-transform:uppercase;letter-spacing:0.04em">✓ présente</span>`);
+          // Absence DÉRIVÉE → « ✕ INDISPO » nu (la raison précise reste dans
+          // l'infobulle). Désistement explicite → le motif qu'elle a choisi.
+          const convBadge = !resp ? '' : (resp.status !== 'absent'
+            ? `<span style="font-size:8px;font-family:'JetBrains Mono';color:#22c55e;background:rgba(34,197,94,0.10);padding:1px 5px;border-radius:4px;text-transform:uppercase;letter-spacing:0.04em">✓ présente</span>`
+            : resp.auto
+            ? `<span title="${esc(resp.reason)}" style="font-size:8px;font-family:'JetBrains Mono';color:var(--red);background:var(--red-soft);padding:1px 5px;border-radius:4px;text-transform:uppercase;letter-spacing:0.04em">✕ ${esc(resp.motif)}</span>`
+            : `<span style="font-size:8px;font-family:'JetBrains Mono';color:var(--red);background:var(--red-soft);padding:1px 5px;border-radius:4px;text-transform:uppercase;letter-spacing:0.04em">✗ absente${resp.reason ? ' · ' + esc(resp.reason) : ''}</span>`);
           return `
           <div class="roster-row">
             ${p.photo ? `<img src="${p.photo}" style="width:32px;height:32px;border-radius:50%;object-fit:cover;border:1.5px solid var(--orange)">` : `<div style="width:32px;height:32px;border-radius:50%;background:var(--bg-3);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:12px;color:var(--orange)">${esc(p.name.charAt(0).toUpperCase())}</div>`}
@@ -18249,9 +18253,19 @@ function _medicalUnavailOn(playerId, dateISO) {
   return { id: 'med:' + playerId, playerId, startsAt: from, endsAt: inj.returnDate || null,
     reason: 'blessure', notes: inj.description || '', medical: true };
 }
-// L'indisponibilité EFFECTIVE : période saisie, sinon statut médical. Aucune
-// vue ne doit lire l'un des deux gisements seul — c'est exactement comme ça que
-// le badge s'affichait d'un côté et pas de l'autre.
+// L'indisponibilité EFFECTIVE. Les DEUX gisements sont interrogés, dans cet
+// ordre — et l'ordre a une raison :
+//   1. `player_unavailabilities` : une période SAISIE EXPRESSÉMENT par la coach,
+//      avec ses dates et son motif (vacances, examens, perso, blessure, autre).
+//      C'est une décision datée, donc elle prime ;
+//   2. `p.injury.status === 'indispo'` : le statut médical de la fiche joueuse.
+//      Il décrit un état courant, pas une décision sur une date précise — il ne
+//      sert que si aucune période ne couvre déjà le jour.
+// Concrètement : une joueuse blessée ET en vacances sur la période affichera la
+// période (le motif le plus précis), pas le statut médical.
+//
+// Aucune vue ne doit lire l'un des deux seul — c'est exactement comme ça que le
+// badge s'affichait d'un côté et pas de l'autre.
 function _unavailEffectiveOn(playerId, dateISO) {
   return _unavailOn(playerId, dateISO) || _medicalUnavailOn(playerId, dateISO);
 }
@@ -18451,10 +18465,16 @@ function renderUnavailPlayerBanner() {
 //   2. indisponibilité couvrant la date (période OU statut médical) → absente ;
 //   3. présente par défaut.
 // Retour : { status, reason, motif, message, auto, unavail, source }.
-//   • `reason` = motif nu ('Blessure') — c'est lui que lisent le chip et les tests ;
-//   • `motif`  = ligne prête à afficher ('INDISPO (Blessure)') là où une vue n'a
-//     la place que pour UNE chaîne (feuille d'appel, effectif du match) ;
+//   • `motif`  = CE QUI S'AFFICHE. Pour une absence dérivée c'est « INDISPO »,
+//     tout court. Volontairement nu : une indisponibilité n'est pas forcément
+//     médicale (vacances, examens, perso…), et l'afficher détaillée sur un
+//     écran d'équipe étale la vie privée d'une joueuse devant tout le monde.
+//     Un seul mot, le même pour toutes, quelle qu'en soit la raison.
+//   • `reason` = la raison PRÉCISE ('Blessure', 'Vacances'…), conservée pour le
+//     détail que seule la coach ouvre (infobulle, panneau joueuse). Jamais
+//     poussée dans le badge de liste.
 //   • `source` = 'manual' | 'unavailability' | 'default'.
+const UNAVAIL_LABEL = 'INDISPO';
 function resolveEffectivePresence(playerId, dateISO, existingResponse) {
   const r = existingResponse;
   if (r && r.status) {
@@ -18464,7 +18484,7 @@ function resolveEffectivePresence(playerId, dateISO, existingResponse) {
   const u = _unavailEffectiveOn(playerId, dateISO);
   if (u) {
     const meta = _unavailMeta(u.reason);
-    return { status: 'absent', reason: meta.label, motif: 'INDISPO (' + meta.label + ')',
+    return { status: 'absent', reason: meta.label, motif: UNAVAIL_LABEL,
       message: u.notes || '', auto: true, unavail: u, source: 'unavailability' };
   }
   return { status: 'present', reason: '', motif: '', message: '', auto: false, unavail: null, source: 'default' };
@@ -28825,7 +28845,7 @@ function openEventInstance(parentId, dateStr) {
                     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
                       <span style="font-family:'Anton';font-size:14px;text-transform:uppercase">${esc(p.name)}</span>
                       ${r.auto
-                        ? `<span class="chip" style="background:rgba(255,107,0,0.15);color:var(--orange)">${_unavailMeta(r.unavail.reason).icon} Indispo · ${r.unavail.medical ? 'médical' : 'auto'}</span>`
+                        ? `<span class="chip" style="background:rgba(255,107,0,0.15);color:var(--orange)" title="${esc(r.reason)}${r.unavail.medical ? ' · statut médical' : ''}${r.message ? ' — ' + esc(r.message) : ''}">${_unavailMeta(r.unavail.reason).icon} ${esc(r.motif)}</span>`
                         : `<span class="chip chip-red">${esc(r.reason || 'Indisponible')}</span>`}
                     </div>
                     ${r.auto ? `<div style="font-size:11px;color:var(--ink-3);margin-top:3px;font-family:'JetBrains Mono'">${esc(_unavailRangeLabel(r.unavail))}</div>` : ''}
@@ -38061,7 +38081,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-30.97';
+const APP_VERSION = '2026-07-30.98';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Une seule tentative de rechargement AUTOMATIQUE par session : si le HTML servi

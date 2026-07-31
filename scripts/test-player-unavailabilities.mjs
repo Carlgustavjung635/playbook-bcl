@@ -205,7 +205,7 @@ t('l\'écran de convoc la compte dans les absentes', () => {
   ctx.openEventInstance(CID, DATE);
   const m = ctx.__lastModal || '';
   ok(m.includes('Ophelie'), 'joueuse absente de l\'écran');
-  ok(/Indispo · auto/.test(m), 'badge « indispo auto » absent');
+  ok(/INDISPO/.test(m), 'badge « indispo » absent');
   ok(m.includes('overrideUnavailPresence('), 'action « convoquer quand même » absente');
 });
 t('un désistement classique garde son rendu habituel', () => {
@@ -214,7 +214,7 @@ t('un désistement classique garde son rendu habituel', () => {
   ctx.openEventInstance(CID, DATE);
   const m = ctx.__lastModal || '';
   ok(m.includes('Boulot'), 'motif absent');
-  ok(!/Indispo · auto/.test(m), 'badge indispo affiché à tort');
+  ok(!/INDISPO/.test(m), 'badge indispo affiché à tort');
   ok(m.includes('restoreInstancePresent('), 'action de retour habituelle perdue');
 });
 t('le coach peut la convoquer quand même (override)', () => {
@@ -380,12 +380,41 @@ t('une période saisie prime sur le statut médical (motif le plus précis)', ()
   ok(r.reason === 'Examens', 'motif = ' + r.reason);
   ok(!r.unavail.medical, 'la source médicale a doublé la période saisie');
 });
-t('le motif prêt-à-afficher est « INDISPO (raison) »', () => {
+// v.98 — UN SEUL MOT, LE MÊME POUR TOUTES.
+// « INDISPO (Blessure) » / « Indispo · médical » disaient DEUX choses fausses :
+// que l'app ne gère que le médical, et — plus grave — ça étalait la raison de
+// l'absence d'une joueuse sur un écran d'équipe. Vacances, examens, perso,
+// blessure : le badge est le même. Le détail reste accessible à la coach.
+t('le motif affiché est « INDISPO » nu — jamais la raison', () => {
   seed(); addUnavail('pA', TODAY, AFTER(30), 'vacances');
   const r = ctx._convocResp(conv(), AFTER(3), 'pA');
-  ok(r.motif === 'INDISPO (Vacances)', 'motif = ' + r.motif);
-  ok(r.reason === 'Vacances', 'le motif nu doit rester nu : ' + r.reason);
+  ok(r.motif === 'INDISPO', 'motif = ' + r.motif);
+  ok(r.reason === 'Vacances', 'la raison précise doit rester disponible : ' + r.reason);
   ok(r.source === 'unavailability', 'source = ' + r.source);
+});
+t('TOUS les motifs donnent le même badge (pas seulement le médical)', () => {
+  ['blessure', 'vacances', 'exams', 'perso', 'autre'].forEach(reason => {
+    seed(); addUnavail('pA', TODAY, AFTER(30), reason);
+    const r = ctx._convocResp(conv(), AFTER(3), 'pA');
+    ok(r.status === 'absent', reason + ' : non comptée absente');
+    ok(r.motif === 'INDISPO', reason + ' : motif = ' + r.motif);
+  });
+});
+t('le statut médical donne EXACTEMENT le même badge qu\'une période', () => {
+  seed(); addUnavail('pA', TODAY, AFTER(30), 'vacances');
+  const viaPeriode = ctx._convocResp(conv(), AFTER(3), 'pA').motif;
+  seed(); setInjury('pA', { status: 'indispo' });
+  const viaMedical = ctx._convocResp(conv(), AFTER(3), 'pA').motif;
+  ok(viaPeriode === 'INDISPO' && viaMedical === 'INDISPO',
+    'badges divergents : « ' + viaPeriode + ' » vs « ' + viaMedical + ' »');
+});
+t('aucun écran ne laisse fuir « médical » ni la raison dans le badge', () => {
+  seed(); addUnavail('pA', TODAY, AFTER(30), 'perso', 'rendez-vous');
+  S.auth = { role: 'coach', coachId: 'admin' };
+  ctx.openEventInstance(CID, AFTER(3));
+  const m = ctx.__lastModal || '';
+  ok(/INDISPO/.test(m), 'badge absent');
+  ok(!/Indispo · médical/.test(m) && !/INDISPO \(/.test(m), 'la raison fuite dans le badge');
 });
 t('un désistement explicite ne porte pas le préfixe INDISPO', () => {
   seed();
@@ -401,7 +430,7 @@ t('la joueuse voit son statut médical dans « mon statut » (vue entraînement)
   ctx.openEventInstance(CID, AFTER(3));
   const m = ctx.__lastModal || '';
   ok(/Absente/.test(m), 'la joueuse se croit encore présente');
-  ok(/INDISPO \(Blessure\)/.test(m), 'motif hérité absent');
+  ok(/INDISPO/.test(m) && !/Blessure/.test(m), 'motif nu attendu');
 });
 t('la feuille d\'appel s\'ouvre malgré une absence DÉRIVÉE', () => {
   // Elle lisait `responses[p.id].reason` en direct → TypeError sur une absence
@@ -410,7 +439,7 @@ t('la feuille d\'appel s\'ouvre malgré une absence DÉRIVÉE', () => {
   ctx.openCallSheet(CID, AFTER(3));
   const m = ctx.__lastModal || '';
   ok(/Appel/.test(m), 'la feuille d\'appel ne s\'est pas ouverte');
-  ok(/INDISPO \(Blessure\)/.test(m), 'motif absent de la liste des absentes');
+  ok(/INDISPO/.test(m), 'motif absent de la liste des absentes');
 });
 t('l\'effectif du match n\'affiche plus « présente » sous un badge indispo', () => {
   seed();
@@ -423,14 +452,15 @@ t('l\'effectif du match n\'affiche plus « présente » sous un badge indispo', 
   ctx.openRosterManager('m1');
   const m = ctx.__lastModal || '';
   const row = m.slice(m.indexOf('Ophelie'), m.indexOf('Ophelie') + 500);
-  ok(/absente/.test(row), 'toujours annoncée présente : ' + row.slice(-200));
-  ok(/INDISPO \(Blessure\)/.test(m), 'motif hérité absent de la vue match');
+  ok(!/présente/.test(row), 'toujours annoncée présente : ' + row.slice(0, 260));
+  ok(/INDISPO/.test(row), 'badge INDISPO absent de la vue match');
+  ok(!/INDISPO \(/.test(m) && !/Indispo · médical/.test(m), 'la raison précise fuite dans le badge');
 });
 t('convocCard ne lève plus de ReferenceError (dateStr fantôme)', () => {
   seed(); addUnavail('pA', TODAY, AFTER(30), 'blessure');
   const out = ctx.convocCard(conv(), false, true);
   ok(typeof out === 'string' && out.length > 0, 'rendu vide');
-  ok(/INDISPO \(Blessure\)/.test(out), 'motif hérité absent');
+  ok(/INDISPO/.test(out), 'motif hérité absent');
 });
 
 console.log(R.join('\n'));
