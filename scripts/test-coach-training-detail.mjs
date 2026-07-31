@@ -96,8 +96,57 @@ try {
 }
 console.log('✓ script évalué');
 
+// --- FAUX SERVEUR ------------------------------------------------------------
+// Le mot du coach est désormais écrit PUIS RELU (incident du 30/07/2026) : sans
+// serveur simulé, aucun envoi ne peut aboutir dans ce test.
+// ⚠ On MERGE dans le vrai PbSync (persist() a besoin de schedule()) : le
+// remplacer casserait la moitié de la suite.
+// `__staleBuild` reproduit l'incident à l'identique : le client pousse la ligne
+// SANS la colonne coach_note (build antérieur à v.95) — la ligne est bien
+// touchée, la valeur serveur ne bouge pas.
+ctx.__server = {};
+ctx.__staleBuild = false;
+ctx.__dbError = null;
+ctx.__flushes = 0;
+ctx.Pb = Object.assign({}, ctx.Pb, { online: true });
+// ⚠ Les blocs <script type="module"> (où vit PbSync) sont HORS de portée de ce
+// test : `window.PbSync` n'existe pas. Le rendre truthy suffit à réveiller tous
+// les `if (window.PbSync) PbSync.xxx()` disséminés dans le code classique —
+// d'où le Proxy : flushNow est le nôtre, tout le reste est un no-op inoffensif.
+// Sans lui, persist() explose sur PbSync.schedule.
+ctx.PbSync = new Proxy({
+  flushNow: async () => {
+    ctx.__flushes++;
+    (ctx.state.trainingCompletions || []).forEach(c => {
+      const row = ctx.__server[c.id] || (ctx.__server[c.id] = { coach_note: null });
+      if (!ctx.__staleBuild) row.coach_note = c.coachNote || null;
+    });
+  }
+}, {
+  get: (target, key) => {
+    if (key in target) return target[key];
+    if (typeof key === 'symbol' || key === 'then') return undefined;  // jamais thenable
+    return () => {};
+  }
+});
+ctx.sb = {
+  from: () => ({
+    select: () => ({
+      eq: (col, id) => ({
+        limit: async () => {
+          if (ctx.__dbError) return { data: null, error: { message: ctx.__dbError } };
+          const row = ctx.__server[id];
+          return { data: row ? [{ id, coach_note: row.coach_note }] : [], error: null };
+        }
+      })
+    })
+  })
+};
+
 const R = [];
 const t = (label, fn) => { try { fn(); R.push('✓ ' + label); } catch (e) { R.push('✗ ' + label + ' → ' + e.message); } };
+// Variante asynchrone : l'envoi d'un mot attend désormais le flush ET la relecture.
+const ta = async (label, fn) => { try { await fn(); R.push('✓ ' + label); } catch (e) { R.push('✗ ' + label + ' → ' + e.message); } };
 const assert = (c, m) => { if (!c) throw new Error(m || 'assertion'); };
 
 // --- décor -------------------------------------------------------------------
@@ -186,6 +235,12 @@ function seed() {
   ctx.__pushes = [];
   ctx.__toasts = [];
   ctx.__confirm = true;
+  ctx.__server = {};
+  ctx.__staleBuild = false;
+  ctx.__dbError = null;
+  ctx.__flushes = 0;
+  ctx.state._trainingNoteBusy = null;
+  store['pb8_coach_note_drafts'] = '{}';        // aucun brouillon résiduel
 }
 ctx.render = () => {};
 ctx.showToast = m => { ctx.__toasts.push(String(m)); };
@@ -650,11 +705,11 @@ t('supprimée : la joueuse peut re-valider (unicité portée par les lignes viva
 // ============================================================================
 // 8) MOT DU COACH
 // ============================================================================
-t('mot du coach : enregistré, horodaté, poussé à la joueuse SEULE', () => {
+await ta('mot du coach : enregistré, horodaté, poussé à la joueuse SEULE', async () => {
   seed();
   els['tcn-text'] = { value: '6 km sous la pluie, chapeau.' };
   ctx.openTrainingCoachNote('cA1');
-  ctx.saveTrainingCoachNote('cA1');
+  await ctx.saveTrainingCoachNote('cA1');
   const c = S.trainingCompletions.find(x => x.id === 'cA1');
   assert(c.coachNote.includes('chapeau'), 'mot non enregistré');
   assert(c.coachNoteAt > 0, 'horodatage absent');
@@ -663,19 +718,19 @@ t('mot du coach : enregistré, horodaté, poussé à la joueuse SEULE', () => {
   assert(ctx.__pushes[0].payload.type === 'training_coach_note', 'type de push faux');
 });
 
-t('mot du coach : un mot vide est refusé (pas d\'écriture à blanc)', () => {
+await ta('mot du coach : un mot vide est refusé (pas d\'écriture à blanc)', async () => {
   seed();
   els['tcn-text'] = { value: '   ' };
-  ctx.saveTrainingCoachNote('cA1');
+  await ctx.saveTrainingCoachNote('cA1');
   assert(!S.trainingCompletions.find(x => x.id === 'cA1').coachNote, 'mot vide enregistré');
   assert(ctx.__pushes.length === 0, 'push envoyé pour un mot vide');
 });
 
-t('mot du coach : retirable', () => {
+await ta('mot du coach : retirable', async () => {
   seed();
   els['tcn-text'] = { value: 'Bravo' };
-  ctx.saveTrainingCoachNote('cA1');
-  ctx.saveTrainingCoachNote('cA1', true);
+  await ctx.saveTrainingCoachNote('cA1');
+  await ctx.saveTrainingCoachNote('cA1', true);
   const c = S.trainingCompletions.find(x => x.id === 'cA1');
   assert(c.coachNote === null && c.coachNoteAt === null, 'mot non retiré');
 });
@@ -696,11 +751,11 @@ t('raccourci drill-down : sans validation, on le dit au lieu d\'ouvrir un formul
   assert(ctx.__toasts.join(' ').includes('Aucune séance'), 'aucun retour utilisateur');
 });
 
-t('mot du coach : une joueuse ne peut pas s\'en écrire un', () => {
+await ta('mot du coach : une joueuse ne peut pas s\'en écrire un', async () => {
   seed();
   S.auth = { role: 'player', playerId: 'pA' };
   els['tcn-text'] = { value: 'je suis la meilleure' };
-  ctx.saveTrainingCoachNote('cA1');
+  await ctx.saveTrainingCoachNote('cA1');
   assert(!S.trainingCompletions.find(x => x.id === 'cA1').coachNote, 'la joueuse a écrit un mot de coach');
   S.auth = { role: 'coach', coachId: 'admin' };
 });
@@ -708,10 +763,10 @@ t('mot du coach : une joueuse ne peut pas s\'en écrire un', () => {
 // ============================================================================
 // 9) RETOUR CÔTÉ JOUEUSE (feed + écran de séance)
 // ============================================================================
-t('feed joueuse : le mot du coach et la correction remontent', () => {
+await ta('feed joueuse : le mot du coach et la correction remontent', async () => {
   seed();
   els['tcn-text'] = { value: 'Chapeau pour hier.' };
-  ctx.saveTrainingCoachNote('cA1');
+  await ctx.saveTrainingCoachNote('cA1');
   ctx.openEditCompletionModal('cA1');
   ctx._tceSet('distanceKm', '6.4');
   ctx.saveCompletionEdit('cA1');
@@ -750,10 +805,10 @@ t('feed joueuse : les notes PRIVÉES du coach ne fuient jamais', () => {
   S.auth = { role: 'coach', coachId: 'admin' };
 });
 
-t('écran joueuse : le mot du coach et la mention de correction s\'affichent', () => {
+await ta('écran joueuse : le mot du coach et la mention de correction s\'affichent', async () => {
   seed();
   els['tcn-text'] = { value: 'Continue comme ça.' };
-  ctx.saveTrainingCoachNote('cA1');
+  await ctx.saveTrainingCoachNote('cA1');
   ctx.openEditCompletionModal('cA1');
   ctx._tceSet('distanceKm', '6.3');
   ctx.saveCompletionEdit('cA1');
@@ -862,6 +917,115 @@ t('_tdMore / _tdSet sans état ouvert → no-op silencieux', () => {
   ctx.state._trainingDash = null;
   ctx._tdMore(); ctx._tdSet('period', 'w'); ctx._tdTab('detail');
   assert(true);
+});
+
+// ============================================================================
+// 11 bis) INCIDENT DU 30/07/2026 — MOTS DU COACH PERDUS EN SILENCE
+// ============================================================================
+// Reproduction fidèle : l'appareil du coach tournait un build ANTÉRIEUR à v.95,
+// dont le dump ignorait `coach_note`. Résultat en base : 12 lignes touchées
+// (updated_at bumpé), coach_note NULL sur les 12 — et 12 toasts « Mot envoyé ».
+// Ces tests verrouillent les trois garanties qui manquaient : relire avant
+// d'annoncer, conserver le texte, le dire à l'écran.
+
+await ta('INCIDENT : un build périmé n\'obtient PLUS de confirmation de succès', async () => {
+  seed();
+  ctx.__staleBuild = true;                       // le dump part sans coach_note
+  els['tcn-text'] = { value: 'Bravo pour ta séance !' };
+  ctx.openTrainingCoachNote('cA1');
+  await ctx.saveTrainingCoachNote('cA1');
+  assert(!ctx.__toasts.some(x => /envoyé/i.test(x)), 'toast de succès menteur : ' + JSON.stringify(ctx.__toasts));
+  assert(ctx.__pushes.length === 0, 'push parti pour un mot jamais enregistré');
+  assert(M().includes('NON envoyé'), 'écran d\'échec absent');
+});
+await ta('INCIDENT : le texte est CONSERVÉ et reproposé tel quel', async () => {
+  // Le brouillon survit même à l'écrasement de l'objet local par la sync —
+  // c'est tout l'intérêt de le stocker hors de state.
+  const c = S.trainingCompletions.find(x => x.id === 'cA1');
+  c.coachNote = '';                              // simule l'apply() qui écrase
+  ctx.openTrainingCoachNote('cA1');
+  assert(M().includes('Bravo pour ta séance !'), 'texte perdu : ' + M().slice(0, 200));
+  assert(M().includes('Brouillon récupéré'), 'brouillon non signalé');
+});
+await ta('INCIDENT : l\'échec propose de RECHARGER (la vraie remédiation)', async () => {
+  seed();
+  ctx.__staleBuild = true;
+  els['tcn-text'] = { value: 'Test' };
+  await ctx.saveTrainingCoachNote('cA1');
+  assert(M().includes('_cacheBustReload'), 'aucun bouton de rechargement');
+  assert(M().includes('périmée'), 'cause non expliquée au coach');
+});
+await ta('INCIDENT : le suivi affiche un bandeau tant qu\'il reste des mots en carafe', async () => {
+  seed();
+  ctx.__staleBuild = true;
+  els['tcn-text'] = { value: 'Un' };
+  await ctx.saveTrainingCoachNote('cA1');
+  els['tcn-text'] = { value: 'Deux' };
+  await ctx.saveTrainingCoachNote('cA2');
+  ctx.openTrainingDashboard('prog1', 'detail');
+  assert(M().includes('2 mots non envoyés'), 'bandeau absent ou mal compté : ' + (M().match(/\d+ mots? non envoyés?/) || ['(rien)'])[0]);
+  assert(M().includes('mot non envoyé'), 'ligne de timeline non marquée');
+});
+await ta('RÉTABLISSEMENT : une fois l\'app à jour, le renvoi passe et purge le brouillon', async () => {
+  ctx.__staleBuild = false;                      // build rechargé
+  els['tcn-text'] = { value: 'Un' };
+  await ctx.saveTrainingCoachNote('cA1');
+  assert(ctx.__server['cA1'].coach_note === 'Un', 'serveur = ' + JSON.stringify(ctx.__server['cA1']));
+  assert(!ctx._coachNotePending(S.trainingCompletions.find(x => x.id === 'cA1')), 'brouillon non purgé');
+  assert(ctx.__pushes.length === 1, 'push non envoyé après confirmation');
+  assert(ctx.__toasts.some(x => /Mot envoyé/.test(x)), 'aucune confirmation');
+});
+await ta('le toast de succès NOMME la destinataire (repérer celle qui manque)', async () => {
+  seed();
+  els['tcn-text'] = { value: 'Chapeau' };
+  await ctx.saveTrainingCoachNote('cA1');
+  assert(ctx.__toasts.some(x => x.includes('Alice')), 'toasts = ' + JSON.stringify(ctx.__toasts));
+});
+await ta('HORS LIGNE : pas de succès annoncé, brouillon gardé, message adapté', async () => {
+  seed();
+  ctx.Pb.online = false;
+  els['tcn-text'] = { value: 'Sans réseau' };
+  await ctx.saveTrainingCoachNote('cA1');
+  assert(!ctx.__toasts.some(x => /envoyé/i.test(x)), 'succès annoncé hors ligne');
+  assert(M().includes('Pas de connexion'), 'cause hors-ligne non expliquée');
+  ctx.openTrainingCoachNote('cA1');
+  assert(M().includes('Sans réseau'), 'texte perdu hors ligne');
+  ctx.Pb.online = true;
+});
+await ta('COLONNE MANQUANTE en base : traitée comme un build périmé', async () => {
+  seed();
+  ctx.__dbError = 'column training_completions.coach_note does not exist';
+  els['tcn-text'] = { value: 'X' };
+  await ctx.saveTrainingCoachNote('cA1');
+  assert(M().includes('_cacheBustReload'), 'pas de remédiation proposée');
+  ctx.__dbError = null;
+});
+await ta('anti double-envoi pendant l\'aller-retour', async () => {
+  seed();
+  els['tcn-text'] = { value: 'Une seule fois' };
+  const p1 = ctx.saveTrainingCoachNote('cA1');
+  const p2 = ctx.saveTrainingCoachNote('cA1');   // doit être ignoré
+  await p1; await p2;
+  assert(ctx.__pushes.length === 1, 'pushes = ' + ctx.__pushes.length);
+});
+await ta('RETRAIT d\'un mot : vérifié aussi, et pas de push', async () => {
+  seed();
+  els['tcn-text'] = { value: 'A retirer' };
+  await ctx.saveTrainingCoachNote('cA1');
+  ctx.__pushes = [];
+  await ctx.saveTrainingCoachNote('cA1', true);
+  assert(ctx.__server['cA1'].coach_note === null, 'serveur garde encore le mot');
+  assert(ctx.__pushes.length === 0, 'push envoyé pour un retrait');
+  assert(ctx.__toasts.some(x => /retiré/i.test(x)), 'retrait non confirmé');
+});
+await ta('le brouillon ne part JAMAIS dans la sync (il est local à l\'appareil)', async () => {
+  seed();
+  ctx.__staleBuild = true;
+  els['tcn-text'] = { value: 'Local' };
+  await ctx.saveTrainingCoachNote('cA1');
+  assert(store['pb8_coach_note_drafts'].includes('Local'), 'brouillon non persisté en localStorage');
+  const dumped = JSON.stringify(S.trainingCompletions);
+  assert(!/pb8_coach_note_drafts/.test(dumped), 'brouillon infiltré dans les entités sync');
 });
 
 // ============================================================================

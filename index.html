@@ -21538,7 +21538,17 @@ function renderCoachTrainingDetail(programId) {
   const formats = _tdRunFormatsOf(p);
   const fmtStats = _tdRunFormatStats(comps);
 
+  // Mots écrits mais jamais confirmés côté serveur. Ce bandeau est le garde-fou
+  // de l'incident du 30/07 : même si tout le reste échoue, le coach VOIT qu'il
+  // lui reste des messages en carafe au lieu de le découvrir des jours plus tard.
+  const pendingIds = _coachNotePendingIds();
+
   return `
+    ${pendingIds.length ? `
+      <div style="padding:11px 13px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:8px;margin-bottom:12px;font-size:12px;color:var(--ink-2);line-height:1.5">
+        <b>✍ ${pendingIds.length} mot${pendingIds.length > 1 ? 's' : ''} non envoyé${pendingIds.length > 1 ? 's' : ''}</b> — le texte est conservé sur cet appareil.
+        <button class="btn btn-secondary btn-block" onclick="openTrainingCoachNote('${esc(pendingIds[0])}')" style="margin-top:8px;font-size:12px">→ Reprendre le premier</button>
+      </div>` : ''}
     <!-- FILTRES — empilés par défaut, en ligne à partir de 30em (cf. .td-filters) -->
     <div style="margin-bottom:12px">
       <div class="segmented td-seg">
@@ -21798,7 +21808,7 @@ function renderCompletionsTimeline(comps, opts) {
           <div style="font-size:12px;color:var(--ink-2);overflow-wrap:break-word">${esc((s && s.name) || 'Séance')}${fmt ? ` <span class="td-fmt-tag">${esc(fmt.label)}</span>` : ''}</div>
           <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px">${esc(day)} · ${lvlIcon} ${esc(TRAINING_LEVEL_LABEL[c.contractLevel] || '')}${esc(lateBadge)}</div>
           <div style="font-size:11px;color:var(--ink-3);margin-top:3px;overflow-wrap:break-word">
-            ${mate ? '👯 ' + esc(mate.name) + ' ' : ''}${Number.isFinite(c.runningDistanceKm) && c.runningDistanceKm > 0 ? '🏃 ' + c.runningDistanceKm + ' km ' : (fmt ? '<span style="opacity:.7">🏃 pas de distance</span> ' : '')}${c.postMessage ? '💬 ' : ''}${c.editedAt ? '✎ corrigée ' : ''}${c.coachNote ? '📣 ' : ''}
+            ${mate ? '👯 ' + esc(mate.name) + ' ' : ''}${Number.isFinite(c.runningDistanceKm) && c.runningDistanceKm > 0 ? '🏃 ' + c.runningDistanceKm + ' km ' : (fmt ? '<span style="opacity:.7">🏃 pas de distance</span> ' : '')}${c.postMessage ? '💬 ' : ''}${c.editedAt ? '✎ corrigée ' : ''}${c.coachNote ? '📣 ' : ''}${_coachNotePending(c) ? '<span style="color:var(--orange)">✍ mot non envoyé</span> ' : ''}
           </div>
           ${thumbs.length ? `<div class="td-thumbs">
             ${thumbs.map(t => `<img class="td-thumb" src="${esc(t.url)}" loading="lazy" alt="">`).join('')}
@@ -21892,6 +21902,7 @@ function openTrainingCompletionDetail(id) {
           ? `<div style="font-size:12px;color:var(--ink-2);overflow-wrap:break-word;white-space:pre-wrap;margin-bottom:8px">${esc(c.coachNote)}</div>
              <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-bottom:8px">envoyé le ${esc(c.coachNoteAt ? new Date(c.coachNoteAt).toLocaleString('fr-FR') : '—')}</div>`
           : `<div style="font-size:11px;color:var(--ink-3);margin-bottom:8px">Elle le verra sur sa séance et dans ses notifs.</div>`}
+        ${_coachNotePending(c) ? `<div style="font-size:11px;color:var(--orange);margin-bottom:8px;line-height:1.5">✍ Un brouillon non envoyé t'attend ici.</div>` : ''}
         <button class="btn btn-secondary btn-block" onclick="openTrainingCoachNote('${esc(c.id)}')" style="font-size:12px">${c.coachNote ? '✎ Modifier le mot' : '📣 Écrire un mot'}</button>
       </div>
     </div>
@@ -22124,6 +22135,12 @@ function openTrainingCoachNote(id) {
   const c = _trainingCompletionById(id);
   if (!c || !_trainingCanEditCompletion(c)) return;
   const pl = (state.players || []).find(x => x.id === c.playerId);
+  // Le brouillon PRIME sur la valeur enregistrée : s'il en reste un, c'est que
+  // le dernier envoi n'a pas été confirmé, et c'est ce texte-là que le coach
+  // veut retrouver — pas la version d'avant.
+  const pending = _coachNotePending(c);
+  const value = pending ? pending.text : (c.coachNote || '');
+  const busy = state._trainingNoteBusy === c.id;
   openModal(`
     <div class="modal-header">
       <div>
@@ -22133,16 +22150,21 @@ function openTrainingCoachNote(id) {
       <button class="modal-close" onclick="openTrainingCompletionDetail('${esc(c.id)}')">✕</button>
     </div>
     <div class="modal-body">
+      ${pending ? `
+        <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:12px;color:var(--ink-2);line-height:1.5;margin-bottom:12px">
+          ✍ <b>Brouillon récupéré</b> — ce texte n'est pas encore parti. Touche « Envoyer ».
+        </div>` : ''}
       <div class="fld">
         <label class="fld-label">Ton message</label>
-        <textarea id="tcn-text" rows="4" placeholder="Ex : 6 km sous la pluie, chapeau. Continue comme ça.">${esc(c.coachNote || '')}</textarea>
+        <textarea id="tcn-text" rows="4" placeholder="Ex : 6 km sous la pluie, chapeau. Continue comme ça." ${busy ? 'disabled' : ''}>${esc(value)}</textarea>
         <div style="font-size:10px;color:var(--ink-3);margin-top:4px">Elle le verra sur sa séance et dans ses notifications. Elle seule.</div>
       </div>
+      ${busy ? `<div style="text-align:center;font-size:12px;color:var(--ink-3);padding:8px">⏳ Envoi et vérification…</div>` : ''}
     </div>
     <div class="modal-footer" style="display:flex;gap:6px">
       <button class="btn btn-secondary" onclick="openTrainingCompletionDetail('${esc(c.id)}')">Annuler</button>
-      ${c.coachNote ? `<button class="btn btn-ghost" onclick="saveTrainingCoachNote('${esc(c.id)}',true)">🗑 Retirer</button>` : ''}
-      <button class="btn btn-primary" style="flex:1" onclick="saveTrainingCoachNote('${esc(c.id)}')">✓ Envoyer</button>
+      ${c.coachNote && !busy ? `<button class="btn btn-ghost" onclick="saveTrainingCoachNote('${esc(c.id)}',true)">🗑 Retirer</button>` : ''}
+      <button class="btn btn-primary" style="flex:1" onclick="saveTrainingCoachNote('${esc(c.id)}')" ${busy ? 'disabled' : ''}>${busy ? '⏳ Envoi…' : '✓ Envoyer'}</button>
     </div>
   `);
 }
@@ -22155,20 +22177,142 @@ function openTrainingCoachNoteForPlayer(playerId, programId) {
   if (!list.length) { try { showToast('Aucune séance validée où accrocher un mot'); } catch (e) {} return; }
   openTrainingCoachNote(list[0].id);
 }
-function saveTrainingCoachNote(id, clear) {
+// ============================================================
+// BROUILLONS DE MOTS DU COACH — filet anti-perte (local à l'appareil)
+// ============================================================
+// INCIDENT DU 30/07/2026, à ne pas reproduire : le coach a écrit 12 mots en
+// 8 minutes (11:43 → 11:51). Les 12 lignes ont bien été touchées en base
+// (updated_at bumpé) mais `coach_note` est resté NULL sur les 12 — son appareil
+// tournait encore un build ANTÉRIEUR à v.95, dont `_dumpTrainingCompletionRow`
+// ne connaissait pas la colonne. L'upsert partait sans le champ, puis l'apply()
+// de sync réécrasait l'objet local par la ligne distante (sans note) : le mot
+// disparaissait de l'écran. Et il avait vu 12 toasts « Mot envoyé ».
+//
+// DEUX FAUTES DE CONCEPTION, corrigées ici :
+//   1. annoncer un succès JAMAIS confirmé (persist + flush « fire and forget ») ;
+//   2. n'avoir aucune copie du texte une fois l'objet local écrasé.
+// D'où : brouillon posé AVANT toute écriture réseau, effacé UNIQUEMENT après
+// relecture serveur concluante. Le brouillon vit hors de PbSync : il est propre
+// à l'appareil et ne doit jamais être synchronisé.
+const COACH_NOTE_DRAFTS_KEY = 'pb8_coach_note_drafts';
+function _coachNoteDrafts() { const d = load(COACH_NOTE_DRAFTS_KEY, {}); return (d && typeof d === 'object') ? d : {}; }
+function _coachNoteDraftSet(id, text) {
+  const all = _coachNoteDrafts();
+  if (text) all[id] = { text: String(text), at: Date.now() }; else delete all[id];
+  save(COACH_NOTE_DRAFTS_KEY, all);
+}
+function _coachNoteDraft(id) { const d = _coachNoteDrafts()[id]; return (d && d.text) ? d : null; }
+// Un brouillon n'est « en attente » que s'il DIFFÈRE de ce qui est enregistré :
+// après un envoi réussi on l'efface, mais une purge ratée ne doit pas alerter
+// pour un texte déjà en base.
+function _coachNotePending(c) {
+  if (!c) return null;
+  const d = _coachNoteDraft(c.id);
+  return (d && d.text !== (c.coachNote || '')) ? d : null;
+}
+function _coachNotePendingIds() {
+  return Object.keys(_coachNoteDrafts()).filter(id => _coachNotePending(_trainingCompletionById(id)));
+}
+
+// RELECTURE APRÈS ÉCRITURE — le contrôle qui manquait.
+// On attend le flush, puis on RELIT la ligne côté serveur et on compare. C'est le
+// seul moyen de distinguer « enregistré » de « la ligne est partie sans mon
+// champ » : _flushAll avale les erreurs par entité (console.warn) et rend une
+// promesse résolue même quand un dump n'a rien poussé d'utile.
+async function _verifyCoachNoteSaved(id, expected) {
+  // Références explicitement globales (`window.x`) et résolues UNE fois : le
+  // client Supabase est un `const` du bloc module, un `sb` nu se résoudrait sur
+  // la portée lexicale et non sur ce que le reste de l'app a publié.
+  const db = window.sb, pb = window.Pb, sync = window.PbSync;
+  if (!db || !(pb && pb.online)) return { ok: false, reason: 'offline' };
+  try { if (sync && sync.flushNow) await sync.flushNow(state); }
+  catch (e) { return { ok: false, reason: 'flush', detail: e && e.message }; }
+  try {
+    const res = await db.from('training_completions').select('id,coach_note').eq('id', id).limit(1);
+    if (res.error) {
+      // Colonne inconnue du serveur = migration non appliquée ; tout le reste est
+      // un incident réseau/permission. Les deux ne se soignent pas pareil.
+      const msg = String(res.error.message || '');
+      return { ok: false, reason: /coach_note|column/i.test(msg) ? 'schema' : 'read', detail: msg };
+    }
+    const row = (res.data || [])[0];
+    if (!row) return { ok: false, reason: 'missing' };
+    return ((row.coach_note || '') === (expected || '')) ? { ok: true } : { ok: false, reason: 'reverted' };
+  } catch (e) { return { ok: false, reason: 'read', detail: e && e.message }; }
+}
+
+// Écran d'échec. On ne referme RIEN et on n'efface pas le brouillon : le texte
+// reste récupérable, et la remédiation proposée dépend de la cause.
+function _coachNoteFailed(id, reason) {
+  const c = _trainingCompletionById(id);
+  const pl = c ? (state.players || []).find(x => x.id === c.playerId) : null;
+  const stale = (reason === 'reverted' || reason === 'schema');
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">${esc(pl ? '#' + pl.num + ' ' + pl.name : '')}</div>
+        <div class="modal-title">⚠ Mot NON envoyé</div>
+      </div>
+      <button class="modal-close" onclick="openTrainingCoachNote('${esc(id)}')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="padding:11px 13px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:12px;color:var(--ink-2);line-height:1.6;margin-bottom:12px">
+        <b>Ton texte est conservé</b> — il se rouvrira tel quel tant qu'il n'est pas parti.
+      </div>
+      <div style="font-size:12px;color:var(--ink-2);line-height:1.6">
+        ${stale
+          ? `Le serveur n'a pas gardé le message : cette version de l'app est <b>périmée</b> et écrit sans le champ.<br><br>Recharge l'app, puis renvoie — ton brouillon sera déjà là.`
+          : reason === 'offline'
+            ? `Pas de connexion pour l'instant. Réessaie dès que tu as du réseau.`
+            : `L'enregistrement n'a pas pu être vérifié. Réessaie ; si ça recommence, recharge l'app.`}
+      </div>
+    </div>
+    <div class="modal-footer" style="display:flex;gap:6px">
+      <button class="btn btn-secondary" onclick="openTrainingCoachNote('${esc(id)}')">← Mon texte</button>
+      ${stale ? `<button class="btn btn-primary" style="flex:1" onclick="_cacheBustReload()">🔄 Recharger l'app</button>`
+              : `<button class="btn btn-primary" style="flex:1" onclick="saveTrainingCoachNote('${esc(id)}')">↻ Réessayer</button>`}
+    </div>
+  `);
+}
+
+async function saveTrainingCoachNote(id, clear) {
   const c = _trainingCompletionById(id);
   if (!c || !_trainingCanEditCompletion(c)) return;
+  if (state._trainingNoteBusy) return;            // anti double-envoi
   let txt = '';
   if (!clear) {
     const el = document.getElementById('tcn-text');
     txt = el ? String(el.value || '').trim() : '';
     if (!txt) { try { showToast('Écris ton message d\'abord'); } catch (e) {} return; }
   }
+  // (1) BROUILLON D'ABORD — avant l'écriture locale, avant le réseau. Si tout le
+  // reste échoue, le texte existe encore quelque part.
+  _coachNoteDraftSet(id, clear ? '' : txt);
+  // On mémorise l'état d'avant : en cas d'échec il faut pouvoir REVENIR EN
+  // ARRIÈRE. Laisser l'écriture optimiste en place afficherait un mot « comme
+  // enregistré » alors qu'il n'est jamais parti — exactement l'illusion qui a
+  // coûté 12 messages le 30/07. `updatedAt` est restauré aussi, sinon la ligne
+  // locale resterait en avance sur le serveur et _reassertRows la repousserait
+  // en boucle.
+  const prev = { note: c.coachNote, at: c.coachNoteAt, upd: c.updatedAt };
   const now = Date.now();
   c.coachNote = txt || null;
   c.coachNoteAt = txt ? now : null;
   c.updatedAt = now;
-  persist(); _trainingFlush();
+  persist();
+  // (2) envoi + relecture, écran verrouillé le temps de l'aller-retour
+  state._trainingNoteBusy = id;
+  try { openTrainingCoachNote(id); } catch (e) {}
+  const v = await _verifyCoachNoteSaved(id, clear ? '' : txt);
+  state._trainingNoteBusy = null;
+  if (!v.ok) {
+    c.coachNote = prev.note; c.coachNoteAt = prev.at; c.updatedAt = prev.upd;
+    persist();
+    _coachNoteFailed(id, v.reason);
+    return;
+  }
+  // (3) confirmé seulement maintenant : on purge le brouillon et on annonce.
+  _coachNoteDraftSet(id, '');
   if (txt) {
     // Push réel vers la joueuse. Le pendant dans notifFeed() (source
     // « prepa-mot-coach ») existe : une notif push sans entrée de feed serait un
@@ -22182,7 +22326,12 @@ function saveTrainingCoachNote(id, clear) {
       });
     } catch (e) {}
   }
-  try { showToast(txt ? '📣 Mot envoyé' : '🗑 Mot retiré'); } catch (e) {}
+  try {
+    const who = ((state.players || []).find(x => x.id === c.playerId) || {}).name || '';
+    // Le toast nomme la destinataire : c'est ce qui permet au coach, en
+    // descendant sa liste, de repérer celle qui n'est jamais confirmée.
+    showToast(txt ? ('✅ Mot envoyé' + (who ? ' à ' + who : '')) : '🗑 Mot retiré');
+  } catch (e) {}
   openTrainingCompletionDetail(id);
 }
 
@@ -38314,7 +38463,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-30.99';
+const APP_VERSION = '2026-07-31.100';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Une seule tentative de rechargement AUTOMATIQUE par session : si le HTML servi
