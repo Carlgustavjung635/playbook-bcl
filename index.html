@@ -1879,6 +1879,48 @@
     font-size: 15px; line-height: 1;
   }
 
+  /* Filtres « format de course ». Rangée qui WRAPPE (jamais de scroll
+     horizontal) : le nombre de formats dépend du programme, il n'est pas borné.
+     Cible tactile 44px de haut comme .td-tap. */
+  .td-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .td-chip {
+    min-height: 44px; padding: 0 14px;
+    display: inline-flex; align-items: center;
+    background: var(--bg-2); color: var(--ink-2);
+    border: 1px solid var(--border); border-radius: 999px;
+    font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 600;
+    cursor: pointer; white-space: nowrap;
+  }
+  .td-chip.on { background: var(--orange); color: #000; border-color: var(--orange); }
+
+  /* Répartition par format. 1 colonne par défaut ; 2 dès 26em — au-delà de deux
+     cartes côte à côte la moyenne (« 23.4 km · moy 2.6 ») se couperait. */
+  .td-fmt-grid { display: grid; grid-template-columns: 1fr; gap: 6px; }
+  @media (min-width: 26em) { .td-fmt-grid { grid-template-columns: 1fr 1fr; } }
+  .td-fmt-card {
+    border: 1px solid var(--border-soft); border-radius: 10px;
+    padding: 10px 12px; background: var(--surface); cursor: pointer; min-width: 0;
+  }
+  .td-fmt-card.on { border-color: var(--orange); }
+  .td-fmt-card:active { background: var(--bg-3); }
+  .td-fmt-card-label {
+    font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700;
+    color: var(--orange); overflow-wrap: break-word;
+  }
+  .td-fmt-card-n { font-family: 'Anton', sans-serif; font-size: 18px; margin-top: 2px; }
+  .td-fmt-card-n span { font-family: inherit; font-size: 11px; color: var(--ink-3); }
+  .td-fmt-card-km { font-size: 11px; color: var(--ink-3); margin-top: 2px; overflow-wrap: break-word; }
+
+  /* Étiquette de format dans une ligne de timeline : inline, elle suit le nom de
+     la séance et se replie avec lui. */
+  .td-fmt-tag {
+    display: inline-block; vertical-align: baseline;
+    padding: 1px 6px; border-radius: 999px;
+    background: var(--bg-3); border: 1px solid var(--border-soft);
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--ink-2);
+    white-space: nowrap;
+  }
+
   /* Tableau des km : scroll confiné au tableau (jamais à la page). */
   .td-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin-top: 8px; }
   .td-table { width: 100%; border-collapse: collapse; font-size: 11px; }
@@ -20452,6 +20494,126 @@ function _trainingHasDistance(session, level) {
   return !!(session && (session.blocks || []).some(b => b.track_distance && _trainingBlockLevel(b, level).text));
 }
 
+// ============================================================
+// FORMAT DE COURSE — dérivé de la séance (aucune colonne, aucune migration)
+// ============================================================
+// Le coach veut distinguer, dans son suivi, SUR QUEL format de fractionné une
+// distance a été faite : 6 km en 4′/2′ et 6 km en 45″/30″ ne racontent pas du
+// tout la même chose.
+//
+// OÙ VIT L'INFORMATION — audit de la donnée réelle (prépa estivale 2026) :
+//   • `session.formatLabel` : « 4' / 2' » (lun, ven), « 45" / 30" » (mer).
+//     Saisi par le coach dans le wizard, présent sur 3 séances sur 3, et DÉJÀ
+//     affiché à la joueuse sur son écran de séance. → SOURCE PRINCIPALE.
+//   • nom / texte de niveau du bloc de course : « Course 24 min 4x[4'/2'] »,
+//     « 18 blocs [45" course rapide / 30" marche active] ». Texte libre, mais
+//     exploitable en repli.
+//   • drill lié au bloc : PISTE MORTE EN PRATIQUE, et c'est mesuré, pas supposé.
+//     Les blocs de course pointent « Course fractionnée fond », un drill de mode
+//     `circuit` SANS interval_config ; le seul drill `interval` du club (« 45/30 »)
+//     n'est lié à AUCUN bloc. On lit quand même cette source — elle est exacte
+//     quand elle existe — mais elle ne peut pas être la principale.
+// ⚠ Il n'existe AUCUN champ `interval_config` sur un bloc de prépa : ce champ
+// appartient à `drills` (migration 20260713_003), pas à `training_sessions`.
+//
+// CE QUE LE BADGE DIT — ET NE DIT PAS : c'est le format PRÉVU par la séance, pas
+// une déclaration de la joueuse. Une joueuse peut valider sa séance en ayant
+// sauté la course. D'où la règle d'affichage : le format ne s'affiche JAMAIS
+// seul, toujours à côté de la distance (ou de son absence explicite). Ne pas le
+// présenter comme « ce qu'elle a fait ».
+
+// Un token de durée → secondes. « 45" »=45, « 4' »=240, « 90 s »=90, « 2 min »=120.
+// L'ORDRE des alternatives est significatif (première correspondance gagne) :
+// '' avant ', secondes? avant s, minutes? avant min avant m.
+const RUN_TOKEN_RE = /(\d+(?:[.,]\d+)?)\s*(''|’’|″|"|′|’|'|secondes?|secs?|minutes?|min|mn|s|m)/i;
+function _runTokenSeconds(part) {
+  const m = RUN_TOKEN_RE.exec(String(part || ''));
+  if (!m) return null;
+  const n = Number(String(m[1]).replace(',', '.'));
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const u = String(m[2]).toLowerCase();
+  const sec = Math.round(/^(?:''|’’|″|"|secondes?|secs?|s)$/.test(u) ? n : n * 60);
+  // Garde-fou : une répétition de fractionné va de quelques secondes à quelques
+  // minutes. Hors de ces bornes on a parsé autre chose (durée totale, nombre de
+  // tours) — mieux vaut AUCUN badge qu'un badge faux.
+  return (sec >= 5 && sec <= 3600) ? sec : null;
+}
+
+// « 4' / 2' », « 4x[4'/2'] », « 18 blocs [45" course / 30" marche] » → {work, rest}.
+// Le contenu ENTRE CROCHETS prime : c'est là que le coach met le format quand la
+// chaîne porte aussi une durée totale — sans cette règle « Course 24 min 4x[4'/2'] »
+// serait parsé comme « 24 min ».
+function _parseRunFormat(str) {
+  let s = String(str || '');
+  const br = /\[([^\]]+)\]/.exec(s);
+  if (br) s = br[1];
+  const parts = s.split('/');
+  if (parts.length < 2) return null;
+  for (let i = 0; i + 1 < parts.length; i++) {
+    const work = _runTokenSeconds(parts[i]);
+    const rest = _runTokenSeconds(parts[i + 1]);
+    if (work !== null && rest !== null) return { work, rest };
+  }
+  return null;
+}
+
+// 240 → « 4′ » · 45 → « 45″ » · 90 → « 1′30 ». Notation d'athlétisme : la même
+// que celle que le coach a tapée, pour que le badge lui soit immédiatement
+// reconnaissable.
+function _runSecLabel(sec) {
+  if (sec < 60) return sec + '″';
+  if (sec % 60 === 0) return (sec / 60) + '′';
+  return Math.floor(sec / 60) + '′' + String(sec % 60).padStart(2, '0');
+}
+// `key` est la forme CANONIQUE (secondes) : c'est elle qui regroupe, filtre et
+// compte. Deux séances écrites « 4' / 2' » et « 240s/120s » sont le MÊME format
+// et doivent tomber dans le même seau — comparer les libellés ne le ferait pas.
+function _runFormatOf(work, rest) {
+  return { key: work + '-' + rest, label: _runSecLabel(work) + '/' + _runSecLabel(rest), work, rest };
+}
+
+// Le format de course d'une séance, par ordre de fiabilité décroissante.
+// null = aucun format identifiable → aucun badge (on n'invente pas).
+function _trainingRunFormat(session) {
+  if (!session) return null;
+  const f0 = _parseRunFormat(session.formatLabel);
+  if (f0) return Object.assign(_runFormatOf(f0.work, f0.rest), { source: 'session' });
+  const blocks = (session.blocks || []).filter(b => b && b.type === 'course');
+  for (const b of blocks) {
+    for (const lvl of TRAINING_LEVELS) {
+      const d = _trainingBlockDrill(b, lvl);
+      const cy = (d && d.mode === 'interval' && d.intervalConfig) ? d.intervalConfig.cycles : null;
+      const w = cy ? Math.round(Number(cy.work_ms) / 1000) : 0;
+      const r = cy ? Math.round(Number(cy.rest_ms) / 1000) : 0;
+      if (w > 0 && r > 0) return Object.assign(_runFormatOf(w, r), { source: 'drill' });
+    }
+  }
+  for (const b of blocks) {
+    const cands = [b.name].concat(TRAINING_LEVELS.map(l => _trainingBlockLevel(b, l).text));
+    for (const txt of cands) {
+      const f = _parseRunFormat(txt);
+      if (f) return Object.assign(_runFormatOf(f.work, f.rest), { source: 'block' });
+    }
+  }
+  return null;
+}
+// Le format d'une validation = celui de sa séance (la validation ne porte pas de
+// format à elle : elle référence la séance, qui porte le plan).
+function _completionRunFormat(c) {
+  if (!c) return null;
+  return _trainingRunFormat((state.trainingSessions || []).find(x => x.id === c.sessionId));
+}
+const RUN_FORMAT_NONE = '__none';
+const RUN_FORMAT_NONE_LABEL = 'Sans format';
+// D'où sort le format affiché. Le coach doit pouvoir juger de sa fiabilité : lu
+// dans le champ « Format » de la séance, déduit d'un drill de fractionné, ou
+// deviné dans le texte d'un bloc — ce dernier est le plus fragile.
+const RUN_FORMAT_SOURCE_LABEL = {
+  session: 'format de la séance',
+  drill: 'déduit du fractionné lié',
+  block: 'déduit du bloc de course'
+};
+
 // --- WIZARD COACH -----------------------------------------------------------
 // Même pattern que les wizards drills : l'état vit sur state._trainingWizard (et
 // PAS sur window._), il est deep-cloné à l'ouverture (le wizard ne mute jamais
@@ -21173,7 +21335,7 @@ function openTrainingDashboard(programId, tab) {
   state._trainingDash = {
     programId,
     tab: (tab === 'detail' && _trainingIsCoach()) ? 'detail' : 'rank',
-    playerId: '', sessionId: '', period: 'all',
+    playerId: '', sessionId: '', period: 'all', runFormat: '',
     // Pagination de la timeline. Sur 6 semaines × 20 joueuses × 3 séances, il y a
     // ~360 lignes à rendre, chacune avec 2 <img> : tout sortir d'un coup fige
     // l'iPhone. On coupe à 40 et on affiche un compteur explicite du reste (règle
@@ -21308,9 +21470,49 @@ function _tdFilteredCompletions(p) {
     .filter(c => pool.has(c.playerId))
     .filter(c => !d.playerId || c.playerId === d.playerId)
     .filter(c => !d.sessionId || c.sessionId === d.sessionId)
+    .filter(c => {
+      if (!d.runFormat) return true;
+      const f = _completionRunFormat(c);
+      return d.runFormat === RUN_FORMAT_NONE ? !f : !!(f && f.key === d.runFormat);
+    })
     .filter(c => !c.datePlanned || (c.datePlanned >= b.from && c.datePlanned <= b.to))
     .sort((x, y) => (y.datePlanned || '').localeCompare(x.datePlanned || '')
       || (y.dateCompleted || 0) - (x.dateCompleted || 0));
+}
+
+// Les formats de course PRÉSENTS dans un programme, pour construire les filtres.
+// Jamais une liste en dur (« 45/30 » et « 4/2 ») : un autre programme aura
+// d'autres formats, et le club en changera la saison prochaine.
+function _tdRunFormatsOf(p) {
+  const out = [], seen = new Set();
+  _trainingSessionsOf(p.id).forEach(sess => {
+    const f = _trainingRunFormat(sess);
+    const key = f ? f.key : RUN_FORMAT_NONE;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ key, label: f ? f.label : RUN_FORMAT_NONE_LABEL, work: f ? f.work : 0 });
+  });
+  // Du plus court au plus long : l'ordre de lecture naturel d'un fractionné.
+  // « Sans format » ferme la marche (work = 0 le mettrait en tête).
+  return out.sort((a, b2) => (a.key === RUN_FORMAT_NONE ? 1 : b2.key === RUN_FORMAT_NONE ? -1 : a.work - b2.work));
+}
+
+// Répartition des validations par format. C'EST LE LIVRABLE ANALYTIQUE : le but
+// de distinguer les formats est de comparer les distances qu'ils produisent, donc
+// on sort aussi la moyenne — un total brut se lit mal quand les deux formats
+// n'ont pas le même nombre de séances.
+function _tdRunFormatStats(comps) {
+  const by = {};
+  (comps || []).forEach(c => {
+    const f = _completionRunFormat(c);
+    const key = f ? f.key : RUN_FORMAT_NONE;
+    const e = by[key] || (by[key] = { key, label: f ? f.label : RUN_FORMAT_NONE_LABEL, n: 0, nKm: 0, km: 0 });
+    e.n++;
+    if (Number.isFinite(c.runningDistanceKm) && c.runningDistanceKm > 0) { e.nKm++; e.km += c.runningDistanceKm; }
+  });
+  return Object.keys(by).map(k => by[k])
+    .map(e => Object.assign(e, { avg: e.nKm ? Math.round((e.km / e.nKm) * 10) / 10 : null, km: Math.round(e.km * 10) / 10 }))
+    .sort((a, b2) => b2.n - a.n);
 }
 
 // --- Onglet 2 : suivi détaillé (coach) --------------------------------------
@@ -21330,6 +21532,11 @@ function renderCoachTrainingDetail(programId) {
   const periodLabel = d.period === 'w' ? 'ces 7 derniers jours' : d.period === 'm' ? 'ces 30 derniers jours' : 'tout le programme';
   const shown = comps.slice(0, d.limit || 40);
   const rest = comps.length - shown.length;
+  // Filtre par format de course : affiché SEULEMENT s'il y a plusieurs formats
+  // dans le programme. Sur un programme à format unique, la rangée de chips
+  // n'offrirait aucun choix et ne ferait que voler de la hauteur.
+  const formats = _tdRunFormatsOf(p);
+  const fmtStats = _tdRunFormatStats(comps);
 
   return `
     <!-- FILTRES — empilés par défaut, en ligne à partir de 30em (cf. .td-filters) -->
@@ -21337,6 +21544,11 @@ function renderCoachTrainingDetail(programId) {
       <div class="segmented td-seg">
         ${TD_PERIODS.map(([k, lab]) => `<button class="segmented-btn ${(d.period || 'all') === k ? 'active' : ''}" onclick="_tdSet('period','${k}')">${lab}</button>`).join('')}
       </div>
+      ${formats.length > 1 ? `
+        <div class="td-chips" role="group" aria-label="Filtrer par format de course">
+          <button class="td-chip ${d.runFormat ? '' : 'on'}" onclick="_tdSet('runFormat','')">🏃 Tous formats</button>
+          ${formats.map(f => `<button class="td-chip ${d.runFormat === f.key ? 'on' : ''}" onclick="_tdSet('runFormat','${esc(f.key)}')">${esc(f.label)}</button>`).join('')}
+        </div>` : ''}
       <div class="td-filters">
         <select onchange="_tdSet('playerId',this.value)" aria-label="Filtrer par joueuse">
           <option value="">👥 Toutes les joueuses</option>
@@ -21357,6 +21569,18 @@ function renderCoachTrainingDetail(programId) {
       <span><b>${pts}</b> pts</span>
     </div>
 
+    ${fmtStats.length > 1 ? `
+      <div class="eyebrow-muted" style="margin-bottom:6px">Par format de course</div>
+      <div class="td-fmt-grid">
+        ${fmtStats.map(f => `
+          <div class="td-fmt-card${d.runFormat === f.key ? ' on' : ''}" onclick="_tdSet('runFormat','${d.runFormat === f.key ? '' : esc(f.key)}')">
+            <div class="td-fmt-card-label">${esc(f.label)}</div>
+            <div class="td-fmt-card-n">${f.n}<span> séance${f.n > 1 ? 's' : ''}</span></div>
+            <div class="td-fmt-card-km">${f.nKm ? f.km + ' km · moy ' + f.avg : 'aucune distance'}</div>
+          </div>`).join('')}
+      </div>
+      <div style="height:14px"></div>` : ''}
+
     ${d.playerId ? renderPlayerProgression(d.playerId, p.id) : ''}
 
     ${comps.length ? `
@@ -21370,11 +21594,11 @@ function renderCoachTrainingDetail(programId) {
       <div class="empty">
         <div class="empty-icon">🗓</div>
         <div class="empty-title">Aucune validation</div>
-        <div class="empty-desc">Rien ${esc(periodLabel)}${d.playerId ? ' pour cette joueuse' : ''}${d.sessionId ? ' sur cette séance' : ''}.</div>
+        <div class="empty-desc">Rien ${esc(periodLabel)}${d.playerId ? ' pour cette joueuse' : ''}${d.sessionId ? ' sur cette séance' : ''}${d.runFormat ? ' sur ce format de course' : ''}.</div>
       </div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center">
         ${(d.period !== 'all') ? `<button class="btn btn-secondary" onclick="_tdSet('period','all')" style="font-size:12px">📆 Voir tout le programme</button>` : ''}
-        ${(d.playerId || d.sessionId) ? `<button class="btn btn-ghost" onclick="_td().playerId='';_td().sessionId='';_tdSet('period','all')" style="font-size:12px">✕ Retirer les filtres</button>` : ''}
+        ${(d.playerId || d.sessionId || d.runFormat) ? `<button class="btn btn-ghost" onclick="_td().playerId='';_td().sessionId='';_td().runFormat='';_tdSet('period','all')" style="font-size:12px">✕ Retirer les filtres</button>` : ''}
       </div>`}
 
     <div style="font-size:10px;color:var(--ink-3);margin-top:14px;line-height:1.5">
@@ -21558,6 +21782,10 @@ function renderCompletionsTimeline(comps, opts) {
     try { day = formatDate(c.datePlanned, 'short'); } catch (e) {}
     const lateBadge = (c.datePlanned && c.dateCompleted && _isRattrapage(c.datePlanned, c.dateCompleted)) ? ' · ⏰ rattrapage' : '';
     const lvlIcon = c.contractLevel === 'ultra' ? '🔴' : c.contractLevel === 'med' ? '🟠' : '🟢';
+    // Format PRÉVU par la séance. Il ne s'affiche jamais seul : la ligne suivante
+    // porte la distance (ou son absence), sans quoi le badge laisserait croire
+    // que la course a forcément été faite.
+    const fmt = _completionRunFormat(c);
     const thumbs = [
       c.squadPhotoUrl ? { url: c.squadPhotoUrl, kind: 'squad' } : null,
       c.postPhotoUrl ? { url: c.postPhotoUrl, kind: 'post' } : null
@@ -21567,10 +21795,10 @@ function renderCompletionsTimeline(comps, opts) {
         ${o.showPlayer !== false ? _trPlayerAvatar(pl, 34) : ''}
         <div class="td-row-main">
           ${o.showPlayer !== false ? `<div class="td-row-name">#${pl ? pl.num : '?'} ${esc(pl ? pl.name : 'Joueuse')}</div>` : ''}
-          <div style="font-size:12px;color:var(--ink-2);overflow-wrap:break-word">${esc((s && s.name) || 'Séance')}</div>
+          <div style="font-size:12px;color:var(--ink-2);overflow-wrap:break-word">${esc((s && s.name) || 'Séance')}${fmt ? ` <span class="td-fmt-tag">${esc(fmt.label)}</span>` : ''}</div>
           <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px">${esc(day)} · ${lvlIcon} ${esc(TRAINING_LEVEL_LABEL[c.contractLevel] || '')}${esc(lateBadge)}</div>
           <div style="font-size:11px;color:var(--ink-3);margin-top:3px;overflow-wrap:break-word">
-            ${mate ? '👯 ' + esc(mate.name) + ' ' : ''}${Number.isFinite(c.runningDistanceKm) && c.runningDistanceKm > 0 ? '🏃 ' + c.runningDistanceKm + ' km ' : ''}${c.postMessage ? '💬 ' : ''}${c.editedAt ? '✎ corrigée ' : ''}${c.coachNote ? '📣 ' : ''}
+            ${mate ? '👯 ' + esc(mate.name) + ' ' : ''}${Number.isFinite(c.runningDistanceKm) && c.runningDistanceKm > 0 ? '🏃 ' + c.runningDistanceKm + ' km ' : (fmt ? '<span style="opacity:.7">🏃 pas de distance</span> ' : '')}${c.postMessage ? '💬 ' : ''}${c.editedAt ? '✎ corrigée ' : ''}${c.coachNote ? '📣 ' : ''}
           </div>
           ${thumbs.length ? `<div class="td-thumbs">
             ${thumbs.map(t => `<img class="td-thumb" src="${esc(t.url)}" loading="lazy" alt="">`).join('')}
@@ -21606,6 +21834,7 @@ function openTrainingCompletionDetail(id) {
   const s = (state.trainingSessions || []).find(x => x.id === c.sessionId);
   const mate = c.squadTeammateId ? (state.players || []).find(x => x.id === c.squadTeammateId) : null;
   const cfg = _trainingConfig(p);
+  const fmt = _trainingRunFormat(s);
   const editable = _trainingCanEditCompletion(c);
   let editor = c.updatedBy || '';
   const ec = (state.coaches || []).find(x => x.id === c.updatedBy);
@@ -21635,7 +21864,8 @@ function openTrainingCompletionDetail(id) {
       ${line('Validée le', c.dateCompleted ? esc(new Date(c.dateCompleted).toLocaleString('fr-FR')) : '—')}
       ${line('Contrat', esc(TRAINING_LEVEL_LABEL[c.contractLevel] || c.contractLevel))}
       ${line('Squad', mate ? '👯 #' + mate.num + ' ' + esc(mate.name) : (c.squadTeammateId ? 'Coéquipière inconnue' : ''))}
-      ${line('Distance', (Number.isFinite(c.runningDistanceKm) && c.runningDistanceKm > 0) ? '🏃 ' + c.runningDistanceKm + ' km' : '')}
+      ${line('Distance', (Number.isFinite(c.runningDistanceKm) && c.runningDistanceKm > 0) ? '🏃 ' + c.runningDistanceKm + ' km' : (fmt ? '<span style="color:var(--ink-3)">aucune distance saisie</span>' : ''))}
+      ${line('Format course', fmt ? esc(fmt.label) + ' <span style="color:var(--ink-3);font-size:11px">· ' + esc(RUN_FORMAT_SOURCE_LABEL[fmt.source] || '') + '</span>' : '')}
       ${line('Notes coach', c.notes ? esc(c.notes) : '')}
       ${c.editedAt ? line('Correction', '✎ ' + esc(new Date(c.editedAt).toLocaleString('fr-FR')) + (editor ? ' · ' + esc(editor) : '')) : ''}
 
@@ -21971,7 +22201,7 @@ function exportTrainingCompletionsCsv(programId) {
     const s = (v === null || v === undefined) ? '' : String(v);
     return /[";\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   };
-  const head = ['Numéro', 'Joueuse', 'Jour prévu', 'Validée le', 'Séance', 'Contrat', 'Points', 'Squad avec', 'Distance km', 'Photo squad', 'Photo post', 'Message', 'Notes coach', 'Mot du coach', 'Corrigée le', 'Corrigée par'];
+  const head = ['Numéro', 'Joueuse', 'Jour prévu', 'Validée le', 'Séance', 'Format course', 'Contrat', 'Points', 'Squad avec', 'Distance km', 'Photo squad', 'Photo post', 'Message', 'Notes coach', 'Mot du coach', 'Corrigée le', 'Corrigée par'];
   const lines = [head.map(cell).join(';')];
   comps.forEach(c => {
     const pl = (state.players || []).find(x => x.id === c.playerId);
@@ -21983,6 +22213,9 @@ function exportTrainingCompletionsCsv(programId) {
       c.datePlanned || '',
       c.dateCompleted ? new Date(c.dateCompleted).toISOString() : '',
       (s && s.name) || '',
+      // Format en NOTATION LISIBLE (4'/2') et non en clé canonique (240-120) :
+      // le fichier finit dans un tableur lu par un humain.
+      (() => { const f = _trainingRunFormat(s); return f ? f.label : ''; })(),
       TRAINING_LEVEL_LABEL[c.contractLevel] || c.contractLevel || '',
       c.pointsTotal || 0,
       mate ? ('#' + mate.num + ' ' + mate.name) : '',
@@ -38081,7 +38314,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-30.98';
+const APP_VERSION = '2026-07-30.99';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Une seule tentative de rechargement AUTOMATIQUE par session : si le HTML servi

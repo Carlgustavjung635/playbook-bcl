@@ -19,7 +19,11 @@ const blocks = [...html.matchAll(/<script([^>]*)>([\s\S]*?)<\/script>/g)]
   .filter(m => !/\bsrc=/.test(m[1]) && !/type\s*=\s*["']module["']/.test(m[1]));
 const code = blocks.map(m => m[2]).join('\n;\n')
   + '\n;globalThis.state = state; globalThis.K = K;'
-  + '\nglobalThis.TRAINING_LEVELS = TRAINING_LEVELS;';
+  + '\nglobalThis.TRAINING_LEVELS = TRAINING_LEVELS;'
+  // `const` de haut niveau = portée LEXICALE du contexte, pas propriété du global :
+  // sans ce pont, ctx.RUN_FORMAT_NONE vaut undefined et les filtres testés
+  // passent silencieusement en « aucun filtre ».
+  + '\nglobalThis.RUN_FORMAT_NONE = RUN_FORMAT_NONE; globalThis.RUN_FORMAT_SOURCE_LABEL = RUN_FORMAT_SOURCE_LABEL;';
 
 // --- stubs DOM minimalistes -------------------------------------------------
 const store = {};
@@ -772,8 +776,9 @@ t('CSV : en-tête, séparateur ;, BOM UTF-8', () => {
   const csv = String(ctx.__blob || '');
   assert(csv.charCodeAt(0) === 0xFEFF, 'BOM absent → accents cassés dans Excel FR');
   const head = csv.slice(1).split('\r\n')[0];
-  assert(head.split(';').length === 16, 'colonnes = ' + head.split(';').length);
+  assert(head.split(';').length === 17, 'colonnes = ' + head.split(';').length);
   assert(head.includes('Distance km') && head.includes('Corrigée par'), 'en-tête incomplet');
+  assert(head.includes('Format course'), 'colonne format de course absente');
   assert(ctx.__blobType.includes('text/csv'), 'type MIME = ' + ctx.__blobType);
 });
 
@@ -860,7 +865,237 @@ t('_tdMore / _tdSet sans état ouvert → no-op silencieux', () => {
 });
 
 // ============================================================================
-// 12) RESPONSIVE MOBILE UNIVERSEL
+// 12) FORMAT DE COURSE (dérivé de la séance — aucune migration)
+// ============================================================================
+// Les chaînes testées ici sont celles RÉELLEMENT en base (prépa estivale 2026),
+// relevées avant d'écrire le parseur. Ne pas les « simplifier » : c'est
+// exactement ce que le coach a tapé, apostrophes et guillemets compris.
+const P = ctx._parseRunFormat;
+
+t('parse le format d\'une séance : « 4\' / 2\' » → 240s / 120s', () => {
+  const f = P("4' / 2'");
+  assert(f && f.work === 240 && f.rest === 120, JSON.stringify(f));
+});
+t('parse « 45" / 30" » → 45s / 30s', () => {
+  const f = P('45" / 30"');
+  assert(f && f.work === 45 && f.rest === 30, JSON.stringify(f));
+});
+t('le contenu entre crochets PRIME sur la durée totale (« Course 24 min 4x[4\'/2\'] »)', () => {
+  const f = P("Course 24 min 4x[4'/2']");
+  assert(f && f.work === 240 && f.rest === 120, 'a parsé la durée totale : ' + JSON.stringify(f));
+});
+t('parse un texte de bloc bavard : « 18 blocs [45" course rapide / 30" marche active] »', () => {
+  const f = P('18 blocs [45" course rapide / 30" marche active]');
+  assert(f && f.work === 45 && f.rest === 30, JSON.stringify(f));
+});
+t('parse les unités écrites en toutes lettres (min / s)', () => {
+  assert(JSON.stringify(P('2 min / 1 min')) === JSON.stringify({ work: 120, rest: 60 }), 'min');
+  assert(JSON.stringify(P('90 s / 30 s')) === JSON.stringify({ work: 90, rest: 30 }), 's');
+  assert(JSON.stringify(P('30 secondes / 15 secondes')) === JSON.stringify({ work: 30, rest: 15 }), 'secondes');
+});
+t('aucun format identifiable → null (on n\'invente jamais un badge)', () => {
+  ['', null, undefined, 'Capacité', 'Format Intermittent', '45 minutes', '3 tours'].forEach(v =>
+    assert(P(v) === null, 'a inventé un format sur : ' + JSON.stringify(v)));
+});
+t('garde-fou : des valeurs absurdes sont rejetées plutôt que badgées', () => {
+  assert(P('0" / 30"') === null, 'zéro accepté');
+  assert(P('200 min / 2 min') === null, 'durée hors bornes acceptée');
+});
+t('CLÉ CANONIQUE : deux notations du même format tombent dans le même seau', () => {
+  const a = ctx._runFormatOf(...Object.values(P("4' / 2'")));
+  const b = ctx._runFormatOf(...Object.values(P('240 s / 120 s')));
+  assert(a.key === b.key, a.key + ' != ' + b.key);
+  assert(a.label === "4′/2′", 'libellé = ' + a.label);
+});
+t('libellé : 45 → 45″, 240 → 4′, 90 → 1′30', () => {
+  assert(ctx._runSecLabel(45) === '45″', ctx._runSecLabel(45));
+  assert(ctx._runSecLabel(240) === '4′', ctx._runSecLabel(240));
+  assert(ctx._runSecLabel(90) === '1′30', ctx._runSecLabel(90));
+});
+
+t('PRIORITÉ 1 : le champ « Format » de la séance fait foi', () => {
+  const f = ctx._trainingRunFormat({ formatLabel: '45" / 30"', blocks: [{ type: 'course', name: "Course 4x[4'/2']" }] });
+  assert(f && f.key === '45-30', 'clé = ' + (f && f.key));
+  assert(f.source === 'session', 'source = ' + f.source);
+});
+t('PRIORITÉ 2 : à défaut, un drill `interval` lié au bloc de course', () => {
+  seed();
+  S.drills = [{ id: 'dIv', name: '45/30', mode: 'interval', deletedAt: null,
+    intervalConfig: { cycles: { work_ms: 45000, rest_ms: 30000 } } }];
+  const f = ctx._trainingRunFormat({ formatLabel: '', blocks: [
+    { type: 'course', name: 'Course', levels: { min: { drill_id: 'dIv' }, med: {}, ultra: {} } }] });
+  assert(f && f.key === '45-30' && f.source === 'drill', JSON.stringify(f));
+});
+t('PRIORITÉ 2 bis : un drill `circuit` lié n\'est PAS un format (cas réel du club)', () => {
+  // La donnée de prod : les blocs de course pointent « Course fractionnée fond »,
+  // un drill de mode `circuit` sans interval_config. Le lire comme un format
+  // inventerait un badge à partir de rien.
+  seed();
+  S.drills = [{ id: 'dCirc', name: 'Course fractionnée fond', mode: 'circuit', deletedAt: null, intervalConfig: null }];
+  const f = ctx._trainingRunFormat({ formatLabel: '', blocks: [
+    { type: 'course', name: 'Course', levels: { min: { drill_id: 'dCirc' }, med: {}, ultra: {} } }] });
+  assert(f === null, 'format inventé depuis un drill circuit : ' + JSON.stringify(f));
+});
+t('PRIORITÉ 3 : à défaut, le nom puis le texte du bloc de course', () => {
+  seed();
+  S.drills = [];
+  const f1 = ctx._trainingRunFormat({ formatLabel: '', blocks: [{ type: 'course', name: "Course 24 min 4x[4'/2']" }] });
+  assert(f1 && f1.key === '240-120' && f1.source === 'block', JSON.stringify(f1));
+  const f2 = ctx._trainingRunFormat({ formatLabel: '', blocks: [
+    { type: 'course', name: 'Course', levels: { min: { text: '' }, med: { text: '18 blocs [45" / 30"]' }, ultra: { text: '' } } }] });
+  assert(f2 && f2.key === '45-30' && f2.source === 'block', JSON.stringify(f2));
+});
+t('seuls les blocs de type `course` sont regardés', () => {
+  const f = ctx._trainingRunFormat({ formatLabel: '', blocks: [{ type: 'gainage', name: "6 séries [30\" / 20\"]" }] });
+  assert(f === null, 'un bloc de gainage a produit un format de course');
+});
+t('séance sans rien → null, et aucun crash', () => {
+  assert(ctx._trainingRunFormat(null) === null);
+  assert(ctx._trainingRunFormat({}) === null);
+  assert(ctx._trainingRunFormat({ blocks: null }) === null);
+});
+
+// --- décor déterministe pour l'UI -------------------------------------------
+// Les sessionId sont FORCÉS : le décor de base les déduit du jour de la semaine
+// de datePlanned, ce qui ferait dépendre les assertions du jour où le test tourne.
+function seedFormats() {
+  seed();
+  S.drills = [];
+  S.trainingSessions.forEach(x => { x.formatLabel = ''; });
+  S.trainingSessions.find(x => x.id === 's1').formatLabel = '45" / 30"';
+  S.trainingSessions.find(x => x.id === 's2').formatLabel = "4' / 2'";
+  S.trainingCompletions = [
+    comp({ id: 'f1', playerId: 'pA', datePlanned: back(1), sessionId: 's1', runningDistanceKm: 3.2 }),
+    comp({ id: 'f2', playerId: 'pA', datePlanned: back(2), sessionId: 's1', runningDistanceKm: 2.8 }),
+    comp({ id: 'f3', playerId: 'pB', datePlanned: back(3), sessionId: 's2', runningDistanceKm: 6 }),
+    comp({ id: 'f4', playerId: 'pB', datePlanned: back(4), sessionId: 's3' }),   // séance sans format
+  ];
+}
+
+t('timeline : chaque ligne porte l\'étiquette du format de sa séance', () => {
+  seedFormats();
+  ctx.openTrainingDashboard('prog1', 'detail');
+  const h = M();
+  assert(h.includes('td-fmt-tag">45″/30″'), 'étiquette 45″/30″ absente');
+  assert(h.includes('td-fmt-tag">4′/2′'), 'étiquette 4′/2′ absente');
+});
+t('le format ne s\'affiche JAMAIS seul : sans distance, on le dit', () => {
+  // f4 est sur une séance SANS format → aucune mention ; f1..f3 ont une distance.
+  seedFormats();
+  S.trainingCompletions.find(c => c.id === 'f1').runningDistanceKm = null;
+  ctx.openTrainingDashboard('prog1', 'detail');
+  assert(M().includes('pas de distance'), 'absence de distance non signalée');
+});
+t('une séance sans format ne produit aucune étiquette', () => {
+  seedFormats();
+  const only = ctx.renderCompletionsTimeline([S.trainingCompletions.find(c => c.id === 'f4')], {});
+  assert(!only.includes('td-fmt-tag'), 'étiquette posée sur une séance sans format');
+  assert(!only.includes('pas de distance'), 'mention de distance sur une séance sans course');
+});
+
+t('FILTRE : les chips listent les formats du programme + « tous »', () => {
+  seedFormats();
+  ctx.openTrainingDashboard('prog1', 'detail');
+  const h = M();
+  assert(h.includes('Tous formats'), 'chip « tous » absente');
+  assert(h.includes(">45″/30″</button>"), 'chip 45″/30″ absente');
+  assert(h.includes(">4′/2′</button>"), 'chip 4′/2′ absente');
+  assert(h.includes('Sans format'), 'chip « sans format » absente');
+});
+t('FILTRE : les chips ne sont PAS affichées si le programme n\'a qu\'un format', () => {
+  seedFormats();
+  S.trainingSessions.forEach(x => { x.formatLabel = '45" / 30"'; });
+  ctx.openTrainingDashboard('prog1', 'detail');
+  assert(!M().includes('Tous formats'), 'rangée de filtres affichée sans choix à offrir');
+});
+t('FILTRE : sélectionner un format restreint la timeline', () => {
+  seedFormats();
+  ctx.openTrainingDashboard('prog1', 'detail');
+  ctx._tdSet('runFormat', '45-30');
+  const ids = ctx._tdFilteredCompletions(S.trainingPrograms[0]).map(c => c.id).sort();
+  assert(JSON.stringify(ids) === JSON.stringify(['f1', 'f2']), 'ids = ' + ids.join(','));
+});
+t('FILTRE : « sans format » isole les séances sans course identifiable', () => {
+  ctx._tdSet('runFormat', ctx.RUN_FORMAT_NONE);
+  const ids = ctx._tdFilteredCompletions(S.trainingPrograms[0]).map(c => c.id);
+  assert(JSON.stringify(ids) === JSON.stringify(['f4']), 'ids = ' + ids.join(','));
+});
+t('FILTRE : il se combine avec les autres (joueuse + format)', () => {
+  seedFormats();
+  ctx.openTrainingDashboard('prog1', 'detail');
+  ctx._tdSet('runFormat', '45-30');
+  ctx._tdSet('playerId', 'pB');
+  assert(ctx._tdFilteredCompletions(S.trainingPrograms[0]).length === 0, 'combinaison de filtres inopérante');
+});
+t('FILTRE : il est purgé par « retirer les filtres »', () => {
+  seedFormats();
+  ctx.openTrainingDashboard('prog1', 'detail');
+  ctx._tdSet('runFormat', '45-30');
+  ctx._tdSet('playerId', 'pC');           // aucune validation → état vide
+  assert(M().includes('sur ce format de course'), 'le format n\'est pas mentionné dans l\'état vide');
+  assert(M().includes("_td().runFormat=''"), 'le CTA ne purge pas le filtre format');
+});
+
+t('RÉPARTITION : une carte par format, avec séances, km et MOYENNE', () => {
+  seedFormats();
+  ctx.openTrainingDashboard('prog1', 'detail');
+  const st = ctx._tdRunFormatStats(ctx._tdFilteredCompletions(S.trainingPrograms[0]));
+  const a = st.find(x => x.key === '45-30');
+  const b = st.find(x => x.key === '240-120');
+  const none = st.find(x => x.key === ctx.RUN_FORMAT_NONE);
+  assert(a && a.n === 2 && a.km === 6 && a.avg === 3, JSON.stringify(a));
+  assert(b && b.n === 1 && b.km === 6 && b.avg === 6, JSON.stringify(b));
+  assert(none && none.n === 1 && none.nKm === 0 && none.avg === null, JSON.stringify(none));
+  // ...et c'est bien rendu : c'est le livrable analytique de la feature.
+  assert(M().includes('Par format de course'), 'bloc de répartition absent');
+  assert(M().includes('moy 3'), 'moyenne absente du rendu');
+});
+t('RÉPARTITION : une carte est cliquable et bascule le filtre', () => {
+  assert(M().includes("_tdSet('runFormat','45-30')"), 'carte non cliquable');
+});
+t('RÉPARTITION : pas de bloc quand tout est du même format (rien à comparer)', () => {
+  seedFormats();
+  S.trainingSessions.forEach(x => { x.formatLabel = '45" / 30"'; });
+  ctx.openTrainingDashboard('prog1', 'detail');
+  assert(!M().includes('Par format de course'), 'bloc de répartition affiché sans comparaison possible');
+});
+
+t('DÉTAIL : la ligne format donne le libellé ET sa provenance', () => {
+  seedFormats();
+  ctx.openTrainingCompletionDetail('f1');
+  const h = M();
+  assert(h.includes('Format course'), 'ligne absente');
+  assert(h.includes('45″/30″'), 'libellé absent');
+  assert(h.includes('format de la séance'), 'provenance absente');
+});
+t('DÉTAIL : sans distance, la ligne le dit au lieu de laisser un vide', () => {
+  seedFormats();
+  S.trainingCompletions.find(c => c.id === 'f1').runningDistanceKm = null;
+  ctx.openTrainingCompletionDetail('f1');
+  assert(M().includes('aucune distance saisie'), 'absence de distance non explicitée');
+});
+
+t('CSV : la colonne format porte le libellé lisible, pas la clé canonique', () => {
+  seedFormats();
+  ctx.openTrainingDashboard('prog1', 'detail');
+  ctx.exportTrainingCompletionsCsv('prog1');
+  const csv = String(ctx.__blob);
+  assert(csv.includes('45″/30″'), 'libellé absent du CSV');
+  assert(!csv.includes('45-30'), 'clé canonique exportée (illisible dans un tableur)');
+});
+
+t('RÉTROACTIF : aucune écriture, aucun champ ajouté sur les validations', () => {
+  seedFormats();
+  const before = JSON.stringify(S.trainingCompletions);
+  ctx.openTrainingDashboard('prog1', 'detail');
+  ctx._tdSet('runFormat', '45-30');
+  ctx.openTrainingCompletionDetail('f1');
+  ctx.exportTrainingCompletionsCsv('prog1');
+  assert(JSON.stringify(S.trainingCompletions) === before, 'la dérivation a muté les validations');
+});
+
+// ============================================================================
+// 13) RESPONSIVE MOBILE UNIVERSEL
 // ============================================================================
 // On PARSE le CSS réel plutôt que de simuler une largeur : la mise en page de cet
 // écran est faite à 100 % par des media queries, jamais par du JS qui lirait
@@ -1011,6 +1246,19 @@ t('la barre d\'onglets neutralise les marges de .segmented (sinon 36px volés)',
   assert(M().includes('class="segmented td-seg"'), 'classe td-seg absente de la barre d\'onglets');
   const r = baseRuleOf('.segmented.td-seg');
   assert(/margin-left:\s*0/.test(r) && /margin-right:\s*0/.test(r), 'marges latérales non annulées');
+});
+
+t('les chips de format wrappent et font 44px (nombre de formats non borné)', () => {
+  assert(/flex-wrap:\s*wrap/.test(baseRuleOf('.td-chips')), '.td-chips ne wrappe pas → scroll horizontal');
+  assert(!/overflow-x/.test(baseRuleOf('.td-chips')), '.td-chips scrolle au lieu de wrapper');
+  const c = baseRuleOf('.td-chip');
+  assert(Number((c.match(/min-height:\s*(\d+)px/) || [])[1] || 0) >= 44, 'chip sous 44px : ' + c);
+});
+
+t('la répartition par format est mobile-first : 1 colonne en base, 2 au palier', () => {
+  assert(/grid-template-columns:\s*1fr\s*;/.test(baseRuleOf('.td-fmt-grid') + ';'), '.td-fmt-grid pas en 1 colonne en base');
+  const inRow = tdMediaQueries().map(q => q.body).join('\n');
+  assert(/\.td-fmt-grid\s*\{[^}]*grid-template-columns:\s*1fr 1fr/.test(inRow), '2 colonnes jamais atteintes');
 });
 
 t('les vignettes sont dimensionnées par CSS (et grossissent au palier supérieur)', () => {
