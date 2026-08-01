@@ -9810,6 +9810,14 @@ function doLogout() {
   state._guideForceShow = false;
   state._guideCollapsed = undefined;
   state._guideWasNew = undefined;
+  // Aperçu coach de la prépa : le logout SPA ne recharge pas la page, on efface
+  // donc les états d'écran de la prépa. Le drapeau n'est de toute façon honoré
+  // que pour un coach (_trainingPreviewOn), mais un état d'écran qui traverse un
+  // changement d'identité est une bombe à retardement — cf. _broadcastSnoozed.
+  state._previewMode = false;
+  state._trainingView = null;
+  state._trainingValidate = null;
+  window._trainingResume = null;
   state.auth = null;
   state.authFlow = { stage: 'role', role: null, playerId: null, pinInput: '' };
   state.view = null;
@@ -21265,6 +21273,9 @@ function openTrainingPrograms() {
             <div style="display:flex;gap:6px;flex-wrap:wrap">
               <button class="btn btn-secondary" onclick="openTrainingDashboard('${p.id}')" style="padding:6px 10px;font-size:11px">🏆 Classement</button>
               <button class="btn btn-secondary" onclick="openTrainingDashboard('${p.id}','detail')" style="padding:6px 10px;font-size:11px">📊 Suivi détaillé</button>
+              <!-- Aperçu joueuse : lecture seule de bout en bout, donc ouvert aussi
+                   au coach scopé (contrairement à l'édition). -->
+              <button class="btn btn-secondary" onclick="openTrainingCoachPreview('${p.id}')" style="padding:6px 10px;font-size:11px">🔍 Aperçu joueuse</button>
               ${scoped ? '' : `
                 <button class="btn btn-secondary" onclick="openTrainingWizard('${p.id}')" style="padding:6px 10px;font-size:11px">✎ Éditer</button>
                 <button class="btn btn-secondary" onclick="toggleTrainingProgramActive('${p.id}')" style="padding:6px 10px;font-size:11px">${p.isActive === false ? '▶ Publier' : '⏸ Dépublier'}</button>
@@ -22402,6 +22413,68 @@ function exportTrainingCompletionsCsv(programId) {
 // PRÉPA « FULL PACKAGE » — côté joueuse (exécution + validation)
 // ============================================================
 
+// --- APERÇU COACH ------------------------------------------------------------
+// Le coach ouvre une séance et la parcourt EXACTEMENT comme une joueuse : mêmes
+// blocs, mêmes trois niveaux, mêmes drills lançables POUR DE VRAI (chrono, TTS,
+// keep-alive, format 45/30 complet). Seule différence : rien n'est jamais écrit.
+//
+// Pourquoi un drapeau et pas un écran dédié — dupliquer le rendu joueuse
+// garantirait qu'il diverge dès la première évolution, et un aperçu qui ment sur
+// ce que vit la joueuse ne sert à rien. On réutilise donc renderTrainingSession()
+// tel quel : seuls le bandeau de tête et le pied de page changent.
+//
+// DÉFENSE EN PROFONDEUR — même principe que l'aperçu 21 j côté joueuse : le
+// drapeau ne se contente pas de remplacer un bouton, il est retesté à l'entrée de
+// CHAQUE fonction qui écrit (ouverture de la validation, upload de photo, insert
+// de la completion, push au coach). Un bouton absent n'est pas une garde.
+//
+// `state._previewMode` est TRANSIENT : le préfixe `_` n'apparaît dans aucun
+// save() de persist(), il ne survit donc ni au reload ni au changement
+// d'identité. Et il n'est HONORÉ que pour un coach — une joueuse ne peut pas s'en
+// servir pour esquiver une écriture, la garde exige role === 'coach'.
+//
+// Les runtimes de drill (launchDrill / launchCircuit / launchInterval) n'écrivent
+// RIEN : ni persist(), ni table, ni push. C'est pour ça que l'aperçu peut les
+// lancer sans garde — si un jour un runtime se met à journaliser une session, il
+// faudra y poser _trainingPreviewBlocks() comme partout ailleurs.
+function _trainingPreviewOn() {
+  return !!(state._previewMode && state.auth && state.auth.role === 'coach');
+}
+// Garde à poser en TOUTE PREMIÈRE ligne des fonctions qui mutent : renvoie true
+// quand l'appelant doit s'arrêter net.
+function _trainingPreviewBlocks() {
+  if (!_trainingPreviewOn()) return false;
+  try { showToast('🔍 Mode aperçu — action non enregistrée'); } catch (e) {}
+  return true;
+}
+// Entrée depuis la bibliothèque coach : on ouvre le programme comme la joueuse le
+// voit (liste des séances → séance → drills).
+function openTrainingCoachPreview(programId) {
+  if (!_trainingIsCoach()) return;
+  state._previewMode = true;
+  state._trainingView = null;
+  state._trainingValidate = null;
+  openTrainingPreview(programId);
+}
+// Sortie : le drapeau tombe AVANT tout rendu, et on ramène le coach à sa
+// bibliothèque (il vient de là — le renvoyer à l'accueil lui ferait perdre son fil).
+function exitTrainingCoachPreview(programId) {
+  state._previewMode = false;
+  state._trainingView = null;
+  state._trainingValidate = null;
+  window._trainingResume = null;
+  if (programId) { try { openTrainingPrograms(); return; } catch (e) {} }
+  closeModal();
+}
+// Bandeau de tête, identique sur les deux écrans de l'aperçu.
+function _trainingPreviewBanner() {
+  if (!_trainingPreviewOn()) return '';
+  return `
+    <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:11px;color:var(--ink-2);line-height:1.5;margin-bottom:12px;overflow-wrap:break-word">
+      🔍 <b>Mode aperçu coach</b> — tu vois l'écran exact de la joueuse. Rien n'est enregistré : ni validation, ni points, ni notification.
+    </div>`;
+}
+
 // Les séances « dues » d'un programme à l'instant `nowMs` : celle du jour, celle
 // de la veille si elle est encore rattrapable, et celle de DEMAIN (fenêtre
 // d'anticipation H-24). Trois jours suffisent : la fenêtre totale va de H-24 à
@@ -22593,15 +22666,19 @@ function openTrainingPreview(programId) {
   // c'est le seul endroit où la joueuse voit toutes ses séances, y compris un
   // jour de repos. Seuls l'en-tête et le bandeau changent.
   const running = _trainingProgramRunning(p, todayISO);
+  // Le coach passe par le MÊME écran (cf. openTrainingCoachPreview) : c'est tout
+  // l'intérêt de l'aperçu. Seuls l'eyebrow, un bandeau et le pied changent.
+  const cp = _trainingPreviewOn();
   openModal(`
     <div class="modal-header">
       <div>
-        <div class="eyebrow">${running ? 'Mon programme · ' + esc(_trainingPeriodLabel(p)) : 'Aperçu · démarre ' + when}</div>
+        <div class="eyebrow">${cp ? '🔍 Aperçu joueuse' : running ? 'Mon programme · ' + esc(_trainingPeriodLabel(p)) : 'Aperçu · démarre ' + when}</div>
         <div class="modal-title">${esc(p.name || 'Programme')}</div>
       </div>
-      <button class="modal-close" onclick="closeModal()">✕</button>
+      <button class="modal-close" onclick="${cp ? 'exitTrainingCoachPreview()' : 'closeModal()'}">✕</button>
     </div>
     <div class="modal-body">
+      ${_trainingPreviewBanner()}
       <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:11px;color:var(--ink-2);line-height:1.5;margin-bottom:14px">
         ${running
           ? `📖 Toutes tes séances. Tu peux valider la séance du jour, celle de <b>demain</b> (24 h en avance) et rattraper la veille jusqu'à 48 h.`
@@ -22627,7 +22704,11 @@ function openTrainingPreview(programId) {
             </div>`;
         }).join('') : `<div class="empty"><div class="empty-icon">📭</div><div class="empty-title">Aucune séance</div><div class="empty-desc">Le coach n'a pas encore ajouté de séance.</div></div>`}
       </div>
-    </div>`);
+    </div>
+    ${cp ? `
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-block" onclick="exitTrainingCoachPreview('${p.id}')">← Quitter l'aperçu</button>
+      </div>` : ''}`);
 }
 
 // --- Écran de séance --------------------------------------------------------
@@ -22669,6 +22750,10 @@ function renderTrainingSession() {
   const availLevels = TRAINING_LEVELS.filter(l => (s.blocks || []).some(b => _trainingBlockLevel(b, l).text));
   if (availLevels.length && !availLevels.includes(v.level)) v.level = availLevels[0];
   const lvl = v.level;
+  // Aperçu coach : le CORPS de l'écran est rendu à l'identique (blocs, niveaux,
+  // boutons de drill, récup). Seuls le bandeau de tête et le pied changent — et
+  // `done` est déjà null pour un coach, `pid` étant réservé aux joueuses.
+  const cp = _trainingPreviewOn();
 
   const blocksHtml = (s.blocks || []).map((b, i) => {
     const lv = _trainingBlockLevel(b, lvl);
@@ -22693,12 +22778,13 @@ function renderTrainingSession() {
   openModal(`
     <div class="modal-header">
       <div>
-        <div class="eyebrow">${esc(p.name || 'Prépa')} · ${esc(formatDate(v.datePlanned, 'short'))}${isPreview ? ' · aperçu' : isAdvance ? ' · demain' : v.datePlanned < todayISO ? ' · rattrapage' : ''}</div>
+        <div class="eyebrow">${cp ? '🔍 Aperçu · ' : ''}${esc(p.name || 'Prépa')} · ${esc(formatDate(v.datePlanned, 'short'))}${isPreview ? ' · aperçu' : isAdvance ? ' · demain' : v.datePlanned < todayISO ? ' · rattrapage' : ''}</div>
         <div class="modal-title">${esc(s.name || 'Séance')}</div>
       </div>
-      <button class="modal-close" onclick="state._trainingView=null;closeModal()">✕</button>
+      <button class="modal-close" onclick="${cp ? 'exitTrainingCoachPreview()' : 'state._trainingView=null;closeModal()'}">✕</button>
     </div>
     <div class="modal-body">
+      ${_trainingPreviewBanner()}
       ${done ? `
         <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--green,#15803d);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:${done.coachNote || done.editedAt ? '8px' : '14px'}">
           ✓ <b>Séance validée</b> — ${esc(_completionSummary(done))}
@@ -22743,8 +22829,11 @@ function renderTrainingSession() {
           <div class="md-content" style="font-size:11px;color:var(--ink-2)">${mdToHtml(s.notesRecovery)}</div>
         </div>` : ''}
     </div>
-    <div class="modal-footer">
-      ${done ? `<button class="btn btn-secondary btn-block" onclick="openTrainingDashboard('${p.id}')">📊 Voir le classement</button>`
+    <div class="modal-footer"${cp ? ' style="display:flex;flex-direction:column;gap:6px"' : ''}>
+      ${cp ? `
+        <button class="btn btn-secondary btn-block" disabled style="opacity:.6;cursor:default;margin:0">🔍 Mode aperçu — aucune sauvegarde</button>
+        <button class="btn btn-primary btn-block" style="margin:0" onclick="exitTrainingCoachPreview('${p.id}')">← Quitter l'aperçu</button>`
+        : done ? `<button class="btn btn-secondary btn-block" onclick="openTrainingDashboard('${p.id}')">📊 Voir le classement</button>`
         : isPreview ? `<button class="btn btn-secondary btn-block" disabled style="opacity:.6;cursor:default">⏳ ${daysUntil === 0 ? 'Démarre aujourd\'hui' : daysUntil === 1 ? 'Démarre demain' : 'Démarre dans ' + daysUntil + ' jours'}</button>`
         : !stillValid ? `<button class="btn btn-secondary btn-block" onclick="state._trainingView=null;closeModal()">Fermer</button>`
         : !availLevels.length ? ''
@@ -22783,6 +22872,7 @@ function _trainingMaybeResume() {
 // voie tout de suite si ça a marché, et pour ne pas empiler upload + insert dans
 // un même bouton dont l'échec serait ambigu.
 function openTrainingValidate() {
+  if (_trainingPreviewBlocks()) return;   // aperçu coach : jamais d'écran de validation
   const v = state._trainingView; if (!v) return;
   if (!(state.auth && state.auth.role === 'player')) return;
   const _p = activeTrainingPrograms().find(x => x.id === v.programId);
@@ -22816,6 +22906,9 @@ function _tvaSquadOk() { const a = _tva(); return !!(a && a.squadOn && a.squadPh
 function _tvaPostOk() { const a = _tva(); return !!(a && a.postOn && a.postPhotoUrl && (a.postMessage || '').trim()); }
 
 async function _tvaPhoto(kind, event) {
+  // Garde AVANT la lecture du fichier : un upload Storage est une écriture, même
+  // si aucune ligne de completion n'est créée derrière.
+  if (_trainingPreviewBlocks()) { try { event.target.value = ''; } catch (e) {} return; }
   const a = _tva(); if (!a) return;
   const file = (event.target.files || [])[0];
   event.target.value = '';
@@ -22927,6 +23020,7 @@ function renderTrainingValidate() {
 // Insert de la validation. base_points ET points_total sont FIGÉS ici : rejouer
 // le barème à la lecture réécrirait l'historique si le coach le change ensuite.
 function confirmTrainingCompletion() {
+  if (_trainingPreviewBlocks()) return;   // aperçu coach : aucun insert, aucun point
   const a = _tva(); if (!a) return;
   const pid = (state.auth && state.auth.role === 'player') ? state.auth.playerId : null;
   if (!pid) return;
@@ -22975,6 +23069,7 @@ function confirmTrainingCompletion() {
 
 // Le coach suit l'assiduité : une validation lui est poussée.
 function _trainingNotifyCoachCompletion(p, c) {
+  if (_trainingPreviewOn()) return;   // aperçu coach : aucun push (garde muette, la 3e du chemin)
   const me = currentPlayer();
   const who = me ? ('#' + me.num + ' ' + me.name) : 'Une joueuse';
   notifyPush([_pushCoachKey()], {
@@ -38463,7 +38558,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-31.100';
+const APP_VERSION = '2026-07-31.101';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Une seule tentative de rechargement AUTOMATIQUE par session : si le HTML servi
