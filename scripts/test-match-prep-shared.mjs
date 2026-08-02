@@ -24,9 +24,12 @@ function extractFn(name) {
 
 const src = [extractFn('getMatchPlayLinks'), extractFn('renderMatchPrepForPlayer')].join('\n\n');
 function renderForPlayer(state, m) {
-  return new Function('state', 'esc', 'getCatShort', 'getCatLabel', 'parseVideo', 'viewFocusVideo',
+  // _videoThumbSlot : depuis les vignettes Instagram (v.102), le repli d'une
+  // vidéo sans thumbnail est un slot hydratable, pas un <div>▶</div> inline.
+  return new Function('state', 'esc', 'getCatShort', 'getCatLabel', 'parseVideo', 'viewFocusVideo', '_videoThumbSlot',
     src + '\nreturn renderMatchPrepForPlayer;'
-  )(state, s => String(s), () => 'O', () => 'Offensif', () => ({ thumb: '' }), () => {})(m);
+  )(state, s => String(s), () => 'O', () => 'Offensif', () => ({ thumb: '' }), () => {},
+    (url, thumb) => (thumb ? `<img src="${thumb}" alt="">` : '<div class="vthumb-slot"></div>'))(m);
 }
 function baseState(role = 'player') {
   return {

@@ -1221,6 +1221,81 @@
     line-height: 1.4;
     max-width: 90%;
   }
+  /* --- Placeholder de MARQUE quand le réseau ne donne pas de vignette ---
+     Instagram / TikTok / Vimeo n'exposent aucune vignette publique (cf. le
+     commentaire de _videoThumbFetch). Plutôt qu'un carré gris muet, on habille
+     la tuile aux couleurs du réseau : glyphe + gros ▶ + titre du play. Si
+     /api/video-thumb finit par trouver une vraie vignette, elle est injectée
+     PAR-DESSUS (data-vthumb) et ce bloc est masqué. */
+  .v-tile-placeholder[data-vprov] {
+    color: #fff;
+    background: linear-gradient(150deg, #2b2b33, #14141a);
+    gap: 6px;
+  }
+  .v-tile-placeholder[data-vprov="instagram"] {
+    background: linear-gradient(140deg, #405de6 0%, #833ab4 32%, #c13584 56%, #fd1d1d 80%, #fcb045 100%);
+  }
+  .v-tile-placeholder[data-vprov="tiktok"] {
+    background: linear-gradient(140deg, #25f4ee 0%, #101014 45%, #fe2c55 100%);
+  }
+  .v-tile-placeholder[data-vprov="vimeo"] {
+    background: linear-gradient(140deg, #1ab7ea 0%, #0d5a75 100%);
+  }
+  .v-tile-placeholder[data-vprov="youtube"] {
+    background: linear-gradient(140deg, #ff0000 0%, #7a0000 100%);
+  }
+  .v-tile-prov {
+    display: flex; align-items: center; gap: 4px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.32);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    color: #fff;
+  }
+  .v-tile-prov svg { display: block; }
+  .v-tile-placeholder[data-vprov] .v-tile-placeholder-icon {
+    width: 44px; height: 44px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.42);
+    font-size: 18px; color: #fff;
+    opacity: 1;
+  }
+  .v-tile-placeholder-title {
+    font-family: 'Anton', sans-serif;
+    font-size: 13px; line-height: 1.15;
+    text-transform: uppercase; letter-spacing: 0.02em;
+    color: #fff;
+    max-width: 96%;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+  }
+  .v-tile-placeholder[data-vprov] .v-tile-placeholder-tags {
+    color: rgba(255, 255, 255, 0.82);
+  }
+  /* Slot de vignette pour les petites tuiles carrées (.focus-img-thumb) :
+     remplit le parent, reçoit l'<img> si la vignette distante arrive. */
+  .vthumb-slot {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  .vthumb-slot img { width: 100%; height: 100%; object-fit: cover; }
+  .vthumb-slot-ph {
+    width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 22px;
+    color: #fff;
+    background: linear-gradient(140deg, #2b2b33, #14141a);
+  }
+  .vthumb-slot-ph[data-vprov="instagram"] {
+    background: linear-gradient(140deg, #405de6, #833ab4 35%, #c13584 60%, #fd1d1d 85%, #fcb045);
+  }
+  .vthumb-slot-ph[data-vprov="tiktok"] { background: linear-gradient(140deg, #25f4ee, #101014 45%, #fe2c55); }
+  .vthumb-slot-ph[data-vprov="vimeo"] { background: linear-gradient(140deg, #1ab7ea, #0d5a75); }
 
   /* === V8: Plan d'entraînement === */
   .training-exo-row {
@@ -7473,6 +7548,144 @@ function parseVideo(url) {
   return null;
 }
 
+// ============================================================
+// VIGNETTES VIDÉO DISTANTES (Instagram / Vimeo / TikTok)
+// ------------------------------------------------------------
+// POURQUOI YouTube marche et pas Instagram : YouTube publie une vignette à une
+// URL DÉTERMINISTE (img.youtube.com/vi/<id>/…) — zéro appel réseau, ça marche
+// depuis toujours. Instagram n'expose plus RIEN de public :
+//   1. api.instagram.com/oembed → retiré par Meta en octobre 2020 (répond
+//      aujourd'hui une page HTML de connexion, plus du JSON) ;
+//   2. graph.facebook.com/<v>/instagram_oembed → « Provide valid app ID » :
+//      il faut un jeton d'app Facebook (voir netlify/functions/video-thumb.js) ;
+//   3. scraper l'og:image de la page publique ou de /embed/ → depuis une IP
+//      serveur, Instagram sert le MUR DE CONNEXION : aucune balise og:image ;
+//   4. le faire depuis le navigateur est de toute façon interdit (CORS).
+// D'où la mécanique ici : on DEMANDE la vignette à /api/video-thumb (qui sait
+// résoudre Vimeo et TikTok tout de suite, et Instagram dès qu'un jeton est
+// posé), on met le résultat en cache local, et tant qu'il n'y a pas de vignette
+// on garde le placeholder de MARQUE (dégradé du réseau + titre du play).
+// Jamais de carré gris muet.
+// ============================================================
+const VIDEO_THUMB_KEY = 'pb8_video_thumbs';
+const VIDEO_THUMB_TTL_OK = 6 * 3600 * 1000;   // les URL CDN Instagram sont signées → courte durée
+const VIDEO_THUMB_TTL_KO = 60 * 60 * 1000;    // échec : on ne re-tape pas le réseau avant 1 h
+const VIDEO_THUMB_REMOTE = ['instagram', 'vimeo', 'tiktok'];
+const VIDEO_PROVIDER_LABEL = { instagram: 'Instagram', tiktok: 'TikTok', vimeo: 'Vimeo', youtube: 'YouTube', direct: 'Vidéo' };
+let _videoThumbMem = null;
+const _videoThumbInflight = {};
+
+// Glyphe du réseau (SVG générique, pas de logo de marque embarqué).
+function videoProviderGlyph(provider) {
+  if (provider === 'instagram') {
+    return `<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+      <rect x="3" y="3" width="18" height="18" rx="5"/><circle cx="12" cy="12" r="4"/><circle cx="17.3" cy="6.7" r="1.2" fill="currentColor" stroke="none"/></svg>`;
+  }
+  if (provider === 'tiktok') return '<span aria-hidden="true">♪</span>';
+  if (provider === 'vimeo') return '<span aria-hidden="true">🎬</span>';
+  return '<span aria-hidden="true">▶</span>';
+}
+
+// Vrai seulement pour les providers dont la vignette exige un aller-retour.
+function _videoThumbNeedsRemote(v) {
+  return !!v && !v.thumb && VIDEO_THUMB_REMOTE.indexOf(v.provider) >= 0;
+}
+
+function _videoThumbStore() {
+  if (_videoThumbMem) return _videoThumbMem;
+  try { _videoThumbMem = JSON.parse(localStorage.getItem(VIDEO_THUMB_KEY) || '{}') || {}; }
+  catch (e) { _videoThumbMem = {}; }
+  return _videoThumbMem;
+}
+function _videoThumbSave() {
+  const s = _videoThumbStore();
+  const keys = Object.keys(s);
+  if (keys.length > 200) {  // borne dure : on jette les entrées les plus vieilles
+    keys.sort((a, b) => (s[a].ts || 0) - (s[b].ts || 0))
+        .slice(0, keys.length - 200)
+        .forEach(k => { delete s[k]; });
+  }
+  try { localStorage.setItem(VIDEO_THUMB_KEY, JSON.stringify(s)); } catch (e) {}
+}
+// undefined = jamais demandé | null = demandé, sans vignette | string = URL
+function _videoThumbCached(url) {
+  const e = _videoThumbStore()[url];
+  if (!e) return undefined;
+  const ttl = e.thumb ? VIDEO_THUMB_TTL_OK : VIDEO_THUMB_TTL_KO;
+  if (Date.now() - (e.ts || 0) > ttl) return undefined;
+  return e.thumb || null;
+}
+function _videoThumbRemember(url, thumb) {
+  _videoThumbStore()[url] = { thumb: thumb || null, ts: Date.now() };
+  _videoThumbSave();
+}
+function _videoThumbFetch(url) {
+  if (_videoThumbInflight[url]) return _videoThumbInflight[url];
+  // file:// (tests locaux, aperçu hors-ligne) : pas de fonction serveur.
+  if (!/^https?:$/.test(location.protocol)) return Promise.resolve(null);
+  const p = fetch('/api/video-thumb?url=' + encodeURIComponent(url))
+    .then(r => {
+      const ct = r.headers.get('content-type') || '';
+      // Fonction non déployée → page 404 HTML : on ne tente pas de la parser.
+      if (!r.ok || ct.indexOf('json') < 0) return null;
+      return r.json();
+    })
+    .then(j => {
+      const thumb = (j && j.thumb) ? String(j.thumb) : null;
+      _videoThumbRemember(url, thumb);
+      return thumb;
+    })
+    .catch(() => { _videoThumbRemember(url, null); return null; });
+  _videoThumbInflight[url] = p;
+  p.then(() => { delete _videoThumbInflight[url]; }, () => { delete _videoThumbInflight[url]; });
+  return p;
+}
+
+// Injecte la vignette PAR-DESSUS le placeholder, seulement si l'image charge
+// vraiment (une URL CDN expirée ou un hotlink refusé ne doit pas laisser une
+// image cassée à la place d'un placeholder lisible).
+function _applyVideoThumb(el, thumb) {
+  if (!thumb || !el || !el.isConnected || el.getAttribute('data-vthumb-done')) return;
+  const img = new Image();
+  img.alt = '';
+  img.decoding = 'async';
+  img.onload = () => {
+    if (!el.isConnected || el.getAttribute('data-vthumb-done')) return;
+    el.setAttribute('data-vthumb-done', '1');
+    el.insertBefore(img, el.firstChild);
+    el.querySelectorAll('[data-vthumb-ph]').forEach(ph => { ph.style.display = 'none'; });
+  };
+  img.onerror = () => {};  // le placeholder de marque reste : rien à faire
+  img.src = thumb;
+}
+
+// Appelé à la fin de chaque rendu : tout élément [data-vthumb] tente sa
+// vignette (cache d'abord, réseau ensuite). Idempotent, borné par le cache.
+function _hydrateVideoThumbs(root) {
+  const scope = root || document;
+  let nodes;
+  try { nodes = scope.querySelectorAll('[data-vthumb]'); } catch (e) { return; }
+  nodes.forEach(el => {
+    const url = el.getAttribute('data-vthumb');
+    if (!url || el.getAttribute('data-vthumb-done')) return;
+    const cached = _videoThumbCached(url);
+    if (cached === undefined) { _videoThumbFetch(url).then(t => _applyVideoThumb(el, t)); return; }
+    if (cached) _applyVideoThumb(el, cached);
+  });
+}
+
+// Petite tuile carrée (.focus-img-thumb) : vignette si on l'a, sinon slot de
+// marque qui sera hydraté par _hydrateVideoThumbs.
+function _videoThumbSlot(url, thumb) {
+  if (thumb) return `<img src="${esc(thumb)}" alt="">`;
+  const v = url ? parseVideo(url) : null;
+  const prov = v ? v.provider : '';
+  const remote = _videoThumbNeedsRemote(v) ? esc(String(url)) : '';
+  return `<div class="vthumb-slot"${remote ? ` data-vthumb="${remote}"` : ''}>
+    <div class="vthumb-slot-ph" data-vthumb-ph${prov ? ` data-vprov="${prov}"` : ''}>${videoProviderGlyph(prov)}</div>
+  </div>`;
+}
+
 function videoEmbed(url) {
   const v = parseVideo(url);
   if (!v) return `<div class="v-tile-media-emoji">▶</div>`;
@@ -10793,18 +11006,30 @@ function playTile(p, opts) {
     ? '<div class="v-tile-badge" style="background:rgba(var(--accent-rgb),0.85);color:black">+ saison</div>'
     : '';
 
+  // VIGNETTE : YouTube la donne par URL (v.thumb). Instagram/TikTok/Vimeo non —
+  // on demande alors la vignette à /api/video-thumb (data-vthumb sur le média,
+  // hydraté après rendu), et en attendant (ou à jamais, si le réseau ne donne
+  // rien) on affiche un placeholder AUX COULEURS DU RÉSEAU avec le titre du
+  // play, plutôt que le carré gris quasi vide d'avant.
+  const remoteThumbUrl = (!previewSrc && _videoThumbNeedsRemote(v)) ? esc(String(p.videoUrl)) : '';
+  const provider = v ? v.provider : '';
+  const provLabel = VIDEO_PROVIDER_LABEL[provider] || '';
+  const phTags = concepts.length > 0
+    ? concepts.slice(0,2).map(c => esc(c)).join(' · ')
+    : (p.tags && p.tags.length > 0
+      ? p.tags.slice(0,2).map(t => esc(t)).join(' · ')
+      : `${esc(descPlain.slice(0, 40))}${descPlain.length > 40 ? '…' : ''}`);
+
   return `
     <div class="v-tile" style="${dim ? 'opacity:0.55' : ''}">
-      <div class="v-tile-media" onclick="openPlay('${p.id}')" style="cursor:pointer">
+      <div class="v-tile-media" onclick="openPlay('${p.id}')" style="cursor:pointer"${remoteThumbUrl ? ` data-vthumb="${remoteThumbUrl}"` : ''}>
         ${previewSrc
           ? `<img src="${previewSrc}" alt="" onerror="this.style.display='none'">`
-          : `<div class="v-tile-placeholder">
+          : `<div class="v-tile-placeholder"${hasVideo && provider ? ` data-vprov="${provider}"` : ''} data-vthumb-ph>
+              ${hasVideo && provLabel ? `<div class="v-tile-prov">${videoProviderGlyph(provider)}<span>${esc(provLabel)}</span></div>` : ''}
               <div class="v-tile-placeholder-icon">${hasVideo ? '▶' : '🏀'}</div>
-              ${concepts.length > 0
-                ? `<div class="v-tile-placeholder-tags">${concepts.slice(0,2).map(c => esc(c)).join(' · ')}</div>`
-                : (p.tags && p.tags.length > 0
-                  ? `<div class="v-tile-placeholder-tags">${p.tags.slice(0,2).map(t => esc(t)).join(' · ')}</div>`
-                  : `<div class="v-tile-placeholder-tags">${esc(descPlain.slice(0, 40))}${descPlain.length > 40 ? '…' : ''}</div>`)}
+              ${hasVideo ? `<div class="v-tile-placeholder-title">${esc(p.title)}</div>` : ''}
+              <div class="v-tile-placeholder-tags">${phTags}</div>
             </div>`}
         <div style="position:absolute;top:6px;left:6px;display:flex;gap:4px;flex-wrap:wrap">
           ${hasGallery ? `<div class="v-tile-badge" style="background:rgba(var(--accent-rgb),0.9);color:black">📷 ${images.length}</div>` : ''}
@@ -13980,7 +14205,7 @@ function focusItem(matchId, type, p, color, canEdit) {
               return `
                 <div>
                   <div class="focus-img-thumb" onclick="viewFocusVideo('${safeUrl}',${startSec})" style="position:relative">
-                    ${thumb ? `<img src="${esc(thumb)}" alt="">` : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:var(--ink-3);font-size:28px">▶</div>`}
+                    ${_videoThumbSlot(v.url, thumb)}
                     <span style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:32px;height:32px;border-radius:50%;background:rgba(0,0,0,0.75);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px">▶</span>
                     ${tsBadge}
                   </div>
@@ -15111,7 +15336,7 @@ function renderFocusModal(matchId, type, focusId, isNew) {
             return `
               <div>
                 <div class="focus-img-thumb" style="position:relative">
-                  ${thumb ? `<img src="${esc(thumb)}" alt="">` : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:var(--ink-3);font-size:28px">▶</div>`}
+                  ${_videoThumbSlot(v.url, thumb)}
                   ${tsBadge}
                   <button onclick="event.stopPropagation();removeFocusVideo(${i},'${matchId}','${type}','${focusId}',${isNew})"
                     style="position:absolute;top:2px;right:2px;width:20px;height:20px;border-radius:50%;background:rgba(0,0,0,0.8);color:white;border:none;cursor:pointer;font-size:11px">✕</button>
@@ -15704,7 +15929,7 @@ function renderMatchPrep(m) {
               return `
                 <div>
                   <div class="focus-img-thumb" onclick="viewFocusVideo('${safeUrl}',${startSec})" style="position:relative">
-                    ${thumb ? `<img src="${esc(thumb)}" alt="">` : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:var(--ink-3);font-size:28px">▶</div>`}
+                    ${_videoThumbSlot(v.url, thumb)}
                     <span style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:32px;height:32px;border-radius:50%;background:rgba(0,0,0,0.75);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px">▶</span>
                     ${tsBadge}
                     <button class="btn btn-icon" onclick="event.stopPropagation();removePrepVideo('${m.id}',${idx})" style="position:absolute;top:2px;right:2px;background:rgba(0,0,0,0.6);color:#fff;padding:2px 6px;font-size:10px">✕</button>
@@ -15814,7 +16039,7 @@ function renderMatchPrepForPlayer(m) {
           return `
             <div>
               <div class="focus-img-thumb" onclick="viewFocusVideo('${safeUrl}',${startSec})" style="position:relative">
-                ${thumb ? `<img src="${esc(thumb)}" alt="">` : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:var(--ink-3);font-size:28px">▶</div>`}
+                ${_videoThumbSlot(v.url, thumb)}
                 <span style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:32px;height:32px;border-radius:50%;background:rgba(0,0,0,0.75);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px">▶</span>
               </div>
               ${lbl}
@@ -38241,6 +38466,9 @@ function _doRender() {
       }
     }
   }
+  // Vignettes Instagram/Vimeo/TikTok : le DOM vient d'être remplacé, on
+  // (re)tente l'hydratation. Cache d'abord → aucun appel réseau si déjà connu.
+  try { _hydrateVideoThumbs(); } catch (e) {}
 }
 
 function render() {
@@ -38558,7 +38786,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-07-31.101';
+const APP_VERSION = '2026-08-02.102';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Une seule tentative de rechargement AUTOMATIQUE par session : si le HTML servi
