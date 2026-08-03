@@ -18,6 +18,7 @@
 //
 // On modélise fidèlement _flushEntity / _flushAll / _fetchApplySeed d'index.html.
 import assert from 'node:assert';
+import fs from 'node:fs';
 
 // ---------------------------------------------------------------------------
 // SUJET — extrait fidèle du moteur de sync (bloc <script type="module">)
@@ -298,6 +299,77 @@ await t('fetchAll appelé deux fois en parallèle → une seule sync partagée',
   eng.boot(state);
   await Promise.all([eng.fetchAll(state), eng.fetchAll(state)]);
   assert.strictEqual(selects, 1, 'la 2e demande se greffe sur la 1re');
+});
+
+// ---------------------------------------------------------------------------
+// GARDE STRUCTURELLE — le correctif doit rester GÉNÉRIQUE.
+//
+// Le bug ne touchait pas « les plays » : il touchait le moteur. Relevé en prod
+// le 2026-08-03, un seul flush a réécrit 12 collections en 2,2 s, dans l'ordre
+// exact de déclaration de ENTITIES (plays 16:34:00.752, matches .01.238,
+// challenges .01.419, challenge_scores .01.589, convocations .01.748,
+// convocation_responses .01.902, lineups .02.049, ffbb_config .02.202,
+// team_settings .02.408, programs .02.600, offseason_logs .02.749,
+// team_reviews .02.930). Le correctif vit donc dans la boucle de `_flushAll`,
+// et il doit y rester : ces assertions échouent si quelqu'un le déplace, le
+// contourne, ou le réduit à une entité particulière.
+console.log('\nGARDE STRUCTURELLE — le gate est dans le moteur, pas sur une entité');
+
+const HTML = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+
+// Extrait le corps d'une fonction par appariement d'accolades.
+function bodyOf(signature) {
+  const i = HTML.indexOf(signature);
+  assert.notStrictEqual(i, -1, `introuvable dans index.html : ${signature}`);
+  let d = 0, start = HTML.indexOf('{', i);
+  for (let j = start; j < HTML.length; j++) {
+    if (HTML[j] === '{') d++;
+    else if (HTML[j] === '}' && --d === 0) return HTML.slice(start, j + 1);
+  }
+  throw new Error('accolades non appariées : ' + signature);
+}
+
+const flushAll = bodyOf('async function _flushAll(state)');
+
+await t('le gate est DANS la boucle sur ENTITIES (donc les 38 entités, pas une)', () => {
+  assert.ok(/for \(const entity of ENTITIES\)/.test(flushAll), '_flushAll itère bien sur ENTITIES');
+  assert.ok(flushAll.includes('_reconciled.has(entity.key)'), 'le gate interroge _reconciled');
+  assert.ok(flushAll.indexOf('_reconciled.has(entity.key)') < flushAll.indexOf('_flushEntity('),
+    'le gate passe AVANT le push, pas après');
+});
+
+await t("aucune entité n'est traitée à part (pas de cas particulier dans le gate)", () => {
+  const gate = flushAll.slice(flushAll.indexOf('for (const entity of ENTITIES)'));
+  assert.ok(!/entity\.key\s*===/.test(gate), 'pas de branche sur une entité nommée');
+  assert.ok(!/entity\.table\s*===/.test(gate), 'pas de branche sur une table nommée');
+});
+
+await t('serveur injoignable → on saute l\'entité au lieu de pousser à l\'aveugle', () => {
+  assert.ok(/const ok = await _fetchApplySeed\(entity, state\);\s*\n\s*if \(!ok\) continue;/.test(flushAll),
+    'un fetch en échec fait `continue`, jamais un push');
+});
+
+await t('_flushEntity n\'est appelable que depuis _flushAll (aucun contournement)', () => {
+  const appels = (HTML.match(/_flushEntity\(/g) || []).length;
+  assert.strictEqual(appels, 2, `attendu : 1 définition + 1 appel dans _flushAll (trouvé ${appels})`);
+  assert.ok(flushAll.includes('_flushEntity('), 'et cet appel est bien celui de _flushAll');
+});
+
+await t('toute lecture serveur marque l\'entité comme réconciliée', () => {
+  assert.ok(bodyOf('function _seedCacheFromRemote(entity, rows, state)').includes('_reconciled.add(entity.key)'),
+    'le seed du cache est le seul point qui ouvre le droit de pousser');
+});
+
+await t('la sync initiale est partagée, pour que le flush du boot puisse l\'attendre', () => {
+  assert.ok(/_fetchAllInFlight = p;/.test(HTML), 'fetchAll publie sa promesse');
+  assert.ok(flushAll.includes('await _fetchAllInFlight'), '_flushAll l\'attend avant de pousser');
+});
+
+await t('le repère de session est pris avant tout, dans les deux points d\'entrée', () => {
+  assert.ok(flushAll.trimStart().startsWith('{\n  _captureBaseline(state);'),
+    '_captureBaseline est la 1re instruction de _flushAll (avant même le test online)');
+  assert.ok(/fetchAll\(state\) \{\s*\n\s*_captureBaseline\(state\);/.test(HTML),
+    'et la 1re de fetchAll');
 });
 
 console.log(`\n${pass} assertion(s) OK — le flush ne réécrit plus une collection qu'il n'a pas lue.`);
