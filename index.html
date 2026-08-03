@@ -5694,9 +5694,54 @@ function _reassertRows(table, dumpRows) {
   } catch (e) { /* offline / sb absent : le flush normal réessaiera */ }
 }
 
+// Photo de l'état AU CHARGEMENT DE LA PAGE, par entité : { key: { rowKey: hash } }.
+// C'est le seul repère qui permette de distinguer « l'utilisateur a écrit ça
+// pendant cette session » de « cette ligne dort dans le localStorage depuis
+// avant-hier ». Prise une seule fois, au premier flush ou à la première sync,
+// donc avant toute interaction.
+const _bootDump = {};
+function _captureBaseline(state) {
+  ENTITIES.forEach(entity => {
+    if (_bootDump[entity.key]) return;
+    try {
+      const map = entity.dump(state);
+      _bootDump[entity.key] = Object.fromEntries(
+        Object.entries(map).map(([k, r]) => [k, _stableJson(r)]));
+    } catch (e) { _bootDump[entity.key] = {}; }
+  });
+}
+
+// Après une réconciliation TARDIVE (l'apply vient de recouvrir l'état local par
+// celui du serveur) : ré-affirme les lignes que l'utilisateur avait RÉELLEMENT
+// modifiées depuis le chargement. Sans ça, une saisie faite hors ligne serait
+// silencieusement annulée au retour du réseau — on remplacerait une perte de
+// données par une autre. Les lignes simplement PÉRIMÉES, elles, ne sont pas
+// ré-affirmées : c'est tout l'objet du correctif.
+function _reassertDirty(entity, before) {
+  const base = _bootDump[entity.key] || {};
+  const dirty = Object.entries(before)
+    .filter(([k, row]) => _stableJson(row) !== base[k])
+    .map(([, row]) => row);
+  if (!dirty.length || !window.sb) return;
+  const onConflict = Array.isArray(entity.pk) ? entity.pk.join(',') : entity.pk;
+  try {
+    sb.from(entity.table).upsert(dirty, { onConflict })
+      .then(({ error }) => { if (error) console.warn('[sync] reassert ' + entity.table + ':', error.message); });
+  } catch (e) { /* hors ligne : le flush normal réessaiera */ }
+}
+
 // Caches : { entityKey: { rowKey: hash } }
 const _lastSeen = Object.fromEntries(ENTITIES.map(e => [e.key, {}]));
 let _flushPending = null;
+// Entités déjà CONFRONTÉES au serveur depuis ce chargement de page. `_lastSeen`
+// est un cache MÉMOIRE : il repart vide à chaque boot. Tant qu'une entité n'y
+// figure pas, on n'a aucune idée de ce que le serveur contient — et pousser
+// dans cet état revient à écraser le serveur avec un localStorage qui peut
+// dater de plusieurs jours. Cf. _flushAll.
+const _reconciled = new Set();
+// Promesse du fetchAll en cours (null sinon) : un flush déclenché pendant le
+// boot l'attend au lieu de partir à l'aveugle ou de refetcher pour rien.
+let _fetchAllInFlight = null;
 
 // PK composite : compose la clé string PostgREST (col1=eq.v1&col2=eq.v2…)
 function _pkFilter(entity, row) {
@@ -5734,12 +5779,61 @@ async function _flushEntity(entity, currentMap) {
   _lastSeen[entity.key] = newCache;
 }
 
+// Va chercher les lignes distantes d'une entité, les fusionne dans le state
+// (apply) et amorce le cache de flush. Rend false si le serveur n'a pas
+// répondu : l'appelant ne doit alors RIEN pousser pour cette entité.
+async function _fetchApplySeed(entity, state) {
+  try {
+    const { data, error } = await sb.from(entity.table).select('*');
+    if (error) { console.warn(`[sync] fetch ${entity.table}:`, error.message); return false; }
+    const rows = data || [];
+    // CRITIQUE : n'apply QUE si remote a des données. Sinon on garde le seed
+    // local et on laisse le prochain flush pousser local → remote.
+    if (rows.length > 0) {
+      try { entity.apply(state, rows); }
+      catch (e) { console.warn(`[sync] apply ${entity.key}:`, e.message); }
+    }
+    _seedCacheFromRemote(entity, rows, state);
+    return true;
+  } catch (e) { console.warn(`[sync] fetch ${entity.key}:`, e.message); return false; }
+}
+
 // Hook public : appelé après chaque persist() côté main script
+//
+// RÉCONCILIER AVANT DE POUSSER — sans quoi on écrase le serveur à l'aveugle.
+// `_lastSeen` repart VIDE à chaque chargement de page : tant qu'une entité n'a
+// pas été confrontée au serveur, chacune de ses lignes locales paraît modifiée
+// et le flush ré-uploadait la collection ENTIÈRE, telle qu'elle dort dans le
+// localStorage de CET appareil. Sur un appareil dont la copie datait — une
+// joueuse qui rouvre la PWA le lendemain — ça réécrivait par-dessus les
+// renommages faits par le coach entre-temps.
+// Constaté en prod le 2026-08-03 : 100 lignes `plays` sur 105 réécrites en un
+// seul ordre, à la microseconde près (updated_at identique, posé par trigger).
+// Un simple appui sur un onglet dans les ~2 s du boot suffisait : goSection()
+// → persist() → flush à +400 ms, avant que fetchAll n'ait peuplé le cache.
+// Même mécanisme si le fetch d'une entité échoue (blip réseau) : `continue`
+// laissait son cache vide, et le flush suivant repoussait tout.
 async function _flushAll(state) {
+  _captureBaseline(state);
   if (!Pb.online) return;
+  // Sync initiale en cours : on la laisse finir. Elle amorce les caches ; sans
+  // ça on repartirait chercher les mêmes lignes en parallèle.
+  if (_fetchAllInFlight) { try { await _fetchAllInFlight; } catch (e) {} }
   for (const entity of ENTITIES) {
     if (entity.auth === 'l2' && !Pb.user) continue;
     try {
+      // Jamais confrontée au serveur (boot hors-ligne, fetch en erreur…) : on
+      // va la chercher MAINTENANT. Serveur injoignable → on ne pousse RIEN
+      // pour cette entité : une écriture différée se rattrape, un écrasement
+      // non. Le state local reste intact, le prochain flush réessaiera.
+      if (!_reconciled.has(entity.key)) {
+        // Ce que cet appareil s'apprêtait à pousser, AVANT que le serveur ne
+        // parle : sert à retrouver les vraies écritures après l'apply.
+        const before = entity.dump(state);
+        const ok = await _fetchApplySeed(entity, state);
+        if (!ok) continue;
+        _reassertDirty(entity, before);
+      }
       const map = entity.dump(state);
       await _flushEntity(entity, map);
     } catch (e) { console.warn(`[sync] dump ${entity.key}:`, e.message); }
@@ -5755,6 +5849,9 @@ function _rowKey(entity, row) {
 // Helper : init le cache à partir des rows remote (PAS du state). Comme ça,
 // items locaux pas encore dans remote → absents du cache → next flush les push.
 function _seedCacheFromRemote(entity, rows, state) {
+  // Passé ce point, on SAIT ce que le serveur contient pour cette entité : le
+  // flush est autorisé à pousser ses écarts (cf. _flushAll).
+  _reconciled.add(entity.key);
   // On dump le state APRÈS apply pour avoir le format exact que dump produirait
   const map = entity.dump(state);
   const remoteKeys = new Set(rows.map(r => _rowKey(entity, r)));
@@ -5771,23 +5868,21 @@ window.PbSync = {
     if (_flushPending) return;
     _flushPending = setTimeout(() => { _flushPending = null; _flushAll(state); }, 400);
   },
-  async fetchAll(state) {
-    if (!Pb.online) return;
-    for (const entity of ENTITIES) {
-      if (entity.auth === 'l2' && !Pb.user) continue;
-      try {
-        const { data, error } = await sb.from(entity.table).select('*');
-        if (error) { console.warn(`[sync] fetch ${entity.table}:`, error.message); continue; }
-        const rows = data || [];
-        // CRITIQUE : n'apply QUE si remote a des données. Sinon on garde le seed
-        // local et on laisse le prochain flush pousser local → remote.
-        if (rows.length > 0) {
-          try { entity.apply(state, rows); }
-          catch (e) { console.warn(`[sync] apply ${entity.key}:`, e.message); }
-        }
-        _seedCacheFromRemote(entity, rows, state);
-      } catch (e) { console.warn(`[sync] fetch ${entity.key}:`, e.message); }
-    }
+  // Publiée en tant que promesse partagée (`_fetchAllInFlight`) : un flush
+  // déclenché pendant le boot l'attend au lieu de pousser sur un cache vide,
+  // et un pull-to-refresh concurrent se greffe dessus au lieu de tout refetch.
+  fetchAll(state) {
+    _captureBaseline(state);
+    if (_fetchAllInFlight) return _fetchAllInFlight;
+    const p = (async () => {
+      if (!Pb.online) return;
+      for (const entity of ENTITIES) {
+        if (entity.auth === 'l2' && !Pb.user) continue;
+        await _fetchApplySeed(entity, state);
+      }
+    })();
+    _fetchAllInFlight = p;
+    return p.finally(() => { if (_fetchAllInFlight === p) _fetchAllInFlight = null; });
   },
   // Fetch ciblé d'UNE entité (par key) + apply + seed cache. Utilisé pour
   // rafraîchir `coaches` à la demande avant le sélecteur de coach au login,
@@ -5797,14 +5892,7 @@ window.PbSync = {
     const entity = ENTITIES.find(e => e.key === key);
     if (!entity) return false;
     if (entity.auth === 'l2' && !Pb.user) return false;
-    try {
-      const { data, error } = await sb.from(entity.table).select('*');
-      if (error) { console.warn(`[sync] fetchOne ${entity.table}:`, error.message); return false; }
-      const rows = data || [];
-      if (rows.length > 0) { try { entity.apply(state, rows); } catch (e) {} }
-      _seedCacheFromRemote(entity, rows, state);
-      return true;
-    } catch (e) { console.warn(`[sync] fetchOne ${entity.key}:`, e.message); return false; }
+    return _fetchApplySeed(entity, state);
   },
   subscribeAll(state, onApplied) {
     ENTITIES.filter(e => e.realtime).forEach(entity => {
@@ -38786,7 +38874,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-02.102';
+const APP_VERSION = '2026-08-03.104';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Une seule tentative de rechargement AUTOMATIQUE par session : si le HTML servi
