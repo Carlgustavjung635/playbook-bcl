@@ -5895,6 +5895,12 @@ function _dumpPintadeRulesRow(r) {
     proof_timeout_seconds: _pintadeClampInt(r.proofTimeoutSeconds, 10, 300, 30),
     extension_hours_per_fail: _pintadeClampInt(r.extensionHoursPerFail, 0, 168, 24),
     max_consecutive_fails: _pintadeClampInt(r.maxConsecutiveFails, 1, 10, 3),
+    // Auto-libération après N preuves consécutives (migration _003). 0 = coupée.
+    auto_release_after_ok: _pintadeClampInt(r.autoReleaseAfterOk, 0, 50, 6),
+    // Règles du jeu écrites par le coach. NULL = pas personnalisé → le front
+    // affiche SON texte par défaut. On ne pousse donc jamais ce défaut : gelé
+    // en base, il ne suivrait plus les évolutions du jeu (cf. migration _003).
+    rules_text: (typeof r.rulesText === 'string' && r.rulesText.trim()) ? r.rulesText.slice(0, 20000) : null,
     sanction_feed_post: r.sanctionFeedPost !== false,
     sanction_extension: r.sanctionExtension !== false,
     sanction_coach_alert: r.sanctionCoachAlert !== false,
@@ -5912,6 +5918,11 @@ function _pintadeRulesFromRow(r) {
     proofTimeoutSeconds: _pintadeClampInt(r.proof_timeout_seconds, 10, 300, 30),
     extensionHoursPerFail: _pintadeClampInt(r.extension_hours_per_fail, 0, 168, 24),
     maxConsecutiveFails: _pintadeClampInt(r.max_consecutive_fails, 1, 10, 3),
+    autoReleaseAfterOk: _pintadeClampInt(r.auto_release_after_ok, 0, 50, 6),
+    // '' plutôt que null : le front distingue « vide » de « absent » à un seul
+    // endroit (l'écran de configuration), et partout ailleurs une chaîne vide
+    // retombe naturellement sur le texte par défaut.
+    rulesText: (typeof r.rules_text === 'string') ? r.rules_text : '',
     sanctionFeedPost: r.sanction_feed_post !== false,
     sanctionExtension: r.sanction_extension !== false,
     sanctionCoachAlert: r.sanction_coach_alert !== false,
@@ -10535,6 +10546,7 @@ function doLogout() {
   // donc les états d'écran de la prépa. Le drapeau n'est de toute façon honoré
   // que pour un coach (_trainingPreviewOn), mais un état d'écran qui traverse un
   // changement d'identité est une bombe à retardement — cf. _broadcastSnoozed.
+  state._pintadeRulesOpen = false;
   state._previewMode = false;
   state._trainingView = null;
   state._trainingValidate = null;
@@ -18999,6 +19011,8 @@ const PINTADE_RULES_DEFAULT = {
   proofTimeoutSeconds: 30,
   extensionHoursPerFail: 24,
   maxConsecutiveFails: 3,
+  autoReleaseAfterOk: 6,
+  rulesText: '',              // vide = pas personnalisé → PINTADE_RULES_TEXT_DEFAULT
   sanctionFeedPost: true,
   sanctionExtension: true,
   sanctionCoachAlert: true,
@@ -19007,6 +19021,66 @@ const PINTADE_RULES_DEFAULT = {
   updatedAt: 0
 };
 const PINTADE_H = 3600000;   // une heure en ms
+
+// ============================================================
+// LE TEXTE DES RÈGLES — VERSION DE RÉFÉRENCE
+// ------------------------------------------------------------
+// Markdown, rendu par `mdToHtml` (échappement AVANT rendu, donc rien
+// d'injectable même si le coach y colle n'importe quoi).
+//
+// Il vit ICI, et pas comme DEFAULT SQL, pour une raison pratique : le bouton
+// « Réinitialiser au texte par défaut » a besoin du texte côté client de toute
+// façon — un client ne peut pas restaurer un DEFAULT de colonne. Une seconde
+// copie en base ne servirait qu'à diverger de celle-ci à la première correction
+// de formulation. Tant que `rulesText` est vide, c'est ce texte qui s'affiche,
+// et il suit donc les évolutions du jeu. Dès que le coach enregistre le sien,
+// c'est le sien qui fait foi et plus aucune mise à jour n'y touche.
+//
+// À RELIRE à chaque changement de règle : ce texte est la seule chose que les
+// joueuses lisent vraiment. Les valeurs chiffrées y sont écrites en toutes
+// lettres — elles doivent rester cohérentes avec PINTADE_RULES_DEFAULT.
+const PINTADE_RULES_TEXT_DEFAULT = `🕊 **LA PINTADE DU MOIS**
+
+Une peluche géante circule dans l'équipe. Une joueuse est désignée porteuse pendant une période limitée.
+
+## Ses règles
+- La porteuse doit **avoir la peluche avec elle en permanence** dès qu'elle croise quelqu'un du groupe (coach ou coéquipière).
+- N'importe qui peut lui demander une **preuve photo** à tout moment depuis l'app.
+- Une seule demande possible **toutes les 2 heures** — laissez-la vivre.
+
+## Comment ça marche
+1. Tu reçois une notification « 🕊 Preuve demandée »
+2. Tu as **2 h pour ouvrir l'app** — passé ce délai c'est raté (tu dormais peut-être, on comprend)
+3. Une fois l'écran ouvert, tu as **30 secondes** pour photographier la peluche
+4. Photo prise → ✅ preuve validée, elle part dans le feed
+
+## Comment te libérer
+- **6 preuves réussies d'affilée** = tu es libérée automatiquement 🎉
+- La pintade est alors **transférée à celle qui a demandé la 6e preuve** — elle t'aura libérée sans le vouloir 😏
+- Sois stratégique dans tes demandes : **si tu es la 6e à en demander une, la peluche te tombe dessus**
+- Une joueuse qui porte déjà la pintade ne peut pas se demander de preuve à elle-même
+
+## Si tu rates
+- La période se prolonge de **+24 h** à chaque échec (elle finira par te lâcher)
+- **3 échecs consécutifs** → le coach décide de la suite : nouvelle sanction, transfert, ou libération
+- Un échec remet ta série de réussites à zéro — et une réussite remet ta série d'échecs à zéro
+
+## Le fun, c'est aussi les autres
+- Toutes les preuves **et** tous les échecs sont visibles de tout le monde dans le feed
+- Sois créative : selfies, mises en scène, la peluche fait la vaisselle — tout est permis
+- Le principe : plus tu joues le jeu, moins c'est long
+
+## Fin de période
+- À la date de fin, le coach transfère la pintade à une autre joueuse
+- Tes preuves restent dans le feed pour la postérité 🎉
+
+🕊 **Que la meilleure gagne !**`;
+// Le texte réellement affiché : celui du coach s'il en a écrit un, sinon le nôtre.
+function pintadeRulesText() {
+  const t = (pintadeRules().rulesText || '').trim();
+  return t || PINTADE_RULES_TEXT_DEFAULT;
+}
+function pintadeRulesTextIsCustom() { return !!(pintadeRules().rulesText || '').trim(); }
 
 // REPRISE DES DONNÉES LOCALES v.106 → v.107.
 // Un appareil qui a tourné en v.106 garde en localStorage des demandes au vieux
@@ -19177,20 +19251,36 @@ function pintadeRequestsOf(periodId) {
 //     système se tait et attend l'arbitrage du coach (règle explicite du cahier
 //     des charges — sans ce plafond, une joueuse qui décroche verrait sa peine
 //     grossir indéfiniment sans que personne n'ait rien décidé).
+// DEUX SÉRIES, qui se remettent à zéro MUTUELLEMENT : un raté efface les
+// réussites accumulées, une réussite efface les ratés. C'est ce qui rend les
+// deux mécaniques (3 ratés → arbitrage du coach, 6 réussites → libération)
+// exclusives l'une de l'autre à tout instant.
 function _pintadeTally(periodId) {
   const max = pintadeRules().maxConsecutiveFails;
-  let streak = 0, counted = 0;
+  let streak = 0, counted = 0, okStreak = 0, lastOk = null;
   pintadeRequestsOf(periodId).forEach(q => {
     const s = _pintadeStatus(q);
     if (s === 'pending' || s === 'awaiting_photo') return;   // un chrono tourne encore
-    if (s === 'ok') { streak = 0; return; }
+    if (s === 'ok') { streak = 0; okStreak++; lastOk = q; return; }
     streak++;                                  // failed_not_seen ET failed_timeout
+    okStreak = 0; lastOk = null;
     if (streak <= max) counted++;
   });
-  return { streak, counted };
+  return { streak, counted, okStreak, lastOk };
 }
 function pintadeStreak(periodId) { return _pintadeTally(periodId).streak; }
 function pintadeCountedFails(periodId) { return _pintadeTally(periodId).counted; }
+// Série de réussites EN COURS, et la demande qui l'a close (celle dont l'autrice
+// hérite de la peluche si le seuil est atteint).
+function pintadeOkStreak(periodId) { return _pintadeTally(periodId).okStreak; }
+function pintadeOkStreakLast(periodId) { return _pintadeTally(periodId).lastOk; }
+// Combien de preuves il reste à enchaîner pour se libérer. null = mécanique
+// désactivée par le coach (seuil 0).
+function pintadeOkRemaining(periodId) {
+  const goal = pintadeRules().autoReleaseAfterOk;
+  if (!goal) return null;
+  return Math.max(0, goal - pintadeOkStreak(periodId));
+}
 function pintadeFailTotal(periodId) { return pintadeRequestsOf(periodId).filter(_pintadeIsFail).length; }
 // Ventilation des ratés par nature. Le coach a besoin de la distinction avant
 // de trancher : trois « pas vue » sur une joueuse dont le téléphone est mort ne
@@ -19337,6 +19427,9 @@ function _pintadePersistStale() {
 // La porteuse a pris la photo dans les temps.
 async function submitPintadeProof(event) {
   const req = pintadeActiveRequest();
+  // Capturé AVANT l'upload : l'auto-libération clôt cette garde, et
+  // `pintadeActivePeriod()` ne la retrouverait plus après coup.
+  const period = pintadeActivePeriod();
   const input = event && event.target;
   const file = input && (input.files || [])[0];
   try { if (input) input.value = ''; } catch (e) {}
@@ -19373,14 +19466,23 @@ async function submitPintadeProof(event) {
     persist(); _pintadeFlush();
     window._pintadeUploading = false;
     if (req.status === 'ok') {
-      _pintadeRenderOverlay('success');
-      try {
-        notifyPush([_pushCoachKey()], {
-          title: '🕊 Preuve validée',
-          body: _pintadePlayerLabel(req.holderId) + ' a montré la pintade dans les temps.',
-          url: '/', tag: 'pintade-ok-' + req.id, type: 'pintade_ok'
-        });
-      } catch (e) {}
+      // AUTO-LIBÉRATION : c'est ici, et seulement ici, que la série est
+      // confrontée au seuil. L'appareil de la porteuse est le seul à passer par
+      // ce chemin — cf. l'en-tête de _pintadeMaybeAutoRelease.
+      let freed = null;
+      try { freed = _pintadeMaybeAutoRelease(period, req); } catch (e) { console.warn('[pintade] auto-release:', e && e.message); }
+      if (freed) {
+        _pintadeRenderOverlay('freed', freed);
+      } else {
+        _pintadeRenderOverlay('success');
+        try {
+          notifyPush([_pushCoachKey()], {
+            title: '🕊 Preuve validée',
+            body: _pintadePlayerLabel(req.holderId) + ' a montré la pintade dans les temps.',
+            url: '/', tag: 'pintade-ok-' + req.id, type: 'pintade_ok'
+          });
+        } catch (e) {}
+      }
     } else {
       _pintadeRenderOverlay('failed');
     }
@@ -19487,6 +19589,143 @@ function pintadeAssign(playerId, days, opts) {
   } catch (e) {}
   return true;
 }
+// ============================================================
+// AUTO-LIBÉRATION APRÈS N PREUVES CONSÉCUTIVES (migration _003)
+// ------------------------------------------------------------
+// Six preuves d'affilée et la porteuse est libérée — la pintade passe à CELLE
+// QUI A DEMANDÉ LA SIXIÈME. C'est ce qui transforme les demandes de preuve en
+// jeu à part entière : jusque-là demander ne coûtait rien et la porteuse ne
+// pouvait que subir. Désormais elle a un objectif atteignable, et les
+// demandeuses un risque à calculer — ce qui régule le harcèlement bien mieux
+// qu'un rate limit.
+//
+// ------------------------------------------------------------
+// LA SEULE ÉCRITURE DE CE MODULE QUI NE SOIT PAS DÉRIVÉE
+// ------------------------------------------------------------
+// Tout le reste (série, prolongations, fin effective) se recalcule à la lecture.
+// Ici il faut CRÉER une garde : c'est une écriture, et deux appareils qui la
+// feraient en même temps donneraient deux porteuses. D'où deux garde-fous :
+//
+//   1. Un seul appareil déclenche : celui de la PORTEUSE, juste après l'upload
+//      de sa preuve (cf. submitPintadeProof). Par construction, il n'y en a
+//      qu'un.
+//   2. Idempotence par le journal : on refuse s'il existe déjà un incident
+//      'auto_release_success_streak' pour cette garde. Un double appel, un
+//      re-render, une reprise de sync ne peuvent pas transférer deux fois.
+//
+// Si cet appareil meurt pile à cet instant, rien n'est écrit — et c'est très
+// bien : la série reste à 6, donc la PROCHAINE preuve réussie redéclenche. Le
+// pire cas est un retard, jamais un état incohérent.
+function _pintadeAutoReleaseDone(periodId) {
+  return (state.pintadeIncidents || []).some(i =>
+    i && !i.deletedAt && i.periodId === periodId && i.incidentType === 'auto_release_success_streak');
+}
+// À qui revient la peluche. Rend null quand c'est au coach de trancher :
+//   • la 6e demande venait du coach (lui refiler la peluche n'a aucun sens) ;
+//   • ou son autrice a quitté l'effectif entre-temps.
+function _pintadeSuccessorFor(request, period) {
+  const rid = request && request.requesterId;
+  if (!rid || String(rid).startsWith('coach:')) return null;
+  if (period && rid === period.holderId) return null;             // ne devrait pas arriver
+  return (state.players || []).some(p => p.id === rid) ? rid : null;
+}
+// Déclenche l'auto-libération si la série y est. Rend le détail de ce qui s'est
+// passé, ou null si rien n'était dû — l'appelant s'en sert pour l'écran final.
+function _pintadeMaybeAutoRelease(period, triggerRequest) {
+  if (!period || period.ended) return null;
+  const r = pintadeRules();
+  const goal = r.autoReleaseAfterOk;
+  if (!goal) return null;                                          // mécanique coupée
+  if (pintadeOkStreak(period.id) < goal) return null;
+  if (_pintadeAutoReleaseDone(period.id)) return null;             // déjà fait
+  const now = Date.now();
+  const trigger = triggerRequest || pintadeOkStreakLast(period.id);
+  const successor = _pintadeSuccessorFor(trigger, period);
+  const releasedId = period.holderId;
+
+  period.ended = true;
+  period.endedAt = now;
+  period.endedReason = 'auto_released_streak';
+  period.transferredAt = successor ? now : period.transferredAt || null;
+  period.updatedAt = now;
+
+  let newPeriod = null;
+  if (successor) {
+    const d = Math.max(1, Math.min(365, Math.round(Number(r.defaultDurationDays) || 30)));
+    newPeriod = {
+      id: uid(), holderId: successor,
+      startAt: now, endAt: now + d * 86400000, bonusHours: 0,
+      transferredFromId: releasedId, transferredAt: now,
+      ended: false, endedAt: null, endedReason: null,
+      seasonId: getActiveSeasonId() || null,
+      // `createdBy` = le mécanisme, pas une personne : c'est le jeu qui a
+      // tranché, personne n'a cliqué quoi que ce soit.
+      createdBy: 'auto:release_streak', createdAt: now, updatedAt: now, deletedAt: null
+    };
+    state.pintadeHolders = state.pintadeHolders || [];
+    state.pintadeHolders.push(newPeriod);
+  }
+  _pintadeLogIncident(period, {
+    incidentType: 'auto_release_success_streak',
+    streakCount: goal,
+    coachDecision: null,
+    metadata: {
+      releasedHolderId: releasedId,
+      newHolderId: successor || null,
+      streakCount: goal,
+      newPeriodId: newPeriod ? newPeriod.id : null,
+      triggerRequestId: trigger ? trigger.id : null,
+      // Le coach doit désigner la suivante lui-même (demande venue de lui, ou
+      // autrice partie de l'effectif).
+      pendingCoachPick: !successor
+    }
+  });
+  persist(); _pintadeFlush();
+
+  const releasedLabel = _pintadePlayerLabel(releasedId);
+  try {
+    if (successor) {
+      const newLabel = _pintadePlayerLabel(successor);
+      notifyPush([_pushCoachKey()], {
+        title: '🕊 Libérée après ' + goal + ' preuves',
+        body: releasedLabel + ' est libérée par ' + newLabel + ' — la pintade lui est transférée automatiquement.',
+        url: '/', tag: 'pintade-autorelease-' + period.id, type: 'pintade_auto_release'
+      });
+      notifyPush(['player:' + releasedId], {
+        title: '🎉 Tu es libérée !',
+        body: goal + ' preuves d\'affilée. La pintade passe à ' + newLabel + '.',
+        url: '/', tag: 'pintade-freed-' + period.id, type: 'pintade_freed'
+      });
+      notifyPush(['player:' + successor], {
+        title: '🕊 La pintade est pour toi !',
+        body: 'Ta demande a libéré ' + releasedLabel + '… et tu hérites de la peluche jusqu\'au '
+          + _pintadeFmtDate(newPeriod.endAt) + '.',
+        url: '/', tag: 'pintade-assign-' + newPeriod.id, type: 'pintade_assign'
+      });
+    } else {
+      notifyPush([_pushCoachKey()], {
+        title: '🕊 Libérée après ' + goal + ' preuves',
+        body: releasedLabel + ' est libérée. La 6e demande venait de toi : choisis la prochaine porteuse.',
+        url: '/', tag: 'pintade-autorelease-' + period.id, type: 'pintade_auto_release'
+      });
+      notifyPush(['player:' + releasedId], {
+        title: '🎉 Tu es libérée !',
+        body: goal + ' preuves d\'affilée. Le coach désignera la suivante.',
+        url: '/', tag: 'pintade-freed-' + period.id, type: 'pintade_freed'
+      });
+    }
+  } catch (e) {}
+  return { releasedId, successorId: successor, newPeriod, goal, pendingCoachPick: !successor };
+}
+// Le coach doit-il désigner une porteuse à la suite d'une auto-libération ?
+// Vrai tant que personne ne porte la peluche et qu'un incident l'attend.
+function pintadeCoachPickPending() {
+  if (pintadeActivePeriod()) return false;
+  return (state.pintadeIncidents || []).some(i =>
+    i && !i.deletedAt && i.incidentType === 'auto_release_success_streak'
+    && i.metadata && i.metadata.pendingCoachPick);
+}
+
 // Libération : fin ANTICIPÉE. La garde reste en base (historique), elle cesse
 // simplement d'être active.
 function pintadeRelease(reason, notes) {
@@ -19597,9 +19836,28 @@ function _pintadeRemainingMs() {
   if (!req.photoDeadlineAt) return (pintadeRules().proofTimeoutSeconds || 30) * 1000;
   return Math.max(0, req.photoDeadlineAt - Date.now());
 }
-function _pintadeRenderOverlay(mode) {
+function _pintadeRenderOverlay(mode, freed) {
   const host = _pintadeOverlayHost();
   if (window._pintadeTimer) { clearInterval(window._pintadeTimer); window._pintadeTimer = null; }
+
+  // LA DÉLIVRANCE. Cet écran est la récompense de six preuves d'affilée : il
+  // reste plus longtemps que les autres (l'utilisatrice a le droit de savourer)
+  // et nomme sa remplaçante, qui est aussi celle qui l'a piégée en dernier.
+  if (mode === 'freed' && freed) {
+    const suivante = freed.successorId ? _pintadePlayerLabel(freed.successorId) : null;
+    host.innerHTML = `
+      <div class="pintade-screen pintade-ok">
+        <div class="pintade-bird" style="animation:none;font-size:clamp(48px,16vw,72px)">🎉</div>
+        <div class="pintade-eyebrow" style="color:#22c55e">${freed.goal} preuves d'affilée</div>
+        <div class="pintade-title">Tu es libérée !</div>
+        <div class="pintade-sub">${suivante
+          ? 'La pintade passe à <strong>' + esc(suivante) + '</strong> — c\'est elle qui a demandé la dernière preuve. Elle ne l\'avait sûrement pas vu venir 😏'
+          : 'Le coach désignera la prochaine porteuse.'}</div>
+        <button class="btn btn-primary btn-block" style="max-width:340px;margin-top:8px" onclick="_pintadeCloseOverlay();render()">Enfin libre</button>
+      </div>`;
+    window._pintadeAutoClose = setTimeout(() => { try { _pintadeCloseOverlay(); render(); } catch (e) {} }, 6000);
+    return;
+  }
 
   if (mode === 'success' || mode === 'failed') {
     const okMode = mode === 'success';
@@ -19687,13 +19945,16 @@ function renderPintadeHomeCard() {
     // Rien en circulation : le coach voit une invitation à lancer le jeu, les
     // joueuses ne voient RIEN (une carte vide sur l'accueil n'apporte rien).
     if (!_pintadeIsCoach()) return '';
+    // …sauf si une auto-libération attend SA décision : là, ce n'est plus une
+    // invitation mais une tâche.
+    const pick = pintadeCoachPickPending();
     return `
       <div style="margin:0 18px 14px">
-        <div onclick="openPintadeAdmin()" style="cursor:pointer;display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:var(--radius);background:var(--surface);border:1.5px dashed var(--border)">
-          <div style="font-size:26px;flex:0 0 auto;opacity:0.7">🕊</div>
+        <div onclick="openPintadeAdmin()" style="cursor:pointer;display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:var(--radius);background:${pick ? 'rgba(239,68,68,0.08)' : 'var(--surface)'};border:1.5px ${pick ? 'solid var(--red)' : 'dashed var(--border)'}">
+          <div style="font-size:26px;flex:0 0 auto;opacity:${pick ? '1' : '0.7'}">🕊</div>
           <div style="flex:1;min-width:0">
             <div style="font-family:'Anton';font-size:15px;text-transform:uppercase;letter-spacing:0.02em">La pintade</div>
-            <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">Personne ne la porte · désigne une joueuse</div>
+            <div style="font-size:11px;color:${pick ? 'var(--red)' : 'var(--ink-3)'};font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${pick ? 'Libérée par ses preuves · désigne la suivante' : 'Personne ne la porte · désigne une joueuse'}</div>
           </div>
           <div style="flex:0 0 auto;color:var(--orange);font-family:'Anton';font-size:18px">+</div>
         </div>
@@ -19721,6 +19982,58 @@ function renderPintadeHomeCard() {
     </div>`;
 }
 
+// --- LES RÈGLES, EN ACCORDÉON (tout le monde) --------------------------------
+// FERMÉ par défaut : les joueuses qui connaissent déjà le jeu veulent voir qui
+// porte la peluche, pas relire un règlement à chaque ouverture. Mais il est en
+// TÊTE d'écran, parce que celle qui découvre doit le trouver sans chercher.
+//
+// L'état d'ouverture vit dans `state._pintadeRulesOpen` (mémoire, non persisté)
+// et l'accordéon est un simple re-render de la modale : pas de manipulation de
+// hauteur, rien à désynchroniser.
+function togglePintadeRules() {
+  state._pintadeRulesOpen = !state._pintadeRulesOpen;
+  openPintadeScreen();
+}
+function _pintadeRulesAccordion() {
+  const open = !!state._pintadeRulesOpen;
+  return `
+    <div style="margin-bottom:14px;border:1px solid var(--border);border-radius:10px;overflow:hidden">
+      <button onclick="togglePintadeRules()" aria-expanded="${open}"
+        style="width:100%;display:flex;align-items:center;gap:10px;padding:12px;background:var(--bg-1);border:0;cursor:pointer;text-align:left;color:var(--ink)">
+        <span style="font-size:18px;flex:0 0 auto">📜</span>
+        <span style="flex:1;min-width:0;font-family:'Anton';font-size:13px;text-transform:uppercase;letter-spacing:0.02em">Les règles du jeu</span>
+        <span style="flex:0 0 auto;color:var(--orange);font-family:'Anton';font-size:14px">${open ? '▾' : '▸'}</span>
+      </button>
+      ${open ? `<div class="md-content" style="padding:4px 12px 14px;font-size:12px;border-top:1px solid var(--border-soft)">${mdToHtml(pintadeRulesText())}</div>` : ''}
+    </div>`;
+}
+
+// --- LA JAUGE DE LIBÉRATION --------------------------------------------------
+// Six preuves d'affilée et la porteuse est libre. Sans repère visible, la règle
+// resterait une ligne de texte que personne ne relie à sa situation ; affichée,
+// elle devient un objectif — et pour les autres, un compte à rebours avant
+// d'hériter de la peluche.
+function _pintadeFreedomBar(period, mine) {
+  const goal = pintadeRules().autoReleaseAfterOk;
+  if (!goal || !period) return '';
+  const streak = pintadeOkStreak(period.id);
+  const left = Math.max(0, goal - streak);
+  const pips = Array.from({ length: goal }, (_, i) =>
+    `<span style="flex:1;height:6px;border-radius:3px;background:${i < streak ? '#22c55e' : 'var(--bg-3)'}"></span>`).join('');
+  const txt = left === 0
+    ? 'Libération imminente !'
+    : mine
+      ? 'Encore ' + left + ' preuve' + (left > 1 ? 's' : '') + ' d\'affilée et tu es libre'
+      : left === 1
+        ? '⚠ La prochaine demande la libère — et la peluche ira à son autrice'
+        : 'Encore ' + left + ' preuves et elle se libère';
+  return `
+    <div style="margin-top:10px">
+      <div style="display:flex;gap:3px;margin-bottom:5px">${pips}</div>
+      <div style="font-size:10px;color:${left <= 1 ? 'var(--orange)' : 'var(--ink-3)'};font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.03em;line-height:1.4">${esc(txt)}</div>
+    </div>`;
+}
+
 // --- L'ÉCRAN DE LA PINTADE (tout le monde) -----------------------------------
 // Une MODALE, pas un onglet de navigation : la barre du bas est déjà pleine, et
 // ajouter une entrée à la nav toucherait un composant que toutes les vues
@@ -19737,7 +20050,9 @@ function openPintadeScreen() {
       </div>
       <div class="modal-body">
         <div style="font-size:12px;color:var(--ink-3);line-height:1.5">Personne ne porte la pintade en ce moment.</div>
+        ${pintadeCoachPickPending() ? `<div style="margin-top:12px;padding:11px 12px;border-radius:10px;background:rgba(239,68,68,0.10);border:1.5px solid var(--red);font-size:12px;line-height:1.45">🕊 La dernière porteuse s'est libérée avec ses preuves. ${coach ? 'À toi de désigner la suivante.' : 'Le coach va désigner la suivante.'}</div>` : ''}
         ${coach ? `<button class="btn btn-primary btn-block" style="margin-top:14px" onclick="closeModal();setTimeout(()=>openPintadeAdmin(),50)">🕊 Désigner une porteuse</button>` : ''}
+        ${_pintadeRulesAccordion()}
       </div>`);
     return;
   }
@@ -19758,6 +20073,7 @@ function openPintadeScreen() {
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <div class="modal-body">
+      ${_pintadeRulesAccordion()}
       <div style="padding:14px;border-radius:var(--radius);background:linear-gradient(135deg,rgba(var(--accent-rgb),0.12),var(--surface));border:1.5px solid ${mine ? 'var(--orange)' : 'var(--border-soft)'};margin-bottom:14px">
         <div style="font-family:'Anton';font-size:16px;text-transform:uppercase;line-height:1.25">
           ${mine ? 'Elle est chez TOI' : 'Elle est chez ' + esc(_pintadePlayerLabel(period.holderId))}
@@ -19765,6 +20081,7 @@ function openPintadeScreen() {
         <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px;text-transform:uppercase">
           ✅ ${ok} preuve${ok > 1 ? 's' : ''} · 💀 ${fails} raté${fails > 1 ? 's' : ''}${period.transferredFromId ? ' · reçue de ' + esc(_pintadePlayerLabel(period.transferredFromId)) : ''}
         </div>
+        ${_pintadeFreedomBar(period, mine)}
       </div>
 
       ${mine ? `
@@ -19791,10 +20108,48 @@ function openPintadeScreen() {
       <div class="eyebrow-muted" style="margin:16px 0 8px">${feedVisible ? 'Le feed' : 'Feed privé'}</div>
       ${!feedVisible
         ? '<div style="font-size:12px;color:var(--ink-3);font-style:italic;padding:6px 2px">Le coach a rendu le feed privé.</div>'
-        : (!feed.length
-          ? '<div style="font-size:12px;color:var(--ink-3);font-style:italic;padding:6px 2px">Aucune demande pour l\'instant. Le calme avant la tempête.</div>'
-          : `<div style="display:flex;flex-direction:column;gap:6px">${feed.map(_pintadeFeedRow).join('')}</div>`)}
+        : `<div style="display:flex;flex-direction:column;gap:6px">${
+            (feed.length ? feed.map(_pintadeFeedRow).join('')
+              : '<div style="font-size:12px;color:var(--ink-3);font-style:italic;padding:6px 2px">Aucune demande pour l\'instant. Le calme avant la tempête.</div>')
+            + _pintadeGenesisRow(period)}</div>`}
     </div>`);
+}
+// LA LIGNE D'ORIGINE, en pied de feed (le feed est anti-chronologique, donc le
+// plus ancien est en bas) : d'où vient la peluche.
+//
+// L'auto-libération est un INCIDENT, pas une demande, et il appartient à la
+// garde PRÉCÉDENTE — il ne pourrait donc apparaître nulle part dans le feed de
+// la garde courante. On le retrouve par le lien `transferredFromId`, exactement
+// là où il a du sens : au commencement de l'histoire en cours.
+function _pintadeGenesisRow(period) {
+  if (!period) return '';
+  if (!period.transferredFromId) {
+    return `<div class="pintade-feed-row" style="border-style:dashed">
+      <div class="pintade-feed-ico">🕊</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-family:'Anton';font-size:13px;text-transform:uppercase">Début de la garde</div>
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px">${_pintadeFmtDateTime(period.startAt)}</div>
+      </div></div>`;
+  }
+  const auto = (state.pintadeIncidents || []).find(i =>
+    i && !i.deletedAt && i.incidentType === 'auto_release_success_streak'
+    && i.metadata && i.metadata.newPeriodId === period.id);
+  const from = esc(_pintadePlayerLabel(period.transferredFromId));
+  const to = esc(_pintadePlayerLabel(period.holderId));
+  if (auto) {
+    return `<div class="pintade-feed-row" style="border-color:rgba(34,197,94,0.45)">
+      <div class="pintade-feed-ico">🎉</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;color:#22c55e;line-height:1.25">🕊 ${from} libérée après ${auto.streakCount || ''} preuves ! La pintade passe à ${to}</div>
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;line-height:1.5">Elle avait demandé la dernière preuve 😏<br>${_pintadeFmtDateTime(period.startAt)}</div>
+      </div></div>`;
+  }
+  return `<div class="pintade-feed-row" style="border-style:dashed">
+    <div class="pintade-feed-ico">🔄</div>
+    <div style="flex:1;min-width:0">
+      <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;line-height:1.25">Transférée par le coach</div>
+      <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;line-height:1.5">De ${from} à ${to}<br>${_pintadeFmtDateTime(period.startAt)}</div>
+    </div></div>`;
 }
 // Une ligne du feed. Le libellé du demandeur est celui FIGÉ à la demande.
 function _pintadeFeedRow(q) {
@@ -20070,12 +20425,33 @@ function openPintadeRules() {
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <div class="modal-body">
+      <!-- LE TEXTE DES RÈGLES — en tête, parce que c'est la seule chose que les
+           joueuses lisent vraiment. Les curseurs, eux, ne se voient pas. -->
+      <div class="eyebrow-muted" style="margin-bottom:6px">📜 Texte des règles (affiché aux joueuses)</div>
+      <div class="fld" style="margin-bottom:8px">
+        <textarea id="pr-text" rows="10" maxlength="20000"
+          style="width:100%;font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.55"
+          placeholder="Markdown accepté : # titres, - listes, **gras**">${esc(pintadeRulesText())}</textarea>
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px;line-height:1.45">
+          Markdown : <strong>#</strong> titre · <strong>-</strong> liste · <strong>**gras**</strong>.
+          ${pintadeRulesTextIsCustom()
+            ? 'Texte personnalisé — il ne bougera plus tout seul.'
+            : 'Texte par défaut de l\'app : il suit les évolutions du jeu tant que tu n\'y touches pas.'}
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:18px">
+        <button class="btn btn-secondary" style="flex:1;font-size:12px" onclick="_pintadePreviewRules()">👁 Prévisualiser</button>
+        <button class="btn btn-ghost" style="flex:1;font-size:12px" onclick="_pintadeResetRulesText()">↺ Texte par défaut</button>
+      </div>
+
+      <div class="eyebrow-muted" style="margin:0 0 8px">Réglages</div>
       ${num('pr-days', 'Durée par défaut (jours)', 'Proposée à chaque désignation. Modifiable au cas par cas.', r.defaultDurationDays, 1, 365)}
       ${num('pr-rate', 'Rate limit (heures)', 'Une seule demande par tranche, pour la porteuse, quel que soit le demandeur.', r.rateLimitHours, 1, 168)}
       ${num('pr-connect', 'Fenêtre de connexion (heures)', 'Le temps pour OUVRIR l\'app après une demande. Au-delà : « pas vue à temps ». Ne descends pas trop : une demande de nuit doit rester rattrapable au réveil.', r.connectWindowHours, 1, 168)}
       ${num('pr-timeout', 'Délai de la photo (secondes)', 'Le second chrono, qui démarre quand l\'écran s\'affiche chez elle. En dessous de 20 s, ça devient méchant.', r.proofTimeoutSeconds, 10, 300)}
       ${num('pr-ext', 'Prolongation par raté (heures)', 'Ajoutée automatiquement à la fin de garde. 0 = pas de prolongation.', r.extensionHoursPerFail, 0, 168)}
       ${num('pr-max', 'Plafond de ratés consécutifs', 'Au-delà, plus AUCUNE sanction automatique : le système t\'attend.', r.maxConsecutiveFails, 1, 10)}
+      ${num('pr-auto', 'Libération après N preuves', 'Preuves réussies d\'affilée qui libèrent la porteuse. La pintade passe alors à l\'autrice de la dernière demande. 0 = mécanique désactivée.', r.autoReleaseAfterOk, 0, 50)}
       <div class="eyebrow-muted" style="margin:16px 0 8px">Sanctions actives</div>
       ${sw('pr-s-feed', '📰 Post dans le feed', 'Chaque raté apparaît publiquement.', r.sanctionFeedPost)}
       ${sw('pr-s-ext', '⏱ Prolongation automatique', 'Chaque raté rallonge la garde.', r.sanctionExtension)}
@@ -20104,6 +20480,11 @@ function _pintadeSaveRules() {
     proofTimeoutSeconds: clamp(v('pr-timeout'), 10, 300, 30),
     extensionHoursPerFail: clamp(v('pr-ext'), 0, 168, 24),
     maxConsecutiveFails: clamp(v('pr-max'), 1, 10, 3),
+    autoReleaseAfterOk: clamp(v('pr-auto'), 0, 50, 6),
+    // Texte identique au défaut → on stocke '' plutôt qu'une copie. Le coach
+    // qui n'a rien changé continue ainsi de suivre les évolutions du jeu, au
+    // lieu de figer la version du jour à son insu.
+    rulesText: _pintadeReadRulesText(),
     sanctionFeedPost: b('pr-s-feed'),
     sanctionExtension: b('pr-s-ext'),
     sanctionCoachAlert: b('pr-s-alert'),
@@ -20115,9 +20496,56 @@ function _pintadeSaveRules() {
   closeModal(); render();
   if (typeof showToast === 'function') showToast('✓ Règles enregistrées');
 }
+// Lit la zone de texte. Rend '' si elle est vide OU strictement identique au
+// texte de référence : dans les deux cas, « le coach n'a rien personnalisé ».
+function _pintadeReadRulesText() {
+  const el = document.getElementById('pr-text');
+  const cur = el ? String(el.value || '').trim() : (pintadeRules().rulesText || '').trim();
+  if (!cur || cur === PINTADE_RULES_TEXT_DEFAULT.trim()) return '';
+  return cur.slice(0, 20000);
+}
+// Aperçu du rendu Markdown, sans quitter l'édition ni rien enregistrer.
+function _pintadePreviewRules() {
+  const el = document.getElementById('pr-text');
+  const src = el ? el.value : pintadeRulesText();
+  // On mémorise la saisie en cours : rouvrir l'éditeur derrière l'aperçu
+  // relirait sinon la version enregistrée et effacerait le brouillon.
+  window._pintadeRulesDraft = src;
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">Aperçu · ce que voient les joueuses</div>
+        <div class="modal-title">📜 Les règles</div>
+      </div>
+      <button class="modal-close" onclick="_pintadeBackToRules()">✕</button>
+    </div>
+    <div class="modal-body"><div class="md-content">${mdToHtml(src)}</div></div>
+    <div class="modal-footer">
+      <button class="btn btn-primary btn-block" onclick="_pintadeBackToRules()">← Retour à l'édition</button>
+    </div>`);
+}
+function _pintadeBackToRules() {
+  closeModal();
+  setTimeout(() => {
+    openPintadeRules();
+    // Restaure le brouillon (openPintadeRules repart de la valeur enregistrée).
+    const el = document.getElementById('pr-text');
+    if (el && typeof window._pintadeRulesDraft === 'string') el.value = window._pintadeRulesDraft;
+    window._pintadeRulesDraft = null;
+  }, 60);
+}
+// Remet le texte de référence DANS LA ZONE D'ÉDITION, sans rien enregistrer :
+// le coach voit ce qu'il va obtenir et garde la main jusqu'à « Enregistrer ».
+function _pintadeResetRulesText() {
+  const el = document.getElementById('pr-text');
+  if (!el) return;
+  if (!confirm('Remplacer le texte par celui de l\'app ?\n\nTa version actuelle sera perdue (rien n\'est enregistré tant que tu ne valides pas).')) return;
+  el.value = PINTADE_RULES_TEXT_DEFAULT;
+  if (typeof showToast === 'function') showToast('↺ Texte par défaut restauré — pense à enregistrer');
+}
 function _pintadeResetRules() {
   if (!_pintadeIsCoach()) return;
-  if (!confirm('Revenir aux règles par défaut ?\n\n30 jours · 1 demande / 2 h · 2 h pour se connecter · 30 s pour la photo · +24 h par raté · plafond 3.')) return;
+  if (!confirm('Revenir aux règles par défaut ?\n\n30 jours · 1 demande / 2 h · 2 h pour se connecter · 30 s pour la photo · +24 h par raté · plafond 3 ratés · libération à 6 preuves.\n\nLe TEXTE des règles repasse lui aussi à la version de l\'app.')) return;
   state.pintadeRules = Object.assign({}, PINTADE_RULES_DEFAULT, { updatedBy: _pintadeMeId(), updatedAt: Date.now() });
   persist(); _pintadeFlush();
   closeModal(); render();
@@ -39831,6 +40259,13 @@ function notifFeed(opts) {
       title: n + ' ratés consécutifs', detail: _pintadePlayerLabel(period.holderId) + ' · à toi de trancher',
       count: n, action: 'openPintadeCoachAlert()' });
   });
+  // PINTADE — auto-libération dont la 6e demande venait du coach (ou d'une
+  // joueuse partie) : personne ne porte la peluche et c'est à lui de trancher.
+  src('coach', 'pintade-designer', () => {
+    if (typeof pintadeCoachPickPending !== 'function' || !pintadeCoachPickPending()) return;
+    todo('coach', { id: 'pintade-pick', icon: '🕊', title: 'Désigner une porteuse',
+      detail: 'La dernière s\'est libérée avec ses preuves', action: 'openPintadeAdmin()' });
+  });
   src('coach', 'gages-a-moderer', () => {
     if (typeof gagesPendingCount !== 'function') return;
     const n = gagesPendingCount();
@@ -40783,7 +41218,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-07.107';
+const APP_VERSION = '2026-08-07.108';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Une seule tentative de rechargement AUTOMATIQUE par session : si le HTML servi

@@ -908,6 +908,318 @@ t('une garde d\'une autre saison n\'est jamais la garde active', () => {
   ok(ctx.pintadeActivePeriod() === null, 'garde d\'une saison passée encore active');
 });
 
+// =============================================================================
+// 14) AUTO-LIBÉRATION APRÈS N PREUVES CONSÉCUTIVES (v.108)
+// =============================================================================
+// Six preuves d'affilée et la porteuse est libérée — la peluche passe à CELLE
+// QUI A DEMANDÉ LA SIXIÈME. C'est la seule écriture non dérivée du module :
+// elle CRÉE une garde, donc elle doit être déclenchée par un seul appareil
+// (celui de la porteuse) et rester idempotente.
+
+// Une preuve réussie de bout en bout, demandée par `requesterId`. Rend le
+// résultat de la confrontation au seuil, exactement comme submitPintadeProof.
+function preuveOk(requesterId) {
+  S.auth = String(requesterId).startsWith('coach:')
+    ? { role: 'coach', coachId: 'admin' } : { role: 'player', playerId: requesterId };
+  const period = ctx.pintadeActivePeriod();
+  demande();
+  const q = lastReq();
+  S.auth = { role: 'player', playerId: q.holderId };
+  ouvrir(q); reussite(q);
+  const freed = ctx._pintadeMaybeAutoRelease(period, q);
+  advance(2 * H);                                  // rate limit levé pour la suite
+  return { q, freed };
+}
+t('6 preuves d\'affilée libèrent la porteuse et transfèrent à la 6e demandeuse', () => {
+  seed('coach');
+  const p = startGarde('pA', 30, 'coach');
+  for (let i = 0; i < 5; i++) {
+    const r = preuveOk('pB');
+    ok(r.freed === null, 'libérée dès la ' + (i + 1) + 'e preuve');
+    ok(ctx.pintadeActivePeriod().id === p.id, 'garde changée trop tôt');
+  }
+  ok(ctx.pintadeOkStreak(p.id) === 5, 'série = ' + ctx.pintadeOkStreak(p.id));
+  ok(ctx.pintadeOkRemaining(p.id) === 1, 'reste ' + ctx.pintadeOkRemaining(p.id));
+  const { freed } = preuveOk('pC');               // pC demande la 6e
+  ok(freed, 'aucune libération à la 6e preuve');
+  ok(freed.releasedId === 'pA' && freed.successorId === 'pC', JSON.stringify(freed));
+  const cur = ctx.pintadeActivePeriod();
+  ok(cur && cur.holderId === 'pC', 'nouvelle porteuse = ' + (cur && cur.holderId));
+  ok(cur.transferredFromId === 'pA', 'lien de transfert perdu');
+  ok(S.pintadeHolders.find(h => h.id === p.id).ended === true, 'ancienne garde pas close');
+  ok(S.pintadeHolders.find(h => h.id === p.id).endedReason === 'auto_released_streak',
+    S.pintadeHolders.find(h => h.id === p.id).endedReason);
+  ok(cur.createdBy === 'auto:release_streak', 'la garde doit être attribuée au mécanisme : ' + cur.createdBy);
+});
+t('la nouvelle porteuse repart d\'une ardoise vierge', () => {
+  seed('coach');
+  startGarde('pA', 30, 'coach');
+  for (let i = 0; i < 5; i++) preuveOk('pB');
+  preuveOk('pC');
+  const cur = ctx.pintadeActivePeriod();
+  ok(ctx.pintadeOkStreak(cur.id) === 0, 'série de réussites héritée');
+  ok(ctx.pintadeFailTotal(cur.id) === 0, 'ratés hérités');
+  ok(ctx.pintadeOkRemaining(cur.id) === 6, 'compteur de libération hérité : ' + ctx.pintadeOkRemaining(cur.id));
+  ok(ctx.pintadePeriodEnd(cur) === cur.endAt, 'prolongations héritées');
+});
+t('UN SEUL RATÉ remet la série de réussites à zéro', () => {
+  seed('coach');
+  const p = startGarde('pA', 30, 'coach');
+  for (let i = 0; i < 5; i++) preuveOk('pB');
+  ok(ctx.pintadeOkStreak(p.id) === 5, 'série = ' + ctx.pintadeOkStreak(p.id));
+  S.auth = { role: 'player', playerId: 'pB' };
+  ratePasVue();
+  ok(ctx.pintadeOkStreak(p.id) === 0, 'la série a survécu au raté');
+  ok(ctx.pintadeStreak(p.id) === 1, 'la série de ratés ne démarre pas');
+  // …et symétriquement, une réussite efface la série de ratés.
+  const r = preuveOk('pB');
+  ok(r.freed === null, 'libérée alors que la série était cassée');
+  ok(ctx.pintadeStreak(p.id) === 0, 'la série de ratés a survécu à la réussite');
+  ok(ctx.pintadeOkStreak(p.id) === 1, 'la série de réussites n\'est pas repartie de 1');
+});
+t('la libération est IDEMPOTENTE : jamais deux gardes créées', () => {
+  seed('coach');
+  const p = startGarde('pA', 30, 'coach');
+  for (let i = 0; i < 5; i++) preuveOk('pB');
+  const { q } = preuveOk('pC');
+  const nb = S.pintadeHolders.length;
+  // Rejoué : un double tap, un re-render, une reprise de sync…
+  ok(ctx._pintadeMaybeAutoRelease(S.pintadeHolders.find(h => h.id === p.id), q) === null, 'rejoué avec succès');
+  ok(ctx._pintadeMaybeAutoRelease(ctx.pintadeActivePeriod(), q) === null, 'rejoué sur la NOUVELLE garde');
+  ok(S.pintadeHolders.length === nb, S.pintadeHolders.length + ' gardes au lieu de ' + nb);
+  const incs = (S.pintadeIncidents || []).filter(i => i.incidentType === 'auto_release_success_streak');
+  ok(incs.length === 1, incs.length + ' incidents de libération');
+});
+t('la 6e demande venue du COACH ne lui refile pas la peluche', () => {
+  seed('coach');
+  const p = startGarde('pA', 30, 'coach');
+  for (let i = 0; i < 5; i++) preuveOk('pB');
+  const { freed } = preuveOk('coach:admin');
+  ok(freed && freed.pendingCoachPick === true, JSON.stringify(freed));
+  ok(freed.successorId === null, 'un successeur a été désigné : ' + freed.successorId);
+  ok(ctx.pintadeActivePeriod() === null, 'une garde a été créée quand même');
+  ok(S.pintadeHolders.find(h => h.id === p.id).ended === true, 'la porteuse n\'a pas été libérée');
+  S.auth = { role: 'coach', coachId: 'admin' };
+  ok(ctx.pintadeCoachPickPending() === true, 'le coach n\'est pas invité à désigner');
+});
+t('une demandeuse partie de l\'effectif renvoie la décision au coach', () => {
+  seed('coach');
+  startGarde('pA', 30, 'coach');
+  for (let i = 0; i < 5; i++) preuveOk('pB');
+  S.auth = { role: 'player', playerId: 'pC' };
+  const period = ctx.pintadeActivePeriod();
+  demande();
+  const q = lastReq();
+  S.auth = { role: 'player', playerId: 'pA' }; ouvrir(q); reussite(q);
+  S.players = S.players.filter(x => x.id !== 'pC');        // elle quitte le club
+  const freed = ctx._pintadeMaybeAutoRelease(period, q);
+  ok(freed && freed.pendingCoachPick === true, JSON.stringify(freed));
+  ok(ctx.pintadeActivePeriod() === null, 'une garde a été créée pour une joueuse absente');
+});
+t('le coach peut couper la mécanique (seuil 0)', () => {
+  seed('coach');
+  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, { autoReleaseAfterOk: 0, updatedAt: NOW });
+  const p = startGarde('pA', 30, 'coach');
+  for (let i = 0; i < 8; i++) {
+    const r = preuveOk('pB');
+    ok(r.freed === null, 'libérée à la ' + (i + 1) + 'e alors que la mécanique est coupée');
+  }
+  ok(ctx.pintadeActivePeriod().id === p.id, 'la garde a changé');
+  ok(ctx.pintadeOkRemaining(p.id) === null, 'un objectif est affiché malgré la coupure');
+  ok(ctx._pintadeFreedomBar(p, true) === '', 'la jauge s\'affiche malgré la coupure');
+});
+t('le seuil est réglable par le coach', () => {
+  seed('coach');
+  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, { autoReleaseAfterOk: 3, updatedAt: NOW });
+  startGarde('pA', 30, 'coach');
+  preuveOk('pB'); preuveOk('pB');
+  ok(ctx.pintadeActivePeriod().holderId === 'pA', 'libérée trop tôt');
+  const { freed } = preuveOk('pC');
+  ok(freed && freed.successorId === 'pC', JSON.stringify(freed));
+  ok(freed.goal === 3, 'seuil tracé = ' + freed.goal);
+});
+t('l\'incident tracé porte tout ce qu\'il faut pour comprendre après coup', () => {
+  seed('coach');
+  const p = startGarde('pA', 30, 'coach');
+  for (let i = 0; i < 5; i++) preuveOk('pB');
+  const { q } = preuveOk('pC');
+  const inc = (S.pintadeIncidents || []).find(i => i.incidentType === 'auto_release_success_streak');
+  ok(inc, 'aucun incident tracé');
+  ok(inc.periodId === p.id && inc.holderId === 'pA', JSON.stringify(inc));
+  ok(inc.metadata.releasedHolderId === 'pA' && inc.metadata.newHolderId === 'pC', JSON.stringify(inc.metadata));
+  ok(inc.metadata.triggerRequestId === q.id, 'la demande déclenchante n\'est pas tracée');
+  ok(inc.metadata.streakCount === 6 && inc.metadata.pendingCoachPick === false, JSON.stringify(inc.metadata));
+  ok(inc.metadata.newPeriodId === ctx.pintadeActivePeriod().id, 'la nouvelle garde n\'est pas reliée');
+});
+t('les trois intéressés sont prévenus', () => {
+  seed('coach');
+  startGarde('pA', 30, 'coach');
+  for (let i = 0; i < 5; i++) preuveOk('pB');
+  pushes.length = 0;
+  preuveOk('pC');
+  const coach = pushes.find(x => (x.payload || {}).type === 'pintade_auto_release');
+  const freed = pushes.find(x => (x.payload || {}).type === 'pintade_freed');
+  const next = pushes.find(x => (x.payload || {}).type === 'pintade_assign');
+  ok(coach, 'le coach n\'est pas prévenu');
+  ok(/lib[ée]r/i.test(coach.payload.body), coach.payload.body);
+  ok(freed && freed.keys.includes('player:pA'), 'la libérée n\'est pas prévenue');
+  ok(next && next.keys.includes('player:pC'), 'la nouvelle porteuse n\'est pas prévenue');
+});
+t('le feed raconte la libération en tête de la nouvelle garde', () => {
+  seed('coach');
+  startGarde('pA', 30, 'coach');
+  for (let i = 0; i < 5; i++) preuveOk('pB');
+  preuveOk('pC');
+  const row = ctx._pintadeGenesisRow(ctx.pintadeActivePeriod());
+  ok(/lib[ée]r/i.test(row), 'la libération n\'est pas racontée : ' + row.slice(0, 200));
+  ok(/Emma Petit/.test(row) && /Nina Roux/.test(row), 'les deux joueuses ne sont pas nommées');
+  ok(/🎉/.test(row), 'pas de marque de fête');
+});
+t('la jauge de libération dit la vérité aux deux camps', () => {
+  seed('coach');
+  const p = startGarde('pA', 30, 'coach');
+  for (let i = 0; i < 5; i++) preuveOk('pB');
+  const vuePorteuse = ctx._pintadeFreedomBar(p, true);
+  const vueAutres = ctx._pintadeFreedomBar(p, false);
+  ok(/libre/.test(vuePorteuse), 'la porteuse ne voit pas son objectif : ' + vuePorteuse.slice(0, 200));
+  ok(/lib[èe]re/.test(vueAutres), 'les autres ne sont pas prévenues du risque : ' + vueAutres.slice(0, 200));
+  ok(/autrice|ira/.test(vueAutres), 'le risque d\'hériter n\'est pas dit');
+});
+t('la libération est bien CÂBLÉE dans l\'envoi de preuve', () => {
+  // Vérification statique : le reste de ce bloc teste la mécanique en direct,
+  // mais rien ne garantirait qu'elle soit appelée là où il faut.
+  const src = html.slice(html.indexOf('async function submitPintadeProof'));
+  const corps = src.slice(0, src.indexOf('\n}\n'));
+  ok(/_pintadeMaybeAutoRelease\(/.test(corps), 'submitPintadeProof ne confronte jamais la série au seuil');
+  ok(corps.indexOf('_pintadeMaybeAutoRelease(') > corps.indexOf("status = 'ok'"),
+    'la confrontation doit venir APRÈS que la preuve soit validée');
+});
+
+// =============================================================================
+// 15) LES RÈGLES ÉDITABLES (CMS)
+// =============================================================================
+t('un texte par défaut existe et couvre les règles réellement appliquées', () => {
+  seed('player', 'pB');
+  const txt = ctx.pintadeRulesText();
+  ok(txt && txt.length > 400, 'texte trop court : ' + txt.length);
+  ok(/2 h pour ouvrir/.test(txt), 'la fenêtre de connexion n\'est pas expliquée');
+  ok(/30 secondes/.test(txt), 'le chrono photo n\'est pas expliqué');
+  ok(/6 preuves/.test(txt), 'l\'auto-libération n\'est pas expliquée');
+  ok(/3 échecs/.test(txt), 'le plafond de ratés n\'est pas expliqué');
+  ok(/\+24 h/.test(txt), 'la prolongation n\'est pas expliquée');
+  ok(/toutes les 2 heures/.test(txt), 'le rate limit n\'est pas expliqué');
+  ok(ctx.pintadeRulesTextIsCustom() === false, 'le défaut passe pour personnalisé');
+});
+t('le texte du coach remplace le défaut, partout', () => {
+  seed('coach');
+  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, { rulesText: '# Mes règles\n- Sois sympa', updatedAt: NOW });
+  ok(ctx.pintadeRulesText() === '# Mes règles\n- Sois sympa', ctx.pintadeRulesText());
+  ok(ctx.pintadeRulesTextIsCustom() === true, 'le texte du coach passe pour le défaut');
+  startGarde('pA', 30, 'coach');
+  S._pintadeRulesOpen = true;
+  ctx.openPintadeScreen();
+  ok(/Mes règles/.test(ctx.__lastModal), 'le texte du coach n\'est pas affiché');
+  ok(!/Que la meilleure gagne/.test(ctx.__lastModal), 'le défaut s\'affiche encore');
+});
+t('l\'accordéon est FERMÉ par défaut, et s\'ouvre', () => {
+  seed('player', 'pB');
+  startGarde('pA', 30, 'player', 'pB');
+  S._pintadeRulesOpen = false;
+  ctx.openPintadeScreen();
+  ok(/Les règles du jeu/.test(ctx.__lastModal), 'l\'entrée des règles est absente');
+  ok(!/Que la meilleure gagne/.test(ctx.__lastModal), 'le contenu est déplié d\'entrée');
+  ctx.togglePintadeRules();
+  ok(/Que la meilleure gagne/.test(ctx.__lastModal), 'l\'accordéon ne s\'ouvre pas');
+  ctx.togglePintadeRules();
+  ok(!/Que la meilleure gagne/.test(ctx.__lastModal), 'l\'accordéon ne se referme pas');
+});
+t('les règles sont lisibles même quand personne ne porte la peluche', () => {
+  seed('player', 'pB');
+  S._pintadeRulesOpen = true;
+  ctx.openPintadeScreen();
+  ok(/Les règles du jeu/.test(ctx.__lastModal), 'pas de règles sur l\'écran vide');
+  ok(/Que la meilleure gagne/.test(ctx.__lastModal), 'contenu absent');
+});
+t('le Markdown est rendu, et le HTML collé par le coach est neutralisé', () => {
+  seed('coach');
+  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, {
+    rulesText: '# Titre\n- point\n**gras**\n<img src=x onerror="alert(1)">', updatedAt: NOW });
+  startGarde('pA', 30, 'coach');
+  S._pintadeRulesOpen = true;
+  ctx.openPintadeScreen();
+  const m = ctx.__lastModal;
+  ok(/<h2>Titre<\/h2>/.test(m), 'les titres ne sont pas rendus');
+  ok(/<li>point<\/li>/.test(m), 'les listes ne sont pas rendues');
+  ok(/<strong>gras<\/strong>/.test(m), 'le gras n\'est pas rendu');
+  ok(!/<img/.test(m), 'du HTML brut a traversé le rendu');
+  ok(/&lt;img/.test(m), 'le HTML n\'est pas échappé : ' + m.slice(m.indexOf('img') - 60, m.indexOf('img') + 40));
+});
+t('enregistrer le texte par défaut à l\'identique ne le fige PAS en base', () => {
+  seed('coach');
+  fields['pr-days'] = '30'; fields['pr-rate'] = '2'; fields['pr-connect'] = '2';
+  fields['pr-timeout'] = '30'; fields['pr-ext'] = '24'; fields['pr-max'] = '3'; fields['pr-auto'] = '6';
+  fields['pr-text'] = ctx.PINTADE_RULES_TEXT_DEFAULT;
+  ctx._pintadeSaveRules();
+  ok(S.pintadeRules.rulesText === '', 'une copie du défaut a été enregistrée : ' + (S.pintadeRules.rulesText || '').length + ' car.');
+  const ent = ctx.ENTITIES.find(e => e.key === 'pintadeRules');
+  ok(ent.dump(S)['default'].rules_text === null, 'le défaut serait poussé en base');
+});
+t('un texte réellement personnalisé, lui, est bien poussé', () => {
+  seed('coach');
+  fields['pr-days'] = '30'; fields['pr-rate'] = '2'; fields['pr-connect'] = '2';
+  fields['pr-timeout'] = '30'; fields['pr-ext'] = '24'; fields['pr-max'] = '3'; fields['pr-auto'] = '6';
+  fields['pr-text'] = '# Version du coach';
+  ctx._pintadeSaveRules();
+  ok(S.pintadeRules.rulesText === '# Version du coach', S.pintadeRules.rulesText);
+  const row = ctx.ENTITIES.find(e => e.key === 'pintadeRules').dump(S)['default'];
+  ok(row.rules_text === '# Version du coach', JSON.stringify(row.rules_text));
+  ok(row.auto_release_after_ok === 6, 'le seuil de libération n\'est pas poussé');
+  // …et il revient identique de la base.
+  const back = { ...S, pintadeRules: null };
+  ctx.ENTITIES.find(e => e.key === 'pintadeRules').apply(back, [row]);
+  ok(back.pintadeRules.rulesText === '# Version du coach', JSON.stringify(back.pintadeRules));
+  ok(back.pintadeRules.autoReleaseAfterOk === 6, 'seuil perdu à l\'aller-retour');
+});
+t('une base sans les colonnes v.108 retombe sur les défauts', () => {
+  seed('coach');
+  const legacy = { id: 'default', default_duration_days: 30, rate_limit_hours: 2, connect_window_hours: 2,
+    proof_timeout_seconds: 30, extension_hours_per_fail: 24, max_consecutive_fails: 3,
+    sanction_feed_post: true, sanction_extension: true, sanction_coach_alert: true, feed_public: true,
+    updated_by: null, updated_at: new Date(NOW).toISOString() };
+  const back = { ...S, pintadeRules: null };
+  ctx.ENTITIES.find(e => e.key === 'pintadeRules').apply(back, [legacy]);
+  ok(back.pintadeRules.autoReleaseAfterOk === 6, 'seuil = ' + back.pintadeRules.autoReleaseAfterOk);
+  ok(back.pintadeRules.rulesText === '', 'texte = ' + JSON.stringify(back.pintadeRules.rulesText));
+  S.pintadeRules = back.pintadeRules;
+  ok(ctx.pintadeRulesText().length > 400, 'le texte par défaut ne prend pas le relais');
+});
+t('l\'écran de configuration expose le texte et le seuil', () => {
+  seed('coach');
+  ctx.openPintadeRules();
+  const m = ctx.__lastModal;
+  ok(/Texte des règles/.test(m), 'la zone de texte est absente');
+  ok(/id="pr-text"/.test(m), 'le champ pr-text est absent');
+  ok(/_pintadePreviewRules\(\)/.test(m), 'pas de bouton Prévisualiser');
+  ok(/_pintadeResetRulesText\(\)/.test(m), 'pas de bouton Texte par défaut');
+  ok(/id="pr-auto"/.test(m), 'le seuil de libération est absent');
+  ok(/Que la meilleure gagne/.test(m), 'la zone n\'est pas pré-remplie');
+});
+t('l\'aperçu rend le brouillon en cours, sans rien enregistrer', () => {
+  seed('coach');
+  fields['pr-text'] = '# Brouillon pas enregistré';
+  ctx._pintadePreviewRules();
+  ok(/<h2>Brouillon pas enregistré<\/h2>/.test(ctx.__lastModal), 'aperçu : ' + String(ctx.__lastModal).slice(0, 200));
+  ok(S.pintadeRules === null, 'l\'aperçu a enregistré les règles');
+});
+t('une joueuse ne peut pas toucher au texte', () => {
+  seed('player', 'pB');
+  fields['pr-text'] = '# Piratage';
+  ctx._pintadeSaveRules();
+  ok(S.pintadeRules === null, 'une joueuse a écrit les règles');
+  ctx.openPintadeRules();
+  ok(!ctx.__lastModal, 'l\'écran de configuration s\'ouvre pour une joueuse');
+});
+
 console.log('\n' + R.join('\n'));
 const bad = R.filter(r => r.startsWith('✗'));
 console.log('\n' + (R.length - bad.length) + '/' + R.length + ' OK');
