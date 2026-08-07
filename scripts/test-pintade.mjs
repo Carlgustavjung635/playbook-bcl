@@ -1,24 +1,37 @@
-// Test LA PINTADE DU MOIS (cf. migration 20260807_001_pintade_and_notif_permission).
+// Test LA PINTADE DU MOIS — modèle à DEUX CHRONOS (migrations 20260807_001 + _002).
 //
 // Une joueuse porte une peluche géante. N'importe qui peut lui réclamer une
-// preuve photo ; elle a 30 secondes, appareil photo obligatoire.
+// preuve photo. Deux fenêtres s'enchaînent :
+//   1. CONNEXION (2 h) — elle doit OUVRIR L'APP ;
+//   2. PHOTO (30 s)    — le chrono démarre quand l'écran s'affiche chez elle.
+//
+// La v.106 comptait les 30 s depuis la DEMANDE : une demande de nuit était
+// perdue avant qu'elle n'ouvre les yeux. Le premier bloc de ce fichier
+// verrouille précisément ce correctif.
 //
 // CHOIX STRUCTURANTS verrouillés ici — ce sont eux qui cassent en silence :
-//   • RIEN n'est compté en base. Ratés consécutifs, date de fin effective et
+//   • RIEN n'est compté en base. Ratés consécutifs, fin de garde effective et
 //     prochaine fenêtre de demande se DÉRIVENT des demandes de preuve. Une
 //     prolongation écrite par « le client qui constate » serait appliquée
 //     autant de fois qu'il y a d'appareils ;
-//   • une demande dont le délai est écoulé est un raté POUR TOUT LE MONDE,
-//     immédiatement, sans qu'aucune écriture n'ait eu lieu — sinon il suffirait
-//     de ne pas ouvrir l'app pour ne jamais rater ;
+//   •  est posé UNE SEULE FOIS. Sinon il suffirait de tuer l'app à
+//     la 25e seconde et de la rouvrir pour repartir de 30 : le chrono ne se
+//     terminerait jamais et la preuve ne vaudrait plus rien ;
+//   • seule la PORTEUSE pose ce tampon — jamais le coach, jamais une autre
+//     joueuse qui ouvre son app au même moment ;
+//   • une échéance dépassée est un échec POUR TOUT LE MONDE, immédiatement,
+//     sans qu'aucune écriture n'ait eu lieu — sinon il suffirait de ne pas
+//     ouvrir l'app pour ne jamais rater ;
+//   • DEUX échecs distincts, et deux tons distincts :  peut
+//     arriver honnêtement (la nuit, un tunnel),  non. Les deux
+//     comptent pour la série ;
 //   • le rate limit est GLOBAL à la porteuse, pas par demandeur ;
 //   • au-delà du plafond de ratés consécutifs, plus AUCUNE sanction
 //     automatique : le système attend l'arbitrage du coach ;
 //   • cet arbitrage éteint l'alerte, mais un raté PLUS RÉCENT la rallume ;
 //   • un transfert clôt la garde précédente sans la détruire, et la nouvelle
 //     porteuse n'hérite PAS de la série de ratés de l'ancienne ;
-//   • la porteuse ne peut pas se demander une preuve à elle-même ;
-//   • suppression = soft-delete (un hard delete d'un id 'x…' est repoussé).
+//   • les données v.106 (base ET localStorage) se relisent sans inventer de raté.
 //
 // Le sujet est le VRAI code d'index.html, exécuté dans un vm à DOM stubé.
 import fs from 'node:fs';
@@ -156,16 +169,220 @@ function startGarde(holderId, days, thenRole, thenPid) {
   S.auth = (thenRole === 'coach') ? { role: 'coach', coachId: 'admin' } : (thenRole ? { role: 'player', playerId: thenPid } : prev);
   return ctx.pintadeActivePeriod();
 }
-// Une demande de preuve depuis l'identité courante, puis on la résout.
-function demande() { return ctx.requestPintadeProof(); }
-function lastReq() { const l = S.pintadeRequests.filter(q => !q.deletedAt); return l[l.length - 1]; }
-// Réussite : on simule ce que fait submitPintadeProof après un upload OK.
-function reussite(q) { q.photoUrl = 'https://cdn/x.jpg'; q.status = 'ok'; q.resolvedAt = NOW; q.updatedAt = NOW; }
-// Raté : on laisse simplement filer le chrono (AUCUNE écriture — c'est le test).
-function laisseFiler() { advance(60000); }
 
 // =============================================================================
-// 1) LE RATE LIMIT EST GLOBAL À LA PORTEUSE
+// -1) LA FRONTIÈRE DES BLOCS <script>
+// =============================================================================
+// CE TEST EXISTE À CAUSE D'UN VRAI BUG, attrapé en navigateur et pas ici :
+// `_pintadeStatus` (bloc classique) appelait `_pintadeNormStatus` défini dans le
+// bloc <script type="module">. Les deux blocs ne partagent AUCUNE portée à
+// l'exécution — l'app plantait dès le premier rendu de l'écran pintade.
+//
+// Le harnais de ces tests concatène tous les blocs dans une seule portée : il
+// est structurellement incapable de voir ce genre d'erreur. D'où cette
+// vérification STATIQUE, faite sur le texte du fichier : tout helper pintade
+// appelé depuis le bloc module doit être défini DANS le bloc module.
+{
+  const blocs = [...html.matchAll(/<script([^>]*)>([\s\S]*?)<\/script>/g)].filter(m => !/\bsrc=/.test(m[1]));
+  // On retire les COMMENTAIRES DE LIGNE, et rien d'autre : sans ça, « la
+  // pintade (cf. migration…) » dans un commentaire français passerait pour un
+  // appel de fonction. Volontairement minimal — une première version retirait
+  // aussi les blocs /* */ et les chaînes, et un `/*` isolé dans une chaîne
+  // avalait des pans entiers de fichier, définitions comprises. Le `\s` avant
+  // `//` épargne les `https://`.
+  const codeOnly = src => src
+    .replace(/^[ \t]*\/\/[^\n]*$/gm, '')
+    .replace(/[ \t]+\/\/[^\n]*$/gm, '');
+  const moduleSrc = codeOnly(blocs.filter(m => /type\s*=\s*["']module["']/.test(m[1])).map(m => m[2]).join('\n'));
+  const classicSrc = codeOnly(blocs.filter(m => !/type\s*=\s*["']module["']/.test(m[1])).map(m => m[2]).join('\n'));
+  const defs = src => new Set([...src.matchAll(/function\s+(_?[A-Za-z0-9_$]*[Pp]intade[A-Za-z0-9_$]*)\s*\(/g)].map(m => m[1]));
+  // PAS d'espace toléré avant la parenthèse : un appel s'écrit `foo(`, alors
+  // que la prose des libellés dit « la pintade (transfert, libération) ».
+  const calls = src => new Set([...src.matchAll(/\b(_?[A-Za-z0-9_$]*[Pp]intade[A-Za-z0-9_$]*)\(/g)].map(m => m[1]));
+  const modDefs = defs(moduleSrc), classicDefs = defs(classicSrc);
+  t('aucun helper pintade du bloc module n\'appelle le bloc classique', () => {
+    const fuites = [...calls(moduleSrc)].filter(n => !modDefs.has(n));
+    ok(fuites.length === 0, 'appels hors portée depuis le bloc module : ' + fuites.join(', '));
+  });
+  t('aucun helper pintade du bloc classique n\'appelle le bloc module', () => {
+    const fuites = [...calls(classicSrc)].filter(n => !classicDefs.has(n));
+    ok(fuites.length === 0, 'appels hors portée depuis le bloc classique : ' + fuites.join(', '));
+  });
+}
+
+// --- HELPERS DU PARCOURS À DEUX CHRONOS -------------------------------------
+function demande() { return ctx.requestPintadeProof(); }
+function lastReq() { const l = S.pintadeRequests.filter(q => !q.deletedAt); return l[l.length - 1]; }
+// La porteuse OUVRE l'app : c'est cet instant, et lui seul, qui arme les 30 s.
+function ouvrir(q) { return ctx._pintadeMarkOpened(q || ctx.pintadeActiveRequest()); }
+// Réussite : on simule ce que fait submitPintadeProof après un upload OK.
+function reussite(q) { q.photoUrl = 'https://cdn/x.jpg'; q.status = 'ok'; q.resolvedAt = NOW; q.updatedAt = NOW; }
+// Les DEUX façons de rater, chacune laissant le créneau de demande rouvert
+// derrière elle (pour pouvoir en enchaîner plusieurs).
+function ratePasVue()  { demande(); advance(2 * H + 60000); }                    // jamais ouverte
+function rateTropLente() { demande(); ouvrir(); advance(31000); advance(2 * H); } // ouverte, chrono filé
+
+// =============================================================================
+// 0) LE BUG DE LA v.106 — LE JEU PUNISSAIT LE SOMMEIL
+// =============================================================================
+t('une demande de nuit n\'est PAS ratée : le chrono de la photo n\'a pas démarré', () => {
+  seed('player', 'pB');
+  const p = startGarde('pA', 30, 'player', 'pB');
+  demande();                                   // 3 h du matin, elle dort
+  const q = lastReq();
+  advance(90 * 60000);                         // 1 h 30 plus tard, elle se réveille
+  ok(ctx._pintadeStatus(q) === 'pending', 'statut = ' + ctx._pintadeStatus(q));
+  ok(ctx.pintadeFailTotal(p.id) === 0, 'un raté a été compté pendant son sommeil');
+  ok(q.openedAt === null, 'le tampon d\'ouverture a été posé sans qu\'elle ouvre rien');
+  ok(q.photoDeadlineAt === null, 'le chrono de la photo a démarré tout seul');
+  // Elle ouvre l'app : LÀ seulement les 30 s démarrent.
+  ok(ouvrir(q) === true, 'le tampon n\'a pas été posé à l\'ouverture');
+  ok(ctx._pintadeStatus(q) === 'awaiting_photo', 'statut après ouverture = ' + ctx._pintadeStatus(q));
+  ok(q.photoDeadlineAt - q.openedAt === 30000, 'chrono photo = ' + (q.photoDeadlineAt - q.openedAt));
+});
+t('les deux échéances sont indépendantes et figées à leur propre instant', () => {
+  seed('player', 'pB');
+  startGarde('pA', 30, 'player', 'pB');
+  demande();
+  const q = lastReq();
+  ok(q.connectDeadlineAt - q.requestedAt === 2 * H, 'fenêtre connexion = ' + (q.connectDeadlineAt - q.requestedAt));
+  advance(45 * 60000);
+  const tOuv = NOW;
+  ouvrir(q);
+  ok(q.openedAt === tOuv, 'openedAt mal posé');
+  ok(q.photoDeadlineAt === tOuv + 30000, 'le chrono photo ne part pas de l\'ouverture');
+  ok(q.connectDeadlineAt === q.requestedAt + 2 * H, 'la fenêtre de connexion a bougé');
+});
+
+// =============================================================================
+// 1) L'EXPLOIT À NE JAMAIS ROUVRIR : TUER L'APP POUR RELANCER LES 30 s
+// =============================================================================
+t('rouvrir l\'app NE REMET PAS le chrono à zéro', () => {
+  seed('player', 'pA');
+  startGarde('pA', 30, 'player', 'pB');
+  demande();
+  S.auth = { role: 'player', playerId: 'pA' };
+  const q = ctx.pintadeActiveRequest();
+  ouvrir(q);
+  const echeance = q.photoDeadlineAt;
+  advance(25000);                              // elle tue l'app à la 25e seconde
+  ok(ouvrir(q) === false, 'un second tampon a été posé');
+  ok(q.photoDeadlineAt === echeance, 'l\'échéance a été repoussée : le chrono serait infini');
+  ok(Math.ceil(ctx._pintadeRemainingMs() / 1000) === 5, 'reste ' + ctx._pintadeRemainingMs() + ' ms');
+  advance(6000);
+  ok(ctx._pintadeStatus(q) === 'failed_timeout', 'statut = ' + ctx._pintadeStatus(q));
+  ok(ouvrir(q) === false, 'une demande déjà ratée peut être rouverte');
+});
+t('passer par l\'écran bloquant pose le tampon UNE fois, pas à chaque affichage', () => {
+  seed('player', 'pA');
+  startGarde('pA', 30, 'player', 'pB');
+  demande();
+  S.auth = { role: 'player', playerId: 'pA' };
+  ok(ctx.maybeShowPintadeProof() === true, 'écran non ouvert');
+  const q = ctx.pintadeActiveRequest();
+  const echeance = q.photoDeadlineAt;
+  ok(echeance > 0, 'le chrono n\'a pas démarré à l\'affichage');
+  advance(10000);
+  ctx._pintadeCloseOverlay();
+  ok(ctx.maybeShowPintadeProof() === true, 'réouverture refusée');
+  ok(q.photoDeadlineAt === echeance, 'le réaffichage a relancé le chrono');
+});
+t('ouvrir APRÈS la fenêtre de connexion ne rattrape rien', () => {
+  seed('player', 'pA');
+  startGarde('pA', 30, 'player', 'pB');
+  demande();
+  const q = lastReq();
+  S.auth = { role: 'player', playerId: 'pA' };
+  advance(2 * H + 60000);                      // elle ouvre trop tard
+  ok(ctx._pintadeStatus(q) === 'failed_not_seen', ctx._pintadeStatus(q));
+  ok(ouvrir(q) === false, 'un tampon a été posé sur une demande déjà perdue');
+  ok(q.openedAt === null, 'openedAt posé après coup');
+  ok(ctx.maybeShowPintadeProof() === false, 'l\'écran s\'ouvre sur une demande périmée');
+});
+t('un TIERS ne pose jamais le tampon d\'ouverture de la porteuse', () => {
+  seed('player', 'pB');
+  startGarde('pA', 30, 'player', 'pB');
+  demande();
+  const q = lastReq();
+  // pB (la demandeuse) et le coach ouvrent l'app : rien ne doit démarrer.
+  ok(ctx.maybeShowPintadeProof() === false, 'écran ouvert chez la demandeuse');
+  S.auth = { role: 'coach', coachId: 'admin' };
+  ok(ctx.maybeShowPintadeProof() === false, 'écran ouvert chez le coach');
+  ok(q.openedAt === null, 'le chrono de la porteuse a démarré depuis un autre appareil');
+  ok(ctx._pintadeStatus(q) === 'pending', ctx._pintadeStatus(q));
+});
+
+// =============================================================================
+// 2) LES DEUX ÉCHECS — DÉRIVÉS, SANS ÉCRITURE
+// =============================================================================
+t('2 h sans ouvrir = failed_not_seen, constaté sans la moindre écriture', () => {
+  seed('player', 'pB');
+  const p = startGarde('pA', 30, 'player', 'pB');
+  demande();
+  const q = lastReq();
+  const before = JSON.stringify(S.pintadeRequests);
+  advance(2 * H + 1000);
+  ok(q.status === 'pending', 'le test triche : la ligne a été modifiée');
+  ok(JSON.stringify(S.pintadeRequests) === before, 'une écriture a eu lieu');
+  ok(ctx._pintadeStatus(q) === 'failed_not_seen', ctx._pintadeStatus(q));
+  ok(ctx.pintadeFailTotal(p.id) === 1, 'raté non compté');
+  ok(ctx.pintadeStreak(p.id) === 1, 'série non incrémentée');
+  ok(ctx.pintadeActiveRequest(p.id) === null, 'la demande périmée passe encore pour vivante');
+});
+t('30 s après ouverture = failed_timeout, également sans écriture', () => {
+  seed('player', 'pA');
+  const p = startGarde('pA', 30, 'player', 'pB');
+  demande();
+  S.auth = { role: 'player', playerId: 'pA' };
+  const q = ctx.pintadeActiveRequest();
+  ouvrir(q);
+  const before = JSON.stringify(S.pintadeRequests);
+  advance(31000);
+  ok(JSON.stringify(S.pintadeRequests) === before, 'une écriture a eu lieu');
+  ok(ctx._pintadeStatus(q) === 'failed_timeout', ctx._pintadeStatus(q));
+  ok(ctx.pintadeFailTotal(p.id) === 1, 'raté non compté');
+});
+t('les DEUX natures comptent pour la série et les prolongations', () => {
+  seed('player', 'pB');
+  const p = startGarde('pA', 30, 'player', 'pB');
+  const base = p.endAt;
+  ratePasVue();
+  S.auth = { role: 'player', playerId: 'pB' };
+  rateTropLente();
+  ok(ctx.pintadeStreak(p.id) === 2, 'série = ' + ctx.pintadeStreak(p.id));
+  ok(ctx.pintadePeriodEnd(p) === base + 48 * H, 'prolongation = ' + (ctx.pintadePeriodEnd(p) - base) / H + ' h');
+  ok(ctx.pintadeFailKind(p.id, 'failed_not_seen') === 1, 'ventilation pas-vue');
+  ok(ctx.pintadeFailKind(p.id, 'failed_timeout') === 1, 'ventilation trop-lente');
+});
+t('le rangement en base pose le statut DÉRIVÉ, et il est idempotent', () => {
+  seed('player', 'pB');
+  const p = startGarde('pA', 30, 'player', 'pB');
+  ratePasVue();
+  ok(ctx._pintadePersistStale(), 'rien rangé');
+  ok(lastReq().status === 'failed_not_seen', lastReq().status);
+  ok(lastReq().resolvedAt === lastReq().connectDeadlineAt, 'le raté est daté de sa constatation, pas de son échéance');
+  ok(ctx._pintadePersistStale() === false, 'second passage : écrit à nouveau');
+  ok(ctx.pintadeFailTotal(p.id) === 1, 'le raté a été compté deux fois');
+});
+t('n\'importe quel appareil range le même statut (aucune course)', () => {
+  seed('player', 'pA');
+  const p = startGarde('pA', 30, 'player', 'pB');
+  demande();
+  S.auth = { role: 'player', playerId: 'pA' };
+  ouvrir();
+  advance(31000);
+  // La porteuse range…
+  ctx._pintadePersistStale();
+  const parLaPorteuse = lastReq().status;
+  // …puis on rejoue depuis le coach : le statut ne doit pas changer de nature.
+  S.auth = { role: 'coach', coachId: 'admin' };
+  ctx._pintadePersistStale();
+  ok(lastReq().status === parLaPorteuse, 'deux appareils écrivent deux statuts différents');
+  ok(parLaPorteuse === 'failed_timeout', parLaPorteuse);
+});
+
+// =============================================================================
+// 3) LE RATE LIMIT (inchangé, mais il ne doit pas avoir été cassé)
 // =============================================================================
 t('une demande ouvre une fenêtre de 2 h — même pour un AUTRE demandeur', () => {
   seed('player', 'pB');
@@ -173,25 +390,17 @@ t('une demande ouvre une fenêtre de 2 h — même pour un AUTRE demandeur', () 
   ok(ctx.pintadeCanRequest(), 'premier créneau fermé : ' + ctx.pintadeRequestBlockedReason());
   ok(demande(), 'demande refusée');
   ok(!ctx.pintadeCanRequest(), 'seconde demande acceptée dans la foulée');
-  // Changement de demandeuse : la fenêtre doit RESTER fermée (sinon la porteuse
-  // serait bombardée par onze personnes à la suite).
   S.auth = { role: 'player', playerId: 'pC' };
   ok(!ctx.pintadeCanRequest(), 'une autre joueuse contourne le rate limit');
   S.auth = { role: 'coach', coachId: 'admin' };
   ok(!ctx.pintadeCanRequest(), 'le coach contourne le rate limit');
   ok(ctx.pintadeNextSlotAt(p.id) === lastReq().requestedAt + 2 * H, 'créneau suivant mal calculé');
-  // Une fois le chrono retombé, ce n'est plus « demande en cours » qui bloque
-  // mais bien le rate limit — et la raison affichée doit le dire.
-  laisseFiler();
-  ok(!ctx.pintadeCanRequest(), 'la fenêtre s\'est rouverte dès la fin du chrono');
-  ok(/dans .*(min|h)/.test(ctx.pintadeRequestBlockedReason()), 'raison illisible : ' + ctx.pintadeRequestBlockedReason());
 });
 t('la fenêtre se rouvre pile après le rate limit', () => {
   seed('player', 'pB');
   startGarde('pA', 30, 'player', 'pB');
   demande();
-  laisseFiler();                       // le chrono expire, la demande devient un raté
-  advance(2 * H - 60000 - 1000);
+  advance(2 * H - 1000);
   ok(!ctx.pintadeCanRequest(), 'rouvert une seconde trop tôt');
   advance(2000);
   ok(ctx.pintadeCanRequest(), 'toujours fermé après 2 h : ' + ctx.pintadeRequestBlockedReason());
@@ -202,68 +411,30 @@ t('la porteuse ne peut pas se piéger elle-même', () => {
   ok(!ctx.pintadeCanRequest(), 'la porteuse peut se demander une preuve');
   ok(/toi/i.test(ctx.pintadeRequestBlockedReason()), ctx.pintadeRequestBlockedReason());
 });
-t('une demande déjà en cours en bloque une seconde', () => {
+t('une demande en cours en bloque une seconde, VUE ou PAS ENCORE VUE', () => {
   seed('player', 'pB');
-  startGarde('pA', 30, 'player', 'pB');
+  const p = startGarde('pA', 30, 'player', 'pB');
   demande();
+  // Étape 1 : pas encore vue → bloquée au titre de la demande en cours (et non
+  // du seul rate limit, qui la bloquerait de toute façon).
   ok(/déjà en cours/.test(ctx.pintadeRequestBlockedReason()), ctx.pintadeRequestBlockedReason());
+  // Étape 2 : elle a ouvert, les 30 s tournent → toujours bloquée, même motif.
+  S.auth = { role: 'player', playerId: 'pA' }; ouvrir();
+  S.auth = { role: 'player', playerId: 'pB' };
+  advance(10000);
+  ok(ctx._pintadeStatus(ctx.pintadeActiveRequest(p.id)) === 'awaiting_photo', 'le chrono photo ne tourne pas');
+  ok(/déjà en cours/.test(ctx.pintadeRequestBlockedReason()), ctx.pintadeRequestBlockedReason());
+  // Étape 3 : une fois le chrono photo résolu, plus rien n'est « en cours » —
+  // seul le rate limit tient encore la porte.
+  advance(25000);
+  ok(ctx.pintadeActiveRequest(p.id) === null, 'la demande résolue passe encore pour vivante');
+  ok(/dans .*(min|h)/.test(ctx.pintadeRequestBlockedReason()), 'le rate limit devrait prendre le relais : ' + ctx.pintadeRequestBlockedReason());
 });
 
 // =============================================================================
-// 2) LE CHRONO — ET L'ANTI-TRICHE « JE N'OUVRE PAS L'APP »
+// 4) LES SANCTIONS DÉRIVÉES (inchangées)
 // =============================================================================
-t('le délai est figé À LA DEMANDE (30 s par défaut)', () => {
-  seed('player', 'pB');
-  startGarde('pA', 30, 'player', 'pB');
-  demande();
-  const q = lastReq();
-  ok(q.deadlineAt - q.requestedAt === 30000, 'délai = ' + (q.deadlineAt - q.requestedAt));
-  // Le coach durcit la règle pendant que le chrono tourne : la demande déjà
-  // partie garde le contrat annoncé à la porteuse.
-  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, { proofTimeoutSeconds: 10, updatedAt: NOW });
-  ok(lastReq().deadlineAt - lastReq().requestedAt === 30000, 'délai réécrit rétroactivement');
-});
-t('délai écoulé = RATÉ pour tout le monde, SANS la moindre écriture', () => {
-  seed('player', 'pB');
-  const p = startGarde('pA', 30, 'player', 'pB');
-  demande();
-  const q = lastReq();
-  const before = JSON.stringify(S.pintadeRequests);
-  laisseFiler();
-  ok(q.status === 'pending', 'le test triche : la ligne a été modifiée');
-  ok(JSON.stringify(S.pintadeRequests) === before, 'une écriture a eu lieu');
-  ok(ctx._pintadeStatus(q) === 'expired', 'statut effectif = ' + ctx._pintadeStatus(q));
-  ok(ctx.pintadeFailTotal(p.id) === 1, 'raté non compté');
-  ok(ctx.pintadeStreak(p.id) === 1, 'série non incrémentée');
-  ok(ctx.pintadeActiveRequest(p.id) === null, 'la demande périmée passe encore pour active');
-});
-t('le rangement en base est opportuniste et idempotent', () => {
-  seed('player', 'pA');                        // la PORTEUSE constate
-  const p = startGarde('pA', 30, 'player', 'pB');
-  demande();
-  S.auth = { role: 'player', playerId: 'pA' };
-  laisseFiler();
-  ok(ctx._pintadePersistStale(), 'rien rangé');
-  ok(lastReq().status === 'failed', 'la porteuse devrait poser « failed », a posé ' + lastReq().status);
-  ok(ctx._pintadePersistStale() === false, 'second passage : écrit à nouveau');
-  ok(ctx.pintadeFailTotal(p.id) === 1, 'le raté a été compté deux fois');
-});
-t('un TIERS qui constate pose « expired » — même conséquence', () => {
-  seed('player', 'pB');
-  const p = startGarde('pA', 30, 'player', 'pB');
-  demande(); laisseFiler();
-  ctx._pintadePersistStale();
-  ok(lastReq().status === 'expired', lastReq().status);
-  ok(ctx.pintadeFailTotal(p.id) === 1, 'raté non compté');
-});
-
-// =============================================================================
-// 3) LES SANCTIONS SONT DÉRIVÉES — DONC IDEMPOTENTES
-// =============================================================================
-// Enchaîne n ratés (en respectant le rate limit), depuis pB.
-function nRates(n) {
-  for (let i = 0; i < n; i++) { demande(); laisseFiler(); advance(2 * H); }
-}
+function nRates(n) { for (let i = 0; i < n; i++) ratePasVue(); }
 t('chaque raté prolonge la garde de 24 h', () => {
   seed('player', 'pB');
   const p = startGarde('pA', 30, 'player', 'pB');
@@ -289,7 +460,7 @@ t('une réussite remet la SÉRIE à zéro, sans effacer les prolongations acquis
   const p = startGarde('pA', 30, 'player', 'pB');
   const base = p.endAt;
   nRates(2);
-  demande(); reussite(lastReq()); advance(2 * H);
+  demande(); ouvrir(); reussite(ctx.pintadeActiveRequest() || lastReq()); advance(2 * H);
   ok(ctx.pintadeStreak(p.id) === 0, 'série = ' + ctx.pintadeStreak(p.id));
   ok(ctx.pintadePeriodEnd(p) === base + 48 * H, 'les 48 h acquises ont sauté');
   ok(ctx.pintadeOkTotal(p.id) === 1 && ctx.pintadeFailTotal(p.id) === 2, 'compteurs faux');
@@ -301,11 +472,11 @@ t('AU-DELÀ DU PLAFOND, plus aucune sanction automatique', () => {
   nRates(3);
   ok(ctx.pintadeStreak(p.id) === 3, 'série = ' + ctx.pintadeStreak(p.id));
   ok(ctx.pintadePeriodEnd(p) === base + 72 * H, '3 ratés → ' + (ctx.pintadePeriodEnd(p) - base) / H + ' h');
-  nRates(2);                                    // 4e et 5e raté consécutifs
+  nRates(2);
   ok(ctx.pintadeStreak(p.id) === 5, 'la série doit continuer à compter');
   ok(ctx.pintadePeriodEnd(p) === base + 72 * H, 'la peine a continué à grossir toute seule');
 });
-t('interrupteur « prolongation » coupé → aucune prolongation, la série compte quand même', () => {
+t('interrupteur « prolongation » coupé → aucune prolongation, la série compte', () => {
   seed('player', 'pB');
   const p = startGarde('pA', 30, 'player', 'pB');
   const base = p.endAt;
@@ -316,7 +487,7 @@ t('interrupteur « prolongation » coupé → aucune prolongation, la série com
 });
 
 // =============================================================================
-// 4) L'ARBITRAGE DU COACH
+// 5) L'ARBITRAGE DU COACH (inchangé)
 // =============================================================================
 t('l\'alerte s\'arme au plafond, et pas avant', () => {
   seed('player', 'pB');
@@ -361,7 +532,7 @@ t('la prolongation cumulée du coach s\'AJOUTE aux prolongations automatiques', 
 });
 t('libérer met fin à la garde, sans détruire l\'historique', () => {
   seed('coach');
-  const p = startGarde('pA', 30, 'coach');
+  startGarde('pA', 30, 'coach');
   ok(ctx.pintadeRelease('release'), 'libération refusée');
   ok(ctx.pintadeActivePeriod() === null, 'garde encore active');
   ok(S.pintadeHolders.length === 1 && !S.pintadeHolders[0].deletedAt, 'la ligne a été supprimée');
@@ -377,7 +548,7 @@ t('une joueuse ne peut ni libérer ni transférer', () => {
 });
 
 // =============================================================================
-// 5) LE TRANSFERT
+// 6) LE TRANSFERT (inchangé)
 // =============================================================================
 t('un transfert clôt l\'ancienne garde, en ouvre une neuve, garde le lien', () => {
   seed('player', 'pB');
@@ -424,15 +595,16 @@ t('une garde arrivée à son terme s\'éteint toute seule, sans écriture', () =
 });
 
 // =============================================================================
-// 6) LES DOUBLONS DE DEMANDES (deux appareils, même fenêtre)
+// 7) LES DOUBLONS DE DEMANDES
 // =============================================================================
 t('deux demandes concurrentes → UNE survivante déterministe, les autres soft-deletées', () => {
   seed('player', 'pB');
   const p = startGarde('pA', 30, 'player', 'pB');
   const mk = id => ({ id, periodId: p.id, holderId: 'pA', requesterId: 'pB', requesterLabel: 'x',
-    requestedAt: NOW, deadlineAt: NOW + 30000, photoUrl: '', status: 'pending', resolvedAt: null,
+    requestedAt: NOW, connectDeadlineAt: NOW + 2 * H, openedAt: null, photoDeadlineAt: null,
+    photoUrl: '', status: 'pending', resolvedAt: null,
     createdAt: NOW, updatedAt: NOW, deletedAt: null });
-  S.pintadeRequests.push(mk('x2'), mk('x1'));      // insérées dans le désordre
+  S.pintadeRequests.push(mk('x2'), mk('x1'));
   ok(ctx.pintadeActiveRequest(p.id).id === 'x1', 'survivante non déterministe');
   ctx._pintadePersistStale();
   const dead = S.pintadeRequests.filter(q => q.deletedAt);
@@ -442,21 +614,45 @@ t('deux demandes concurrentes → UNE survivante déterministe, les autres soft-
 });
 
 // =============================================================================
-// 7) LE FEED
+// 8) LE FEED — DEUX TONS POUR DEUX ÉCHECS
 // =============================================================================
-t('le feed porte le post de raté « 🕊 [Nom] a raté à HH:MM »', () => {
+t('« pas vue » est dit sans railler, et distingué de « trop lente »', () => {
   seed('player', 'pB');
   const p = startGarde('pA', 30, 'player', 'pB');
-  nRates(1);
+  ratePasVue();
   const row = ctx._pintadeFeedRow(ctx.pintadeRequestsOf(p.id)[0]);
-  ok(/a raté à \d{2}:\d{2}/.test(row), 'format du post : ' + row.slice(0, 200));
-  ok(/Emma Petit/.test(row), 'le nom de la porteuse manque');
-  ok(/Lea Dubois/.test(row), 'le nom de la demandeuse manque');
+  ok(/n&#39;a pas vu la demande à temps|n'a pas vu la demande à temps/.test(row), 'libellé : ' + row.slice(0, 220));
+  ok(/sans connexion/.test(row), 'la cause n\'est pas expliquée');
+  ok(!/trop lente/.test(row), 'les deux échecs sont confondus');
+  ok(!/💀/.test(row), 'la tête de mort est réservée à « trop lente »');
+});
+t('« trop lente » est nettement plus dur', () => {
+  seed('player', 'pA');
+  const p = startGarde('pA', 30, 'player', 'pB');
+  demande();
+  S.auth = { role: 'player', playerId: 'pA' };
+  ouvrir(); advance(31000);
+  const row = ctx._pintadeFeedRow(ctx.pintadeRequestsOf(p.id)[0]);
+  ok(/trop lente/.test(row), 'libellé : ' + row.slice(0, 220));
+  ok(/💀/.test(row), 'pas de marque visuelle forte');
+  ok(/Écran ouvert à \d{2}:\d{2}/.test(row), 'l\'heure d\'ouverture manque : ' + row.slice(0, 260));
+});
+t('les deux états d\'attente sont distincts à l\'écran', () => {
+  seed('player', 'pB');
+  const p = startGarde('pA', 30, 'player', 'pB');
+  demande();
+  const q = lastReq();
+  const avant = ctx._pintadeFeedRow(q);
+  ok(/Demande envoyée/.test(avant) && /Pas encore vue/.test(avant), 'état « pas encore vue » : ' + avant.slice(0, 200));
+  S.auth = { role: 'player', playerId: 'pA' }; ouvrir(q);
+  const pendant = ctx._pintadeFeedRow(q);
+  ok(/Chrono en cours/.test(pendant), 'état « chrono » : ' + pendant.slice(0, 200));
+  ok(/Elle a ouvert à/.test(pendant), 'l\'heure d\'ouverture manque');
 });
 t('le feed montre la photo des preuves réussies', () => {
   seed('player', 'pB');
   const p = startGarde('pA', 30, 'player', 'pB');
-  demande(); reussite(lastReq());
+  demande(); ouvrir(); reussite(lastReq());
   const row = ctx._pintadeFeedRow(ctx.pintadeRequestsOf(p.id)[0]);
   ok(/https:\/\/cdn\/x\.jpg/.test(row), 'photo absente');
   ok(/validée/i.test(row), 'libellé de réussite absent');
@@ -471,20 +667,20 @@ t('le libellé du demandeur est FIGÉ (un renommage ne casse pas le feed)', () =
 t('feed privé : masqué aux joueuses, visible du coach', () => {
   seed('player', 'pB');
   const p = startGarde('pA', 30, 'player', 'pB');
-  nRates(1);
+  ratePasVue();
   S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, { feedPublic: false, updatedAt: NOW });
   ctx.openPintadeScreen();
   ok(/privé/i.test(ctx.__lastModal), 'feed exposé à une joueuse');
-  ok(!/a raté à/.test(ctx.__lastModal), 'le raté fuite malgré le feed privé');
+  ok(!/pas vu la demande/.test(ctx.__lastModal), 'le raté fuite malgré le feed privé');
   S.auth = { role: 'coach', coachId: 'admin' };
   ctx.openPintadeScreen();
-  ok(/a raté à/.test(ctx.__lastModal), 'le coach ne voit plus le feed');
+  ok(/pas vu la demande/.test(ctx.__lastModal), 'le coach ne voit plus le feed');
 });
 
 // =============================================================================
-// 8) L'ÉCRAN DE PREUVE (porteuse)
+// 9) L'ÉCRAN DE PREUVE
 // =============================================================================
-t('l\'écran bloquant ne s\'ouvre QUE pour la porteuse, et seulement s\'il y a une demande', () => {
+t('l\'écran bloquant ne s\'ouvre QUE pour la porteuse, et impose l\'appareil photo', () => {
   seed('player', 'pB');
   startGarde('pA', 30, 'player', 'pB');
   ok(ctx.maybeShowPintadeProof() === false, 'ouvert pour une non-porteuse');
@@ -497,32 +693,32 @@ t('l\'écran bloquant ne s\'ouvre QUE pour la porteuse, et seulement s\'il y a u
   ok(/accept="image\/\*"/.test(h), 'accept image absent');
   ok(!/modal-close/.test(h), 'un bouton de fermeture est présent : l\'écran doit être bloquant');
   ok(/Lea Dubois/.test(h), 'la demandeuse n\'est pas nommée');
-  ok(/30<\/div>/.test(h) || /">30</.test(h), 'le décompte ne part pas de 30 : ' + h.slice(0, 400));
+  ok(/">30</.test(h), 'le décompte ne part pas de 30 : ' + h.slice(0, 400));
 });
 t('le décompte se lit sur l\'horloge absolue (app en arrière-plan)', () => {
   seed('player', 'pA');
   startGarde('pA', 30, 'player', 'pB');
   demande();
   S.auth = { role: 'player', playerId: 'pA' };
-  advance(18000);                      // 18 s passées, écran verrouillé
+  ouvrir();
+  advance(18000);
   ok(Math.ceil(ctx._pintadeRemainingMs() / 1000) === 12, 'reste ' + ctx._pintadeRemainingMs() + ' ms');
   advance(20000);
   ok(ctx._pintadeRemainingMs() === 0, 'le chrono ne peut pas être négatif');
 });
-t('une demande arrivée alors que l\'app est ouverte finit par s\'afficher (veilleur)', () => {
+t('avant ouverture, le chrono affiché reste entier', () => {
   seed('player', 'pA');
   startGarde('pA', 30, 'player', 'pB');
+  demande();
   S.auth = { role: 'player', playerId: 'pA' };
-  ok(ctx.maybeShowPintadeProof() === false, 'ouvert sans demande');
-  S.auth = { role: 'player', playerId: 'pB' }; demande();
-  S.auth = { role: 'player', playerId: 'pA' };
-  ok(ctx.maybeShowPintadeProof() === true, 'le veilleur n\'ouvrirait pas l\'écran');
+  advance(45 * 60000);                        // 45 min se sont écoulées SANS ouverture
+  ok(ctx._pintadeRemainingMs() === 30000, 'reste ' + ctx._pintadeRemainingMs() + ' ms au lieu de 30 000');
 });
 
 // =============================================================================
-// 9) LES PUSH (un chrono de 30 s sans push est injouable)
+// 10) LES PUSH
 // =============================================================================
-t('la demande pousse une notification à la porteuse', () => {
+t('la demande annonce les DEUX fenêtres à la porteuse', () => {
   seed('player', 'pB');
   startGarde('pA', 30, 'player', 'pB');
   pushes.length = 0;
@@ -530,7 +726,8 @@ t('la demande pousse une notification à la porteuse', () => {
   const p = pushes.find(x => (x.payload || {}).type === 'pintade_proof');
   ok(p, 'aucun push de demande');
   ok(p.keys.includes('player:pA'), 'mauvaise destinataire : ' + JSON.stringify(p.keys));
-  ok(/30 secondes/.test(p.payload.body), p.payload.body);
+  ok(/2 h/.test(p.payload.body), 'la fenêtre de connexion n\'est pas annoncée : ' + p.payload.body);
+  ok(/30 s/.test(p.payload.body), 'le chrono photo n\'est pas annoncé : ' + p.payload.body);
 });
 t('l\'assignation prévient la nouvelle porteuse', () => {
   seed('coach');
@@ -541,27 +738,40 @@ t('l\'assignation prévient la nouvelle porteuse', () => {
 });
 
 // =============================================================================
-// 10) LES RÈGLES (écran coach)
+// 11) LES RÈGLES
 // =============================================================================
-t('les défauts s\'appliquent tant que rien n\'a été réglé', () => {
+t('les défauts couvrent les DEUX chronos', () => {
   seed('coach');
   const r = ctx.pintadeRules();
-  ok(r.rateLimitHours === 2 && r.proofTimeoutSeconds === 30 && r.extensionHoursPerFail === 24 && r.maxConsecutiveFails === 3,
-    JSON.stringify(r));
+  ok(r.rateLimitHours === 2 && r.connectWindowHours === 2 && r.proofTimeoutSeconds === 30
+    && r.extensionHoursPerFail === 24 && r.maxConsecutiveFails === 3, JSON.stringify(r));
   ok(S.pintadeRules === null, 'des défauts front ont été matérialisés (ils écraseraient le serveur)');
 });
-t('les réglages sont bornés à l\'enregistrement', () => {
+t('les réglages sont bornés à l\'enregistrement, fenêtre de connexion comprise', () => {
   seed('coach');
-  fields['pr-days'] = '9999'; fields['pr-rate'] = '0'; fields['pr-timeout'] = '1';
-  fields['pr-ext'] = '-5'; fields['pr-max'] = '99';
+  fields['pr-days'] = '9999'; fields['pr-rate'] = '0'; fields['pr-connect'] = '999';
+  fields['pr-timeout'] = '1'; fields['pr-ext'] = '-5'; fields['pr-max'] = '99';
   fields['pr-s-feed'] = true; fields['pr-s-ext'] = true; fields['pr-s-alert'] = true; fields['pr-public'] = true;
   ctx._pintadeSaveRules();
   const r = ctx.pintadeRules();
   ok(r.defaultDurationDays === 365, 'jours = ' + r.defaultDurationDays);
   ok(r.rateLimitHours === 1, 'rate limit = ' + r.rateLimitHours);
+  ok(r.connectWindowHours === 168, 'fenêtre connexion = ' + r.connectWindowHours);
   ok(r.proofTimeoutSeconds === 10, 'timeout = ' + r.proofTimeoutSeconds);
   ok(r.extensionHoursPerFail === 0, 'extension = ' + r.extensionHoursPerFail);
   ok(r.maxConsecutiveFails === 10, 'plafond = ' + r.maxConsecutiveFails);
+});
+t('la fenêtre de connexion réglée est bien celle appliquée', () => {
+  seed('player', 'pB');
+  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, { connectWindowHours: 8, updatedAt: NOW });
+  startGarde('pA', 30, 'player', 'pB');
+  demande();
+  const q = lastReq();
+  ok(q.connectDeadlineAt - q.requestedAt === 8 * H, 'fenêtre = ' + (q.connectDeadlineAt - q.requestedAt) / H + ' h');
+  advance(7 * H);
+  ok(ctx._pintadeStatus(q) === 'pending', 'ratée avant l\'heure : ' + ctx._pintadeStatus(q));
+  advance(2 * H);
+  ok(ctx._pintadeStatus(q) === 'failed_not_seen', ctx._pintadeStatus(q));
 });
 t('une joueuse ne peut pas modifier les règles', () => {
   seed('player', 'pB');
@@ -569,15 +779,19 @@ t('une joueuse ne peut pas modifier les règles', () => {
   ctx._pintadeSaveRules();
   ok(S.pintadeRules === null, 'une joueuse a écrit les règles');
 });
-t('l\'écran des règles se rend et l\'accueil coach reste debout', () => {
-  seed('coach');
-  startGarde('pA', 30, 'coach');
+t('les écrans coach se rendent, avec la ventilation des ratés', () => {
+  seed('player', 'pB');
+  const p = startGarde('pA', 30, 'player', 'pB');
+  ratePasVue();
+  S.auth = { role: 'player', playerId: 'pB' };
+  rateTropLente();
+  S.auth = { role: 'coach', coachId: 'admin' };
   ctx.openPintadeRules();
-  ok(/Règles de la pintade/.test(ctx.__lastModal), 'écran des règles vide');
+  ok(/Règles de la pintade/.test(ctx.__lastModal) && /Fenêtre de connexion/.test(ctx.__lastModal), 'écran des règles incomplet');
   ctx.openPintadeAdmin();
   ok(/Gérer la pintade/.test(ctx.__lastModal) && /Emma Petit/.test(ctx.__lastModal), 'écran admin incomplet');
-  const home = ctx.renderPintadeHomeCard();
-  ok(/Emma Petit/.test(home), 'carte accueil sans porteuse');
+  ok(/pas vue\(s\)/.test(ctx.__lastModal) && /trop lente\(s\)/.test(ctx.__lastModal), 'ventilation absente de l\'écran admin');
+  ok(/Emma Petit/.test(ctx.renderPintadeHomeCard()), 'carte accueil sans porteuse');
 });
 t('la carte d\'accueil reste MUETTE pour une joueuse quand personne ne la porte', () => {
   seed('player', 'pB');
@@ -587,7 +801,7 @@ t('la carte d\'accueil reste MUETTE pour une joueuse quand personne ne la porte'
 });
 
 // =============================================================================
-// 11) LA SYNCHRO (entités PbSync)
+// 12) LA SYNCHRO
 // =============================================================================
 t('les quatre entités PbSync existent et savent faire l\'aller-retour', () => {
   seed('coach');
@@ -601,41 +815,90 @@ t('les quatre entités PbSync existent et savent faire l\'aller-retour', () => {
   ok(hRow.holder_id === 'pA' && typeof hRow.start_at === 'string' && hRow.deleted_at === null, JSON.stringify(hRow));
   const qRow = Object.values(ent('pintadeRequests').dump(S))[0];
   ok(qRow.status === 'pending' && qRow.period_id === p.id, JSON.stringify(qRow));
-  // Aller-retour : ce qui sort de la base doit redonner le même objet.
+  ok(typeof qRow.connect_deadline_at === 'string', 'connect_deadline_at absent : ' + JSON.stringify(qRow));
+  ok(qRow.opened_at === null && qRow.photo_deadline_at === null, 'le chrono photo est poussé avant ouverture');
+  ok(!('deadline_at' in qRow), 'la colonne v.106 est encore poussée : ' + JSON.stringify(qRow));
   const back = { ...S };
   ent('pintadeHolders').apply(back, [hRow]);
   ok(back.pintadeHolders[0].holderId === 'pA' && back.pintadeHolders[0].endAt === p.endAt, JSON.stringify(back.pintadeHolders[0]));
 });
-t('tant que le coach n\'a rien réglé, AUCUNE ligne de règles n\'est poussée', () => {
-  seed('coach');
-  const ent = ctx.ENTITIES.find(e => e.key === 'pintadeRules');
-  ok(Object.keys(ent.dump(S)).length === 0, 'des défauts front seraient poussés sur le serveur');
-  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, { rateLimitHours: 6, updatedAt: NOW });
-  const row = ent.dump(S)['default'];
-  ok(row && row.id === 'default' && row.rate_limit_hours === 6, JSON.stringify(row));
-});
-t('last-writer-wins : un écho realtime ne ramène pas une preuve à « pending »', () => {
+t('les deux chronos survivent à l\'aller-retour base', () => {
   seed('player', 'pA');
   const p = startGarde('pA', 30, 'player', 'pB');
   demande();
+  S.auth = { role: 'player', playerId: 'pA' };
+  const q = ctx.pintadeActiveRequest();
+  ouvrir(q);
+  const ent = ctx.ENTITIES.find(e => e.key === 'pintadeRequests');
+  const row = ent.dump(S)[q.id];
+  ok(row.status === 'awaiting_photo', row.status);
+  ok(typeof row.opened_at === 'string' && typeof row.photo_deadline_at === 'string', JSON.stringify(row));
+  const back = { ...S, pintadeRequests: [] };
+  ent.apply(back, [row]);
+  const r2 = back.pintadeRequests[0];
+  ok(r2.openedAt === q.openedAt && r2.photoDeadlineAt === q.photoDeadlineAt, JSON.stringify(r2));
+  ok(r2.connectDeadlineAt === q.connectDeadlineAt, 'fenêtre de connexion perdue');
+});
+t('une ligne au format v.106 se relit sans inventer de raté', () => {
+  seed('player', 'pB');
+  const p = startGarde('pA', 30, 'player', 'pB');
+  const ent = ctx.ENTITIES.find(e => e.key === 'pintadeRequests');
+  // Exactement ce qu'une base pas encore migrée renvoie : deadline_at, et les
+  // anciens statuts.
+  const legacy = { id: 'x106', period_id: p.id, holder_id: 'pA', requester_id: 'pB',
+    requester_label: '#7 Lea Dubois', requested_at: new Date(NOW).toISOString(),
+    deadline_at: new Date(NOW + 2 * H).toISOString(), photo_url: null, status: 'pending',
+    resolved_at: null, created_at: new Date(NOW).toISOString(), updated_at: new Date(NOW).toISOString(), deleted_at: null };
+  const back = { ...S, pintadeRequests: [] };
+  ent.apply(back, [legacy]);
+  const r2 = back.pintadeRequests[0];
+  ok(r2.connectDeadlineAt === NOW + 2 * H, 'deadline_at v.106 non repris : ' + r2.connectDeadlineAt);
+  ok(r2.openedAt === null && r2.photoDeadlineAt === null, JSON.stringify(r2));
+  S.pintadeRequests = back.pintadeRequests;
+  ok(ctx._pintadeStatus(r2) === 'pending', 'un raté a été inventé : ' + ctx._pintadeStatus(r2));
+  // Et les anciens statuts se traduisent.
+  ent.apply(back, [Object.assign({}, legacy, { status: 'failed' })]);
+  ok(back.pintadeRequests[0].status === 'failed_timeout', back.pintadeRequests[0].status);
+  ent.apply(back, [Object.assign({}, legacy, { status: 'expired' })]);
+  ok(back.pintadeRequests[0].status === 'failed_not_seen', back.pintadeRequests[0].status);
+});
+t('les demandes gardées en localStorage par la v.106 sont reprises au chargement', () => {
+  const up = ctx._pintadeUpgradeLocalRequests([
+    { id: 'x1', requestedAt: 1000, deadlineAt: 1000 + 30000, status: 'pending' },
+    { id: 'x2', requestedAt: 2000, deadlineAt: 2000 + 30000, status: 'failed' },
+    { id: 'x3', requestedAt: 3000, deadlineAt: 3000 + 30000, status: 'expired' },
+    { id: 'x4', requestedAt: 4000, connectDeadlineAt: 4000 + 2 * H, status: 'ok' },   // déjà v.107
+  ]);
+  ok(up[0].connectDeadlineAt === 1000 + 2 * H, 'fenêtre de connexion non recalculée : ' + up[0].connectDeadlineAt);
+  ok(!('deadlineAt' in up[0]), 'l\'ancien champ traîne encore');
+  ok(up[0].openedAt === null && up[0].photoDeadlineAt === null, JSON.stringify(up[0]));
+  ok(up[1].status === 'failed_timeout', up[1].status);
+  ok(up[2].status === 'failed_not_seen', up[2].status);
+  ok(up[3].connectDeadlineAt === 4000 + 2 * H && up[3].status === 'ok', 'une ligne déjà v.107 a été abîmée');
+});
+t('last-writer-wins : un écho realtime ne ramène pas une preuve à « pending »', () => {
+  seed('player', 'pA');
+  startGarde('pA', 30, 'player', 'pB');
+  demande();
   const q = lastReq();
   const ent = ctx.ENTITIES.find(e => e.key === 'pintadeRequests');
-  const stale = ent.dump(S)[q.id];                       // photo de l'état « pending »
-  reussite(q); q.updatedAt = NOW + 1000;                 // la porteuse envoie sa photo
-  ent.apply(S, [stale]);                                 // l'écho arrive APRÈS
+  const stale = ent.dump(S)[q.id];
+  S.auth = { role: 'player', playerId: 'pA' };
+  ouvrir(q); reussite(q); q.updatedAt = NOW + 1000;
+  ent.apply(S, [stale]);
   ok(S.pintadeRequests.find(x => x.id === q.id).status === 'ok', 'la preuve a été annulée par un écho');
 });
 t('anti-wipe : une demande locale pas encore synchronisée survit à un apply', () => {
   seed('player', 'pB');
-  const p = startGarde('pA', 30, 'player', 'pB');
+  startGarde('pA', 30, 'player', 'pB');
   demande();
   const ent = ctx.ENTITIES.find(e => e.key === 'pintadeRequests');
-  ent.apply(S, []);                                      // le serveur ne la connaît pas encore
+  ent.apply(S, []);
   ok(S.pintadeRequests.length === 1, 'la demande locale a été effacée');
 });
 
 // =============================================================================
-// 12) CLOISONNEMENT SAISON
+// 13) CLOISONNEMENT SAISON
 // =============================================================================
 t('une garde d\'une autre saison n\'est jamais la garde active', () => {
   seed('coach');

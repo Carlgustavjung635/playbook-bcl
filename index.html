@@ -5889,6 +5889,9 @@ function _dumpPintadeRulesRow(r) {
     id: 'default',
     default_duration_days: _pintadeClampInt(r.defaultDurationDays, 1, 365, 30),
     rate_limit_hours: _pintadeClampInt(r.rateLimitHours, 1, 168, 2),
+    // Deux chronos distincts (migration _002) : le temps pour OUVRIR l'app,
+    // puis le temps pour dégainer l'appareil photo une fois l'écran affiché.
+    connect_window_hours: _pintadeClampInt(r.connectWindowHours, 1, 168, 2),
     proof_timeout_seconds: _pintadeClampInt(r.proofTimeoutSeconds, 10, 300, 30),
     extension_hours_per_fail: _pintadeClampInt(r.extensionHoursPerFail, 0, 168, 24),
     max_consecutive_fails: _pintadeClampInt(r.maxConsecutiveFails, 1, 10, 3),
@@ -5905,6 +5908,7 @@ function _pintadeRulesFromRow(r) {
     id: 'default',
     defaultDurationDays: _pintadeClampInt(r.default_duration_days, 1, 365, 30),
     rateLimitHours: _pintadeClampInt(r.rate_limit_hours, 1, 168, 2),
+    connectWindowHours: _pintadeClampInt(r.connect_window_hours, 1, 168, 2),
     proofTimeoutSeconds: _pintadeClampInt(r.proof_timeout_seconds, 10, 300, 30),
     extensionHoursPerFail: _pintadeClampInt(r.extension_hours_per_fail, 0, 168, 24),
     maxConsecutiveFails: _pintadeClampInt(r.max_consecutive_fails, 1, 10, 3),
@@ -5953,8 +5957,26 @@ function _pintadeHolderFromRow(r) {
     deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
   };
 }
+// Normalisation des statuts CÔTÉ MODULE. La liste est réécrite EN DUR ici, et
+// la fonction porte un nom distinct de son homologue du bloc classique
+// (`_pintadeNormStatus`) : ce bloc-ci est un <script type="module">, sa portée
+// ne franchit PAS la frontière des blocs. Même patron que les niveaux de
+// contrat de la prépa ou les statuts de licence. À garder aligné avec la
+// contrainte CHECK de la migration _002.
+//   pending        → la demande est partie, la porteuse n'a rien vu encore
+//   awaiting_photo → l'écran s'est affiché chez elle, les 30 s tournent
+//   ok             → photo reçue dans les temps
+//   failed_not_seen→ elle n'a pas ouvert l'app dans la fenêtre de connexion
+//   failed_timeout → elle a vu, et le chrono a filé
+// Les deux valeurs v.106 se traduisent : 'failed' = la porteuse avait constaté
+// elle-même, donc elle avait vu ; 'expired' = personne n'avait rien vu passer.
+function _pintadeNormStatusDb(s) {
+  if (['pending', 'awaiting_photo', 'ok', 'failed_not_seen', 'failed_timeout'].includes(s)) return s;
+  if (s === 'failed') return 'failed_timeout';
+  if (s === 'expired') return 'failed_not_seen';
+  return 'pending';
+}
 function _dumpPintadeRequestRow(q) {
-  const st = ['pending', 'ok', 'failed', 'expired'].includes(q.status) ? q.status : 'pending';
   return {
     id: q.id,
     period_id: q.periodId || null,
@@ -5962,25 +5984,38 @@ function _dumpPintadeRequestRow(q) {
     requester_id: q.requesterId || '?',
     requester_label: q.requesterLabel || null,
     requested_at: q.requestedAt ? new Date(q.requestedAt).toISOString() : new Date().toISOString(),
-    deadline_at: q.deadlineAt ? new Date(q.deadlineAt).toISOString() : new Date().toISOString(),
+    // Chrono 1 — fenêtre de CONNEXION.
+    connect_deadline_at: q.connectDeadlineAt ? new Date(q.connectDeadlineAt).toISOString() : new Date().toISOString(),
+    // Chrono 2 — fenêtre de PHOTO. Les deux restent nuls tant que la porteuse
+    // n'a rien ouvert : c'est ce qui distingue « pas encore vue » de « vue ».
+    opened_at: q.openedAt ? new Date(q.openedAt).toISOString() : null,
+    photo_deadline_at: (q.openedAt && q.photoDeadlineAt) ? new Date(q.photoDeadlineAt).toISOString() : null,
     photo_url: q.photoUrl || null,
-    status: st,
+    status: _pintadeNormStatusDb(q.status),
     resolved_at: q.resolvedAt ? new Date(q.resolvedAt).toISOString() : null,
     deleted_at: q.deletedAt ? new Date(q.deletedAt).toISOString() : null,
     updated_at: q.updatedAt ? new Date(q.updatedAt).toISOString() : new Date().toISOString()
   };
 }
 function _pintadeRequestFromRow(r) {
+  const requestedAt = r.requested_at ? Date.parse(r.requested_at) : null;
+  // `deadline_at` est le nom v.106 de la même échéance. On le lit en repli pour
+  // qu'un appareil à jour puisse travailler sur une base qui ne l'est pas
+  // encore — sans ça, une ligne relue perdrait sa fenêtre de connexion et
+  // passerait aussitôt pour « pas vue ».
+  const connect = r.connect_deadline_at || r.deadline_at;
   return {
     id: r.id,
     periodId: r.period_id || null,
     holderId: r.holder_id || null,
     requesterId: r.requester_id || '?',
     requesterLabel: r.requester_label || '',
-    requestedAt: r.requested_at ? Date.parse(r.requested_at) : null,
-    deadlineAt: r.deadline_at ? Date.parse(r.deadline_at) : null,
+    requestedAt: requestedAt,
+    connectDeadlineAt: connect ? Date.parse(connect) : requestedAt,
+    openedAt: r.opened_at ? Date.parse(r.opened_at) : null,
+    photoDeadlineAt: r.photo_deadline_at ? Date.parse(r.photo_deadline_at) : null,
     photoUrl: r.photo_url || '',
-    status: ['pending', 'ok', 'failed', 'expired'].includes(r.status) ? r.status : 'pending',
+    status: _pintadeNormStatusDb(r.status),
     resolvedAt: r.resolved_at ? Date.parse(r.resolved_at) : null,
     createdAt: r.created_at ? Date.parse(r.created_at) : null,
     updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
@@ -6570,7 +6605,7 @@ const K = {
   // === LA PINTADE (cf. migration 20260807_001) ===
   pintadeRules: 'pb8_pintade_rules',               // { id:'default', defaultDurationDays, rateLimitHours, ... } — singleton
   pintadeHolders: 'pb8_pintade_holders',           // [{ id, holderId, startAt, endAt, bonusHours, ended, ... }] — 1 par garde
-  pintadeRequests: 'pb8_pintade_requests',         // [{ id, periodId, holderId, requesterId, requestedAt, deadlineAt, photoUrl, status }]
+  pintadeRequests: 'pb8_pintade_requests',         // [{ id, periodId, holderId, requesterId, requestedAt, connectDeadlineAt, openedAt, photoDeadlineAt, photoUrl, status }]
   pintadeIncidents: 'pb8_pintade_incidents',       // [{ id, periodId, holderId, incidentType, streakCount, coachDecision, metadata }]
   notifSnooze: 'pb8_notif_snooze',                 // map { "<role>:<playerId|->": "YYYY-MM-DD" } — « Plus tard » du rappel notifs (local)
   // NB : le repli du BANDEAU notifs n'a volontairement PAS de clé ici. Il vit
@@ -7015,7 +7050,7 @@ let state = {
   // l'en-tête de la migration).
   pintadeRules: load(K.pintadeRules, null),
   pintadeHolders: load(K.pintadeHolders, []),
-  pintadeRequests: load(K.pintadeRequests, []),
+  pintadeRequests: _pintadeUpgradeLocalRequests(load(K.pintadeRequests, [])),
   pintadeIncidents: load(K.pintadeIncidents, []),
 
   // === JOUEUSES GUESTS (Phase 5 — cf. migration 20260524_009_guest_players) ===
@@ -18960,6 +18995,7 @@ const PINTADE_RULES_DEFAULT = {
   id: 'default',
   defaultDurationDays: 30,
   rateLimitHours: 2,
+  connectWindowHours: 2,
   proofTimeoutSeconds: 30,
   extensionHoursPerFail: 24,
   maxConsecutiveFails: 3,
@@ -18971,6 +19007,37 @@ const PINTADE_RULES_DEFAULT = {
   updatedAt: 0
 };
 const PINTADE_H = 3600000;   // une heure en ms
+
+// REPRISE DES DONNÉES LOCALES v.106 → v.107.
+// Un appareil qui a tourné en v.106 garde en localStorage des demandes au vieux
+// format : `deadlineAt` (= demande + 30 s), statuts 'failed'/'expired', et
+// aucune trace d'ouverture. Sans reprise, `_pintadeStatus` ne trouverait pas de
+// `connectDeadlineAt`, lirait 0, et déclarerait TOUTES ces demandes « pas vues
+// à temps » — des ratés inventés au premier chargement.
+//
+// Appelée depuis l'initialisation de `state`, donc TRÈS TÔT : elle ne doit
+// toucher à AUCUNE constante du module pintade (elles sont encore en zone morte
+// temporelle à cet instant). D'où les 2 h écrites en dur ici — c'est une valeur
+// de reprise ponctuelle, pas un réglage.
+function _pintadeUpgradeLocalRequests(list) {
+  if (!Array.isArray(list)) return [];
+  return list.map(q => {
+    if (!q || typeof q !== 'object') return q;
+    if (q.connectDeadlineAt) return q;                   // déjà au format v.107
+    const req = q.requestedAt || 0;
+    const up = Object.assign({}, q, {
+      // Fenêtre de connexion recalculée : garder l'échéance de 30 s ferait
+      // échouer d'un coup des demandes créées sous une règle qui n'existait pas.
+      connectDeadlineAt: req ? req + 2 * 3600000 : 0,
+      openedAt: q.openedAt || null,
+      photoDeadlineAt: q.photoDeadlineAt || null
+    });
+    delete up.deadlineAt;
+    if (q.status === 'failed') up.status = 'failed_timeout';        // elle avait constaté → elle avait vu
+    else if (q.status === 'expired') up.status = 'failed_not_seen'; // personne n'avait rien vu
+    return up;
+  });
+}
 function pintadeRules() {
   return Object.assign({}, PINTADE_RULES_DEFAULT, state.pintadeRules || {});
 }
@@ -19045,16 +19112,56 @@ function _pintadeIsHolder() {
   return !!pid && pid === pintadeHolderId();
 }
 
-// --- LES DEMANDES ------------------------------------------------------------
-// Statut EFFECTIF : une demande encore 'pending' dont le délai est écoulé est
-// déjà un raté, pour tout le monde, sans écriture préalable. C'est le cœur de
-// l'anti-triche : ne pas ouvrir l'app ne protège de rien.
+// --- LES DEMANDES : DEUX CHRONOS QUI S'ENCHAÎNENT ---------------------------
+// La v.106 comptait les 30 secondes depuis la DEMANDE. Une demande postée à 3 h
+// du matin était donc perdue avant que la porteuse n'ouvre les yeux : le jeu
+// punissait le sommeil, pas la négligence.
+//
+//   CHRONO 1 — CONNEXION (2 h par défaut) : elle doit OUVRIR L'APP. Rien ne
+//              tourne tant qu'elle n'a rien vu.
+//   CHRONO 2 — PHOTO (30 s) : il démarre à la SECONDE où l'écran de preuve
+//              s'affiche chez elle. C'est là que le jeu se joue.
+//
+// D'où deux échecs distincts, et c'est volontaire : `failed_not_seen` peut
+// arriver honnêtement (la nuit, un tunnel, une batterie morte) et le feed le dit
+// sans railler ; `failed_timeout` veut dire qu'elle avait l'écran sous les yeux.
+// Les DEUX comptent pour la série et les prolongations — sans quoi ignorer
+// l'app deviendrait la stratégie gagnante.
+//
+// Liste des statuts, CÔTÉ BLOC CLASSIQUE. Elle double volontairement celle de
+// `_pintadeNormStatusDb` (bloc <script type="module">) : les deux blocs ne
+// partagent aucune portée, et un appel qui franchirait la frontière échouerait
+// à l'exécution sans que rien ne le signale à la lecture. À garder alignées
+// toutes les deux avec la contrainte CHECK de la migration _002.
+const PINTADE_STATUSES = ['pending', 'awaiting_photo', 'ok', 'failed_not_seen', 'failed_timeout'];
+const PINTADE_STATUS_LEGACY = { failed: 'failed_timeout', expired: 'failed_not_seen' };
+function _pintadeNormStatus(s) {
+  if (PINTADE_STATUSES.includes(s)) return s;
+  return PINTADE_STATUS_LEGACY[s] || 'pending';
+}
+// Statut EFFECTIF, dérivé sans aucune écriture (cf. l'en-tête du module) : une
+// échéance dépassée est un échec pour tout le monde, immédiatement.
 function _pintadeStatus(q) {
   if (!q) return 'pending';
-  if (q.status === 'pending' && Date.now() > (q.deadlineAt || 0)) return 'expired';
-  return q.status;
+  const now = Date.now();
+  if (q.status === 'pending') {
+    return (now > (q.connectDeadlineAt || 0)) ? 'failed_not_seen' : 'pending';
+  }
+  if (q.status === 'awaiting_photo') {
+    return (now > (q.photoDeadlineAt || 0)) ? 'failed_timeout' : 'awaiting_photo';
+  }
+  return _pintadeNormStatus(q.status);
 }
-function _pintadeIsFail(q) { const s = _pintadeStatus(q); return s === 'failed' || s === 'expired'; }
+function _pintadeIsFail(q) {
+  const s = _pintadeStatus(q);
+  return s === 'failed_not_seen' || s === 'failed_timeout';
+}
+// Une demande « vivante » = elle attend encore quelque chose de la porteuse,
+// que ce soit une connexion ou une photo.
+function _pintadeIsLive(q) {
+  const s = _pintadeStatus(q);
+  return s === 'pending' || s === 'awaiting_photo';
+}
 // Demandes d'une garde, du plus ancien au plus récent. L'ordre compte : la
 // série de ratés consécutifs s'y lit directement.
 function pintadeRequestsOf(periodId) {
@@ -19075,9 +19182,9 @@ function _pintadeTally(periodId) {
   let streak = 0, counted = 0;
   pintadeRequestsOf(periodId).forEach(q => {
     const s = _pintadeStatus(q);
-    if (s === 'pending') return;               // le chrono tourne encore
+    if (s === 'pending' || s === 'awaiting_photo') return;   // un chrono tourne encore
     if (s === 'ok') { streak = 0; return; }
-    streak++;
+    streak++;                                  // failed_not_seen ET failed_timeout
     if (streak <= max) counted++;
   });
   return { streak, counted };
@@ -19085,6 +19192,12 @@ function _pintadeTally(periodId) {
 function pintadeStreak(periodId) { return _pintadeTally(periodId).streak; }
 function pintadeCountedFails(periodId) { return _pintadeTally(periodId).counted; }
 function pintadeFailTotal(periodId) { return pintadeRequestsOf(periodId).filter(_pintadeIsFail).length; }
+// Ventilation des ratés par nature. Le coach a besoin de la distinction avant
+// de trancher : trois « pas vue » sur une joueuse dont le téléphone est mort ne
+// se sanctionnent pas comme trois « trop lente ».
+function pintadeFailKind(periodId, kind) {
+  return pintadeRequestsOf(periodId).filter(q => _pintadeStatus(q) === kind).length;
+}
 function pintadeOkTotal(periodId) { return pintadeRequestsOf(periodId).filter(q => _pintadeStatus(q) === 'ok').length; }
 
 // LA demande en cours, s'il y en a une. Départage DÉTERMINISTE (id le plus
@@ -19096,7 +19209,7 @@ function pintadeActiveRequest(periodId) {
   const p = periodId || (pintadeActivePeriod() || {}).id;
   if (!p) return null;
   return pintadeRequestsOf(p)
-    .filter(q => _pintadeStatus(q) === 'pending')
+    .filter(_pintadeIsLive)
     .sort((a, b) => String(a.id).localeCompare(String(b.id)))[0] || null;
 }
 // Fenêtre anti-harcèlement : une demande par tranche de `rateLimitHours`, POUR
@@ -19124,8 +19237,8 @@ function pintadeRequestBlockedReason() {
 function pintadeCanRequest() { return pintadeRequestBlockedReason() === null; }
 
 // --- ÉCRITURES ---------------------------------------------------------------
-// Demander une preuve. Le push est ESSENTIEL, pas décoratif : avec 30 secondes
-// au chrono, une porteuse qui n'a pas l'app ouverte n'a aucune chance sans lui.
+// Demander une preuve. Seul le CHRONO 1 (connexion) démarre ici : la porteuse
+// dort peut-être. Le push reste essentiel — c'est lui qui la fait ouvrir l'app.
 function requestPintadeProof() {
   const period = pintadeActivePeriod();
   if (!period) return false;
@@ -19141,9 +19254,11 @@ function requestPintadeProof() {
     // le feed illisible six mois plus tard.
     requesterLabel: _pintadeMeLabel(),
     requestedAt: now,
-    // Délai figé lui aussi : si le coach change le réglage pendant que le
-    // chrono tourne, la demande déjà partie garde le contrat annoncé.
-    deadlineAt: now + (r.proofTimeoutSeconds || 30) * 1000,
+    // Échéances FIGÉES elles aussi : si le coach change les réglages pendant
+    // qu'un chrono tourne, la demande déjà partie garde le contrat annoncé.
+    connectDeadlineAt: now + (r.connectWindowHours || 2) * PINTADE_H,
+    // Le chrono de la photo n'existe pas encore : il naîtra à l'ouverture.
+    openedAt: null, photoDeadlineAt: null,
     photoUrl: '', status: 'pending', resolvedAt: null,
     createdAt: now, updatedAt: now, deletedAt: null
   };
@@ -19152,32 +19267,56 @@ function requestPintadeProof() {
   try {
     notifyPush(['player:' + period.holderId], {
       title: '🕊 Preuve demandée !',
-      body: (r.proofTimeoutSeconds || 30) + ' secondes pour prendre la pintade en photo. Go !',
+      body: 'Ouvre l\'app dans les ' + (r.connectWindowHours || 2) + ' h : tu auras '
+        + (r.proofTimeoutSeconds || 30) + ' s pour photographier la pintade.',
       url: '/', tag: 'pintade-proof-' + req.id, type: 'pintade_proof'
     });
   } catch (e) {}
-  if (typeof showToast === 'function') showToast('🎯 Demande envoyée · elle a ' + (r.proofTimeoutSeconds || 30) + ' s');
+  if (typeof showToast === 'function') {
+    showToast('🎯 Demande envoyée · ' + (r.connectWindowHours || 2) + ' h pour se connecter');
+  }
   return true;
 }
 
-// Rangement OPPORTUNISTE : matérialise en base les demandes dont le délai est
-// écoulé. Ne change RIEN à ce qui est affiché ou compté (`_pintadeStatus` les
-// tient déjà pour ratées) — c'est uniquement pour que la base reflète l'écran.
-// Idempotent, et sans course : deux appareils qui écrivent 'failed' et
-// 'expired' au même instant produisent le même résultat métier (un raté), le
-// last-writer-wins de l'apply tranche le reste.
+// LE TAMPON D'OUVERTURE — le point de sécurité de tout le mécanisme.
+// `openedAt` n'est posé QU'UNE FOIS. S'il était réécrit à chaque affichage, il
+// suffirait de tuer l'app à la 25e seconde et de la rouvrir pour repartir de
+// 30 : le chrono ne se terminerait jamais et la preuve n'aurait plus aucune
+// valeur. Une fois posé, le compte à rebours vit sur une échéance ABSOLUE que
+// plus rien ne déplace.
+// Rend true si le tampon vient d'être posé (donc si les 30 s démarrent).
+function _pintadeMarkOpened(req) {
+  if (!req) return false;
+  if (req.openedAt) return false;                        // déjà ouverte : on n'y touche plus
+  if (_pintadeStatus(req) !== 'pending') return false;   // trop tard, ou déjà résolue
+  const now = Date.now();
+  const r = pintadeRules();
+  req.openedAt = now;
+  req.photoDeadlineAt = now + (r.proofTimeoutSeconds || 30) * 1000;
+  req.status = 'awaiting_photo';
+  req.updatedAt = now;
+  persist(); _pintadeFlush();
+  return true;
+}
+
+// Rangement OPPORTUNISTE : matérialise en base les demandes dont une échéance
+// est dépassée. Ne change RIEN à ce qui est affiché ou compté (`_pintadeStatus`
+// les tient déjà pour ratées) — c'est uniquement pour que la base reflète
+// l'écran. Idempotent : le statut écrit est le statut DÉRIVÉ, donc deux
+// appareils qui le posent au même instant écrivent la même chose.
 function _pintadePersistStale() {
   let touched = false;
   const now = Date.now();
-  const mine = _pintadeMyPlayerId();
   (state.pintadeRequests || []).forEach(q => {
-    if (!q || q.deletedAt || q.status !== 'pending') return;
-    if (now <= (q.deadlineAt || 0)) return;
-    // 'failed' quand c'est la porteuse elle-même qui constate (elle était là,
-    // elle a laissé filer) ; 'expired' quand c'est un tiers (personne n'a rien
-    // vu passer). Deux libellés honnêtes, une seule conséquence.
-    q.status = (mine && mine === q.holderId) ? 'failed' : 'expired';
-    q.resolvedAt = q.deadlineAt || now;
+    if (!q || q.deletedAt) return;
+    const eff = _pintadeStatus(q);
+    if (eff !== 'failed_not_seen' && eff !== 'failed_timeout') return;
+    if (q.status === eff) return;                        // déjà rangée
+    q.status = eff;
+    // Horodatage de l'échec = l'échéance franchie, pas l'instant où on s'en
+    // aperçoit. Sinon le feed daterait le raté de la prochaine ouverture de
+    // l'app, ce qui peut être le lendemain.
+    q.resolvedAt = (eff === 'failed_timeout') ? (q.photoDeadlineAt || now) : (q.connectDeadlineAt || now);
     q.updatedAt = now;
     touched = true;
   });
@@ -19187,9 +19326,9 @@ function _pintadePersistStale() {
   // client au flush suivant.
   const period = pintadeActivePeriod();
   if (period) {
-    const pending = pintadeRequestsOf(period.id).filter(q => _pintadeStatus(q) === 'pending')
+    const live = pintadeRequestsOf(period.id).filter(_pintadeIsLive)
       .sort((a, b) => String(a.id).localeCompare(String(b.id)));
-    pending.slice(1).forEach(q => { q.deletedAt = now; q.updatedAt = now; touched = true; });
+    live.slice(1).forEach(q => { q.deletedAt = now; q.updatedAt = now; touched = true; });
   }
   if (touched) { persist(); _pintadeFlush(); }
   return touched;
@@ -19203,9 +19342,10 @@ async function submitPintadeProof(event) {
   try { if (input) input.value = ''; } catch (e) {}
   if (!file) return;
   if (!req) { _pintadeRenderOverlay(); return; }
-  // Le chrono a filé pendant que l'appareil photo était ouvert : on ne triche
-  // pas rétroactivement. La demande est déjà comptée ratée par _pintadeStatus.
-  if (Date.now() > (req.deadlineAt || 0)) { _pintadeRenderOverlay(); return; }
+  // Le chrono de la PHOTO a filé pendant que l'appareil photo était ouvert : on
+  // ne triche pas rétroactivement. La demande est déjà comptée ratée par
+  // `_pintadeStatus`, qui n'attend aucune écriture pour le savoir.
+  if (_pintadeStatus(req) !== 'awaiting_photo') { _pintadeRenderOverlay(); return; }
   if (!window.sb) {
     try { alert('Hors ligne : impossible d\'envoyer la preuve. Reconnecte-toi vite !'); } catch (e) {}
     return;
@@ -19227,8 +19367,8 @@ async function submitPintadeProof(event) {
     // statut reste celui que le chrono a décidé.
     const now = Date.now();
     req.photoUrl = url;
-    if (now <= (req.deadlineAt || 0)) { req.status = 'ok'; req.resolvedAt = now; }
-    else if (req.status === 'pending') { req.status = 'failed'; req.resolvedAt = req.deadlineAt || now; }
+    if (now <= (req.photoDeadlineAt || 0)) { req.status = 'ok'; req.resolvedAt = now; }
+    else if (req.status === 'awaiting_photo') { req.status = 'failed_timeout'; req.resolvedAt = req.photoDeadlineAt || now; }
     req.updatedAt = now;
     persist(); _pintadeFlush();
     window._pintadeUploading = false;
@@ -19408,11 +19548,16 @@ function pintadeAddSanction(notes) {
 // de fond) reconstruit tout #root en innerHTML et détruirait l'<input> de prise
 // de vue en plein milieu du chrono. Même choix que l'écran de tirage de gage.
 //
-// Le décompte se lit sur l'HORLOGE ABSOLUE (deadlineAt − Date.now()), jamais sur
-// un compteur qu'on décrémente : un téléphone qui verrouille l'écran ou passe
-// l'app en arrière-plan fige les timers, et la joueuse rouvrirait sur un chrono
-// resté à 22 s alors que le délai est écoulé depuis longtemps. C'est la leçon
-// déjà apprise sur les drills (`_currentPhaseAt`).
+// Le décompte se lit sur l'HORLOGE ABSOLUE (photoDeadlineAt − Date.now()),
+// jamais sur un compteur qu'on décrémente : un téléphone qui verrouille l'écran
+// ou passe l'app en arrière-plan fige les timers, et la joueuse rouvrirait sur
+// un chrono resté à 22 s alors que le délai est écoulé depuis longtemps. C'est
+// la leçon déjà apprise sur les drills (`_currentPhaseAt`).
+//
+// C'est aussi ce qui rend l'écran INCONTOURNABLE : `photoDeadlineAt` est posé
+// UNE FOIS, à la première ouverture (cf. `_pintadeMarkOpened`). Tuer l'app et la
+// rouvrir ne remet rien à zéro — on retombe sur la même échéance, simplement
+// plus proche.
 function _pintadeOverlayHost() {
   let host = document.getElementById('pintade-overlay');
   if (!host) { host = document.createElement('div'); host.id = 'pintade-overlay'; document.body.appendChild(host); }
@@ -19430,11 +19575,16 @@ function _pintadeCloseOverlay() {
 // Ouvre l'écran si — et seulement si — une demande est réellement en cours pour
 // MOI. Appelé au boot, puis par le veilleur toutes les 4 s (une demande peut
 // arriver alors que l'app est déjà ouverte).
+//
+// C'EST ICI QUE LE CHRONO DE LA PHOTO DÉMARRE, et nulle part ailleurs : le
+// tampon est posé au moment exact où l'écran s'affiche. Une demande qui n'a
+// jamais été affichée n'a donc jamais consommé une seule de ses 30 secondes.
 function maybeShowPintadeProof() {
   if (window._pintadeOverlayOpen) return false;
   if (!_pintadeIsHolder()) return false;
   const req = pintadeActiveRequest();
   if (!req) return false;
+  _pintadeMarkOpened(req);                 // no-op si déjà ouverte : jamais de remise à zéro
   window._pintadeOverlayOpen = true;
   document.body.style.overflow = 'hidden';
   _pintadeRenderOverlay();
@@ -19442,7 +19592,10 @@ function maybeShowPintadeProof() {
 }
 function _pintadeRemainingMs() {
   const req = pintadeActiveRequest();
-  return req ? Math.max(0, (req.deadlineAt || 0) - Date.now()) : 0;
+  if (!req) return 0;
+  // Tant que le tampon d'ouverture n'est pas posé, le chrono complet reste dû.
+  if (!req.photoDeadlineAt) return (pintadeRules().proofTimeoutSeconds || 30) * 1000;
+  return Math.max(0, req.photoDeadlineAt - Date.now());
 }
 function _pintadeRenderOverlay(mode) {
   const host = _pintadeOverlayHost();
@@ -19491,7 +19644,7 @@ function _pintadeRenderOverlay(mode) {
       if (window._pintadeUploading) return;
       const cur = pintadeActiveRequest();
       if (!cur) { _pintadeCloseOverlay(); return; }
-      const ms = Math.max(0, (cur.deadlineAt || 0) - Date.now());
+      const ms = _pintadeRemainingMs();
       const el = document.getElementById('pintade-count');
       if (el) {
         const s = Math.ceil(ms / 1000);
@@ -19616,9 +19769,10 @@ function openPintadeScreen() {
 
       ${mine ? `
         <div style="padding:12px;border-radius:10px;background:var(--bg-3);font-size:12px;color:var(--ink-2);line-height:1.5;margin-bottom:14px">
-          Tu la trimbales partout. À tout moment, quelqu'un peut réclamer une preuve : tu auras
-          <strong>${r.proofTimeoutSeconds} secondes</strong> pour la prendre en photo. Chaque raté prolonge ta garde de
-          ${r.extensionHoursPerFail} h.
+          Tu la trimbales partout. Quand quelqu'un réclame une preuve, tu as
+          <strong>${r.connectWindowHours} h pour ouvrir l'app</strong> — puis
+          <strong>${r.proofTimeoutSeconds} secondes</strong> pour la photo, à partir du moment où l'écran s'affiche.
+          Chaque raté prolonge ta garde de ${r.extensionHoursPerFail} h.
         </div>
       ` : `
         <button class="btn ${blocked === null ? 'btn-primary' : 'btn-secondary'} btn-block"
@@ -19626,7 +19780,7 @@ function openPintadeScreen() {
           🎯 Demander une preuve
         </button>
         <div style="font-size:11px;color:${blocked === null ? '#22c55e' : 'var(--ink-3)'};font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.03em;text-align:center;margin:8px 0 14px;line-height:1.5">
-          ${blocked === null ? 'Créneau ouvert · ' + r.proofTimeoutSeconds + ' s au chrono' : esc(blocked)}
+          ${blocked === null ? 'Créneau ouvert · ' + r.connectWindowHours + ' h pour se connecter, puis ' + r.proofTimeoutSeconds + ' s' : esc(blocked)}
         </div>
       `}
 
@@ -19647,12 +19801,23 @@ function _pintadeFeedRow(q) {
   const st = _pintadeStatus(q);
   const who = esc(q.requesterLabel || 'Quelqu\'un');
   const when = _pintadeFmtDateTime(q.requestedAt);
+  // Les deux états d'attente sont distincts À L'ŒIL : « on attend qu'elle se
+  // connecte » n'a pas la même tension que « les 30 secondes tournent ».
   if (st === 'pending') {
+    const left = (q.connectDeadlineAt || 0) - Date.now();
     return `<div class="pintade-feed-row">
+      <div class="pintade-feed-ico">📨</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-family:'Anton';font-size:13px;text-transform:uppercase">Demande envoyée</div>
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;line-height:1.5">Pas encore vue · ${_pintadeFmtDelay(left)} pour se connecter<br>${when} · demandé par ${who}</div>
+      </div></div>`;
+  }
+  if (st === 'awaiting_photo') {
+    return `<div class="pintade-feed-row" style="border-color:rgba(239,68,68,0.4)">
       <div class="pintade-feed-ico">⏳</div>
       <div style="flex:1;min-width:0">
-        <div style="font-family:'Anton';font-size:13px;text-transform:uppercase">Chrono en cours</div>
-        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px">${when} · demandé par ${who}</div>
+        <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;color:var(--red,#ef4444)">Chrono en cours</div>
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;line-height:1.5">Elle a ouvert à ${_pintadeFmtTime(q.openedAt)} · ça se joue maintenant<br>${when} · demandé par ${who}</div>
       </div></div>`;
   }
   if (st === 'ok') {
@@ -19663,15 +19828,31 @@ function _pintadeFeedRow(q) {
         <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;line-height:1.5">${_pintadeFmtTime(q.resolvedAt || q.requestedAt)} · demandé par ${who}<br>${when}</div>
       </div></div>`;
   }
-  // Le POST DE RATÉ demandé au cahier des charges : « 🕊 [Nom] a raté à HH:MM ».
-  // Il n'est PAS une ligne écrite quelque part — il se dérive de la demande
-  // elle-même, donc il ne peut ni manquer ni faire doublon.
+  // LE POST DE RATÉ. Il n'est PAS une ligne écrite quelque part — il se dérive
+  // de la demande elle-même, donc il ne peut ni manquer ni faire doublon.
+  //
+  // DEUX TONS, et c'est délibéré. « Pas vue » peut arriver honnêtement : la
+  // nuit, un tunnel, une batterie à plat. La railler comme une lenteur serait
+  // injuste, et la première chose qui donne envie de désinstaller. « Trop
+  // lente », en revanche, veut dire qu'elle avait l'écran sous les yeux.
   const label = _pintadePlayerLabel(q.holderId);
-  return `<div class="pintade-feed-row" style="border-color:rgba(239,68,68,0.4)">
-    ${q.photoUrl ? `<img src="${esc(q.photoUrl)}" alt="Preuve hors délai" loading="lazy" onclick="_pintadeViewProof('${esc(q.id)}')" style="opacity:.55">` : '<div class="pintade-feed-ico">💀</div>'}
+  const notSeen = st === 'failed_not_seen';
+  const r = pintadeRules();
+  const title = notSeen
+    ? '🕊 ' + esc(label) + " n'a pas vu la demande à temps"
+    : '🕊 ' + esc(label) + ' a été trop lente à envoyer la photo';
+  const detail = notSeen
+    ? r.connectWindowHours + ' h sans connexion · échéance ' + _pintadeFmtTime(q.connectDeadlineAt)
+    : 'Écran ouvert à ' + _pintadeFmtTime(q.openedAt) + ' · ' + r.proofTimeoutSeconds + ' s écoulées';
+  // Le « pas vue » reste sobre : bordure douce, pas de tête de mort.
+  const border = notSeen ? 'var(--border)' : 'rgba(239,68,68,0.4)';
+  const color = notSeen ? 'var(--orange)' : 'var(--red,#ef4444)';
+  const ico = notSeen ? '🌙' : '💀';
+  return `<div class="pintade-feed-row" style="border-color:${border}">
+    ${q.photoUrl ? `<img src="${esc(q.photoUrl)}" alt="Preuve hors délai" loading="lazy" onclick="_pintadeViewProof('${esc(q.id)}')" style="opacity:.55">` : `<div class="pintade-feed-ico">${ico}</div>`}
     <div style="flex:1;min-width:0">
-      <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;color:var(--red,#ef4444)">🕊 ${esc(label)} a raté à ${_pintadeFmtTime(q.deadlineAt || q.requestedAt)}</div>
-      <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;line-height:1.5">${st === 'expired' ? 'Jamais ouvert' : 'Chrono écoulé'} · demandé par ${who}<br>${when}</div>
+      <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;color:${color};line-height:1.25">${title}</div>
+      <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;line-height:1.5">${esc(detail)}<br>${when} · demandé par ${who}</div>
     </div></div>`;
 }
 function _pintadeViewProof(reqId) {
@@ -19709,7 +19890,8 @@ function openPintadeAdmin() {
           <div style="font-family:'Anton';font-size:16px;text-transform:uppercase">${esc(_pintadePlayerLabel(period.holderId))}</div>
           <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px;line-height:1.6;text-transform:uppercase">
             Depuis le ${_pintadeFmtDate(period.startAt)} · fin le ${_pintadeFmtDateTime(pintadePeriodEnd(period))}<br>
-            ✅ ${pintadeOkTotal(period.id)} preuve(s) · 💀 ${pintadeFailTotal(period.id)} raté(s) · série ${pintadeStreak(period.id)}/${r.maxConsecutiveFails}
+            ✅ ${pintadeOkTotal(period.id)} preuve(s) · 🌙 ${pintadeFailKind(period.id, 'failed_not_seen')} pas vue(s) · 💀 ${pintadeFailKind(period.id, 'failed_timeout')} trop lente(s)<br>
+            Série ${pintadeStreak(period.id)}/${r.maxConsecutiveFails}
             ${(Number(period.bonusHours) || 0) ? '<br>Prolongations coach : +' + period.bonusHours + ' h' : ''}
           </div>
         </div>
@@ -19790,6 +19972,12 @@ function openPintadeCoachAlert() {
       <div style="font-size:12px;color:var(--ink-2);line-height:1.55;margin-bottom:14px">
         <strong>${esc(_pintadePlayerLabel(period.holderId))}</strong> a enchaîné ${streak} ratés.
         Les sanctions automatiques sont <strong>en pause</strong> : plus rien ne s'empile tant que tu n'as pas tranché.
+      </div>
+      <!-- La ventilation avant la décision : trois « pas vue » sur une joueuse
+           au téléphone mort, ce n'est pas trois « trop lente ». -->
+      <div style="padding:10px 12px;background:var(--bg-3);border-radius:8px;margin-bottom:14px;font-size:11px;font-family:'JetBrains Mono';color:var(--ink-3);line-height:1.7;text-transform:uppercase">
+        🌙 ${pintadeFailKind(period.id, 'failed_not_seen')} pas vue(s) — ${pintadeRules().connectWindowHours} h sans connexion<br>
+        💀 ${pintadeFailKind(period.id, 'failed_timeout')} trop lente(s) — écran ouvert, chrono écoulé
       </div>
       ${CHOICES.map(c => `
         <label style="display:flex;gap:10px;align-items:flex-start;padding:10px;background:var(--bg-1);border:1px solid var(--border);border-radius:8px;margin-bottom:6px;cursor:pointer">
@@ -19884,7 +20072,8 @@ function openPintadeRules() {
     <div class="modal-body">
       ${num('pr-days', 'Durée par défaut (jours)', 'Proposée à chaque désignation. Modifiable au cas par cas.', r.defaultDurationDays, 1, 365)}
       ${num('pr-rate', 'Rate limit (heures)', 'Une seule demande par tranche, pour la porteuse, quel que soit le demandeur.', r.rateLimitHours, 1, 168)}
-      ${num('pr-timeout', 'Délai de la photo (secondes)', 'Le chrono de la porteuse. En dessous de 20 s, ça devient méchant.', r.proofTimeoutSeconds, 10, 300)}
+      ${num('pr-connect', 'Fenêtre de connexion (heures)', 'Le temps pour OUVRIR l\'app après une demande. Au-delà : « pas vue à temps ». Ne descends pas trop : une demande de nuit doit rester rattrapable au réveil.', r.connectWindowHours, 1, 168)}
+      ${num('pr-timeout', 'Délai de la photo (secondes)', 'Le second chrono, qui démarre quand l\'écran s\'affiche chez elle. En dessous de 20 s, ça devient méchant.', r.proofTimeoutSeconds, 10, 300)}
       ${num('pr-ext', 'Prolongation par raté (heures)', 'Ajoutée automatiquement à la fin de garde. 0 = pas de prolongation.', r.extensionHoursPerFail, 0, 168)}
       ${num('pr-max', 'Plafond de ratés consécutifs', 'Au-delà, plus AUCUNE sanction automatique : le système t\'attend.', r.maxConsecutiveFails, 1, 10)}
       <div class="eyebrow-muted" style="margin:16px 0 8px">Sanctions actives</div>
@@ -19911,6 +20100,7 @@ function _pintadeSaveRules() {
     id: 'default',
     defaultDurationDays: clamp(v('pr-days'), 1, 365, 30),
     rateLimitHours: clamp(v('pr-rate'), 1, 168, 2),
+    connectWindowHours: clamp(v('pr-connect'), 1, 168, 2),
     proofTimeoutSeconds: clamp(v('pr-timeout'), 10, 300, 30),
     extensionHoursPerFail: clamp(v('pr-ext'), 0, 168, 24),
     maxConsecutiveFails: clamp(v('pr-max'), 1, 10, 3),
@@ -19927,7 +20117,7 @@ function _pintadeSaveRules() {
 }
 function _pintadeResetRules() {
   if (!_pintadeIsCoach()) return;
-  if (!confirm('Revenir aux règles par défaut ?\n\n30 jours · 1 demande / 2 h · 30 s au chrono · +24 h par raté · plafond 3.')) return;
+  if (!confirm('Revenir aux règles par défaut ?\n\n30 jours · 1 demande / 2 h · 2 h pour se connecter · 30 s pour la photo · +24 h par raté · plafond 3.')) return;
   state.pintadeRules = Object.assign({}, PINTADE_RULES_DEFAULT, { updatedBy: _pintadeMeId(), updatedAt: Date.now() });
   persist(); _pintadeFlush();
   closeModal(); render();
@@ -39476,8 +39666,15 @@ function notifFeed(opts) {
     if (typeof _pintadeIsHolder !== 'function' || !_pintadeIsHolder()) return;
     const q = pintadeActiveRequest();
     if (!q) return;
+    // Le détail dit où en est le parcours : tant qu'elle n'a rien ouvert, il
+    // lui reste des heures ; une fois l'écran affiché, il lui reste des
+    // secondes. Annoncer la même chose dans les deux cas serait trompeur.
+    const started = _pintadeStatus(q) === 'awaiting_photo';
     todo('player', { id: 'pintade-req-' + q.id, ts: q.requestedAt || Date.now(), icon: '🕊',
-      title: 'Preuve demandée !', detail: (q.requesterLabel || 'Quelqu\'un') + ' attend ta photo',
+      title: 'Preuve demandée !',
+      detail: started
+        ? 'Le chrono tourne — envoie ta photo !'
+        : (q.requesterLabel || 'Quelqu\'un') + ' attend ta photo · ouvre dans ' + _pintadeFmtDelay((q.connectDeadlineAt || 0) - Date.now()),
       action: 'maybeShowPintadeProof()' });
   });
   src('player', 'pintade-porteuse', () => {
@@ -40586,7 +40783,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-07.106';
+const APP_VERSION = '2026-08-07.107';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Une seule tentative de rechargement AUTOMATIQUE par session : si le HTML servi
