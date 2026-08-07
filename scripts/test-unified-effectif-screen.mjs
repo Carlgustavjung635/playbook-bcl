@@ -62,11 +62,11 @@ console.log('SCÉNARIO 3 — corps Roster global (exécuté) : indicateur saison
   const POSTES = [1, 2, 3, 4, 5].map(n => ({ n, label: 'P' + n, short: 'P' + n }));
   const render = new Function('state', 'esc', '_lastSeenBadge', 'getCurrentSeason',
     'isScopedCoach', 'visiblePlayersForUser', '_seasonsLoaded', 'getSeasonPlayers',
-    'PLAYER_POSTES', '_normPostes', '_postesBadges', '_ageFromDob',
+    'PLAYER_POSTES', '_normPostes', '_postesBadges', '_ageFromDob', 'notifPermBadgeHtml',
     body + '\nreturn _effectifRosterBody();'
   )(state, s => String(s), () => ({ color: '#888', dot: '●', label: 'jamais vue' }), () => ({ id: 's1', status: 'active' }),
     () => false, a => a || [], () => false, () => [],
-    POSTES, a => (Array.isArray(a) ? a.filter(n => n >= 1 && n <= 5) : []), () => '', () => null);
+    POSTES, a => (Array.isArray(a) ? a.filter(n => n >= 1 && n <= 5) : []), () => '', () => null, () => '');
   t('liste les 2 joueuses + bouton + Ajouter', () => {
     assert.ok(render.includes('Lea') && render.includes('Candice'));
     assert.ok(/addNewPlayer\(\)/.test(render) && render.includes('+ Ajouter'));

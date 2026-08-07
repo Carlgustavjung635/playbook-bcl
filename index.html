@@ -534,6 +534,83 @@
     margin-top: 10px; line-height: 1.4; text-align: center;
   }
 
+  /* ========== LA PINTADE — écran de preuve bloquant ==========
+     Même armature que l'écran de tirage de gage (overlay hors #root, donc
+     insensible aux re-renders), avec un rouge d'urgence à la place de l'accent :
+     30 secondes au chrono, ce n'est pas le moment d'être discret.
+     MOBILE-FIRST : tout est en clamp()/vw, aucun palier n'est nécessaire en
+     dessous de la tablette. */
+  #pintade-overlay:empty { display: none; }
+  .pintade-screen {
+    position: fixed; inset: 0; z-index: 10001;   /* au-dessus du tirage de gage */
+    background: radial-gradient(circle at 50% 32%, rgba(239,68,68,0.22), transparent 70%), var(--bg);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: calc(env(safe-area-inset-top) + 20px) 20px calc(env(safe-area-inset-bottom) + 20px);
+    text-align: center; gap: 12px; animation: gageIn 0.2s ease-out;
+    overflow-y: auto;
+  }
+  .pintade-screen.pintade-ok { background: radial-gradient(circle at 50% 32%, rgba(34,197,94,0.22), transparent 70%), var(--bg); }
+  .pintade-eyebrow {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--red, #ef4444);
+  }
+  .pintade-bird { font-size: clamp(40px, 13vw, 60px); line-height: 1; animation: pintadeShake 1.1s ease-in-out infinite; }
+  @keyframes pintadeShake {
+    0%, 100% { transform: rotate(-6deg); } 50% { transform: rotate(6deg); }
+  }
+  .pintade-count {
+    font-family: 'Anton', sans-serif; font-size: clamp(64px, 26vw, 104px); line-height: 1;
+    color: var(--red, #ef4444); text-shadow: 0 0 40px rgba(239,68,68,0.45);
+    font-variant-numeric: tabular-nums;
+  }
+  /* Sous 6 secondes, le chrono pulse : la joueuse doit sentir que ça se joue là. */
+  .pintade-count.pintade-hot { animation: pintadePulse 0.5s ease-in-out infinite; }
+  @keyframes pintadePulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.12); } }
+  .pintade-title {
+    font-family: 'Anton', sans-serif; font-size: clamp(18px, 5.6vw, 24px);
+    text-transform: uppercase; letter-spacing: 0.03em; color: var(--ink); line-height: 1.2;
+  }
+  .pintade-sub {
+    font-size: 12px; color: var(--ink-2); line-height: 1.5; max-width: 340px;
+  }
+  /* L'input fichier natif est illisible : on le cache et on habille le <label>.
+     `capture` force l'appareil photo sur mobile — la galerie n'a rien à faire
+     ici, une preuve d'il y a trois jours n'est pas une preuve. */
+  /* Sélecteur ancré sur l'ID de l'overlay, à dessein. La règle globale
+     `input:not([type=checkbox]):not([type=radio])` impose width:100% et pèse
+     (0,2,1) : `.pintade-screen input.pintade-shoot` pesait exactement pareil et
+     PERDAIT l'égalité à l'ordre du fichier — l'input restait un bloc invisible
+     de 375 px en absolu au milieu de l'écran. L'ID tranche sans ambiguïté, et
+     cet input ne vit de toute façon nulle part ailleurs. */
+  #pintade-overlay input.pintade-shoot {
+    position: absolute; width: 1px; height: 1px; min-height: 0; padding: 0;
+    border: 0; opacity: 0; pointer-events: none;
+  }
+  .pintade-shoot-btn {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    width: 100%; max-width: 340px; min-height: 60px; padding: 16px 18px;
+    border-radius: var(--radius-lg); border: 2px solid var(--red, #ef4444);
+    background: var(--red, #ef4444); color: #fff; cursor: pointer;
+    font-family: 'Anton', sans-serif; font-size: 17px; text-transform: uppercase; letter-spacing: 0.03em;
+    box-shadow: 0 10px 40px rgba(239,68,68,0.35);
+  }
+  .pintade-shoot-btn:active { transform: scale(0.98); }
+  .pintade-shoot-btn[aria-disabled="true"] { opacity: 0.55; pointer-events: none; }
+
+  /* Feed public : une preuve par ligne, photo à gauche. */
+  .pintade-feed-row {
+    display: flex; gap: 10px; align-items: flex-start; padding: 10px;
+    background: var(--bg-1); border: 1px solid var(--border); border-radius: 10px;
+  }
+  .pintade-feed-row img {
+    width: 58px; height: 58px; flex: 0 0 auto; object-fit: cover;
+    border-radius: 8px; border: 1px solid var(--border); cursor: pointer; background: var(--bg-3);
+  }
+  .pintade-feed-ico {
+    width: 58px; height: 58px; flex: 0 0 auto; display: flex; align-items: center;
+    justify-content: center; font-size: 24px; border-radius: 8px; background: var(--bg-3);
+  }
+
   /* ========== ANNIVERSAIRE : ANIMATION DU JOUR J ========== */
   /* Confettis 100 % CSS + DOM, AUCUNE librairie externe : l'app est un fichier
      unique servi en PWA offline-first, une dépendance CDN ne serait pas
@@ -3796,6 +3873,23 @@ window.PbStore = {
     const { error } = await sb.from('players').update({ last_seen_at: new Date().toISOString() }).eq('id', playerId);
     if (error) throw error;
   },
+  // État des notifications de la joueuse (migration 20260807_001). UPDATE ciblé
+  // de DEUX colonnes, sur le modèle de touchLastSeen — surtout PAS via
+  // upsertPlayer, qui pousse la ligne ENTIÈRE : une joueuse dont la copie
+  // locale date écraserait alors le nom ou la photo mis à jour ailleurs
+  // entre-temps. C'est exactement le mode de panne corrigé en v.104 sur le
+  // moteur PbSync, et le canal `players` vit hors de ce moteur : il ne l'aurait
+  // pas évité tout seul.
+  // Tolère l'absence des colonnes (migration pas encore appliquée) : le caller
+  // catch en silence et l'état reste local.
+  async updateNotifPermission(playerId, perm) {
+    if (!playerId || !perm) return;
+    const { error } = await sb.from('players').update({
+      notif_permission: perm,
+      notif_permission_at: new Date().toISOString()
+    }).eq('id', playerId);
+    if (error) throw error;
+  },
   subscribePlayers(onChange) {
     if (Pb.playersChannel) { sb.removeChannel(Pb.playersChannel); Pb.playersChannel = null; }
     const ch = sb.channel('players-sync')
@@ -3814,7 +3908,12 @@ window.PbStore = {
   async fetchPlayers() {
     // last_seen_at peut ne pas encore exister en base (migration 20260601_001) :
     // on tente le select enrichi, fallback legacy si la colonne manque.
-    let res = await sb.from('players').select('id,name,num,photo,feedback,last_seen_at,postes,taille_cm,date_naissance').order('num');
+    let res = await sb.from('players').select('id,name,num,photo,feedback,last_seen_at,postes,taille_cm,date_naissance,notif_permission,notif_permission_at').order('num');
+    if (res.error) {
+      // Fallback si notif_permission (migration 20260807_001) pas encore
+      // appliquée → l'état des notifs reste local, le coach ne le voit pas.
+      res = await sb.from('players').select('id,name,num,photo,feedback,last_seen_at,postes,taille_cm,date_naissance').order('num');
+    }
     if (res.error) {
       // Fallback si postes/taille_cm/date_naissance (migrations 20260709_002/_003)
       // pas encore appliquées → les nouveaux champs restent locaux (préservés au merge).
@@ -5336,6 +5435,96 @@ const ENTITIES = [
       state.trainingCompletions = [...pendingLocal, ...fromRemote];
       if (ahead.length) _reassertRows('training_completions', ahead.map(_dumpTrainingCompletionRow));
     }
+  },
+  // ==========================================================================
+  // LA PINTADE (cf. migration 20260807_001) — quatre entités.
+  //
+  // `pintadeRules` est un SINGLETON (une ligne, id 'default'), sur le modèle de
+  // `team`/team_settings. Les trois autres sont des collections classiques avec
+  // le patron last-writer-wins par `updatedAt` + anti-wipe des ids 'x…'.
+  //
+  // AUCUNE de ces entités ne stocke de compteur : ratés consécutifs, date de
+  // fin effective et prochaine fenêtre de demande se dérivent des demandes de
+  // preuve à la lecture. Cf. l'en-tête de la migration.
+  // ==========================================================================
+  {
+    key: 'pintadeRules', table: 'pintade_rules', pk: 'id', realtime: true, auth: 'anon',
+    // Tant que le coach n'a rien réglé, state.pintadeRules vaut null : on ne
+    // pousse RIEN. Pousser des défauts front écraserait la ligne seedée par la
+    // migration — et, pire, les réglages d'un coach depuis un appareil qui
+    // n'aurait pas encore lu le serveur (le mode de panne de la v.104).
+    dump: (state) => state.pintadeRules ? { 'default': _dumpPintadeRulesRow(state.pintadeRules) } : {},
+    apply: (state, rows) => {
+      const r = rows.find(x => x.id === 'default') || rows[0];
+      if (!r) return;
+      const mapped = _pintadeRulesFromRow(r);
+      const loc = state.pintadeRules;
+      if (loc && (loc.updatedAt || 0) > (mapped.updatedAt || 0)) {
+        _reassertRows('pintade_rules', [_dumpPintadeRulesRow(loc)]);
+        return;
+      }
+      state.pintadeRules = mapped;
+    }
+  },
+  {
+    key: 'pintadeHolders', table: 'pintade_holders', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.pintadeHolders || []).map(h => [h.id, _dumpPintadeHolderRow(h)])),
+    apply: (state, rows) => {
+      const local = state.pintadeHolders || [];
+      const localById = Object.fromEntries(local.map(h => [h.id, h]));
+      const remoteIds = new Set(rows.map(r => r.id));
+      const ahead = [];
+      const fromRemote = rows.map(r => {
+        const mapped = _pintadeHolderFromRow(r);
+        const loc = localById[r.id];
+        if (loc && (loc.updatedAt || 0) > (mapped.updatedAt || 0)) { ahead.push(loc); return loc; }
+        return mapped;
+      });
+      const pendingLocal = local.filter(h => !remoteIds.has(h.id) && typeof h.id === 'string' && h.id.startsWith('x'));
+      state.pintadeHolders = [...pendingLocal, ...fromRemote];
+      if (ahead.length) _reassertRows('pintade_holders', ahead.map(_dumpPintadeHolderRow));
+    }
+  },
+  {
+    key: 'pintadeRequests', table: 'pintade_proof_requests', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.pintadeRequests || []).map(q => [q.id, _dumpPintadeRequestRow(q)])),
+    apply: (state, rows) => {
+      const local = state.pintadeRequests || [];
+      const localById = Object.fromEntries(local.map(q => [q.id, q]));
+      const remoteIds = new Set(rows.map(r => r.id));
+      const ahead = [];
+      const fromRemote = rows.map(r => {
+        const mapped = _pintadeRequestFromRow(r);
+        const loc = localById[r.id];
+        // LWW indispensable ici : la porteuse envoie sa photo dans la SECONDE
+        // qui suit, et un écho realtime concurrent la ramènerait à 'pending' —
+        // soit un raté injustement infligé.
+        if (loc && (loc.updatedAt || 0) > (mapped.updatedAt || 0)) { ahead.push(loc); return loc; }
+        return mapped;
+      });
+      const pendingLocal = local.filter(q => !remoteIds.has(q.id) && typeof q.id === 'string' && q.id.startsWith('x'));
+      state.pintadeRequests = [...pendingLocal, ...fromRemote];
+      if (ahead.length) _reassertRows('pintade_proof_requests', ahead.map(_dumpPintadeRequestRow));
+    }
+  },
+  {
+    key: 'pintadeIncidents', table: 'pintade_incident_log', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.pintadeIncidents || []).map(i => [i.id, _dumpPintadeIncidentRow(i)])),
+    apply: (state, rows) => {
+      const local = state.pintadeIncidents || [];
+      const localById = Object.fromEntries(local.map(i => [i.id, i]));
+      const remoteIds = new Set(rows.map(r => r.id));
+      const ahead = [];
+      const fromRemote = rows.map(r => {
+        const mapped = _pintadeIncidentFromRow(r);
+        const loc = localById[r.id];
+        if (loc && (loc.updatedAt || 0) > (mapped.updatedAt || 0)) { ahead.push(loc); return loc; }
+        return mapped;
+      });
+      const pendingLocal = local.filter(i => !remoteIds.has(i.id) && typeof i.id === 'string' && i.id.startsWith('x'));
+      state.pintadeIncidents = [...pendingLocal, ...fromRemote];
+      if (ahead.length) _reassertRows('pintade_incident_log', ahead.map(_dumpPintadeIncidentRow));
+    }
   }
 ];
 
@@ -5683,6 +5872,153 @@ function _seriesFromRow(r) {
     deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
   };
 }
+// --- LA PINTADE : sérialisation (module) ------------------------------------
+// cf. migration 20260807_001. Comme pour les licences et les mots
+// d'anniversaire, les bornes des CHECK sont réécrites EN DUR ici : les
+// constantes du bloc <script> classique ne franchissent pas la frontière des
+// blocs. Une valeur hors bornes ferait échouer TOUT le lot d'upsert de la
+// table — et un lot en échec est rejoué indéfiniment, ce qui gèle la synchro de
+// la table pour tout le monde. On borne donc AVANT d'envoyer.
+function _pintadeClampInt(v, min, max, dflt) {
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n)) return dflt;
+  return Math.min(max, Math.max(min, n));
+}
+function _dumpPintadeRulesRow(r) {
+  return {
+    id: 'default',
+    default_duration_days: _pintadeClampInt(r.defaultDurationDays, 1, 365, 30),
+    rate_limit_hours: _pintadeClampInt(r.rateLimitHours, 1, 168, 2),
+    proof_timeout_seconds: _pintadeClampInt(r.proofTimeoutSeconds, 10, 300, 30),
+    extension_hours_per_fail: _pintadeClampInt(r.extensionHoursPerFail, 0, 168, 24),
+    max_consecutive_fails: _pintadeClampInt(r.maxConsecutiveFails, 1, 10, 3),
+    sanction_feed_post: r.sanctionFeedPost !== false,
+    sanction_extension: r.sanctionExtension !== false,
+    sanction_coach_alert: r.sanctionCoachAlert !== false,
+    feed_public: r.feedPublic !== false,
+    updated_by: r.updatedBy || null,
+    updated_at: r.updatedAt ? new Date(r.updatedAt).toISOString() : new Date().toISOString()
+  };
+}
+function _pintadeRulesFromRow(r) {
+  return {
+    id: 'default',
+    defaultDurationDays: _pintadeClampInt(r.default_duration_days, 1, 365, 30),
+    rateLimitHours: _pintadeClampInt(r.rate_limit_hours, 1, 168, 2),
+    proofTimeoutSeconds: _pintadeClampInt(r.proof_timeout_seconds, 10, 300, 30),
+    extensionHoursPerFail: _pintadeClampInt(r.extension_hours_per_fail, 0, 168, 24),
+    maxConsecutiveFails: _pintadeClampInt(r.max_consecutive_fails, 1, 10, 3),
+    sanctionFeedPost: r.sanction_feed_post !== false,
+    sanctionExtension: r.sanction_extension !== false,
+    sanctionCoachAlert: r.sanction_coach_alert !== false,
+    feedPublic: r.feed_public !== false,
+    updatedBy: r.updated_by || null,
+    updatedAt: r.updated_at ? Date.parse(r.updated_at) : 0
+  };
+}
+function _dumpPintadeHolderRow(h) {
+  return {
+    id: h.id,
+    holder_id: h.holderId || null,
+    start_at: h.startAt ? new Date(h.startAt).toISOString() : new Date().toISOString(),
+    end_at: h.endAt ? new Date(h.endAt).toISOString() : new Date().toISOString(),
+    bonus_hours: _pintadeClampInt(h.bonusHours, 0, 100000, 0),
+    transferred_from_id: h.transferredFromId || null,
+    transferred_at: h.transferredAt ? new Date(h.transferredAt).toISOString() : null,
+    ended: !!h.ended,
+    ended_at: h.endedAt ? new Date(h.endedAt).toISOString() : null,
+    ended_reason: h.endedReason || null,
+    season_id: h.seasonId || null,
+    created_by: h.createdBy || null,
+    deleted_at: h.deletedAt ? new Date(h.deletedAt).toISOString() : null,
+    updated_at: h.updatedAt ? new Date(h.updatedAt).toISOString() : new Date().toISOString()
+  };
+}
+function _pintadeHolderFromRow(r) {
+  return {
+    id: r.id,
+    holderId: r.holder_id || null,
+    startAt: r.start_at ? Date.parse(r.start_at) : null,
+    endAt: r.end_at ? Date.parse(r.end_at) : null,
+    bonusHours: Number.isFinite(r.bonus_hours) ? r.bonus_hours : 0,
+    transferredFromId: r.transferred_from_id || null,
+    transferredAt: r.transferred_at ? Date.parse(r.transferred_at) : null,
+    ended: !!r.ended,
+    endedAt: r.ended_at ? Date.parse(r.ended_at) : null,
+    endedReason: r.ended_reason || null,
+    seasonId: r.season_id || null,
+    createdBy: r.created_by || null,
+    createdAt: r.created_at ? Date.parse(r.created_at) : null,
+    updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
+    deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
+  };
+}
+function _dumpPintadeRequestRow(q) {
+  const st = ['pending', 'ok', 'failed', 'expired'].includes(q.status) ? q.status : 'pending';
+  return {
+    id: q.id,
+    period_id: q.periodId || null,
+    holder_id: q.holderId || null,
+    requester_id: q.requesterId || '?',
+    requester_label: q.requesterLabel || null,
+    requested_at: q.requestedAt ? new Date(q.requestedAt).toISOString() : new Date().toISOString(),
+    deadline_at: q.deadlineAt ? new Date(q.deadlineAt).toISOString() : new Date().toISOString(),
+    photo_url: q.photoUrl || null,
+    status: st,
+    resolved_at: q.resolvedAt ? new Date(q.resolvedAt).toISOString() : null,
+    deleted_at: q.deletedAt ? new Date(q.deletedAt).toISOString() : null,
+    updated_at: q.updatedAt ? new Date(q.updatedAt).toISOString() : new Date().toISOString()
+  };
+}
+function _pintadeRequestFromRow(r) {
+  return {
+    id: r.id,
+    periodId: r.period_id || null,
+    holderId: r.holder_id || null,
+    requesterId: r.requester_id || '?',
+    requesterLabel: r.requester_label || '',
+    requestedAt: r.requested_at ? Date.parse(r.requested_at) : null,
+    deadlineAt: r.deadline_at ? Date.parse(r.deadline_at) : null,
+    photoUrl: r.photo_url || '',
+    status: ['pending', 'ok', 'failed', 'expired'].includes(r.status) ? r.status : 'pending',
+    resolvedAt: r.resolved_at ? Date.parse(r.resolved_at) : null,
+    createdAt: r.created_at ? Date.parse(r.created_at) : null,
+    updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
+    deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
+  };
+}
+function _dumpPintadeIncidentRow(i) {
+  return {
+    id: i.id,
+    period_id: i.periodId || null,
+    holder_id: i.holderId || '?',
+    incident_type: i.incidentType || 'coach_action',
+    streak_count: Number.isFinite(i.streakCount) ? i.streakCount : null,
+    coach_decision: i.coachDecision || null,
+    notes: i.notes ? String(i.notes).slice(0, 500) : null,
+    metadata: (i.metadata && typeof i.metadata === 'object') ? i.metadata : {},
+    created_by: i.createdBy || null,
+    deleted_at: i.deletedAt ? new Date(i.deletedAt).toISOString() : null,
+    updated_at: i.updatedAt ? new Date(i.updatedAt).toISOString() : new Date().toISOString()
+  };
+}
+function _pintadeIncidentFromRow(r) {
+  return {
+    id: r.id,
+    periodId: r.period_id || null,
+    holderId: r.holder_id || '?',
+    incidentType: r.incident_type || 'coach_action',
+    streakCount: Number.isFinite(r.streak_count) ? r.streak_count : null,
+    coachDecision: r.coach_decision || null,
+    notes: r.notes || '',
+    metadata: (r.metadata && typeof r.metadata === 'object') ? r.metadata : {},
+    createdBy: r.created_by || null,
+    createdAt: r.created_at ? Date.parse(r.created_at) : null,
+    updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
+    deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
+  };
+}
+
 // Re-pousse immédiatement (fire-and-forget, idempotent) des lignes locales
 // détectées PLUS RÉCENTES que le remote lors d'un apply : sans ça, un refetch
 // realtime concurrent + _seedCacheFromRemote masqueraient la mutation au flush.
@@ -6231,6 +6567,15 @@ const K = {
   playerUnavailabilities: 'pb8_player_unavail',        // [{ id, playerId, startsAt, endsAt, reason, notes }] — saisi par le coach
   playerLicences: 'pb8_player_licences',           // [{ id, playerId, seasonId, status, notes, updatedAt }] — 1 par (joueuse, saison)
   birthdayMessages: 'pb8_birthday_messages',       // [{ id, birthdayPlayerId, authorPlayerId, birthdayYear, message, readAt }] — écrits par les coéquipières
+  // === LA PINTADE (cf. migration 20260807_001) ===
+  pintadeRules: 'pb8_pintade_rules',               // { id:'default', defaultDurationDays, rateLimitHours, ... } — singleton
+  pintadeHolders: 'pb8_pintade_holders',           // [{ id, holderId, startAt, endAt, bonusHours, ended, ... }] — 1 par garde
+  pintadeRequests: 'pb8_pintade_requests',         // [{ id, periodId, holderId, requesterId, requestedAt, deadlineAt, photoUrl, status }]
+  pintadeIncidents: 'pb8_pintade_incidents',       // [{ id, periodId, holderId, incidentType, streakCount, coachDecision, metadata }]
+  notifSnooze: 'pb8_notif_snooze',                 // map { "<role>:<playerId|->": "YYYY-MM-DD" } — « Plus tard » du rappel notifs (local)
+  // NB : le repli du BANDEAU notifs n'a volontairement PAS de clé ici. Il vit
+  // dans window._notifBannerHidden, donc il repart à zéro au prochain
+  // chargement : « masquer » veut dire « pas maintenant », pas « plus jamais ».
   birthdayCelebrated: 'pb8_bday_celebrated',       // map { "<playerId>:YYYY-MM-DD": ts } — animation du jour J déjà jouée (local, jamais sync)
   trainingRemind: 'pb8_training_remind', // map { "<role>:<playerId|->": "YYYY-MM-DD" } — filigrane anti-doublon du rappel quotidien (local)
 };
@@ -6663,6 +7008,16 @@ let state = {
   playerLicences: load(K.playerLicences, []),
   birthdayMessages: load(K.birthdayMessages, []),
 
+  // === LA PINTADE (cf. migration 20260807_001) ===
+  // `pintadeRules` est un OBJET (singleton, comme state.team), les trois autres
+  // des tableaux. Aucun compteur n'y est stocké : ratés consécutifs, date de fin
+  // effective et prochaine fenêtre de demande sont recalculés à la lecture (cf.
+  // l'en-tête de la migration).
+  pintadeRules: load(K.pintadeRules, null),
+  pintadeHolders: load(K.pintadeHolders, []),
+  pintadeRequests: load(K.pintadeRequests, []),
+  pintadeIncidents: load(K.pintadeIncidents, []),
+
   // === JOUEUSES GUESTS (Phase 5 — cf. migration 20260524_009_guest_players) ===
   // guestPlayers : humains temporaires identifiés par leur nom (copine d'une
   //   joueuse, essayeuse). [{ id, name, note, promotedToPlayerId, firstSeenAt,
@@ -6772,6 +7127,10 @@ function persist() {
   save(K.playerUnavailabilities, state.playerUnavailabilities);
   save(K.playerLicences, state.playerLicences);
   save(K.birthdayMessages, state.birthdayMessages);
+  save(K.pintadeRules, state.pintadeRules);
+  save(K.pintadeHolders, state.pintadeHolders);
+  save(K.pintadeRequests, state.pintadeRequests);
+  save(K.pintadeIncidents, state.pintadeIncidents);
   // FIX Option B : pendant l'édition d'un plan, bumper updatedAt de l'entrée
   // courante AVANT le save → la garde anti-écho de l'apply() trainingPlans peut
   // distinguer une édition locale fraîche d'un écho realtime obsolète (qui
@@ -9309,7 +9668,7 @@ function _effectifSeasonBody() {
               <div style="flex:1;min-width:0">
                 <div style="font-family:'Anton';text-transform:uppercase;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p.name)}</div>
                 <div style="font-size:9px;font-family:'JetBrains Mono';margin-top:3px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
-                  ${esc(_teamTagLabel(link.teamTag))} · <span style="color:${ls.color}"${ls.exact ? ` title="Dernière connexion : ${ls.exact}"` : ''}>${ls.label}</span> · <span style="color:${lm.color}" title="Licence : ${esc(lm.label)}">🎫 ${lm.dot}</span>
+                  ${esc(_teamTagLabel(link.teamTag))} · <span style="color:${ls.color}"${ls.exact ? ` title="Dernière connexion : ${ls.exact}"` : ''}>${ls.label}</span> · <span style="color:${lm.color}" title="Licence : ${esc(lm.label)}">🎫 ${lm.dot}</span>${notifPermDotHtml(p)}
                 </div>
               </div>
               <span class="list-row-trail" style="flex:none">›</span>
@@ -9735,6 +10094,10 @@ function _adminPanelBody() {
   const admin = _adminCoach();
   const others = _nonAdminCoaches();
   const pendingGages = (state.gages || []).filter(g => g.status === 'pending' && !g.deletedAt).length;
+  // Défensif : le panneau admin est ouvert très tôt au boot, avant que la
+  // pintade ne soit forcément chargée. Un throw ici viderait TOUT le panneau.
+  let pintadeAlert = false;
+  try { pintadeAlert = (typeof pintadeAlertPending === 'function') && pintadeAlertPending(); } catch (e) {}
   return `
     <!-- MON PROFIL -->
     <div class="eyebrow-muted" style="margin-bottom:6px">Mon profil (admin)</div>
@@ -9776,8 +10139,17 @@ function _adminPanelBody() {
 
     <!-- MODÉRATION GAGES -->
     <div class="eyebrow-muted" style="margin-bottom:6px">Modération</div>
-    <button class="btn btn-secondary btn-block" style="text-align:left" onclick="closeModal();setTimeout(()=>openGagesCoach(),50)">
+    <button class="btn btn-secondary btn-block mb-3" style="text-align:left" onclick="closeModal();setTimeout(()=>openGagesCoach(),50)">
       🎁 Modérer les gages proposés${pendingGages ? ` <span style="color:var(--orange);font-family:'JetBrains Mono';font-size:11px">· ${pendingGages} en attente</span>` : ''}
+    </button>
+
+    <!-- LA PINTADE -->
+    <div class="eyebrow-muted" style="margin-bottom:6px">La pintade</div>
+    <button class="btn btn-secondary btn-block mb-2" style="text-align:left" onclick="closeModal();setTimeout(()=>openPintadeAdmin(),50)">
+      🕊 Gérer la pintade${pintadeAlert ? ` <span style="color:var(--red);font-family:'JetBrains Mono';font-size:11px">· arbitrage en attente</span>` : ''}
+    </button>
+    <button class="btn btn-secondary btn-block" style="text-align:left" onclick="closeModal();setTimeout(()=>openPintadeRules(),50)">
+      ⚙️ Règles du gage Pintade
     </button>
   `;
 }
@@ -9941,6 +10313,9 @@ function openSettings() {
         </button>
         <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openProposeGage(),50)">
           🎁 Proposer un gage
+        </button>
+        <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openPintadeScreen(),50)">
+          🕊 La pintade
         </button>
         <button class="btn btn-secondary btn-block mb-2" onclick="reopenPlayerGuide()">
           ↻ Revoir le guide
@@ -10106,6 +10481,16 @@ function doLogout() {
   window._gageBootChecked = false;
   window._gageSessionTotal = 0;
   try { _closeGageOverlay(); } catch (e) {}
+  // Pintade + rappel notifs : mêmes garde-fous de SESSION. Un logout SPA ne
+  // recharge pas la page — sans ce reset, la joueuse suivante hériterait de
+  // l'écran de preuve de la précédente (pire : elle pourrait l'alimenter avec
+  // sa propre photo), et le bandeau notifs resterait replié pour quelqu'un qui
+  // ne l'a jamais vu.
+  window._pintadeBootChecked = false;
+  window._pintadeAlertBootChecked = false;
+  try { _pintadeCloseOverlay(); } catch (e) {}
+  window._notifBootChecked = false;
+  window._notifBannerHidden = false;
   // Mini-guide joueuse : reset des états de SESSION (force-show manuel + replié/neuf)
   // pour que la prochaine identité réévalue la visibilité depuis son propre PIN.
   state._guideForceShow = false;
@@ -10851,6 +11236,7 @@ function renderHomeCoach() {
       ${renderOverdueTrainingsBanner()}
       ${renderBroadcastCoachCard()}
       ${renderGageCoachHomeCard()}
+      ${renderPintadeHomeCard()}
       ${renderBirthdayCoachCard()}
       ${nextEvent ? heroCard(nextEvent) : ''}
 
@@ -11173,6 +11559,9 @@ function renderHomePlayer() {
   return `
     <div class="fade-up">
       ${renderPlayerGuide()}
+      <!-- 0. Notifications coupées : bandeau permanent, en TÊTE d'accueil.
+           Repliable pour la session, il revient au prochain chargement. -->
+      ${renderNotifBanner()}
       <div class="section-header">
         <div>
           <div class="eyebrow">Salut #${p.num}</div>
@@ -11201,6 +11590,9 @@ function renderHomePlayer() {
 
       <!-- 1ter. Boîte à gages : point d'entrée visible pour proposer -->
       ${renderGageHomeCard()}
+
+      <!-- 1ter-2. La pintade : qui la porte, et le bouton pour la piéger -->
+      ${renderPintadeHomeCard()}
 
       <!-- 1quater. Prépa physique : séance du jour / anticipation 24 h / rattrapage 48 h -->
       ${renderTrainingPlayerCard()}
@@ -18529,6 +18921,1017 @@ function confirmInvalidateGage(drawId, choiceOverride, reasonOverride) {
   }
   render();
   return true;
+}
+
+// ============================================================
+// LA PINTADE DU MOIS (cf. migration 20260807_001)
+// ------------------------------------------------------------
+// La pintade est une peluche géante. Une joueuse en est la PORTEUSE : elle la
+// trimbale partout, et n'importe qui — coach ou coéquipière — peut lui réclamer
+// une preuve photo. Elle a 30 secondes, appareil photo obligatoire.
+//
+// ------------------------------------------------------------
+// RIEN N'EST COMPTÉ EN BASE, TOUT SE DÉRIVE DES DEMANDES
+// ------------------------------------------------------------
+// Ni le nombre de ratés consécutifs, ni la date de fin effective, ni la
+// prochaine fenêtre de demande ne sont stockés. Ils se recalculent à la lecture
+// des `pintadeRequests`, comme la dette de gages (`gageDebt`) ou les compteurs
+// de défis automatiques (`autoChallengeScores`).
+//
+// La raison est concrète : une prolongation « +24 h par raté » écrite en base
+// serait appliquée par le client qui CONSTATE le raté. Ce client peut être
+// n'importe lequel des onze de l'équipe, plusieurs à la fois — et le même raté
+// serait compté deux ou trois fois. Le projet a déjà payé ce prix (convocations
+// en double, cumuls cross-saison). Dérivée, la sanction est idempotente : dix
+// appareils qui recalculent trouvent la même date, et un appareil resté hors
+// ligne n'introduit aucun écart.
+//
+// Corollaire important : une demande dont le délai est écoulé est un RATÉ pour
+// tout le monde, immédiatement, sans qu'aucune écriture ne soit nécessaire (cf.
+// `_pintadeStatus`). L'écriture en base n'est qu'un rangement opportuniste. Il
+// suffirait sinon de ne pas ouvrir l'app pour ne jamais rater — exactement le
+// contournement que ce jeu doit interdire.
+// ============================================================
+
+// Défauts front. Ils doublent le seed SQL et servent tant que le serveur n'a
+// pas répondu (boot hors ligne, migration pas encore appliquée) — l'écran ne
+// doit jamais être vide à cause d'une ligne de règles manquante.
+const PINTADE_RULES_DEFAULT = {
+  id: 'default',
+  defaultDurationDays: 30,
+  rateLimitHours: 2,
+  proofTimeoutSeconds: 30,
+  extensionHoursPerFail: 24,
+  maxConsecutiveFails: 3,
+  sanctionFeedPost: true,
+  sanctionExtension: true,
+  sanctionCoachAlert: true,
+  feedPublic: true,
+  updatedBy: null,
+  updatedAt: 0
+};
+const PINTADE_H = 3600000;   // une heure en ms
+function pintadeRules() {
+  return Object.assign({}, PINTADE_RULES_DEFAULT, state.pintadeRules || {});
+}
+function _pintadeFlush() { try { if (window.PbSync && PbSync.flushNow) PbSync.flushNow(state).catch(() => {}); } catch (e) {} }
+function _pintadeIsCoach() { return !!(state.auth && state.auth.role === 'coach'); }
+function _pintadeMyPlayerId() { return (state.auth && state.auth.role === 'player') ? state.auth.playerId : null; }
+// Identité du demandeur : '<playerId>' ou 'coach:<coachId>'. Aucun anonymat ici
+// — au contraire de la boîte à gages : savoir QUI a piégé QUI fait partie du jeu.
+function _pintadeMeId() {
+  if (_pintadeIsCoach()) { const c = currentCoach(); return 'coach:' + (c ? c.id : ((state.auth && state.auth.coachId) || 'admin')); }
+  return _pintadeMyPlayerId();
+}
+function _pintadeMeLabel() {
+  if (_pintadeIsCoach()) { const c = currentCoach(); return (c && c.name ? c.name : 'Coach') + ' (coach)'; }
+  const p = (state.players || []).find(x => x.id === _pintadeMyPlayerId());
+  return p ? ('#' + p.num + ' ' + p.name) : 'Une joueuse';
+}
+function _pintadePlayerLabel(pid) {
+  const p = (state.players || []).find(x => x.id === pid);
+  return p ? ('#' + p.num + ' ' + p.name) : 'Joueuse inconnue';
+}
+function _pintadeFmtTime(ms) {
+  if (!ms) return '';
+  const d = new Date(ms);
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+function _pintadeFmtDate(ms) {
+  if (!ms) return '';
+  const d = new Date(ms);
+  return String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0');
+}
+function _pintadeFmtDateTime(ms) { return ms ? (_pintadeFmtDate(ms) + ' à ' + _pintadeFmtTime(ms)) : ''; }
+// « dans 47 min », « dans 2 h 05 ». Toujours arrondi À LA MINUTE SUPÉRIEURE :
+// afficher « dans 0 min » alors que le bouton est encore grisé serait le
+// meilleur moyen de faire croire à un bug.
+function _pintadeFmtDelay(ms) {
+  const mins = Math.max(0, Math.ceil(ms / 60000));
+  if (mins < 60) return mins + ' min';
+  const h = Math.floor(mins / 60), m = mins % 60;
+  return h + ' h' + (m ? ' ' + String(m).padStart(2, '0') : '');
+}
+
+// --- LA GARDE EN COURS -------------------------------------------------------
+function _pintadePeriods() {
+  return (state.pintadeHolders || []).filter(h => h && !h.deletedAt);
+}
+// Fin RÉELLE d'une garde : fin de base + prolongations décidées par le coach
+// + prolongations automatiques dues aux ratés. Cf. l'en-tête du module.
+function pintadePeriodEnd(period) {
+  if (!period) return 0;
+  const r = pintadeRules();
+  const bonus = (Number(period.bonusHours) || 0) * PINTADE_H;
+  const auto = r.sanctionExtension
+    ? pintadeCountedFails(period.id) * (Number(r.extensionHoursPerFail) || 0) * PINTADE_H
+    : 0;
+  return (period.endAt || 0) + bonus + auto;
+}
+// La garde ACTIVE : ni close explicitement, ni arrivée à son terme. Scopée
+// saison avec la même tolérance que partout ailleurs (une garde sans seasonId,
+// écrite avant que les saisons ne soient chargées, reste visible).
+function pintadeActivePeriod() {
+  const now = Date.now();
+  const active = getActiveSeasonId();
+  const inSeason = h => (!_seasonsLoaded() || !active || (h.seasonId ? h.seasonId === active : true));
+  return _pintadePeriods()
+    .filter(h => !h.ended && inSeason(h) && pintadePeriodEnd(h) > now)
+    .sort((a, b) => (b.startAt || 0) - (a.startAt || 0))[0] || null;
+}
+function pintadeHolderId() { const p = pintadeActivePeriod(); return p ? p.holderId : null; }
+function _pintadeIsHolder() {
+  const pid = _pintadeMyPlayerId();
+  return !!pid && pid === pintadeHolderId();
+}
+
+// --- LES DEMANDES ------------------------------------------------------------
+// Statut EFFECTIF : une demande encore 'pending' dont le délai est écoulé est
+// déjà un raté, pour tout le monde, sans écriture préalable. C'est le cœur de
+// l'anti-triche : ne pas ouvrir l'app ne protège de rien.
+function _pintadeStatus(q) {
+  if (!q) return 'pending';
+  if (q.status === 'pending' && Date.now() > (q.deadlineAt || 0)) return 'expired';
+  return q.status;
+}
+function _pintadeIsFail(q) { const s = _pintadeStatus(q); return s === 'failed' || s === 'expired'; }
+// Demandes d'une garde, du plus ancien au plus récent. L'ordre compte : la
+// série de ratés consécutifs s'y lit directement.
+function pintadeRequestsOf(periodId) {
+  if (!periodId) return [];
+  return (state.pintadeRequests || [])
+    .filter(q => q && !q.deletedAt && q.periodId === periodId)
+    .sort((a, b) => (a.requestedAt || 0) - (b.requestedAt || 0) || String(a.id).localeCompare(String(b.id)));
+}
+// Parcourt la garde dans l'ordre et rend { streak, counted } :
+//   • streak  = ratés consécutifs EN COURS (remis à zéro par une réussite) ;
+//   • counted = ratés ouvrant droit à une prolongation automatique. Au-delà de
+//     `maxConsecutiveFails` dans une MÊME série, plus rien ne s'empile : le
+//     système se tait et attend l'arbitrage du coach (règle explicite du cahier
+//     des charges — sans ce plafond, une joueuse qui décroche verrait sa peine
+//     grossir indéfiniment sans que personne n'ait rien décidé).
+function _pintadeTally(periodId) {
+  const max = pintadeRules().maxConsecutiveFails;
+  let streak = 0, counted = 0;
+  pintadeRequestsOf(periodId).forEach(q => {
+    const s = _pintadeStatus(q);
+    if (s === 'pending') return;               // le chrono tourne encore
+    if (s === 'ok') { streak = 0; return; }
+    streak++;
+    if (streak <= max) counted++;
+  });
+  return { streak, counted };
+}
+function pintadeStreak(periodId) { return _pintadeTally(periodId).streak; }
+function pintadeCountedFails(periodId) { return _pintadeTally(periodId).counted; }
+function pintadeFailTotal(periodId) { return pintadeRequestsOf(periodId).filter(_pintadeIsFail).length; }
+function pintadeOkTotal(periodId) { return pintadeRequestsOf(periodId).filter(q => _pintadeStatus(q) === 'ok').length; }
+
+// LA demande en cours, s'il y en a une. Départage DÉTERMINISTE (id le plus
+// petit) : deux appareils hors ligne peuvent créer chacun leur demande dans la
+// même fenêtre ; sans survivante unique et identique partout, la porteuse
+// verrait deux chronos et récolterait deux ratés pour un seul oubli. Même
+// patron que le dédoublonnage des convocations.
+function pintadeActiveRequest(periodId) {
+  const p = periodId || (pintadeActivePeriod() || {}).id;
+  if (!p) return null;
+  return pintadeRequestsOf(p)
+    .filter(q => _pintadeStatus(q) === 'pending')
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)))[0] || null;
+}
+// Fenêtre anti-harcèlement : une demande par tranche de `rateLimitHours`, POUR
+// LA PORTEUSE, quel que soit le demandeur. Rend 0 si c'est ouvert tout de suite.
+function pintadeNextSlotAt(periodId) {
+  const p = periodId || (pintadeActivePeriod() || {}).id;
+  if (!p) return 0;
+  const last = pintadeRequestsOf(p).reduce((m, q) => Math.max(m, q.requestedAt || 0), 0);
+  if (!last) return 0;
+  return last + (pintadeRules().rateLimitHours || 0) * PINTADE_H;
+}
+// Pourquoi le bouton « Demander une preuve » est grisé — une raison lisible
+// plutôt qu'un bouton mort sans explication. null = c'est bon, vas-y.
+function pintadeRequestBlockedReason() {
+  const period = pintadeActivePeriod();
+  if (!period) return 'Aucune pintade en circulation.';
+  if (!state.auth || (state.auth.role !== 'coach' && state.auth.role !== 'player')) return 'Connecte-toi pour demander une preuve.';
+  if (_pintadeIsHolder()) return "C'est toi qui l'as. Tu ne vas pas te piéger toi-même.";
+  if (pintadeActiveRequest(period.id)) return 'Une demande est déjà en cours.';
+  const slot = pintadeNextSlotAt(period.id);
+  const wait = slot - Date.now();
+  if (wait > 0) return 'Prochaine demande possible dans ' + _pintadeFmtDelay(wait) + '.';
+  return null;
+}
+function pintadeCanRequest() { return pintadeRequestBlockedReason() === null; }
+
+// --- ÉCRITURES ---------------------------------------------------------------
+// Demander une preuve. Le push est ESSENTIEL, pas décoratif : avec 30 secondes
+// au chrono, une porteuse qui n'a pas l'app ouverte n'a aucune chance sans lui.
+function requestPintadeProof() {
+  const period = pintadeActivePeriod();
+  if (!period) return false;
+  const reason = pintadeRequestBlockedReason();
+  if (reason) { if (typeof showToast === 'function') showToast('⏳ ' + reason); return false; }
+  const now = Date.now();
+  const r = pintadeRules();
+  state.pintadeRequests = state.pintadeRequests || [];
+  const req = {
+    id: uid(), periodId: period.id, holderId: period.holderId,
+    requesterId: _pintadeMeId(),
+    // Libellé FIGÉ à la demande : un renommage ou un départ ne doit pas rendre
+    // le feed illisible six mois plus tard.
+    requesterLabel: _pintadeMeLabel(),
+    requestedAt: now,
+    // Délai figé lui aussi : si le coach change le réglage pendant que le
+    // chrono tourne, la demande déjà partie garde le contrat annoncé.
+    deadlineAt: now + (r.proofTimeoutSeconds || 30) * 1000,
+    photoUrl: '', status: 'pending', resolvedAt: null,
+    createdAt: now, updatedAt: now, deletedAt: null
+  };
+  state.pintadeRequests.push(req);
+  persist(); _pintadeFlush();
+  try {
+    notifyPush(['player:' + period.holderId], {
+      title: '🕊 Preuve demandée !',
+      body: (r.proofTimeoutSeconds || 30) + ' secondes pour prendre la pintade en photo. Go !',
+      url: '/', tag: 'pintade-proof-' + req.id, type: 'pintade_proof'
+    });
+  } catch (e) {}
+  if (typeof showToast === 'function') showToast('🎯 Demande envoyée · elle a ' + (r.proofTimeoutSeconds || 30) + ' s');
+  return true;
+}
+
+// Rangement OPPORTUNISTE : matérialise en base les demandes dont le délai est
+// écoulé. Ne change RIEN à ce qui est affiché ou compté (`_pintadeStatus` les
+// tient déjà pour ratées) — c'est uniquement pour que la base reflète l'écran.
+// Idempotent, et sans course : deux appareils qui écrivent 'failed' et
+// 'expired' au même instant produisent le même résultat métier (un raté), le
+// last-writer-wins de l'apply tranche le reste.
+function _pintadePersistStale() {
+  let touched = false;
+  const now = Date.now();
+  const mine = _pintadeMyPlayerId();
+  (state.pintadeRequests || []).forEach(q => {
+    if (!q || q.deletedAt || q.status !== 'pending') return;
+    if (now <= (q.deadlineAt || 0)) return;
+    // 'failed' quand c'est la porteuse elle-même qui constate (elle était là,
+    // elle a laissé filer) ; 'expired' quand c'est un tiers (personne n'a rien
+    // vu passer). Deux libellés honnêtes, une seule conséquence.
+    q.status = (mine && mine === q.holderId) ? 'failed' : 'expired';
+    q.resolvedAt = q.deadlineAt || now;
+    q.updatedAt = now;
+    touched = true;
+  });
+  // Doublons de demandes en vol : on garde la survivante déterministe (cf.
+  // pintadeActiveRequest) et on soft-delete les autres. JAMAIS de hard delete —
+  // une ligne d'id « x… » supprimée en dur est repoussée par n'importe quel
+  // client au flush suivant.
+  const period = pintadeActivePeriod();
+  if (period) {
+    const pending = pintadeRequestsOf(period.id).filter(q => _pintadeStatus(q) === 'pending')
+      .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    pending.slice(1).forEach(q => { q.deletedAt = now; q.updatedAt = now; touched = true; });
+  }
+  if (touched) { persist(); _pintadeFlush(); }
+  return touched;
+}
+
+// La porteuse a pris la photo dans les temps.
+async function submitPintadeProof(event) {
+  const req = pintadeActiveRequest();
+  const input = event && event.target;
+  const file = input && (input.files || [])[0];
+  try { if (input) input.value = ''; } catch (e) {}
+  if (!file) return;
+  if (!req) { _pintadeRenderOverlay(); return; }
+  // Le chrono a filé pendant que l'appareil photo était ouvert : on ne triche
+  // pas rétroactivement. La demande est déjà comptée ratée par _pintadeStatus.
+  if (Date.now() > (req.deadlineAt || 0)) { _pintadeRenderOverlay(); return; }
+  if (!window.sb) {
+    try { alert('Hors ligne : impossible d\'envoyer la preuve. Reconnecte-toi vite !'); } catch (e) {}
+    return;
+  }
+  window._pintadeUploading = true;
+  _pintadeRenderOverlay();
+  try {
+    const blob = (typeof compressImageBlob === 'function') ? await compressImageBlob(file, 1400, 0.82) : file;
+    const fname = 'proof-' + req.id + '-' + Date.now() + '.jpg';
+    const { error: upErr } = await sb.storage.from('pintade-proofs')
+      .upload(fname, blob, { contentType: 'image/jpeg', cacheControl: '31536000', upsert: false });
+    if (upErr) throw upErr;
+    const { data: pub } = sb.storage.from('pintade-proofs').getPublicUrl(fname);
+    const url = (pub && pub.publicUrl) || '';
+    if (!url) throw new Error('URL publique indisponible');
+    // Le délai est revérifié APRÈS l'upload : sur un réseau lent, il a pu
+    // s'écouler entre la prise de vue et l'arrivée de l'URL. On enregistre
+    // quand même la photo (elle existe, elle a sa place dans le feed) mais le
+    // statut reste celui que le chrono a décidé.
+    const now = Date.now();
+    req.photoUrl = url;
+    if (now <= (req.deadlineAt || 0)) { req.status = 'ok'; req.resolvedAt = now; }
+    else if (req.status === 'pending') { req.status = 'failed'; req.resolvedAt = req.deadlineAt || now; }
+    req.updatedAt = now;
+    persist(); _pintadeFlush();
+    window._pintadeUploading = false;
+    if (req.status === 'ok') {
+      _pintadeRenderOverlay('success');
+      try {
+        notifyPush([_pushCoachKey()], {
+          title: '🕊 Preuve validée',
+          body: _pintadePlayerLabel(req.holderId) + ' a montré la pintade dans les temps.',
+          url: '/', tag: 'pintade-ok-' + req.id, type: 'pintade_ok'
+        });
+      } catch (e) {}
+    } else {
+      _pintadeRenderOverlay('failed');
+    }
+  } catch (e) {
+    console.error('[pintade] upload preuve', e && e.message ? e.message : e);
+    window._pintadeUploading = false;
+    _pintadeRenderOverlay();
+    try { alert('⚠ L\'envoi de la photo a échoué. Réessaie VITE, le chrono tourne.'); } catch (e2) {}
+  }
+}
+
+// Un raté vient d'être constaté : on prévient le coach si la série atteint le
+// plafond. Best-effort, jamais bloquant.
+function _pintadeNotifyStreak(period) {
+  try {
+    const r = pintadeRules();
+    if (!r.sanctionCoachAlert || !period) return;
+    const streak = pintadeStreak(period.id);
+    if (streak < r.maxConsecutiveFails) return;
+    notifyPush([_pushCoachKey()], {
+      title: '🕊 ' + r.maxConsecutiveFails + ' ratés consécutifs',
+      body: _pintadePlayerLabel(period.holderId) + ' enchaîne les ratés. À toi de trancher.',
+      url: '/', tag: 'pintade-streak-' + period.id + '-' + streak, type: 'pintade_streak'
+    });
+  } catch (e) {}
+}
+
+// --- ALERTE COACH « N RATÉS CONSÉCUTIFS » ------------------------------------
+// L'alerte est ARMÉE tant que le coach n'a pas tranché SUR CE RATÉ-LÀ. On
+// mémorise dans l'incident l'id du dernier raté connu au moment de la décision :
+// sans ce repère, l'alerte se rallumerait à chaque render juste après avoir été
+// traitée, et le coach ne pourrait plus rien faire d'autre.
+function _pintadeLastFailId(periodId) {
+  const fails = pintadeRequestsOf(periodId).filter(_pintadeIsFail);
+  return fails.length ? fails[fails.length - 1].id : null;
+}
+function pintadeAlertPending(period) {
+  const p = period || pintadeActivePeriod();
+  if (!p) return false;
+  const r = pintadeRules();
+  if (!r.sanctionCoachAlert) return false;
+  if (pintadeStreak(p.id) < r.maxConsecutiveFails) return false;
+  const lastFail = _pintadeLastFailId(p.id);
+  if (!lastFail) return false;
+  return !(state.pintadeIncidents || []).some(i =>
+    i && !i.deletedAt && i.periodId === p.id && i.incidentType === 'coach_action' &&
+    i.metadata && i.metadata.handledRequestId === lastFail);
+}
+
+// --- ACTIONS COACH -----------------------------------------------------------
+function _pintadeLogIncident(period, fields) {
+  state.pintadeIncidents = state.pintadeIncidents || [];
+  const now = Date.now();
+  state.pintadeIncidents.push(Object.assign({
+    id: uid(), periodId: period ? period.id : null,
+    holderId: period ? period.holderId : '?',
+    incidentType: 'coach_action', streakCount: period ? pintadeStreak(period.id) : null,
+    coachDecision: null, notes: '', metadata: {},
+    createdBy: _pintadeMeId(), createdAt: now, updatedAt: now, deletedAt: null
+  }, fields || {}));
+}
+// Assigner la pintade. Toute garde encore ouverte est close d'abord : il ne
+// peut y en avoir qu'une, et deux gardes actives rendraient « la porteuse »
+// indéterminée sur tous les écrans.
+function pintadeAssign(playerId, days, opts) {
+  if (!_pintadeIsCoach()) return false;
+  if (!playerId || !(state.players || []).some(p => p.id === playerId)) return false;
+  const r = pintadeRules();
+  const now = Date.now();
+  const d = Math.max(1, Math.min(365, Math.round(Number(days) || r.defaultDurationDays)));
+  const prev = pintadeActivePeriod();
+  const isTransfer = !!(opts && opts.transfer) && !!prev;
+  if (prev) {
+    prev.ended = true;
+    prev.endedAt = now;
+    prev.endedReason = isTransfer ? 'transfer' : (opts && opts.reason) || 'replaced';
+    prev.transferredAt = isTransfer ? now : prev.transferredAt || null;
+    prev.updatedAt = now;
+  }
+  state.pintadeHolders = state.pintadeHolders || [];
+  const period = {
+    id: uid(), holderId: playerId,
+    startAt: now, endAt: now + d * 86400000, bonusHours: 0,
+    transferredFromId: isTransfer ? prev.holderId : null,
+    transferredAt: isTransfer ? now : null,
+    ended: false, endedAt: null, endedReason: null,
+    seasonId: getActiveSeasonId() || null,
+    createdBy: _pintadeMeId(), createdAt: now, updatedAt: now, deletedAt: null
+  };
+  state.pintadeHolders.push(period);
+  if (isTransfer) {
+    _pintadeLogIncident(prev, {
+      coachDecision: 'transfer', notes: (opts && opts.notes) || '',
+      metadata: { handledRequestId: _pintadeLastFailId(prev.id), toPlayerId: playerId, newPeriodId: period.id }
+    });
+  }
+  persist(); _pintadeFlush();
+  try {
+    notifyPush(['player:' + playerId], {
+      title: '🕊 La pintade est pour toi !',
+      body: 'Tu la portes jusqu\'au ' + _pintadeFmtDate(period.endAt) + '. Ne la lâche pas.',
+      url: '/', tag: 'pintade-assign-' + period.id, type: 'pintade_assign'
+    });
+  } catch (e) {}
+  return true;
+}
+// Libération : fin ANTICIPÉE. La garde reste en base (historique), elle cesse
+// simplement d'être active.
+function pintadeRelease(reason, notes) {
+  if (!_pintadeIsCoach()) return false;
+  const period = pintadeActivePeriod();
+  if (!period) return false;
+  const now = Date.now();
+  period.ended = true; period.endedAt = now;
+  period.endedReason = reason || 'release';
+  period.updatedAt = now;
+  _pintadeLogIncident(period, {
+    coachDecision: 'release', notes: notes || '',
+    metadata: { handledRequestId: _pintadeLastFailId(period.id) }
+  });
+  persist(); _pintadeFlush();
+  try {
+    notifyPush(['player:' + period.holderId], {
+      title: '🕊 Libérée !',
+      body: 'Le coach met fin à ta garde de la pintade. Repos.',
+      url: '/', tag: 'pintade-release-' + period.id, type: 'pintade_release'
+    });
+  } catch (e) {}
+  return true;
+}
+// Prolongation CUMULÉE décidée par le coach : s'ajoute aux prolongations
+// automatiques, ne les remplace pas.
+function pintadeExtend(hours, notes) {
+  if (!_pintadeIsCoach()) return false;
+  const period = pintadeActivePeriod();
+  if (!period) return false;
+  const h = Math.max(1, Math.min(2400, Math.round(Number(hours) || 24)));
+  const now = Date.now();
+  period.bonusHours = (Number(period.bonusHours) || 0) + h;
+  period.updatedAt = now;
+  _pintadeLogIncident(period, {
+    coachDecision: 'extend_cumulative', notes: notes || '',
+    metadata: { handledRequestId: _pintadeLastFailId(period.id), addedHours: h }
+  });
+  persist(); _pintadeFlush();
+  return true;
+}
+// « Nouvelle sanction empilée » : le coach acte une sanction hors-app (pompes,
+// tournée de gâteaux…). Rien à calculer, tout à tracer — l'alerte s'éteint et
+// la note reste au journal.
+function pintadeAddSanction(notes) {
+  if (!_pintadeIsCoach()) return false;
+  const period = pintadeActivePeriod();
+  if (!period) return false;
+  _pintadeLogIncident(period, {
+    coachDecision: 'sanction_added', notes: notes || '',
+    metadata: { handledRequestId: _pintadeLastFailId(period.id) }
+  });
+  persist(); _pintadeFlush();
+  return true;
+}
+
+// --- ÉCRAN DE PREUVE BLOQUANT (porteuse) -------------------------------------
+// Vit dans #pintade-overlay, HORS de #root : un re-render (écho realtime, sync
+// de fond) reconstruit tout #root en innerHTML et détruirait l'<input> de prise
+// de vue en plein milieu du chrono. Même choix que l'écran de tirage de gage.
+//
+// Le décompte se lit sur l'HORLOGE ABSOLUE (deadlineAt − Date.now()), jamais sur
+// un compteur qu'on décrémente : un téléphone qui verrouille l'écran ou passe
+// l'app en arrière-plan fige les timers, et la joueuse rouvrirait sur un chrono
+// resté à 22 s alors que le délai est écoulé depuis longtemps. C'est la leçon
+// déjà apprise sur les drills (`_currentPhaseAt`).
+function _pintadeOverlayHost() {
+  let host = document.getElementById('pintade-overlay');
+  if (!host) { host = document.createElement('div'); host.id = 'pintade-overlay'; document.body.appendChild(host); }
+  return host;
+}
+function _pintadeCloseOverlay() {
+  if (window._pintadeTimer) { clearInterval(window._pintadeTimer); window._pintadeTimer = null; }
+  if (window._pintadeAutoClose) { clearTimeout(window._pintadeAutoClose); window._pintadeAutoClose = null; }
+  const host = document.getElementById('pintade-overlay');
+  if (host) host.innerHTML = '';
+  document.body.style.overflow = '';
+  window._pintadeOverlayOpen = false;
+  window._pintadeUploading = false;
+}
+// Ouvre l'écran si — et seulement si — une demande est réellement en cours pour
+// MOI. Appelé au boot, puis par le veilleur toutes les 4 s (une demande peut
+// arriver alors que l'app est déjà ouverte).
+function maybeShowPintadeProof() {
+  if (window._pintadeOverlayOpen) return false;
+  if (!_pintadeIsHolder()) return false;
+  const req = pintadeActiveRequest();
+  if (!req) return false;
+  window._pintadeOverlayOpen = true;
+  document.body.style.overflow = 'hidden';
+  _pintadeRenderOverlay();
+  return true;
+}
+function _pintadeRemainingMs() {
+  const req = pintadeActiveRequest();
+  return req ? Math.max(0, (req.deadlineAt || 0) - Date.now()) : 0;
+}
+function _pintadeRenderOverlay(mode) {
+  const host = _pintadeOverlayHost();
+  if (window._pintadeTimer) { clearInterval(window._pintadeTimer); window._pintadeTimer = null; }
+
+  if (mode === 'success' || mode === 'failed') {
+    const okMode = mode === 'success';
+    host.innerHTML = `
+      <div class="pintade-screen ${okMode ? 'pintade-ok' : ''}">
+        <div class="pintade-bird" style="animation:none">${okMode ? '🕊' : '💀'}</div>
+        <div class="pintade-title">${okMode ? 'Preuve validée !' : 'Trop tard…'}</div>
+        <div class="pintade-sub">${okMode
+          ? 'Ta photo part dans le feed. La pintade est bien avec toi, tout le monde le sait.'
+          : 'Le chrono est passé. Le raté part dans le feed, et ta garde est prolongée.'}</div>
+        <button class="btn ${okMode ? 'btn-primary' : 'btn-secondary'} btn-block" style="max-width:340px;margin-top:8px" onclick="_pintadeCloseOverlay();render()">OK</button>
+      </div>`;
+    window._pintadeAutoClose = setTimeout(() => { try { _pintadeCloseOverlay(); render(); } catch (e) {} }, okMode ? 3200 : 4200);
+    return;
+  }
+
+  const req = pintadeActiveRequest();
+  if (!req) { _pintadeCloseOverlay(); return; }
+  const left = Math.ceil(_pintadeRemainingMs() / 1000);
+  const busy = !!window._pintadeUploading;
+  host.innerHTML = `
+    <div class="pintade-screen">
+      <div class="pintade-eyebrow">🕊 Preuve demandée</div>
+      <div class="pintade-bird">🕊</div>
+      <div class="pintade-count ${left <= 6 ? 'pintade-hot' : ''}" id="pintade-count">${left}</div>
+      <div class="pintade-title">Montre la pintade !</div>
+      <div class="pintade-sub"><strong>${esc(req.requesterLabel || 'Quelqu\'un')}</strong> réclame une preuve.
+        Prends-la en photo, tout de suite. Pas de galerie : appareil photo seulement.</div>
+      <label class="pintade-shoot-btn" ${busy ? 'aria-disabled="true"' : ''} for="pintade-shoot-input">
+        ${busy ? '⏳ Envoi en cours…' : '📸 Prendre la photo'}
+      </label>
+      <input class="pintade-shoot" id="pintade-shoot-input" type="file" accept="image/*" capture="environment"
+             onchange="submitPintadeProof(event)" ${busy ? 'disabled' : ''}>
+      <div class="pintade-sub" style="font-size:10px;font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.04em;opacity:0.8">
+        Cet écran ne se ferme pas. Photo ou chrono.
+      </div>
+    </div>`;
+  // Le tick ne redessine QUE le nombre : reconstruire l'écran à chaque seconde
+  // remplacerait l'<input> et fermerait l'appareil photo au nez de la joueuse.
+  window._pintadeTimer = setInterval(() => {
+    try {
+      if (window._pintadeUploading) return;
+      const cur = pintadeActiveRequest();
+      if (!cur) { _pintadeCloseOverlay(); return; }
+      const ms = Math.max(0, (cur.deadlineAt || 0) - Date.now());
+      const el = document.getElementById('pintade-count');
+      if (el) {
+        const s = Math.ceil(ms / 1000);
+        if (el.textContent !== String(s)) el.textContent = String(s);
+        if (s <= 6) el.classList.add('pintade-hot');
+      }
+      if (ms <= 0) {
+        clearInterval(window._pintadeTimer); window._pintadeTimer = null;
+        const period = pintadeActivePeriod();
+        _pintadePersistStale();
+        _pintadeNotifyStreak(period);
+        _pintadeRenderOverlay('failed');
+      }
+    } catch (e) {}
+  }, 250);
+}
+// Veilleur : une demande peut arriver alors que l'app est déjà ouverte (push +
+// realtime), et les demandes périmées doivent finir par être rangées en base.
+// 4 s : assez fin pour ne pas gâcher un chrono de 30 s, assez lâche pour ne rien
+// coûter. Idempotent, un seul par page.
+function _pintadeStartWatch() {
+  if (window._pintadeWatch) return;
+  window._pintadeWatch = setInterval(() => {
+    try {
+      if (!state.auth) return;
+      _pintadePersistStale();
+      maybeShowPintadeProof();
+    } catch (e) {}
+  }, 4000);
+}
+
+// --- ACCUEIL : LA CARTE (joueuse ET coach) -----------------------------------
+// Une seule carte pour les deux rôles : le coach joue au même jeu (il peut
+// demander une preuve), il a juste des boutons en plus dans l'écran.
+function renderPintadeHomeCard() {
+  if (!state.auth || (state.auth.role !== 'coach' && state.auth.role !== 'player')) return '';
+  const period = pintadeActivePeriod();
+  const alert = _pintadeIsCoach() && pintadeAlertPending(period);
+  if (!period) {
+    // Rien en circulation : le coach voit une invitation à lancer le jeu, les
+    // joueuses ne voient RIEN (une carte vide sur l'accueil n'apporte rien).
+    if (!_pintadeIsCoach()) return '';
+    return `
+      <div style="margin:0 18px 14px">
+        <div onclick="openPintadeAdmin()" style="cursor:pointer;display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:var(--radius);background:var(--surface);border:1.5px dashed var(--border)">
+          <div style="font-size:26px;flex:0 0 auto;opacity:0.7">🕊</div>
+          <div style="flex:1;min-width:0">
+            <div style="font-family:'Anton';font-size:15px;text-transform:uppercase;letter-spacing:0.02em">La pintade</div>
+            <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">Personne ne la porte · désigne une joueuse</div>
+          </div>
+          <div style="flex:0 0 auto;color:var(--orange);font-family:'Anton';font-size:18px">+</div>
+        </div>
+      </div>`;
+  }
+  const mine = _pintadeIsHolder();
+  const end = pintadePeriodEnd(period);
+  const blocked = pintadeRequestBlockedReason();
+  const sub = mine
+    ? 'Tu la portes jusqu\'au ' + _pintadeFmtDate(end) + ' · tiens-toi prête'
+    : _pintadePlayerLabel(period.holderId) + ' · jusqu\'au ' + _pintadeFmtDate(end);
+  const border = alert ? 'var(--red,#ef4444)' : mine ? 'var(--orange)' : 'var(--border-soft)';
+  return `
+    <div style="margin:0 18px 14px">
+      <div onclick="openPintadeScreen()" style="cursor:pointer;display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:var(--radius);background:linear-gradient(135deg,rgba(var(--accent-rgb),0.10),var(--surface));border:1.5px solid ${border}">
+        <div style="font-size:26px;flex:0 0 auto">🕊</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-family:'Anton';font-size:15px;text-transform:uppercase;letter-spacing:0.02em">La pintade${mine ? ' est chez toi' : ''}</div>
+          <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(sub)}</div>
+          ${alert ? `<div style="font-size:10px;color:var(--red,#ef4444);font-family:'JetBrains Mono';margin-top:3px;text-transform:uppercase">⚠ ${pintadeStreak(period.id)} ratés consécutifs · à trancher</div>`
+            : (!mine && blocked === null) ? `<div style="font-size:10px;color:#22c55e;font-family:'JetBrains Mono';margin-top:3px;text-transform:uppercase">🎯 tu peux demander une preuve</div>` : ''}
+        </div>
+        <div style="flex:0 0 auto;color:var(--orange);font-family:'Anton';font-size:18px">→</div>
+      </div>
+    </div>`;
+}
+
+// --- L'ÉCRAN DE LA PINTADE (tout le monde) -----------------------------------
+// Une MODALE, pas un onglet de navigation : la barre du bas est déjà pleine, et
+// ajouter une entrée à la nav toucherait un composant que toutes les vues
+// traversent. Le jeu ne vaut pas ce risque de régression.
+function openPintadeScreen() {
+  const period = pintadeActivePeriod();
+  const r = pintadeRules();
+  const coach = _pintadeIsCoach();
+  if (!period) {
+    openModal(`
+      <div class="modal-header">
+        <div class="modal-title">🕊 La pintade</div>
+        <button class="modal-close" onclick="closeModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div style="font-size:12px;color:var(--ink-3);line-height:1.5">Personne ne porte la pintade en ce moment.</div>
+        ${coach ? `<button class="btn btn-primary btn-block" style="margin-top:14px" onclick="closeModal();setTimeout(()=>openPintadeAdmin(),50)">🕊 Désigner une porteuse</button>` : ''}
+      </div>`);
+    return;
+  }
+  // Feed non public : réservé au coach. Le reste de l'écran (qui la porte,
+  // demander une preuve) reste visible de tout le monde — c'est le jeu.
+  const feedVisible = r.feedPublic || coach;
+  const mine = _pintadeIsHolder();
+  const blocked = pintadeRequestBlockedReason();
+  const end = pintadePeriodEnd(period);
+  const ok = pintadeOkTotal(period.id), fails = pintadeFailTotal(period.id);
+  const feed = pintadeRequestsOf(period.id).slice().reverse();
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">Jusqu'au ${_pintadeFmtDateTime(end)}</div>
+        <div class="modal-title">🕊 La pintade</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="padding:14px;border-radius:var(--radius);background:linear-gradient(135deg,rgba(var(--accent-rgb),0.12),var(--surface));border:1.5px solid ${mine ? 'var(--orange)' : 'var(--border-soft)'};margin-bottom:14px">
+        <div style="font-family:'Anton';font-size:16px;text-transform:uppercase;line-height:1.25">
+          ${mine ? 'Elle est chez TOI' : 'Elle est chez ' + esc(_pintadePlayerLabel(period.holderId))}
+        </div>
+        <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px;text-transform:uppercase">
+          ✅ ${ok} preuve${ok > 1 ? 's' : ''} · 💀 ${fails} raté${fails > 1 ? 's' : ''}${period.transferredFromId ? ' · reçue de ' + esc(_pintadePlayerLabel(period.transferredFromId)) : ''}
+        </div>
+      </div>
+
+      ${mine ? `
+        <div style="padding:12px;border-radius:10px;background:var(--bg-3);font-size:12px;color:var(--ink-2);line-height:1.5;margin-bottom:14px">
+          Tu la trimbales partout. À tout moment, quelqu'un peut réclamer une preuve : tu auras
+          <strong>${r.proofTimeoutSeconds} secondes</strong> pour la prendre en photo. Chaque raté prolonge ta garde de
+          ${r.extensionHoursPerFail} h.
+        </div>
+      ` : `
+        <button class="btn ${blocked === null ? 'btn-primary' : 'btn-secondary'} btn-block"
+          ${blocked === null ? 'onclick="requestPintadeProof();closeModal();setTimeout(()=>openPintadeScreen(),80)"' : 'disabled aria-disabled="true" style="opacity:.5;cursor:not-allowed"'}>
+          🎯 Demander une preuve
+        </button>
+        <div style="font-size:11px;color:${blocked === null ? '#22c55e' : 'var(--ink-3)'};font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.03em;text-align:center;margin:8px 0 14px;line-height:1.5">
+          ${blocked === null ? 'Créneau ouvert · ' + r.proofTimeoutSeconds + ' s au chrono' : esc(blocked)}
+        </div>
+      `}
+
+      ${coach ? `
+        <button class="btn btn-secondary btn-block mb-2" style="text-align:left" onclick="closeModal();setTimeout(()=>openPintadeAdmin(),50)">⚙️ Gérer la pintade (transfert, libération)</button>
+      ` : ''}
+
+      <div class="eyebrow-muted" style="margin:16px 0 8px">${feedVisible ? 'Le feed' : 'Feed privé'}</div>
+      ${!feedVisible
+        ? '<div style="font-size:12px;color:var(--ink-3);font-style:italic;padding:6px 2px">Le coach a rendu le feed privé.</div>'
+        : (!feed.length
+          ? '<div style="font-size:12px;color:var(--ink-3);font-style:italic;padding:6px 2px">Aucune demande pour l\'instant. Le calme avant la tempête.</div>'
+          : `<div style="display:flex;flex-direction:column;gap:6px">${feed.map(_pintadeFeedRow).join('')}</div>`)}
+    </div>`);
+}
+// Une ligne du feed. Le libellé du demandeur est celui FIGÉ à la demande.
+function _pintadeFeedRow(q) {
+  const st = _pintadeStatus(q);
+  const who = esc(q.requesterLabel || 'Quelqu\'un');
+  const when = _pintadeFmtDateTime(q.requestedAt);
+  if (st === 'pending') {
+    return `<div class="pintade-feed-row">
+      <div class="pintade-feed-ico">⏳</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-family:'Anton';font-size:13px;text-transform:uppercase">Chrono en cours</div>
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px">${when} · demandé par ${who}</div>
+      </div></div>`;
+  }
+  if (st === 'ok') {
+    return `<div class="pintade-feed-row">
+      ${q.photoUrl ? `<img src="${esc(q.photoUrl)}" alt="Preuve" loading="lazy" onclick="_pintadeViewProof('${esc(q.id)}')">` : '<div class="pintade-feed-ico">✅</div>'}
+      <div style="flex:1;min-width:0">
+        <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;color:#22c55e">✅ Preuve validée</div>
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;line-height:1.5">${_pintadeFmtTime(q.resolvedAt || q.requestedAt)} · demandé par ${who}<br>${when}</div>
+      </div></div>`;
+  }
+  // Le POST DE RATÉ demandé au cahier des charges : « 🕊 [Nom] a raté à HH:MM ».
+  // Il n'est PAS une ligne écrite quelque part — il se dérive de la demande
+  // elle-même, donc il ne peut ni manquer ni faire doublon.
+  const label = _pintadePlayerLabel(q.holderId);
+  return `<div class="pintade-feed-row" style="border-color:rgba(239,68,68,0.4)">
+    ${q.photoUrl ? `<img src="${esc(q.photoUrl)}" alt="Preuve hors délai" loading="lazy" onclick="_pintadeViewProof('${esc(q.id)}')" style="opacity:.55">` : '<div class="pintade-feed-ico">💀</div>'}
+    <div style="flex:1;min-width:0">
+      <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;color:var(--red,#ef4444)">🕊 ${esc(label)} a raté à ${_pintadeFmtTime(q.deadlineAt || q.requestedAt)}</div>
+      <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;line-height:1.5">${st === 'expired' ? 'Jamais ouvert' : 'Chrono écoulé'} · demandé par ${who}<br>${when}</div>
+    </div></div>`;
+}
+function _pintadeViewProof(reqId) {
+  const q = (state.pintadeRequests || []).find(x => x.id === reqId);
+  if (!q || !q.photoUrl) return;
+  let root = document.getElementById('modal-root');
+  if (!root) { root = document.createElement('div'); root.id = 'modal-root'; document.body.appendChild(root); }
+  root.innerHTML = `
+    <div class="img-viewer" onclick="closeModal();setTimeout(()=>openPintadeScreen(),60)">
+      <button class="img-viewer-close" onclick="event.stopPropagation();closeModal();setTimeout(()=>openPintadeScreen(),60)">✕</button>
+      <img src="${esc(q.photoUrl)}" alt="Preuve pintade">
+    </div>`;
+  document.body.style.overflow = 'hidden';
+}
+
+// --- COACH : GÉRER LA PINTADE ------------------------------------------------
+function openPintadeAdmin() {
+  if (!_pintadeIsCoach()) return;
+  const period = pintadeActivePeriod();
+  const r = pintadeRules();
+  const sid = getActiveSeasonId();
+  const pool = visiblePlayersForUser((_seasonsLoaded() && sid) ? getSeasonPlayers(sid, { team: 'all' }) : (state.players || []))
+    .filter(p => !period || p.id !== period.holderId)
+    .sort((a, b) => (a.num || 0) - (b.num || 0));
+  const opts = pool.map(p => `<option value="${esc(p.id)}">#${p.num} ${esc(p.name)}</option>`).join('');
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">🕊 Gérer la pintade</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      ${period ? `
+        <div style="padding:12px 14px;background:var(--bg-3);border-radius:8px;margin-bottom:14px">
+          <div class="eyebrow-muted" style="margin-bottom:4px">Porteuse actuelle</div>
+          <div style="font-family:'Anton';font-size:16px;text-transform:uppercase">${esc(_pintadePlayerLabel(period.holderId))}</div>
+          <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px;line-height:1.6;text-transform:uppercase">
+            Depuis le ${_pintadeFmtDate(period.startAt)} · fin le ${_pintadeFmtDateTime(pintadePeriodEnd(period))}<br>
+            ✅ ${pintadeOkTotal(period.id)} preuve(s) · 💀 ${pintadeFailTotal(period.id)} raté(s) · série ${pintadeStreak(period.id)}/${r.maxConsecutiveFails}
+            ${(Number(period.bonusHours) || 0) ? '<br>Prolongations coach : +' + period.bonusHours + ' h' : ''}
+          </div>
+        </div>
+        ${pintadeAlertPending(period) ? `<button class="btn btn-primary btn-block mb-3" style="background:var(--red,#ef4444);border-color:var(--red,#ef4444)" onclick="closeModal();setTimeout(()=>openPintadeCoachAlert(),50)">⚠ ${pintadeStreak(period.id)} ratés consécutifs — trancher</button>` : ''}
+      ` : `<div style="font-size:12px;color:var(--ink-3);line-height:1.5;margin-bottom:14px">Personne ne porte la pintade. Désigne une joueuse pour lancer la garde.</div>`}
+
+      ${pool.length ? `
+        <div class="eyebrow-muted" style="margin-bottom:6px">${period ? 'Transférer à' : 'Désigner'}</div>
+        <div class="fld" style="margin-bottom:8px"><select id="pintade-target">${opts}</select></div>
+        <div class="fld" style="margin-bottom:10px">
+          <label style="font-size:11px;color:var(--ink-3)">Durée (jours)</label>
+          <input id="pintade-days" type="number" min="1" max="365" value="${r.defaultDurationDays}">
+        </div>
+        <button class="btn btn-primary btn-block mb-3" onclick="_pintadeSubmitAssign()">${period ? '🔄 Transférer la pintade' : '🕊 Lancer la garde'}</button>
+      ` : `<div style="font-size:12px;color:var(--ink-3);font-style:italic;margin-bottom:14px">Aucune autre joueuse disponible dans l'effectif.</div>`}
+
+      ${period ? `
+        <button class="btn btn-secondary btn-block mb-2" onclick="_pintadeSubmitExtend()">⏱ Prolonger de 24 h</button>
+        <button class="btn btn-secondary btn-block mb-3" onclick="_pintadeSubmitRelease()">🔓 Libérer (fin anticipée)</button>
+      ` : ''}
+
+      <button class="btn btn-secondary btn-block" style="text-align:left" onclick="closeModal();setTimeout(()=>openPintadeRules(),50)">⚙️ Règles du gage Pintade</button>
+    </div>`);
+}
+function _pintadeSubmitAssign() {
+  const sel = document.getElementById('pintade-target');
+  const d = document.getElementById('pintade-days');
+  if (!sel || !sel.value) return;
+  const transfer = !!pintadeActivePeriod();
+  if (transfer && !confirm('Transférer la pintade à ' + _pintadePlayerLabel(sel.value) + ' ?\n\nLa garde en cours sera close (son historique est conservé).')) return;
+  if (!pintadeAssign(sel.value, d ? d.value : null, { transfer })) return;
+  closeModal(); render();
+  if (typeof showToast === 'function') showToast(transfer ? '🔄 Pintade transférée' : '🕊 Garde lancée');
+}
+function _pintadeSubmitExtend() {
+  if (!confirm('Prolonger la garde de 24 h ?')) return;
+  if (!pintadeExtend(24)) return;
+  closeModal(); render();
+  if (typeof showToast === 'function') showToast('⏱ +24 h');
+}
+function _pintadeSubmitRelease() {
+  const period = pintadeActivePeriod();
+  if (!period) return;
+  if (!confirm('Libérer ' + _pintadePlayerLabel(period.holderId) + ' ?\n\nLa garde s\'arrête maintenant. Plus personne ne porte la pintade.')) return;
+  if (!pintadeRelease('release')) return;
+  closeModal(); render();
+  if (typeof showToast === 'function') showToast('🔓 Pintade libérée');
+}
+
+// --- COACH : L'ARBITRAGE DES N RATÉS CONSÉCUTIFS -----------------------------
+// Le système s'arrête de sanctionner tout seul au plafond et rend la main. Ce
+// n'est pas un détail d'ergonomie : au-delà, l'empilement automatique devient
+// une punition que personne n'a décidée.
+function openPintadeCoachAlert() {
+  if (!_pintadeIsCoach()) return;
+  const period = pintadeActivePeriod();
+  if (!period) return;
+  const streak = pintadeStreak(period.id);
+  const sid = getActiveSeasonId();
+  const pool = visiblePlayersForUser((_seasonsLoaded() && sid) ? getSeasonPlayers(sid, { team: 'all' }) : (state.players || []))
+    .filter(p => p.id !== period.holderId)
+    .sort((a, b) => (a.num || 0) - (b.num || 0));
+  const CHOICES = [
+    { id: 'sanction_added',    icon: '⚡', label: 'Nouvelle sanction empilée', hint: 'Tu sanctionnes hors app (pompes, gâteaux…). On le note au journal.' },
+    { id: 'transfer',          icon: '🔄', label: 'Transférer la pintade',     hint: 'Une autre joueuse prend le relais. L\'historique est conservé.' },
+    { id: 'release',           icon: '🔓', label: 'Libérer',                   hint: 'La garde s\'arrête maintenant. Clémence.' },
+    { id: 'extend_cumulative', icon: '⏱', label: 'Prolongation cumulée',      hint: 'On rallonge encore, explicitement, de 24 h.' },
+  ];
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">Arbitrage</div>
+        <div class="modal-title">⚠ ${streak} ratés consécutifs</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:12px;color:var(--ink-2);line-height:1.55;margin-bottom:14px">
+        <strong>${esc(_pintadePlayerLabel(period.holderId))}</strong> a enchaîné ${streak} ratés.
+        Les sanctions automatiques sont <strong>en pause</strong> : plus rien ne s'empile tant que tu n'as pas tranché.
+      </div>
+      ${CHOICES.map(c => `
+        <label style="display:flex;gap:10px;align-items:flex-start;padding:10px;background:var(--bg-1);border:1px solid var(--border);border-radius:8px;margin-bottom:6px;cursor:pointer">
+          <input type="radio" name="pintade-choice" value="${c.id}" ${c.id === 'sanction_added' ? 'checked' : ''} onchange="_pintadeAlertToggleTarget()" style="margin-top:3px">
+          <span style="flex:1;min-width:0">
+            <span style="display:block;font-family:'Anton';font-size:13px;text-transform:uppercase">${c.icon} ${esc(c.label)}</span>
+            <span style="display:block;font-size:11px;color:var(--ink-3);line-height:1.45;margin-top:2px">${esc(c.hint)}</span>
+          </span>
+        </label>`).join('')}
+      <div id="pintade-alert-target" style="display:none;margin:10px 0">
+        <div class="eyebrow-muted" style="margin-bottom:6px">Nouvelle porteuse</div>
+        <div class="fld"><select id="pintade-alert-player">${pool.map(p => `<option value="${esc(p.id)}">#${p.num} ${esc(p.name)}</option>`).join('')}</select></div>
+      </div>
+      <div class="fld" style="margin-top:10px">
+        <label style="font-size:11px;color:var(--ink-3)">Notes (optionnel)</label>
+        <textarea id="pintade-alert-notes" rows="2" maxlength="500" placeholder="Ex : prévenue en direct, elle rattrape samedi"></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary btn-block" onclick="_pintadeSubmitCoachDecision()">Valider l'arbitrage</button>
+    </div>`);
+  _pintadeAlertToggleTarget();
+}
+function _pintadeAlertToggleTarget() {
+  const el = document.getElementById('pintade-alert-target');
+  if (!el) return;
+  const sel = document.querySelector('input[name="pintade-choice"]:checked');
+  el.style.display = (sel && sel.value === 'transfer') ? 'block' : 'none';
+}
+function _pintadeSubmitCoachDecision() {
+  const sel = document.querySelector('input[name="pintade-choice"]:checked');
+  if (!sel) return;
+  const notesEl = document.getElementById('pintade-alert-notes');
+  const notes = notesEl ? notesEl.value.trim() : '';
+  const choice = sel.value;
+  let done = false;
+  if (choice === 'transfer') {
+    const t = document.getElementById('pintade-alert-player');
+    if (!t || !t.value) { try { alert('Choisis une nouvelle porteuse.'); } catch (e) {} return; }
+    done = pintadeAssign(t.value, null, { transfer: true, notes });
+  } else if (choice === 'release') {
+    done = pintadeRelease('coach_decision', notes);
+  } else if (choice === 'extend_cumulative') {
+    done = pintadeExtend(24, notes);
+  } else {
+    done = pintadeAddSanction(notes);
+  }
+  if (!done) return;
+  closeModal(); render();
+  if (typeof showToast === 'function') showToast('✓ Arbitrage enregistré');
+}
+// Au boot coach : l'alerte s'impose, mais laisse passer les popups qui exigent
+// déjà une action. Même file d'attente que les autres rappels.
+function maybeShowPintadeCoachAlert(attempt) {
+  if (!_pintadeIsCoach()) return false;
+  const period = pintadeActivePeriod();
+  if (!pintadeAlertPending(period)) return false;
+  let busy = false;
+  try { busy = _pbModalOpen() || !!document.querySelector('#gage-overlay .gage-screen, #pintade-overlay .pintade-screen'); } catch (e) {}
+  if (busy) {
+    const n = (attempt || 0) + 1;
+    if (n <= 6) { try { setTimeout(() => { try { maybeShowPintadeCoachAlert(n); } catch (e) {} }, 3000); } catch (e) {} }
+    return false;
+  }
+  openPintadeCoachAlert();
+  return true;
+}
+
+// --- COACH : RÈGLES DU GAGE PINTADE ------------------------------------------
+function openPintadeRules() {
+  if (!_pintadeIsCoach()) return;
+  const r = pintadeRules();
+  const num = (id, label, hint, val, min, max) => `
+    <div class="fld" style="margin-bottom:12px">
+      <label style="font-size:12px">${esc(label)}</label>
+      <input id="${id}" type="number" min="${min}" max="${max}" value="${val}" inputmode="numeric">
+      <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;line-height:1.45">${esc(hint)}</div>
+    </div>`;
+  const sw = (id, label, hint, on) => `
+    <label style="display:flex;gap:10px;align-items:flex-start;padding:10px;background:var(--bg-1);border:1px solid var(--border);border-radius:8px;margin-bottom:6px;cursor:pointer">
+      <input type="checkbox" id="${id}" ${on ? 'checked' : ''} style="margin-top:3px">
+      <span style="flex:1;min-width:0">
+        <span style="display:block;font-size:13px">${esc(label)}</span>
+        <span style="display:block;font-size:11px;color:var(--ink-3);line-height:1.45;margin-top:2px">${esc(hint)}</span>
+      </span>
+    </label>`;
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">⚙️ Règles de la pintade</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      ${num('pr-days', 'Durée par défaut (jours)', 'Proposée à chaque désignation. Modifiable au cas par cas.', r.defaultDurationDays, 1, 365)}
+      ${num('pr-rate', 'Rate limit (heures)', 'Une seule demande par tranche, pour la porteuse, quel que soit le demandeur.', r.rateLimitHours, 1, 168)}
+      ${num('pr-timeout', 'Délai de la photo (secondes)', 'Le chrono de la porteuse. En dessous de 20 s, ça devient méchant.', r.proofTimeoutSeconds, 10, 300)}
+      ${num('pr-ext', 'Prolongation par raté (heures)', 'Ajoutée automatiquement à la fin de garde. 0 = pas de prolongation.', r.extensionHoursPerFail, 0, 168)}
+      ${num('pr-max', 'Plafond de ratés consécutifs', 'Au-delà, plus AUCUNE sanction automatique : le système t\'attend.', r.maxConsecutiveFails, 1, 10)}
+      <div class="eyebrow-muted" style="margin:16px 0 8px">Sanctions actives</div>
+      ${sw('pr-s-feed', '📰 Post dans le feed', 'Chaque raté apparaît publiquement.', r.sanctionFeedPost)}
+      ${sw('pr-s-ext', '⏱ Prolongation automatique', 'Chaque raté rallonge la garde.', r.sanctionExtension)}
+      ${sw('pr-s-alert', '🔔 Alerte coach au plafond', 'Tu es prévenu et tu tranches.', r.sanctionCoachAlert)}
+      <div class="eyebrow-muted" style="margin:16px 0 8px">Visibilité</div>
+      ${sw('pr-public', '👀 Feed public', 'Décoché, seul le coach voit les preuves et les ratés.', r.feedPublic)}
+    </div>
+    <div class="modal-footer" style="display:flex;gap:8px">
+      <button class="btn btn-ghost" style="flex:0 0 auto" onclick="_pintadeResetRules()">↺ Défauts</button>
+      <button class="btn btn-primary" style="flex:1" onclick="_pintadeSaveRules()">Enregistrer</button>
+    </div>`);
+}
+function _pintadeSaveRules() {
+  if (!_pintadeIsCoach()) return;
+  const v = id => { const el = document.getElementById(id); return el ? el.value : null; };
+  const b = id => { const el = document.getElementById(id); return !!(el && el.checked); };
+  const clamp = (x, min, max, dflt) => {
+    const n = Math.round(Number(x));
+    return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : dflt;
+  };
+  state.pintadeRules = {
+    id: 'default',
+    defaultDurationDays: clamp(v('pr-days'), 1, 365, 30),
+    rateLimitHours: clamp(v('pr-rate'), 1, 168, 2),
+    proofTimeoutSeconds: clamp(v('pr-timeout'), 10, 300, 30),
+    extensionHoursPerFail: clamp(v('pr-ext'), 0, 168, 24),
+    maxConsecutiveFails: clamp(v('pr-max'), 1, 10, 3),
+    sanctionFeedPost: b('pr-s-feed'),
+    sanctionExtension: b('pr-s-ext'),
+    sanctionCoachAlert: b('pr-s-alert'),
+    feedPublic: b('pr-public'),
+    updatedBy: _pintadeMeId(),
+    updatedAt: Date.now()
+  };
+  persist(); _pintadeFlush();
+  closeModal(); render();
+  if (typeof showToast === 'function') showToast('✓ Règles enregistrées');
+}
+function _pintadeResetRules() {
+  if (!_pintadeIsCoach()) return;
+  if (!confirm('Revenir aux règles par défaut ?\n\n30 jours · 1 demande / 2 h · 30 s au chrono · +24 h par raté · plafond 3.')) return;
+  state.pintadeRules = Object.assign({}, PINTADE_RULES_DEFAULT, { updatedBy: _pintadeMeId(), updatedAt: Date.now() });
+  persist(); _pintadeFlush();
+  closeModal(); render();
+  if (typeof showToast === 'function') showToast('↺ Règles réinitialisées');
 }
 
 // ============================================================
@@ -35124,7 +36527,7 @@ function _effectifRosterBody() {
             ${p.photo ? `<img src="${p.photo}" style="width:36px;height:36px;border-radius:50%;object-fit:cover;border:2px solid var(--orange)">` : `<div style="width:36px;height:36px;border-radius:50%;background:var(--bg-3);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:14px;color:var(--orange);border:2px solid var(--border)">${esc((p.name||'?').charAt(0).toUpperCase())}</div>`}
             <div style="font-family:'Anton';font-size:18px;color:var(--orange);min-width:32px">#${p.num}</div>
             <div style="flex:1;min-width:0">
-              <div style="display:flex;align-items:center;gap:6px"><div style="font-family:'Anton';text-transform:uppercase;font-size:13px">${esc(p.name)}</div>${sTag}</div>
+              <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"><div style="font-family:'Anton';text-transform:uppercase;font-size:13px">${esc(p.name)}</div>${sTag}${notifPermBadgeHtml(p)}</div>
               ${(_normPostes(p.postes).length || _ageFromDob(p.dateNaissance) != null || Number.isFinite(p.tailleCm)) ? `<div style="margin-top:3px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">${_postesBadges(p.postes)}${Number.isFinite(p.tailleCm) ? `<span style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono'">${p.tailleCm}cm</span>` : ''}${_ageFromDob(p.dateNaissance) != null ? `<span style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono'">${_ageFromDob(p.dateNaissance)} ans</span>` : ''}</div>` : ''}
               <div style="font-size:9px;color:${ls.color};font-family:'JetBrains Mono';margin-top:2px"${ls.exact ? ` title="Dernière connexion : ${ls.exact}"` : ''}><span style="font-size:7px;vertical-align:middle">${ls.dot}</span> ${ls.label}</div>
             </div>
@@ -37617,7 +39020,16 @@ function _initPlayersSync() {
           // select), rp.xxx = undefined → on garde la valeur locale.
           postes: Array.isArray(rp.postes) ? rp.postes : (lp.postes || []),
           tailleCm: (rp.taille_cm != null) ? rp.taille_cm : (lp.tailleCm != null ? lp.tailleCm : null),
-          dateNaissance: (rp.date_naissance !== undefined) ? (rp.date_naissance || null) : (lp.dateNaissance || null) };
+          dateNaissance: (rp.date_naissance !== undefined) ? (rp.date_naissance || null) : (lp.dateNaissance || null),
+          // État des notifications (migration 20260807_001). Colonne absente →
+          // rp.notif_permission undefined → on garde ce qu'on avait en local.
+          // NULL en base = « jamais mesuré », un état bien distinct de 'denied' :
+          // afficher « a refusé » alors qu'on n'en sait rien serait la meilleure
+          // façon de faire passer une joueuse pour ce qu'elle n'est pas.
+          notifPermission: (rp.notif_permission !== undefined) ? (rp.notif_permission || null) : (lp.notifPermission || null),
+          notifPermissionAt: (rp.notif_permission_at !== undefined)
+            ? (rp.notif_permission_at ? Date.parse(rp.notif_permission_at) : null)
+            : (lp.notifPermissionAt || null) };
       });
       const remoteIds = new Set(remote.map(r => r.id));
       const localOnly = state.players.filter(p => !remoteIds.has(p.id));
@@ -37718,6 +39130,35 @@ function _initPlayersSync() {
             setTimeout(() => { try { maybeShowBirthdayCelebration(); } catch (e) {} }, 2600);
           }
         } catch (e) { console.warn('[bday] boot celebration:', e.message); }
+        // PINTADE : l'écran de preuve passe AVANT tout le reste de la file — il
+        // porte un chrono de 30 secondes, il ne peut pas faire la queue derrière
+        // un rappel de licence. Le veilleur prend ensuite le relais (une demande
+        // peut arriver à n'importe quel moment, app ouverte).
+        try {
+          if (!window._pintadeBootChecked) {
+            window._pintadeBootChecked = true;
+            setTimeout(() => { try { _pintadePersistStale(); maybeShowPintadeProof(); _pintadeStartWatch(); } catch (e) {} }, 400);
+          }
+        } catch (e) { console.warn('[pintade] boot:', e.message); }
+        // NOTIFICATIONS : la mesure part TOUT DE SUITE (elle ne demande rien à
+        // personne et c'est elle qui alimente l'écran Effectif du coach). Le
+        // rappel, lui, passe en DERNIER de la file — les gages, les diffusions
+        // et la licence exigent une action, pas lui.
+        try {
+          if (state.auth && state.auth.role === 'player' && !window._notifBootChecked) {
+            window._notifBootChecked = true;
+            setTimeout(() => { try { _notifSyncPermission(); } catch (e) {} }, 800);
+            setTimeout(() => { try { maybeShowNotifPrompt(); } catch (e) {} }, 3400);
+          }
+        } catch (e) { console.warn('[notif] boot prompt:', e.message); }
+        // PINTADE — arbitrage coach : en fin de file (il attend une décision, pas
+        // une urgence), et il cède le passage aux popups déjà ouvertes.
+        try {
+          if (state.auth && state.auth.role === 'coach' && !window._pintadeAlertBootChecked) {
+            window._pintadeAlertBootChecked = true;
+            setTimeout(() => { try { maybeShowPintadeCoachAlert(); } catch (e) {} }, 3000);
+          }
+        } catch (e) { console.warn('[pintade] boot alerte coach:', e.message); }
         // Subscribe Realtime sur toutes les entités configurées. On utilise
         // scheduleRender (debouncé 100ms) au lieu de render() direct pour
         // collapser plusieurs events Realtime en un seul re-render.
@@ -38026,6 +39467,27 @@ function notifFeed(opts) {
       icon: '🎁', title: 'Gage à tirer', detail: d.length + ' tirage' + (d.length > 1 ? 's' : '') + ' au sort à faire',
       count: d.length, action: 'maybeShowGageReveal()' });
   });
+  // PINTADE — la demande de preuve en cours. `todo` (donc actionnable : elle
+  // survit au filigrane « lu ») parce qu'un chrono de 30 s ne doit pas pouvoir
+  // être masqué d'un coup de cloche. `_pintadeStatus` écarte déjà les demandes
+  // dont le délai est écoulé : on ne relance jamais sur un raté déjà consommé.
+  src('player', 'pintade-preuve', () => {
+    if (typeof pintadeActiveRequest !== 'function') return;
+    if (typeof _pintadeIsHolder !== 'function' || !_pintadeIsHolder()) return;
+    const q = pintadeActiveRequest();
+    if (!q) return;
+    todo('player', { id: 'pintade-req-' + q.id, ts: q.requestedAt || Date.now(), icon: '🕊',
+      title: 'Preuve demandée !', detail: (q.requesterLabel || 'Quelqu\'un') + ' attend ta photo',
+      action: 'maybeShowPintadeProof()' });
+  });
+  src('player', 'pintade-porteuse', () => {
+    if (typeof pintadeActivePeriod !== 'function') return;
+    const period = pintadeActivePeriod();
+    if (!period || period.holderId !== pid) return;
+    add('player', { id: 'pintade-hold-' + period.id, ts: period.startAt || 0, icon: '🕊',
+      title: 'Tu portes la pintade', detail: 'Jusqu\'au ' + _pintadeFmtDate(pintadePeriodEnd(period)) + ' · tiens-toi prête',
+      action: 'openPintadeScreen()' });
+  });
   src('player', 'feedback', () => {
     // SECURITY: ne lit que feedback.positives/negatives/technicals, jamais injury/etc.
     const meFb = (state.players || []).find(p => p.id === pid);
@@ -38161,6 +39623,17 @@ function notifFeed(opts) {
   });
 
   // ======================== COACH ========================
+  // PINTADE — l'arbitrage. Actionnable : tant que le coach n'a pas tranché, les
+  // sanctions automatiques sont en pause, donc rien ne bouge sans lui.
+  src('coach', 'pintade-arbitrage', () => {
+    if (typeof pintadeAlertPending !== 'function' || !pintadeAlertPending()) return;
+    const period = pintadeActivePeriod();
+    if (!period) return;
+    const n = pintadeStreak(period.id);
+    todo('coach', { id: 'pintade-alert-' + period.id + '-' + n, icon: '🕊',
+      title: n + ' ratés consécutifs', detail: _pintadePlayerLabel(period.holderId) + ' · à toi de trancher',
+      count: n, action: 'openPintadeCoachAlert()' });
+  });
   src('coach', 'gages-a-moderer', () => {
     if (typeof gagesPendingCount !== 'function') return;
     const n = gagesPendingCount();
@@ -38461,9 +39934,248 @@ async function openPushSettings() {
   }
   if (perm === 'denied') {
     alert("🔕 Notifications bloquées par l'appareil.\n\nPour les réactiver : Réglages de l'appareil → Playbook BCL → Notifications → autoriser.");
+    try { _notifSyncPermission(); } catch (e) {}
     return;
   }
   await enablePush();
+  // La mesure est remontée quel que soit le résultat : un refus est justement
+  // ce que le coach a besoin de savoir.
+  try { _notifSyncPermission(); } catch (e) {}
+}
+
+// ============================================================
+// FORCER L'ACTIVATION DES NOTIFICATIONS (cf. migration 20260807_001)
+// ------------------------------------------------------------
+// Une notification n'existe que si le navigateur l'autorise, et cette
+// autorisation ne vivait QUE dans le navigateur de la joueuse : le coach
+// n'avait aucun moyen de savoir qui recevait ses messages. Il relançait donc
+// tout le monde « au cas où » — exactement ce qui rend les notifications
+// insupportables et pousse à les couper.
+//
+// Trois pièces :
+//   1. la mesure, remontée en base à chaque boot (players.notif_permission) ;
+//   2. le rappel côté joueuse — bandeau permanent + modale au boot, esquivable
+//      pour la journée (même patron que le rappel de licence) ;
+//   3. le badge 🔕 dans l'écran Effectif du coach.
+//
+// AUCUNE de ces pièces ne peut activer les notifications toute seule :
+// `Notification.requestPermission()` exige un geste de l'utilisateur, et un
+// 'denied' n'est plus rattrapable depuis la page — il faut passer par les
+// réglages de l'appareil. Le rappel dit donc la vérité selon le cas, au lieu de
+// promettre un bouton magique qui ne ferait rien.
+// ============================================================
+function checkNotifPermission() {
+  try {
+    if (typeof Notification === 'undefined') return 'unsupported';
+    const p = Notification.permission;
+    return (p === 'granted' || p === 'denied' || p === 'default') ? p : 'unsupported';
+  } catch (e) { return 'unsupported'; }
+}
+// Remonte la mesure en base — mais SEULEMENT si elle a bougé. Sans ce garde-fou,
+// chaque ouverture de l'app écrirait une ligne `players` par joueuse, pour rien.
+function _notifSyncPermission() {
+  try {
+    const a = state.auth;
+    if (!a || a.role !== 'player' || !a.playerId) return;
+    const perm = checkNotifPermission();
+    const p = (state.players || []).find(x => x.id === a.playerId);
+    if (!p) return;
+    if (p.notifPermission === perm) return;
+    p.notifPermission = perm;
+    p.notifPermissionAt = Date.now();
+    persist();
+    if (window.PbStore && PbStore.updateNotifPermission) {
+      PbStore.updateNotifPermission(a.playerId, perm)
+        .catch(e => console.warn('[notif] sync permission:', e && e.message));
+    }
+  } catch (e) { console.warn('[notif] sync:', e && e.message); }
+}
+function notifNeedsAttention() {
+  return !!(state.auth && state.auth.role === 'player' && checkNotifPermission() !== 'granted');
+}
+// Report DATÉ, pas de session : une PWA gardée ouverte plusieurs jours n'ouvre
+// jamais de nouvelle session (le rappel ne reviendrait jamais), et quelqu'un qui
+// rouvre l'app dix fois dans la journée serait harcelé par un simple drapeau.
+// Une date par identité donne exactement « plus aujourd'hui, on en reparle
+// demain ». Même patron que le rappel de licence.
+function _notifSnoozedToday() {
+  try {
+    const m = JSON.parse(localStorage.getItem(K.notifSnooze) || '{}');
+    return m[themeIdentityKey()] === isoDate(new Date());
+  } catch (e) { return false; }
+}
+function snoozeNotifPrompt() {
+  try {
+    const m = JSON.parse(localStorage.getItem(K.notifSnooze) || '{}');
+    m[themeIdentityKey()] = isoDate(new Date());
+    localStorage.setItem(K.notifSnooze, JSON.stringify(m));
+  } catch (e) {}
+  try { closeModal(); } catch (e) {}
+}
+// Le BANDEAU, lui, se replie pour la SESSION seulement (drapeau mémoire, donc
+// remis à zéro au prochain chargement). Le report daté du rappel bloquant ne
+// doit pas emporter le bandeau avec lui : « plus tard » veut dire « pas cette
+// popup », pas « oublie le sujet pour la journée ».
+function dismissNotifBanner() {
+  window._notifBannerHidden = true;
+  render();
+}
+function renderNotifBanner() {
+  if (!notifNeedsAttention()) return '';
+  if (window._notifBannerHidden) return '';
+  const perm = checkNotifPermission();
+  const txt = perm === 'denied'
+    ? 'Notifications bloquées par ton téléphone. Tu rates les convocs et les messages du coach.'
+    : perm === 'unsupported'
+      ? "Installe l'app sur ton écran d'accueil pour recevoir les notifications."
+      : 'Active tes notifs pour ne rien rater.';
+  const cta = (perm === 'denied' || perm === 'unsupported') ? 'Comment faire' : 'Activer maintenant';
+  // DEUX RANGS, et pas un seul. Sur un écran de 320 px, un rang unique
+  // [icône | texte | bouton | ✕] laissait au texte une colonne de 47 px de
+  // large sur 185 px de haut — une réglette de mots coupés. Le bouton d'appel à
+  // l'action prend donc sa propre ligne, pleine largeur : c'est aussi une bien
+  // meilleure cible tactile.
+  return `
+    <div style="padding:0 18px;margin-bottom:12px">
+      <div style="padding:11px 12px;border-radius:var(--radius);background:rgba(239,68,68,0.10);border:1.5px solid var(--red)">
+        <div style="display:flex;align-items:flex-start;gap:10px">
+          <div style="font-size:20px;flex:0 0 auto;line-height:1.2">🔔</div>
+          <div style="flex:1;min-width:0;font-size:12px;color:var(--ink);line-height:1.45">${esc(txt)}</div>
+          <button class="btn btn-icon" title="Masquer jusqu'à la prochaine ouverture" aria-label="Masquer"
+            style="flex:0 0 auto;min-height:30px;width:30px;padding:0" onclick="event.stopPropagation();dismissNotifBanner()">✕</button>
+        </div>
+        <button class="btn btn-primary btn-block" style="margin-top:9px;min-height:36px;font-size:12px"
+          onclick="event.stopPropagation();openNotifPrompt()">${esc(cta)}</button>
+      </div>
+    </div>`;
+}
+// La modale. `prompt: true` = elle s'est imposée au boot (bouton « Plus tard » +
+// report daté) ; sans l'option, c'est la joueuse qui l'a ouverte via le bandeau,
+// et une simple croix suffit.
+function openNotifPrompt(opts) {
+  const isPrompt = !!(opts && opts.prompt);
+  const perm = checkNotifPermission();
+  const closeAction = isPrompt ? 'snoozeNotifPrompt()' : 'closeModal()';
+  let body, footer;
+  if (perm === 'denied') {
+    // Rien à faire depuis la page : le navigateur ne redemandera plus. Mentir
+    // avec un bouton « Activer » qui ne produit rien serait pire que tout.
+    body = `
+      <div style="font-size:13px;color:var(--ink);line-height:1.6">
+        Ton téléphone a <strong>bloqué</strong> les notifications de Playbook. Le navigateur ne redemandera plus :
+        il faut le faire à la main, une fois.
+      </div>
+      <div style="margin-top:12px;padding:12px;background:var(--bg-3);border-radius:8px;font-size:12px;color:var(--ink-2);line-height:1.7">
+        <strong>iPhone</strong> : Réglages → Playbook BCL → Notifications → Autoriser.<br>
+        <strong>Android</strong> : Paramètres → Applications → Playbook BCL → Notifications.<br>
+        <strong>Ordinateur</strong> : le cadenas 🔒 dans la barre d'adresse → Notifications → Autoriser.
+      </div>`;
+    footer = `<button class="btn btn-primary btn-block" onclick="${closeAction}">J'ai compris</button>`;
+  } else if (perm === 'unsupported') {
+    body = `
+      <div style="font-size:13px;color:var(--ink);line-height:1.6">
+        Ce navigateur ne sait pas envoyer de notifications tant que l'app n'est pas installée.
+      </div>
+      <div style="margin-top:12px;padding:12px;background:var(--bg-3);border-radius:8px;font-size:12px;color:var(--ink-2);line-height:1.7">
+        <strong>iPhone</strong> : bouton Partager <span style="font-family:monospace">⬆</span> → « Sur l'écran d'accueil ».
+        Rouvre ensuite l'app depuis l'icône, puis reviens ici. (iOS 16.4 minimum.)<br>
+        <strong>Android</strong> : menu ⋮ → « Installer l'application ».
+      </div>`;
+    footer = `<button class="btn btn-primary btn-block" onclick="${closeAction}">J'ai compris</button>`;
+  } else {
+    body = `
+      <div style="font-size:13px;color:var(--ink);line-height:1.6">
+        Sans notifications, tu ne sauras pas qu'une convocation est tombée, qu'un message t'attend
+        ou qu'on te réclame une preuve de pintade — et ton coach devra te relancer à la main.
+      </div>
+      <div style="margin-top:12px;padding:12px;background:var(--bg-3);border-radius:8px;font-size:12px;color:var(--ink-2);line-height:1.6">
+        Ton téléphone va te demander l'autorisation. Réponds <strong>Autoriser</strong> :
+        c'est la seule occasion, après il faut aller la chercher dans les réglages.
+      </div>`;
+    footer = `
+      <button class="btn btn-primary btn-block mb-2" id="notif-enable-btn" onclick="enableNotifsFromPrompt()">🔔 Activer les notifs</button>
+      ${isPrompt ? `<button class="btn btn-ghost btn-block" onclick="snoozeNotifPrompt()">Plus tard</button>` : ''}`;
+  }
+  openModal(`
+    <div class="modal-header">
+      <div>
+        ${isPrompt ? '<div class="eyebrow">Rappel</div>' : ''}
+        <div class="modal-title">🔔 Tes notifications</div>
+      </div>
+      <button class="modal-close" onclick="${closeAction}">✕</button>
+    </div>
+    <div class="modal-body">${body}</div>
+    <div class="modal-footer">${footer}</div>`);
+}
+async function enableNotifsFromPrompt() {
+  const btn = document.getElementById('notif-enable-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ …'; }
+  let ok = false;
+  // enablePush() fait tout : requestPermission (le geste utilisateur est bien
+  // celui-ci — le clic sur ce bouton), enregistrement du service worker,
+  // souscription VAPID et sauvegarde de l'endpoint.
+  try { ok = await enablePush(); } catch (e) { ok = false; }
+  // La mesure est remontée dans TOUS les cas, y compris sur un refus : c'est
+  // même le cas le plus utile à connaître pour le coach.
+  _notifSyncPermission();
+  try { closeModal(); } catch (e) {}
+  if (ok) window._notifBannerHidden = false;
+  try { render(); } catch (e) {}
+}
+// Rappel au boot. Cède le passage aux popups qui exigent déjà une action, et
+// repasse toutes les 3 s (six fois au plus) — même file d'attente que le rappel
+// de licence : dans une PWA qui ne se ferme jamais, un rappel « perdu pour la
+// session » est un rappel perdu pour de bon.
+function _notifSkip(why) {
+  try { console.info('[notif] rappel non affiché — ' + why); } catch (e) {}
+  return false;
+}
+function maybeShowNotifPrompt(force, attempt) {
+  const a = state.auth;
+  if (!a || a.role !== 'player' || !a.playerId) return _notifSkip('pas une joueuse connectée');
+  if (checkNotifPermission() === 'granted') return _notifSkip('notifications déjà autorisées');
+  if (!force) {
+    if (_notifSnoozedToday()) return _notifSkip('reporté à aujourd\'hui (« Plus tard »)');
+    let busy = false;
+    try {
+      busy = _pbModalOpen()
+        || !!document.querySelector('#gage-overlay .gage-screen')
+        || !!document.querySelector('#pintade-overlay .pintade-screen');
+    } catch (e) {}
+    if (busy) {
+      const n = (attempt || 0) + 1;
+      if (n <= 6) { try { setTimeout(() => { try { maybeShowNotifPrompt(false, n); } catch (e) {} }, 3000); } catch (e) {} }
+      return _notifSkip('une autre popup est ouverte — réessai ' + n + '/6');
+    }
+  }
+  openNotifPrompt({ prompt: true });
+  return true;
+}
+// Badge pour l'écran Effectif du coach. NULL (jamais mesuré) et 'denied' sont
+// deux choses différentes et le disent : accuser une joueuse d'avoir refusé
+// alors qu'elle n'a simplement pas encore ouvert la nouvelle version serait
+// faux, et injuste.
+function notifPermBadge(p) {
+  const v = p && p.notifPermission;
+  if (v === 'granted') return null;
+  if (v === 'denied') return { icon: '🔕', label: 'notifs bloquées', color: 'var(--red)' };
+  if (v === 'default') return { icon: '🔔', label: 'notifs pas activées', color: 'var(--orange)' };
+  if (v === 'unsupported') return { icon: '📵', label: 'app non installée', color: 'var(--orange)' };
+  return { icon: '?', label: 'notifs inconnues', color: 'var(--ink-4)' };
+}
+function notifPermBadgeHtml(p) {
+  const b = notifPermBadge(p);
+  if (!b) return '';
+  return `<span title="${esc(b.label)}" style="font-size:8px;font-family:'JetBrains Mono';color:${b.color};background:rgba(239,68,68,0.10);padding:2px 5px;border-radius:4px;text-transform:uppercase;letter-spacing:0.04em;white-space:nowrap">${b.icon} ${esc(b.label)}</span>`;
+}
+// Variante COMPACTE pour la sous-ligne de l'onglet Saison, où chaque indicateur
+// tient en un pictogramme (le badge complet ferait déborder sur 375 px). Rien
+// n'est affiché quand tout va bien : une ligne d'effectif ne doit porter que ce
+// qui appelle une action.
+function notifPermDotHtml(p) {
+  const b = notifPermBadge(p);
+  if (!b) return '';
+  return ` · <span style="color:${b.color}" title="Notifications : ${esc(b.label)}">${b.icon}</span>`;
 }
 function notifyPush(ownerKeys, payload) {
   try {
@@ -38874,7 +40586,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-03.104';
+const APP_VERSION = '2026-08-07.106';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Une seule tentative de rechargement AUTOMATIQUE par session : si le HTML servi

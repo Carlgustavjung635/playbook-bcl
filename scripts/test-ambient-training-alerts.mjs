@@ -103,8 +103,20 @@ t('deux entraînements (E1/E2) le même jour → surveillés tous les deux', () 
 
 console.log('SCÉNARIO 6 — chantier B : photo profil joueuse caméra OU galerie');
 t('plus aucun capture="user" (l\'OS propose Caméra / Bibliothèque)', () => {
-  assert.ok(!/capture="user"/.test(html) && !/capture="environment"/.test(html));
+  assert.ok(!/capture="user"/.test(html), 'capture="user" est revenu : la galerie serait interdite');
   assert.ok(/onchange="changeMyPhoto\(event\)"/.test(html), 'input photo joueuse présent');
+  // L'assertion couvrait à l'origine TOUT le fichier, parce qu'il n'y avait
+  // alors qu'un seul <input type="file"> image. Depuis la v.106, la preuve de
+  // pintade en a un second, et celui-là DOIT forcer l'appareil photo : une
+  // photo tirée de la galerie n'est pas une preuve. On garde donc la règle —
+  // aucun input ne force la caméra — avec cette exception nommée, plutôt que de
+  // laisser la garde s'éteindre pour tout le monde.
+  const captures = [...html.matchAll(/<input[^>]*capture="[^"]*"[^>]*>/g)].map(m => m[0]);
+  captures.forEach(tag => {
+    assert.ok(/submitPintadeProof\(event\)/.test(tag),
+      'un input force la caméra sans être la preuve de pintade : ' + tag.slice(0, 160));
+  });
+  assert.strictEqual(captures.length, 1, 'exactement un input caméra-only attendu (la preuve de pintade)');
 });
 t('bouton session live relabel « option » (le défaut = alertes ambiantes)', () => {
   assert.ok(/Mode session live plein écran \(option\)/.test(html));
