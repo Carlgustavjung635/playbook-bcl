@@ -11635,6 +11635,16 @@ function renderHomePlayer() {
       <!-- 1bis-2. Retours du coach (feedback général qualités/axes) -->
       ${renderPlayerFeedbackCard()}
 
+      <!-- 1bis-3. Mon ressenti équipe (rôle / temps de jeu / ambiance).
+           REMIS ICI : ce CTA vivait sur l'Accueil, puis a été « relocalisé »
+           dans l'onglet Forme ; l'onglet Forme a ensuite été retiré de
+           SECTIONS_PLAYER (prépa full package) SANS relocaliser le CTA
+           → teamReviewCta() n'était plus appelé depuis AUCUN écran atteignable
+           et le formulaire est devenu invisible. Il reprend sa place d'origine,
+           en pendant du feedback coach ci-dessus (lui écrit, elle répond).
+           La fonction elle-même est inchangée. -->
+      ${teamReviewCta(p)}
+
       <!-- 1ter. Boîte à gages : point d'entrée visible pour proposer -->
       ${renderGageHomeCard()}
 
@@ -11908,8 +11918,16 @@ function renderPlayerMatches() {
 
   // Passés : on prend currentSeasonMatches() (saison forcée=active pour
   // la joueuse). Lien direct vers la vue détail match riche.
+  // On inclut aussi les matchs DÉJÀ DISPUTÉS dont le coach n'a pas encore saisi
+  // le score (phase 'past-unscored', cf. getMatchPhase). Sans ça ils
+  // n'apparaissaient NULLE PART côté joueuse — plus dans « À venir »
+  // (getAllEventsBetween part d'aujourd'hui), pas encore dans « Joués » (filtre
+  // score > 0) — donc le bloc « Donner mon ressenti » de renderMatchDetail, qui
+  // gère pourtant explicitement 'past-unscored', était inatteignable pendant les
+  // jours qui suivent le match : exactement la fenêtre où on lui demande.
   const playedMatches = currentSeasonMatches()
-    .filter(m => (m.scoreUs || 0) > 0 || (m.scoreOpp || 0) > 0)
+    .filter(m => m.status !== 'cancelled')
+    .filter(m => (m.scoreUs || 0) > 0 || (m.scoreOpp || 0) > 0 || m.date < todayStr)
     .sort((a, b) => b.date.localeCompare(a.date));
 
   // FFBB read-only : aligné sur le dashboard v2 (ffbbDash) — NOS matchs de la
@@ -11946,9 +11964,12 @@ function renderPlayerMatches() {
   } catch (e) { ffbbBlock = ''; }
 
   const pastMatchRow = m => {
+    // Un match passé sans score saisi n'est ni gagné ni perdu : on n'invente pas
+    // un « D · 0–0 », on affiche l'attente de saisie.
+    const scored = (m.scoreUs || 0) > 0 || (m.scoreOpp || 0) > 0;
     const win = m.scoreUs > m.scoreOpp;
     const tie = m.scoreUs === m.scoreOpp;
-    const color = tie ? 'var(--ink-3)' : (win ? 'var(--green)' : 'var(--red)');
+    const color = !scored ? 'var(--ink-3)' : (tie ? 'var(--ink-3)' : (win ? 'var(--green)' : 'var(--red)'));
     const tag = tie ? 'NUL' : (win ? 'V' : 'D');
     const d = new Date(m.date + 'T00:00:00');
     const day = d.getDate();
@@ -11963,7 +11984,7 @@ function renderPlayerMatches() {
         <div class="list-row-content">
           <div class="list-row-title">${m.home ? '🏠 ' : '✈ '}${esc(m.opponent)}</div>
           <div class="list-row-subtitle">
-            <span style="color:${color};font-family:'Anton';letter-spacing:0.04em">${tag} · ${m.scoreUs}–${m.scoreOpp}</span>
+            <span style="color:${color};font-family:'Anton';letter-spacing:0.04em">${scored ? `${tag} · ${m.scoreUs}–${m.scoreOpp}` : 'Score à venir'}</span>
             ${hasMyStats ? ` · <span style="color:var(--ink-3)">${m.playerStats[p.id].pts || 0} pts · ${m.playerStats[p.id].min || 0}'</span>` : ''}
           </div>
         </div>
@@ -41218,7 +41239,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-07.108';
+const APP_VERSION = '2026-08-09.109';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Une seule tentative de rechargement AUTOMATIQUE par session : si le HTML servi
