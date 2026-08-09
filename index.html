@@ -31588,13 +31588,15 @@ function openEventInstance(parentId, dateStr) {
   const present = _seasonPool.filter(p => _convocResp(c, dateStr, p.id).status === 'present');
   const absent = _seasonPool.filter(p => _convocResp(c, dateStr, p.id).status === 'absent');
   const ovKey = '__inst_' + parentId + '_' + dateStr;
-  // v.111 — Sur un ENTRAÎNEMENT, la joueuse ne voit plus COMBIEN de coéquipières
-  // manquent : l'info ne lui sert à rien et elle expose l'assiduité du groupe.
-  // Les NOMS des absentes étaient déjà coach-only (bloc `isCoach` plus bas) ;
-  // c'est le chiffre qui fuitait. Seul « X Présentes » subsiste côté joueuse.
-  // Test volontairement sur le rôle 'player' et non sur !isCoach : aucun autre
-  // rôle (admin_coach…) ne doit perdre le compteur. Vue MATCH inchangée.
-  const hideAbsentCount = state.auth.role === 'player' && instance.type === 'training';
+  // v.114 — Sur un ENTRAÎNEMENT, la joueuse ne voit AUCUN décompte d'effectif :
+  // ni « X Présentes », ni « Y Absentes », ni liste. La v.111 ne masquait que
+  // les absentes, mais « 14 Présentes » sur un effectif de 16 se soustrait de
+  // tête — le chiffre des présentes trahit le même secret par le complément.
+  // Sa page ne garde que ce qui la concerne : l'événement, le plan, son statut.
+  // Les NOMS restent gardés par les blocs `isCoach` plus bas (inchangés).
+  // Test sur le rôle 'player' et non sur !isCoach : aucun autre rôle
+  // (admin_coach…) ne doit perdre les compteurs. Vue MATCH inchangée.
+  const hideAttendance = state.auth.role === 'player' && instance.type === 'training';
 
   openModal(`
     <div class="modal-header">
@@ -31613,18 +31615,18 @@ function openEventInstance(parentId, dateStr) {
       ${instance.location ? `<div style="font-size:13px;color:var(--ink-2);margin-bottom:8px;font-family:'JetBrains Mono'">⌖ ${esc(instance.location)}</div>` : ''}
       ${instance.note ? `<div style="padding:10px 12px;background:var(--bg-3);border-left:2px solid var(--orange);border-radius:6px;font-size:13px;color:var(--ink-2);line-height:1.5;font-style:italic;margin-bottom:12px">"${esc(instance.note)}"</div>` : ''}
 
+      ${hideAttendance ? '' : `
       <div style="display:flex;gap:16px;align-items:center;margin-bottom:14px">
         <div>
           <div style="font-family:'Anton';font-size:22px;color:var(--green);line-height:1">${present.length}</div>
           <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">Présentes</div>
         </div>
-        ${hideAbsentCount ? '' : `
         <div>
           <div style="font-family:'Anton';font-size:22px;color:${absent.length>0?'var(--red)':'var(--ink-4)'};line-height:1">${absent.length}</div>
           <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">Absentes</div>
         </div>
-        `}
       </div>
+      `}
 
       ${instance.attachments && instance.attachments.length > 0 ? `
         <div class="eyebrow-muted mb-2">Pièces jointes</div>
@@ -41392,7 +41394,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-10.113';
+const APP_VERSION = '2026-08-10.114';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.

@@ -1,5 +1,8 @@
 // ============================================================
-// v.111 — La joueuse ne voit plus le NOMBRE d'absentes sur un entraînement.
+// v.114 — La joueuse ne voit AUCUN décompte d'effectif sur un entraînement.
+//
+// La v.111 ne masquait que « Y Absentes ». Insuffisant : « 14 Présentes » sur un
+// effectif de 16 se soustrait de tête. Depuis la v.114 le bloc entier disparaît.
 //
 // Ce test extrait le CODE RÉEL de index.html (heroCard + openEventInstance) et
 // l'exécute avec des stubs. Il ne réimplémente RIEN : une réimplémentation
@@ -7,9 +10,10 @@
 // toucher au test (piège déjà payé sur test-auto-update.mjs, cf. v.110).
 //
 // Matrice vérifiée :
-//   joueuse + entraînement → « Présentes » OUI, « Absentes » NON
-//   coach   + entraînement → les deux (vue coach INTACTE)
-//   joueuse + match        → les deux (vue match INTACTE)
+//   joueuse + entraînement → NI « Présentes » NI « Absentes » NI noms,
+//                            mais l'événement, le plan et SON statut restent
+//   coach   + entraînement → tout (vue coach INTACTE)
+//   joueuse + match        → tout (vue match INTACTE)
 // ============================================================
 import fs from 'fs';
 import path from 'path';
@@ -49,6 +53,7 @@ const ABSENT_IDS = new Set(['p3', 'p4']); // 2 absentes → chiffre non nul, don
 function makeEnv(role, type) {
   const conv = {
     id: 'c1', title: 'Séance du mardi', type, date: '2026-08-11', time: '19:00',
+    location: 'Gymnase Nord',
     seasonId: 's1', cancelledInstances: [], responses: {},
   };
   const captured = { html: null };
@@ -100,18 +105,30 @@ function run(fnName, role, type, invoke) {
 console.log("\nopenEventInstance — détail d'un entraînement");
 {
   const playerHtml = run('openEventInstance', 'player', 'training', f => f('c1', '2026-08-11'));
-  ok(playerHtml.includes('Présentes'), 'joueuse : « Présentes » toujours affiché');
+  ok(!playerHtml.includes('>Présentes<'), 'joueuse : compteur « Présentes » MASQUÉ');
   ok(!playerHtml.includes('>Absentes<'), 'joueuse : compteur « Absentes » MASQUÉ');
+  ok(!/\b\d+\s*(Présentes|Absentes)/i.test(playerHtml), 'joueuse : aucun chiffre d\'effectif');
+  // Aucun nom de coéquipière ne doit transiter : ni présente, ni absente. Alice
+  // = elle-même (autorisée), donc on teste sur les trois AUTRES.
+  ok(!['Bob', 'Chloe', 'Dina'].some(n => playerHtml.includes(n)),
+    'joueuse : aucun nom de coéquipière');
+  // Ce qui doit RESTER : l'événement et son bouton d'absence perso.
+  ok(playerHtml.includes('Séance du mardi'), 'joueuse : titre de la séance CONSERVÉ');
+  ok(playerHtml.includes('Gymnase Nord'), 'joueuse : lieu CONSERVÉ');
+  ok(playerHtml.includes('playerDeclareAbsence'), 'joueuse : bouton « je ne pourrai pas » CONSERVÉ');
+  ok(playerHtml.includes('Mon statut'), 'joueuse : bloc « Mon statut » CONSERVÉ');
 
   const coachHtml = run('openEventInstance', 'coach', 'training', f => f('c1', '2026-08-11'));
-  ok(coachHtml.includes('Présentes'), 'coach : « Présentes » affiché');
+  ok(coachHtml.includes('>Présentes<'), 'coach : compteur « Présentes » INTACT');
   ok(coachHtml.includes('>Absentes<'), 'coach : compteur « Absentes » INTACT');
   ok(coachHtml.includes('Chloe') && coachHtml.includes('Dina'), 'coach : noms des absentes INTACTS');
+  ok(coachHtml.includes('Bob'), 'coach : noms des présentes INTACTS');
 }
 
 console.log("\nopenEventInstance — détail d'un match (ne doit RIEN changer)");
 {
   const playerHtml = run('openEventInstance', 'player', 'match', f => f('c1', '2026-08-11'));
+  ok(playerHtml.includes('>Présentes<'), 'joueuse + match : compteur « Présentes » INCHANGÉ');
   ok(playerHtml.includes('>Absentes<'), 'joueuse + match : compteur « Absentes » INCHANGÉ');
 }
 
@@ -133,8 +150,13 @@ console.log('\nheroCard — carte « prochain événement »');
 // --- 3. Garde statique : le compteur reste bien gardé ------------------------
 console.log('\nGarde statique');
 {
-  const guards = html.match(/const hideAbsentCount = state\.auth\.role === 'player'/g) || [];
-  ok(guards.length === 2, `2 gardes hideAbsentCount attendues, ${guards.length} trouvée(s)`);
+  ok(/const hideAttendance = state\.auth\.role === 'player' && instance\.type === 'training'/.test(html),
+    "garde hideAttendance présente dans openEventInstance (rôle 'player', pas !isCoach)");
+  ok(/const hideAbsentCount = state\.auth\.role === 'player' && ev\.type !== 'match'/.test(html),
+    "garde hideAbsentCount présente dans heroCard (rôle 'player', pas !isCoach)");
+  // !isCoach engloberait admin_coach : interdit sur ces deux gardes.
+  ok(!/const hideAttendance = !isCoach/.test(html) && !/const hideAbsentCount = !isCoach/.test(html),
+    'aucune garde ne repose sur !isCoach');
 }
 
 console.log(failures === 0 ? '\n✅ Tous les tests passent' : `\n❌ ${failures} test(s) en échec`);
