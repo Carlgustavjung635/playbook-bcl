@@ -174,6 +174,53 @@ t('le ressenti reste PRIVÉ : rien n\'est exposé aux autres joueuses', () => {
   ok(!h.includes('openPlayerReviewsList'), 'l\'écran coach des ressentis est exposé à la joueuse');
 });
 
+// --- 3) CÔTÉ COACH : la section « État d'esprit équipe » ---------------------
+// La carte coach n'était affichée QUE s'il existait au moins un ressenti
+// (`if (reviews.length === 0) return ''`). Or ses deux onclick sont les SEULS
+// points d'entrée de openTeamReviewsDashboard() dans toute l'app : à zéro
+// ressenti, le coach n'avait aucun moyen de savoir que la fonctionnalité
+// existait. Et comme le CTA joueuse était lui-même inatteignable (cf. §1), le
+// compteur ne pouvait jamais quitter zéro — les deux invisibilités se
+// nourrissaient l'une l'autre.
+function asCoach(reviews) {
+  asPlayer([]);
+  S.auth = { role: 'coach', coachId: 'admin' };
+  S.coaches = [{ id: 'admin', name: 'Admin', coachRole: 'admin_coach', teams: ['e1', 'e2'] }];
+  S.players = [{ id: 'pX', name: 'Lea', num: 7 }, { id: 'pY', name: 'Mia', num: 8 }];
+  S.seasonPlayers = ['pX', 'pY'].map(playerId => ({ seasonId: 'S1', playerId, teamTag: 'e1', joinedAt: shift(-200), leftAt: null }));
+  S.teamReviews = reviews || [];
+}
+const REV = (pid, date, extra) => Object.assign({
+  id: 'r-' + pid, pid, date, ambiance: 4, roleClarity: 4, playtime: 4, physique: 4,
+  comment: '', updatedAt: Date.now(),
+}, extra || {});
+
+t('sans aucun ressenti, la section coach reste visible et accessible', () => {
+  asCoach([]);
+  const h = ctx.renderHomeCoach();
+  ok(h.includes('État d\'esprit équipe'), 'la section a disparu de l\'accueil coach');
+  ok(h.includes('openTeamReviewsDashboard()'), 'plus aucun accès au tableau de bord des ressentis');
+  ok(h.includes('Aucun ressenti cette saison'), 'l\'état vide n\'est pas annoncé');
+  ok(h.includes('0/2 joueuses'), 'le compteur 0/N n\'est pas rendu');
+});
+t('avec des ressentis, la carte affiche les moyennes (comportement inchangé)', () => {
+  asCoach([REV('pX', shift(-5)), REV('pY', shift(-2), { ambiance: 2, roleClarity: 2, playtime: 2, physique: 2 })]);
+  const h = ctx.renderHomeCoach();
+  ok(h.includes('Moyenne équipe'), 'la carte de moyennes a disparu');
+  ok(h.includes('2/2 joueuses'), 'le compteur ne suit pas les ressentis reçus');
+  ok(!h.includes('Aucun ressenti cette saison'), 'l\'état vide s\'affiche alors qu\'il y a des ressentis');
+});
+t('un ressenti HORS saison ne remonte pas — et l\'accès reste ouvert', () => {
+  asCoach([REV('pX', shift(-900))]);
+  const h = ctx.renderHomeCoach();
+  ok(h.includes('Aucun ressenti cette saison'), 'un ressenti d\'une autre saison est compté');
+  ok(h.includes('openTeamReviewsDashboard()'), 'l\'accès au tableau de bord est perdu');
+});
+t('le tableau de bord coach n\'est JAMAIS exposé à la joueuse', () => {
+  asPlayer([]);
+  ok(!ctx.renderHomePlayer().includes('openTeamReviewsDashboard'), 'écran coach exposé sur l\'accueil joueuse');
+});
+
 R.forEach(l => console.log('  ' + l));
 const bad = R.filter(l => l.startsWith('✗'));
 console.log(bad.length ? `\n❌ ${bad.length}/${R.length} KO` : `\n✅ ${R.length} assertions OK — les deux formulaires de ressenti sont atteignables.`);

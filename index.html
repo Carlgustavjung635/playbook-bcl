@@ -11384,7 +11384,36 @@ function renderHomeCoach() {
           // Saison courante uniquement : teamReviews agrégeait toutes les saisons
           // (pas de season_id) → on filtre par plage de dates de la saison (fix #5).
           const reviews = currentSeasonTeamReviews();
-          if (reviews.length === 0) return '';
+          // AUCUN RESSENTI ≠ RIEN À MONTRER. Avant : `return ''` → toute la
+          // section disparaissait, et avec elle le SEUL point d'entrée vers
+          // openTeamReviewsDashboard() (cf. les deux onclick ci-dessous : il
+          // n'y en a nulle part ailleurs). Le coach n'avait donc aucun moyen
+          // de savoir que la fonctionnalité existait, ni de constater que
+          // personne n'avait encore répondu — ce qui est en soi l'information
+          // qu'il cherche. Et comme le CTA joueuse était lui-même devenu
+          // inatteignable (v.109), ce compteur restait à 0 pour toujours :
+          // deux invisibilités qui se nourrissaient l'une l'autre.
+          // Le tableau de bord, lui, gère déjà son propre état vide.
+          const nbPlayers = currentSeasonPlayers().length;
+          if (reviews.length === 0) return `
+            <div class="section-header">
+              <div>
+                <div class="eyebrow">0/${nbPlayers} joueuse${nbPlayers > 1 ? 's' : ''}</div>
+                <h2 class="display-md mt-2">État d'esprit équipe</h2>
+              </div>
+              <button class="section-action" onclick="openTeamReviewsDashboard()">Détail →</button>
+            </div>
+            <div style="padding:0 18px;margin-bottom:18px">
+              <div onclick="openTeamReviewsDashboard()" style="padding:14px;background:var(--surface);border:1px dashed var(--border);border-radius:var(--radius);cursor:pointer;display:flex;align-items:center;gap:12px">
+                <div style="font-size:24px">💭</div>
+                <div style="flex:1;min-width:0">
+                  <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;letter-spacing:0.02em">Aucun ressenti cette saison</div>
+                  <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase;letter-spacing:0.04em">Ambiance · rôle · temps de jeu · physique</div>
+                </div>
+                <div style="color:var(--ink-4);font-family:'Anton';font-size:16px">›</div>
+              </div>
+            </div>
+          `;
           // Dernière par joueuse
           const latestByPlayer = {};
           reviews.forEach(r => {
@@ -11404,7 +11433,7 @@ function renderHomeCoach() {
           return `
             <div class="section-header">
               <div>
-                <div class="eyebrow">${latest.length}/${currentSeasonPlayers().length} joueuses</div>
+                <div class="eyebrow">${latest.length}/${nbPlayers} joueuse${nbPlayers > 1 ? 's' : ''}</div>
                 <h2 class="display-md mt-2">État d'esprit équipe</h2>
               </div>
               <button class="section-action" onclick="openTeamReviewsDashboard()">Détail →</button>
@@ -41363,7 +41392,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-10.112';
+const APP_VERSION = '2026-08-10.113';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
