@@ -11488,6 +11488,11 @@ function heroCard(ev) {
   const _parentConv = state.convocations.find(x => x.id === parentId) || null;
   const absent = currentSeasonPlayers()
     .filter(p => _convocResp(_parentConv, instanceDate, p.id).status === 'absent').length;
+  // v.111 — Même règle que le détail (openEventInstance) : sur un ENTRAÎNEMENT,
+  // la joueuse ne voit pas « ⚠ N absentes ». Sans ça, le chiffre qu'on vient de
+  // masquer dans la modale continuait de fuiter sur sa page d'accueil, qui est
+  // justement l'écran qu'elle regarde le plus. Hero MATCH inchangé.
+  const hideAbsentCount = state.auth.role === 'player' && ev.type !== 'match';
 
   return `
     <div class="hero-card fade-up" onclick="openEventInstance('${parentId}','${instanceDate}')">
@@ -11497,7 +11502,7 @@ function heroCard(ev) {
         <div>◷ ${formatDate(ev.date, 'long')}${ev.time ? ' · ' + ev.time : ''}</div>
         ${ev.location ? `<div>⌖ ${esc(ev.location)}</div>` : ''}
       </div>
-      ${absent > 0 ? `
+      ${absent > 0 && !hideAbsentCount ? `
         <div class="hero-meta mt-2">
           <div style="color:#ffe5d6">⚠ ${absent} absente${absent>1?'s':''}</div>
         </div>
@@ -31540,6 +31545,13 @@ function openEventInstance(parentId, dateStr) {
   const present = _seasonPool.filter(p => _convocResp(c, dateStr, p.id).status === 'present');
   const absent = _seasonPool.filter(p => _convocResp(c, dateStr, p.id).status === 'absent');
   const ovKey = '__inst_' + parentId + '_' + dateStr;
+  // v.111 — Sur un ENTRAÎNEMENT, la joueuse ne voit plus COMBIEN de coéquipières
+  // manquent : l'info ne lui sert à rien et elle expose l'assiduité du groupe.
+  // Les NOMS des absentes étaient déjà coach-only (bloc `isCoach` plus bas) ;
+  // c'est le chiffre qui fuitait. Seul « X Présentes » subsiste côté joueuse.
+  // Test volontairement sur le rôle 'player' et non sur !isCoach : aucun autre
+  // rôle (admin_coach…) ne doit perdre le compteur. Vue MATCH inchangée.
+  const hideAbsentCount = state.auth.role === 'player' && instance.type === 'training';
 
   openModal(`
     <div class="modal-header">
@@ -31563,10 +31575,12 @@ function openEventInstance(parentId, dateStr) {
           <div style="font-family:'Anton';font-size:22px;color:var(--green);line-height:1">${present.length}</div>
           <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">Présentes</div>
         </div>
+        ${hideAbsentCount ? '' : `
         <div>
           <div style="font-family:'Anton';font-size:22px;color:${absent.length>0?'var(--red)':'var(--ink-4)'};line-height:1">${absent.length}</div>
           <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">Absentes</div>
         </div>
+        `}
       </div>
 
       ${instance.attachments && instance.attachments.length > 0 ? `
@@ -41245,7 +41259,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-10.110';
+const APP_VERSION = '2026-08-10.111';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
