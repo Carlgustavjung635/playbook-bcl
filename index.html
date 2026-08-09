@@ -8984,6 +8984,20 @@ async function tryPin() {
     persist();
     // Dernière connexion : login frais d'une joueuse → tampon immédiat (force).
     try { _touchCurrentPlayerLastSeen(true); } catch (e) {}
+    // NOTIFICATIONS : le rappel ne partait QU'AU BOOT, depuis un bloc gardé par
+    // `state.auth.role === 'player'` évalué à ce moment-là. Or on ouvre l'app
+    // déconnectée, ou en coach, et on se connecte ENSUITE : au boot le garde
+    // était faux, et se connecter en joueuse ne rejouait rien. Une joueuse qui
+    // se connectait en cours de session ne voyait donc jamais ni la modale ni
+    // le bandeau — c'est le trajet normal sur un téléphone partagé, et c'est
+    // exactement celui qui était mort. On rejoue la mesure et le rappel ici.
+    if (role === 'player') {
+      window._notifBootChecked = true;  // le boot n'a plus rien à refaire
+      try {
+        setTimeout(() => { try { _notifSyncPermission(); } catch (e) {} }, 600);
+        setTimeout(() => { try { notifPromptAfterCheck(); } catch (e) {} }, 1800);
+      } catch (e) {}
+    }
     render();
     return;
   }
@@ -39807,7 +39821,7 @@ function _initPlayersSync() {
           if (state.auth && state.auth.role === 'player' && !window._notifBootChecked) {
             window._notifBootChecked = true;
             setTimeout(() => { try { _notifSyncPermission(); } catch (e) {} }, 800);
-            setTimeout(() => { try { maybeShowNotifPrompt(); } catch (e) {} }, 3400);
+            setTimeout(() => { try { notifPromptAfterCheck(); } catch (e) {} }, 3400);
           }
         } catch (e) { console.warn('[notif] boot prompt:', e.message); }
         // PINTADE — arbitrage coach : en fin de file (il attend une décision, pas
@@ -40663,24 +40677,82 @@ function _notifSyncPermission() {
     }
   } catch (e) { console.warn('[notif] sync:', e && e.message); }
 }
+// LA PERMISSION NE SUFFIT PAS — c'était le trou de la v.106 à la v.110.
+// `disablePush()` désabonne le pushManager et désenregistre le service worker,
+// mais il ne touche pas (et ne PEUT pas toucher) `Notification.permission` :
+// seul le navigateur l'accorde ou la retire. Une joueuse qui coupait ses notifs
+// depuis l'app se retrouvait donc avec permission === 'granted' ET aucune
+// souscription vive. Or tout le rappel — modale ET bandeau — se gardait sur
+// `checkNotifPermission() !== 'granted'` : la condition était fausse, plus rien
+// ne s'affichait, et elle ne recevait plus une seule notification sans que rien
+// ne le lui dise. Le même angle mort couvrait les souscriptions périmées
+// (rotation d'endpoint iOS/FCM, cache Safari vidé, app réinstallée).
+//
+// L'état réel tient donc en DEUX faits : la permission, et l'existence d'une
+// souscription. On les mesure ensemble.
+//
+// La souscription se lit en asynchrone (`pushManager.getSubscription()`) alors
+// que `render()` est synchrone : on garde donc la dernière mesure connue dans
+// `window._notifPushSubscribed` (null = pas encore mesuré → on ne prétend rien
+// et on n'affiche pas d'alarme sur une supposition), rafraîchie au boot, au
+// login et au retour au premier plan.
+function notifPushSubscribedCached() {
+  const v = window._notifPushSubscribed;
+  return (v === true || v === false) ? v : null;
+}
+async function _notifRefreshSubscription() {
+  let sub = null;
+  try { sub = await pushIsSubscribed(); } catch (e) { sub = false; }
+  const before = window._notifPushSubscribed;
+  window._notifPushSubscribed = !!sub;
+  // Ne re-rend que si la mesure a réellement bougé (le bandeau en dépend).
+  if (before !== window._notifPushSubscribed) { try { render(); } catch (e) {} }
+  return window._notifPushSubscribed;
+}
+// L'ÉTAT EFFECTIF, en un mot. C'est lui que la modale et le bandeau lisent.
+//   'granted'     → permission accordée ET souscription vive : rien à signaler.
+//   'unsubscribed'→ permission accordée mais PLUS de souscription : le cas qui
+//                   passait sous le radar. Réparable en un tap, sans redemander
+//                   quoi que ce soit au navigateur.
+//   'default'/'denied'/'unsupported' → comme avant.
+function notifEffectiveState() {
+  const perm = checkNotifPermission();
+  if (perm !== 'granted') return perm;
+  return (notifPushSubscribedCached() === false) ? 'unsubscribed' : 'granted';
+}
 function notifNeedsAttention() {
-  return !!(state.auth && state.auth.role === 'player' && checkNotifPermission() !== 'granted');
+  return !!(state.auth && state.auth.role === 'player' && notifEffectiveState() !== 'granted');
 }
 // Report DATÉ, pas de session : une PWA gardée ouverte plusieurs jours n'ouvre
 // jamais de nouvelle session (le rappel ne reviendrait jamais), et quelqu'un qui
 // rouvre l'app dix fois dans la journée serait harcelé par un simple drapeau.
 // Une date par identité donne exactement « plus aujourd'hui, on en reparle
 // demain ». Même patron que le rappel de licence.
+// …MAIS le report vaut pour l'ÉTAT qu'elle a vu, pas pour la journée entière.
+// « Plus tard » répond à la question posée ce jour-là (« tu n'as jamais activé
+// tes notifs »). Si l'état change ensuite — elle les active puis les recoupe,
+// ou sa souscription meurt — c'est une AUTRE question, et l'ancien report ne
+// doit pas l'étouffer jusqu'à minuit. On enregistre donc l'état avec la date et
+// on ne reporte que tant que les deux tiennent.
+//
+// Format : { "<identité>": { d: "YYYY-MM-DD", s: "<état>" } }. Les anciennes
+// entrées sont de simples chaînes de date (pré-v.112) : on les lit encore, sans
+// état, ce qui les rend simplement caduques à la première divergence.
 function _notifSnoozedToday() {
   try {
     const m = JSON.parse(localStorage.getItem(K.notifSnooze) || '{}');
-    return m[themeIdentityKey()] === isoDate(new Date());
+    const e = m[themeIdentityKey()];
+    if (!e) return false;
+    const today = isoDate(new Date());
+    if (typeof e === 'string') return e === today;   // legacy pré-v.112
+    if (e.d !== today) return false;
+    return e.s === notifEffectiveState();            // état changé → report caduc
   } catch (e) { return false; }
 }
 function snoozeNotifPrompt() {
   try {
     const m = JSON.parse(localStorage.getItem(K.notifSnooze) || '{}');
-    m[themeIdentityKey()] = isoDate(new Date());
+    m[themeIdentityKey()] = { d: isoDate(new Date()), s: notifEffectiveState() };
     localStorage.setItem(K.notifSnooze, JSON.stringify(m));
   } catch (e) {}
   try { closeModal(); } catch (e) {}
@@ -40696,13 +40768,16 @@ function dismissNotifBanner() {
 function renderNotifBanner() {
   if (!notifNeedsAttention()) return '';
   if (window._notifBannerHidden) return '';
-  const perm = checkNotifPermission();
+  const perm = notifEffectiveState();
   const txt = perm === 'denied'
     ? 'Notifications bloquées par ton téléphone. Tu rates les convocs et les messages du coach.'
     : perm === 'unsupported'
       ? "Installe l'app sur ton écran d'accueil pour recevoir les notifications."
-      : 'Active tes notifs pour ne rien rater.';
-  const cta = (perm === 'denied' || perm === 'unsupported') ? 'Comment faire' : 'Activer maintenant';
+      : perm === 'unsubscribed'
+        ? 'Tes notifications sont coupées sur cet appareil. Tu rates les convocs et les messages du coach.'
+        : 'Active tes notifs pour ne rien rater.';
+  const cta = (perm === 'denied' || perm === 'unsupported') ? 'Comment faire'
+    : perm === 'unsubscribed' ? 'Réactiver maintenant' : 'Activer maintenant';
   // DEUX RANGS, et pas un seul. Sur un écran de 320 px, un rang unique
   // [icône | texte | bouton | ✕] laissait au texte une colonne de 47 px de
   // large sur 185 px de haut — une réglette de mots coupés. Le bouton d'appel à
@@ -40727,10 +40802,26 @@ function renderNotifBanner() {
 // et une simple croix suffit.
 function openNotifPrompt(opts) {
   const isPrompt = !!(opts && opts.prompt);
-  const perm = checkNotifPermission();
+  const perm = notifEffectiveState();
   const closeAction = isPrompt ? 'snoozeNotifPrompt()' : 'closeModal()';
   let body, footer;
-  if (perm === 'denied') {
+  if (perm === 'unsubscribed') {
+    // Permission déjà accordée, souscription morte (coupée depuis l'app,
+    // endpoint tourné, cache vidé, app réinstallée). Le navigateur ne
+    // redemandera RIEN : un tap suffit à re-souscrire. C'est le cas le plus
+    // facile à réparer, et c'est justement celui qui ne s'affichait pas.
+    body = `
+      <div style="font-size:13px;color:var(--ink);line-height:1.6">
+        Les notifications de Playbook sont <strong>coupées sur cet appareil</strong>. Ton téléphone les autorise
+        toujours, mais l'app n'est plus abonnée : convocations, compos et messages du coach ne t'arrivent plus.
+      </div>
+      <div style="margin-top:12px;padding:12px;background:var(--bg-3);border-radius:8px;font-size:12px;color:var(--ink-2);line-height:1.6">
+        Un seul tap suffit à les rétablir — ton téléphone ne te redemandera rien.
+      </div>`;
+    footer = `
+      <button class="btn btn-primary btn-block mb-2" id="notif-enable-btn" onclick="enableNotifsFromPrompt()">🔔 Réactiver mes notifs</button>
+      ${isPrompt ? `<button class="btn btn-ghost btn-block" onclick="snoozeNotifPrompt()">Plus tard</button>` : ''}`;
+  } else if (perm === 'denied') {
     // Rien à faire depuis la page : le navigateur ne redemandera plus. Mentir
     // avec un bouton « Activer » qui ne produit rien serait pire que tout.
     body = `
@@ -40791,6 +40882,10 @@ async function enableNotifsFromPrompt() {
   // La mesure est remontée dans TOUS les cas, y compris sur un refus : c'est
   // même le cas le plus utile à connaître pour le coach.
   _notifSyncPermission();
+  // …et la souscription est REMESURÉE : sans ça, `_notifPushSubscribed` restait
+  // à false et le bandeau continuait d'annoncer « coupées » juste après une
+  // réactivation réussie.
+  try { await _notifRefreshSubscription(); } catch (e) {}
   try { closeModal(); } catch (e) {}
   if (ok) window._notifBannerHidden = false;
   try { render(); } catch (e) {}
@@ -40803,10 +40898,19 @@ function _notifSkip(why) {
   try { console.info('[notif] rappel non affiché — ' + why); } catch (e) {}
   return false;
 }
+// Mesure la souscription PUIS décide. `maybeShowNotifPrompt` reste synchrone
+// (une quinzaine d'appelants, dont des setTimeout) : c'est ce sas asynchrone qui
+// garantit que `notifEffectiveState()` s'appuie sur une mesure fraîche et non
+// sur le `null` du démarrage. Sans lui, le premier passage voyait toujours
+// « pas encore mesuré » et laissait filer le cas « souscription morte ».
+async function notifPromptAfterCheck(force) {
+  try { await _notifRefreshSubscription(); } catch (e) {}
+  try { return maybeShowNotifPrompt(force); } catch (e) { return false; }
+}
 function maybeShowNotifPrompt(force, attempt) {
   const a = state.auth;
   if (!a || a.role !== 'player' || !a.playerId) return _notifSkip('pas une joueuse connectée');
-  if (checkNotifPermission() === 'granted') return _notifSkip('notifications déjà autorisées');
+  if (notifEffectiveState() === 'granted') return _notifSkip('notifications déjà actives (permission + souscription)');
   if (!force) {
     if (_notifSnoozedToday()) return _notifSkip('reporté à aujourd\'hui (« Plus tard »)');
     let busy = false;
@@ -41259,7 +41363,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-10.111';
+const APP_VERSION = '2026-08-10.112';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
@@ -41468,6 +41572,12 @@ document.addEventListener('visibilitychange', () => {
     // session — or une PWA n'est jamais vraiment fermée. Le report du jour et le
     // « c'est fait » restent évidemment respectés.
     try { maybeShowLicencePrompt(); } catch (e) {}
+    // Rappel notifications : il manquait ici, alors que la licence et les gages
+    // y étaient. C'est pourtant LE moment où l'état a pu changer sans que l'app
+    // en sache rien — on revient précisément des réglages du téléphone, où l'on
+    // vient d'autoriser ou de couper les notifications de Playbook. La mesure de
+    // la souscription est refaite au passage (cf. notifPromptAfterCheck).
+    try { notifPromptAfterCheck(); } catch (e) {}
     // Rafraîchit le badge d'icône (un signal a pu changer pendant l'absence).
     try { updateAppBadge(); } catch (e) {}
   }

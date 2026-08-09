@@ -94,11 +94,15 @@ ctx.PbStore = {
 function setPerm(p) {
   ctx.Notification = (p === null) ? undefined : { permission: p, requestPermission: () => Promise.resolve(p) };
 }
+// LA SOUSCRIPTION PUSH, indépendante de la permission — c'est tout l'objet du
+// correctif v.112. `null` = pas encore mesurée (état du démarrage).
+function setSub(v) { ctx._notifPushSubscribed = v; }
 function seed(role, pid, perm) {
   for (const k of Object.keys(fields)) delete fields[k];
   for (const k of Object.keys(store)) delete store[k];
   writes.length = 0; openPopup = false; ctx.__lastModal = null;
   ctx._notifBannerHidden = false;
+  setSub(null);
   setPerm(perm === undefined ? 'default' : perm);
   S.auth = (role === 'coach') ? { role: 'coach', coachId: 'admin' } : { role: 'player', playerId: pid || 'pA' };
   S.coaches = [{ id: 'admin', name: 'Sonia', coachRole: 'admin_coach', teams: ['e1', 'e2'] }];
@@ -247,11 +251,89 @@ t('« Plus tard » reporte à demain, pas à la prochaine ouverture', () => {
   ctx.snoozeNotifPrompt();
   ok(ctx.maybeShowNotifPrompt() === false, 'le report ne tient pas');
   ok(ctx.maybeShowNotifPrompt() === false, 'ni au deuxième essai');
-  // Le report est DATÉ (une PWA gardée ouverte n'ouvre jamais de session neuve).
+  // Le report est DATÉ (une PWA gardée ouverte n'ouvre jamais de session neuve)
+  // ET porte l'ÉTAT auquel il répond (v.112).
   const m = JSON.parse(store[ctx.K.notifSnooze] || '{}');
-  ok(/^\d{4}-\d{2}-\d{2}$/.test(Object.values(m)[0] || ''), 'report non daté : ' + JSON.stringify(m));
+  const e = Object.values(m)[0] || {};
+  ok(/^\d{4}-\d{2}-\d{2}$/.test(e.d || ''), 'report non daté : ' + JSON.stringify(m));
+  ok(e.s === 'default', 'report sans état : ' + JSON.stringify(m));
   ok(ctx.maybeShowNotifPrompt(true) === true, 'même forcé, le rappel refuse de s\'ouvrir');
 });
+t('un report pré-v.112 (date nue) est toujours honoré', () => {
+  seed('player', 'pA', 'default');
+  const today = ctx.isoDate(new Date());
+  store[ctx.K.notifSnooze] = JSON.stringify({ [ctx.themeIdentityKey()]: today });
+  ok(ctx.maybeShowNotifPrompt() === false, 'un ancien report est ignoré → la joueuse est reharcelée');
+});
+// =============================================================================
+// 4bis) LE TROU DE LA v.106 À LA v.110 : PERMISSION ACCORDÉE, PUSH COUPÉ
+// -----------------------------------------------------------------------------
+// `disablePush()` désabonne le pushManager et désenregistre le service worker,
+// mais ne touche pas `Notification.permission` — seul le navigateur l'accorde ou
+// la retire. Une joueuse qui coupait ses notifs depuis l'app se retrouvait donc
+// avec 'granted' ET aucune souscription. Tout le rappel se gardait sur
+// `checkNotifPermission() !== 'granted'` : condition fausse, plus rien ne
+// s'affichait, et elle ne recevait plus rien sans que rien ne le lui dise.
+// Ces assertions-là manquaient : c'est pour ça que le bug est passé.
+// =============================================================================
+t('RÉGRESSION v.110 : permission accordée + souscription morte → la modale S\'AFFICHE', () => {
+  seed('player', 'pA', 'granted');
+  setSub(false);
+  ok(ctx.notifEffectiveState() === 'unsubscribed', 'état effectif : ' + ctx.notifEffectiveState());
+  ok(ctx.maybeShowNotifPrompt() === true, 'la modale ne s\'affiche toujours pas — le bug v.110 est intact');
+});
+t('…et la modale propose un vrai bouton de réactivation, pas les réglages', () => {
+  seed('player', 'pA', 'granted');
+  setSub(false);
+  ctx.openNotifPrompt({ prompt: true });
+  const m = ctx.__lastModal || '';
+  ok(/enableNotifsFromPrompt/.test(m), 'aucun bouton de réactivation');
+  ok(/coupées sur cet appareil/.test(m), 'le message n\'explique pas ce qui s\'est passé');
+  ok(!/Réglages/.test(m), 'on renvoie à tort vers les réglages du téléphone');
+});
+t('…et le bandeau le dit aussi', () => {
+  seed('player', 'pA', 'granted');
+  setSub(false);
+  ok(ctx.notifNeedsAttention() === true, 'le bandeau se croit inutile');
+  const b = ctx.renderNotifBanner() || '';
+  ok(/coupées sur cet appareil/.test(b), 'bandeau muet : ' + b.slice(0, 120));
+  ok(/Réactiver/.test(b), 'pas d\'appel à l\'action de réactivation');
+});
+t('souscription VIVE + permission accordée → toujours aucun rappel', () => {
+  seed('player', 'pA', 'granted');
+  setSub(true);
+  ok(ctx.notifEffectiveState() === 'granted', 'état : ' + ctx.notifEffectiveState());
+  ok(ctx.maybeShowNotifPrompt() === false, 'rappel affiché alors que tout va bien');
+  ok(ctx.renderNotifBanner() === '', 'bandeau affiché alors que tout va bien');
+});
+t('souscription NON MESURÉE → on ne crie pas au loup sur une supposition', () => {
+  seed('player', 'pA', 'granted');
+  setSub(null);
+  ok(ctx.notifEffectiveState() === 'granted', 'un état non mesuré déclenche une fausse alerte');
+  ok(ctx.renderNotifBanner() === '', 'bandeau affiché sur une supposition');
+});
+t('un refus « denied » prime sur la souscription', () => {
+  seed('player', 'pA', 'denied');
+  setSub(true);
+  ok(ctx.notifEffectiveState() === 'denied', 'état : ' + ctx.notifEffectiveState());
+});
+t('le report ne survit PAS à un changement d\'état (elle coupe après avoir reporté)', () => {
+  seed('player', 'pA', 'default');
+  ok(ctx.maybeShowNotifPrompt() === true, 'premier rappel non affiché');
+  ctx.snoozeNotifPrompt();
+  ok(ctx.maybeShowNotifPrompt() === false, 'le report ne tient pas');
+  // Même journée, mais l'état a changé : c'est une AUTRE question.
+  setPerm('granted'); setSub(false);
+  ok(ctx.maybeShowNotifPrompt() === true, 'le report d\'hier bâillonne une situation nouvelle');
+});
+t('le report reposé sur le NOUVEL état tient à son tour', () => {
+  seed('player', 'pA', 'granted');
+  setSub(false);
+  ok(ctx.maybeShowNotifPrompt() === true, 'rappel non affiché');
+  ctx.snoozeNotifPrompt();
+  ok(ctx.maybeShowNotifPrompt() === false, 'le report du nouvel état ne tient pas');
+});
+
 t('le report est par IDENTITÉ (le téléphone d\'une joueuse peut en servir deux)', () => {
   seed('player', 'pA', 'default');
   ctx.maybeShowNotifPrompt(); ctx.snoozeNotifPrompt();
@@ -311,6 +393,40 @@ t('un logout remet à zéro le repli du bandeau', () => {
   ctx.doLogout();
   ok(ctx._notifBannerHidden === false, 'la joueuse suivante hérite du repli');
   ok(ctx._notifBootChecked === false, 'le rappel ne sera jamais réévalué pour la suivante');
+});
+
+// =============================================================================
+// 6) LES POINTS DE DÉCLENCHEMENT (garde STRUCTURELLE sur index.html)
+// -----------------------------------------------------------------------------
+// L'autre moitié du bug v.110 : le rappel était bien écrit, mais appelé depuis
+// UN SEUL endroit — le bloc de boot, gardé par `role === 'player'` évalué à cet
+// instant. On ouvre pourtant l'app déconnectée ou en coach et on se connecte
+// ENSUITE : le garde était faux au boot, et se connecter ne rejouait rien.
+// Ces assertions portent sur le texte source parce que c'est du CÂBLAGE : le vm
+// ne peut pas prouver qu'un `visibilitychange` réel rappellera la fonction.
+// =============================================================================
+t('le rappel est rejoué APRÈS un login joueuse (pas seulement au boot)', () => {
+  const i = html.indexOf('_touchCurrentPlayerLastSeen(true)');
+  ok(i > 0, 'ancre de fin de login introuvable — test à réécrire');
+  const after = html.slice(i, i + 1400);
+  ok(/notifPromptAfterCheck\(\)/.test(after),
+    'se connecter en joueuse en cours de session ne redéclenche pas le rappel');
+});
+t('le rappel repasse au RETOUR AU PREMIER PLAN (retour des réglages du téléphone)', () => {
+  // lastIndexOf : le rappel de licence est appelé DEUX fois (boot + retour au
+  // premier plan). C'est le second qu'on vise.
+  const i = html.lastIndexOf('maybeShowLicencePrompt(); } catch (e) {}');
+  ok(i > 0, 'ancre visibilitychange introuvable — test à réécrire');
+  ok(/notifPromptAfterCheck\(\)/.test(html.slice(i, i + 700)),
+    'le rappel notifs manque dans le handler visibilitychange, alors que licence et gages y sont');
+});
+t('le boot mesure la souscription avant de décider', () => {
+  ok(/setTimeout\(\(\) => \{ try \{ notifPromptAfterCheck\(\); \} catch \(e\) \{\} \}, 3400\)/.test(html),
+    'le boot appelle encore maybeShowNotifPrompt sans mesurer la souscription');
+});
+t('plus aucun garde ne se fie à la seule permission', () => {
+  const src = ctx.notifNeedsAttention.toString() + ctx.maybeShowNotifPrompt.toString();
+  ok(/notifEffectiveState/.test(src), 'un garde lit encore checkNotifPermission() seul');
 });
 
 console.log('\n' + R.join('\n'));
