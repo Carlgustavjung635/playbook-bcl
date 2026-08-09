@@ -66,6 +66,7 @@ const ok = (c, m) => { if (!c) throw new Error(m || 'assertion'); };
 const S = ctx.state;
 ctx.render = () => {}; ctx.showToast = () => {}; ctx.notifyPush = () => {};
 ctx.openModal = h => { ctx.__lastModal = h; };
+ctx.closeModal = () => {};
 
 // Dates RELATIVES au jour du test : la fenêtre à couvrir est « le match vient
 // d'avoir lieu », elle glisse avec le calendrier. Aucun littéral de date ici.
@@ -206,7 +207,7 @@ t('sans aucun ressenti, la section coach reste visible et accessible', () => {
 t('avec des ressentis, la carte affiche les moyennes (comportement inchangé)', () => {
   asCoach([REV('pX', shift(-5)), REV('pY', shift(-2), { ambiance: 2, roleClarity: 2, playtime: 2, physique: 2 })]);
   const h = ctx.renderHomeCoach();
-  ok(h.includes('Moyenne équipe'), 'la carte de moyennes a disparu');
+  ok(h.includes('Ressenti actuel'), 'la carte de moyennes a disparu');
   ok(h.includes('2/2 joueuses'), 'le compteur ne suit pas les ressentis reçus');
   ok(!h.includes('Aucun ressenti cette saison'), 'l\'état vide s\'affiche alors qu\'il y a des ressentis');
 });
@@ -219,6 +220,129 @@ t('un ressenti HORS saison ne remonte pas — et l\'accès reste ouvert', () => 
 t('le tableau de bord coach n\'est JAMAIS exposé à la joueuse', () => {
   asPlayer([]);
   ok(!ctx.renderHomePlayer().includes('openTeamReviewsDashboard'), 'écran coach exposé sur l\'accueil joueuse');
+});
+
+// --- 4) AGRÉGATION : le DERNIER ressenti de chaque joueuse, et lui seul -------
+// « L'état d'esprit actuel de l'équipe » n'est pas la moyenne de tout ce qui a
+// été écrit depuis septembre : une joueuse qui répond dix fois pèserait dix
+// fois plus qu'une qui répond une fois, et un coup de mou de novembre tirerait
+// encore la moyenne en avril. Une seule ligne par joueuse : la plus récente.
+t('deux entrées d\'une même joueuse : seule la dernière compte', () => {
+  asCoach([
+    REV('pX', shift(-30), { ambiance: 1, roleClarity: 1, playtime: 1, physique: 1 }),
+    REV('pX', shift(-2), { id: 'r-pX-2', ambiance: 5, roleClarity: 5, playtime: 5, physique: 5 }),
+  ]);
+  const latest = Object.values(ctx.latestTeamReviewByPlayer(ctx.activeTeamReviews()));
+  ok(latest.length === 1, 'l\'historique est recompté dans l\'agrégation');
+  ok(latest[0].ambiance === 5, 'ce n\'est pas la dernière entrée qui est retenue');
+  const h = ctx.renderHomeCoach();
+  ok(h.includes('5.0'), 'la moyenne cumule l\'ancienne entrée au lieu de la remplacer');
+  ok(h.includes('1/2 joueuse'), 'le compteur compte les entrées, pas les joueuses');
+});
+t('à date égale, c\'est la saisie la plus récente qui gagne', () => {
+  const d = shift(-4);
+  asCoach([
+    REV('pX', d, { ambiance: 1, updatedAt: 1000 }),
+    REV('pX', d, { id: 'r-pX-2', ambiance: 5, updatedAt: 2000 }),
+  ]);
+  const latest = Object.values(ctx.latestTeamReviewByPlayer(ctx.activeTeamReviews()));
+  ok(latest.length === 1 && latest[0].ambiance === 5, 'départage par updatedAt cassé');
+});
+t('la date PUBLIÉE prime sur l\'horodatage technique', () => {
+  // Une vieille entrée resynchronisée porte un updatedAt récent : elle ne doit
+  // pas pour autant redevenir « le ressenti actuel » de la joueuse.
+  asCoach([
+    REV('pX', shift(-2), { ambiance: 5, updatedAt: 1000 }),
+    REV('pX', shift(-90), { id: 'r-pX-old', ambiance: 1, updatedAt: 9e12 }),
+  ]);
+  const latest = Object.values(ctx.latestTeamReviewByPlayer(ctx.activeTeamReviews()));
+  ok(latest.length === 1 && latest[0].ambiance === 5, 'une vieille entrée resynchronisée a repris la main');
+});
+t('l\'historique par joueuse garde TOUTES les entrées', () => {
+  asCoach([REV('pX', shift(-30)), REV('pX', shift(-2), { id: 'r-pX-2' })]);
+  ctx.openTeamReviewHistory('pX');
+  ok(/2 entrées/.test(ctx.__lastModal), 'l\'historique a perdu les entrées précédentes');
+  ok(ctx.__lastModal.includes('actuel'), 'la plus récente n\'est pas repérable');
+});
+
+// --- 5) SUPPRESSION ADMIN (soft-delete, migration 20260811_001) --------------
+t('l\'admin supprime un ressenti : soft-delete horodaté et signé', () => {
+  asCoach([REV('pX', shift(-2))]);
+  ctx.deleteTeamReview('r-pX');
+  const r = S.teamReviews.find(x => x.id === 'r-pX');
+  ok(r, 'la ligne a été supprimée DUR : elle reviendra au prochain flush');
+  ok(r.deletedAt > 0, 'deletedAt non posé');
+  ok(r.deletedBy === 'admin', 'deletedBy ne trace pas le coach (audit)');
+  ok(ctx.activeTeamReviews().length === 0, 'le ressenti supprimé est toujours servi');
+});
+t('un ressenti supprimé ne compte dans AUCUNE moyenne', () => {
+  asCoach([
+    REV('pX', shift(-2), { ambiance: 5, roleClarity: 5, playtime: 5, physique: 5 }),
+    REV('pY', shift(-2), { id: 'r-pY', ambiance: 1, roleClarity: 1, playtime: 1, physique: 1 }),
+  ]);
+  ctx.deleteTeamReview('r-pY');
+  const h = ctx.renderHomeCoach();
+  ok(h.includes('5.0'), 'la moyenne compte encore le ressenti supprimé');
+  ok(h.includes('1/2 joueuse'), 'le compteur compte encore le ressenti supprimé');
+});
+t('supprimer la dernière entrée fait remonter la précédente', () => {
+  asCoach([
+    REV('pX', shift(-30), { ambiance: 1 }),
+    REV('pX', shift(-2), { id: 'r-pX-2', ambiance: 5 }),
+  ]);
+  ctx.deleteTeamReview('r-pX-2');
+  const latest = Object.values(ctx.latestTeamReviewByPlayer(ctx.activeTeamReviews()));
+  ok(latest.length === 1 && latest[0].ambiance === 1, 'la joueuse n\'a plus de ressenti courant');
+});
+t('un coach d\'équipe (non admin) ne peut pas supprimer', () => {
+  asCoach([REV('pX', shift(-2))]);
+  S.coaches = [{ id: 'c2', name: 'Coach E2', coachRole: 'coach', teams: ['e2'] }];
+  S.auth = { role: 'coach', coachId: 'c2' };
+  ctx.deleteTeamReview('r-pX');
+  ok(!S.teamReviews[0].deletedAt, 'un coach non-admin a pu supprimer un ressenti');
+});
+t('une joueuse ne peut pas supprimer, même en appelant la fonction', () => {
+  asCoach([REV('pX', shift(-2))]);
+  S.auth = { role: 'player', playerId: 'pX' };
+  ctx.deleteTeamReview('r-pX');
+  ok(!S.teamReviews[0].deletedAt, 'une joueuse a pu supprimer un ressenti');
+});
+t('le bouton 🗑 n\'est proposé qu\'à l\'admin', () => {
+  asCoach([REV('pX', shift(-2))]);
+  ctx.openTeamReviewsDashboard();
+  ok(ctx.__lastModal.includes('deleteTeamReview('), 'l\'admin n\'a pas de bouton de suppression');
+  S.coaches = [{ id: 'c2', name: 'Coach E2', coachRole: 'coach', teams: ['e1'] }];
+  S.auth = { role: 'coach', coachId: 'c2' };
+  ctx.openTeamReviewsDashboard();
+  ok(!ctx.__lastModal.includes('deleteTeamReview('), 'bouton de suppression exposé à un coach non-admin');
+});
+t('un ressenti supprimé disparaît de l\'historique ET du CTA joueuse', () => {
+  asCoach([REV('pX', shift(-2))]);
+  ctx.deleteTeamReview('r-pX');
+  ctx.openTeamReviewHistory('pX');
+  ok(/0 entrée/.test(ctx.__lastModal), 'le ressenti supprimé reste dans l\'historique');
+  S.auth = { role: 'player', playerId: 'pX' };
+  const h = ctx.renderHomePlayer();
+  ok(h.includes('Confidentiel'), 'le CTA joueuse annonce encore une dernière entrée supprimée');
+});
+t('la sync porte deleted_at / deleted_by dans les DEUX sens', () => {
+  // Garde STATIQUE : l'entité PbSync vit dans le bloc <script type="module">,
+  // que ce harnais ne charge pas (il ne concatène que les <script> classiques).
+  // Sans cette vérification, la suppression resterait locale à l'appareil et
+  // le ressenti réapparaîtrait chez tout le monde — sans qu'aucun test ne bronche.
+  const a = html.indexOf("key: 'teamReviews'");
+  const b = html.indexOf("key: 'playerMatchFeedback'");
+  ok(a > 0 && b > a, 'entité teamReviews introuvable — test à réajuster');
+  const src = html.slice(a, b);
+  ok(/deleted_at:\s*r\.deletedAt/.test(src), 'deleted_at n\'est pas poussé au serveur (dump)');
+  ok(/deleted_by:\s*r\.deletedBy/.test(src), 'deleted_by n\'est pas poussé au serveur (dump)');
+  ok(/deletedAt:\s*r\.deleted_at/.test(src), 'deleted_at est perdu au retour du serveur (apply)');
+  ok(/deletedBy:\s*r\.deleted_by/.test(src), 'deleted_by est perdu au retour du serveur (apply)');
+});
+t('la migration soft-delete est versionnée dans le repo', () => {
+  const sql = fs.readFileSync('supabase/migrations/20260811_001_team_reviews_soft_delete.sql', 'utf8');
+  ok(/add column if not exists deleted_at/.test(sql), 'colonne deleted_at absente de la migration');
+  ok(/add column if not exists deleted_by/.test(sql), 'colonne deleted_by absente de la migration');
 });
 
 R.forEach(l => console.log('  ' + l));

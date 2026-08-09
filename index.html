@@ -2750,6 +2750,16 @@
     border-radius: 10px;
     border-left: 3px solid var(--orange);
   }
+  /* Retrait d'un ressenti par l'admin : volontairement discret (action rare et
+     grave, on ne l'invite pas), mais avec la cible tactile pleine de .btn-icon
+     — sur mobile la carte entière est cliquable, ce bouton doit rester
+     atteignable sans zoom et ne jamais se comprimer dans la ligne flex. */
+  .btn-icon.danger {
+    background: transparent;
+    color: var(--red);
+    border-color: var(--red);
+    flex: 0 0 auto;
+  }
 
   /* Ressenti général équipe */
   /* Panneau 5 sur le terrain (live tracker) */
@@ -3808,7 +3818,10 @@ window.PbStore = {
   },
   async listMyTeamReviews(playerId) {
     if (!Pb.user) return [];
-    const { data } = await sb.from('team_reviews').select('*').eq('player_id', playerId).order('date', { ascending: false });
+    // is('deleted_at', null) : un ressenti retiré par l'admin n'est plus servi
+    // par ce chemin non plus (migration 20260811_001).
+    const { data } = await sb.from('team_reviews').select('*').eq('player_id', playerId)
+      .is('deleted_at', null).order('date', { ascending: false });
     return data || [];
   },
 
@@ -4707,11 +4720,16 @@ const ENTITIES = [
     // dashboard coach se MAJ live quand une joueuse soumet (avant : team_reviews
     // n'était dans NI ENTITIES NI realtime → reload obligatoire côté coach).
     key: 'teamReviews', table: 'team_reviews', pk: 'id', realtime: true, auth: 'anon',
+    // deleted_at / deleted_by : suppression DOUCE par l'admin (migration
+    // 20260811_001). Un DELETE dur ne tiendrait pas — le premier appareil dont
+    // le localStorage contient encore la ligne la repousserait au flush.
     dump: (state) => Object.fromEntries((state.teamReviews || []).map(r => [r.id, {
       id: r.id, player_id: r.pid, date: r.date,
       ambiance: r.ambiance ?? null, role_clarity: r.roleClarity ?? null,
       playtime: r.playtime ?? null, physique: r.physique ?? null,
-      comment: r.comment || null
+      comment: r.comment || null,
+      deleted_at: r.deletedAt ? new Date(r.deletedAt).toISOString() : null,
+      deleted_by: r.deletedBy || null
     }])),
     apply: (state, rows) => {
       state.teamReviews = rows.map(r => ({
@@ -4719,6 +4737,8 @@ const ENTITIES = [
         ambiance: r.ambiance, roleClarity: r.role_clarity,
         playtime: r.playtime, physique: r.physique,
         comment: r.comment || '',
+        deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null,
+        deletedBy: r.deleted_by || null,
         updatedAt: r.updated_at ? Date.parse(r.updated_at) : Date.now()
       }));
     }
@@ -7731,18 +7751,55 @@ function challengePeriodShortLabel(period) {
   return 'Saison';
 }
 
+// Ressentis équipe VIVANTS : un ressenti supprimé par l'admin (soft-delete,
+// migration 20260811_001) n'existe plus pour l'application — ni affiché, ni
+// compté dans une moyenne, ni dans un historique. UN SEUL point de passage :
+// toute lecture de state.teamReviews doit venir d'ici, sinon une vue oubliée
+// ressusciterait un ressenti censé être retiré.
+function activeTeamReviews() {
+  return (state.teamReviews || []).filter(r => r && !r.deletedAt);
+}
+
 // Ressentis équipe de la saison courante. teamReviews n'a PAS de season_id en
 // base → on filtre par plage de dates [season.startDate, season.endDate] (option
 // retenue : zéro migration). r.date est une chaîne ISO YYYY-MM-DD (cf.
 // saveTeamReview) → comparaison lexicographique fiable. Fallback rétrocompat :
 // pas de saison définie (ou pas de date de début) → on renvoie tout.
 function currentSeasonTeamReviews() {
-  const all = state.teamReviews || [];
+  const all = activeTeamReviews();
   const season = getCurrentSeason();
   if (!season || !season.startDate) return all;
   const start = season.startDate;
   const end = season.endDate || '9999-12-31';
   return all.filter(r => r.date && r.date >= start && r.date <= end);
+}
+
+// LE DERNIER RESSENTI DE CHAQUE JOUEUSE, et lui seul.
+// Règle produit : « l'état d'esprit actuel de l'équipe », ce n'est pas la
+// moyenne de tout ce qui a été écrit depuis septembre — une joueuse qui répond
+// dix fois pèserait dix fois plus qu'une qui répond une fois, et un coup de
+// mou de novembre continuerait de tirer la moyenne vers le bas en avril.
+// On ne retient donc QU'UNE ligne par joueuse : la plus récente.
+// Tri : `date` d'abord (la date de publication, celle que la joueuse voit),
+// `updatedAt` en départage si deux entrées portent la même date. Les entrées
+// précédentes ne disparaissent pas pour autant : elles restent consultables
+// dans l'historique par joueuse (openTeamReviewHistory).
+// `opts.playerIds` (Set) restreint à un effectif — typiquement la saison.
+function latestTeamReviewByPlayer(reviews, opts) {
+  const o = opts || {};
+  const out = {};
+  (reviews || []).forEach(r => {
+    if (!r || r.deletedAt) return;
+    if (o.playerIds && !o.playerIds.has(r.pid)) return;
+    const cur = out[r.pid];
+    if (!cur || _teamReviewIsNewer(r, cur)) out[r.pid] = r;
+  });
+  return out;
+}
+function _teamReviewIsNewer(a, b) {
+  const da = a.date || '', db = b.date || '';
+  if (da !== db) return da > db;
+  return (a.updatedAt || 0) > (b.updatedAt || 0);
 }
 
 // Helper court : joueuses de la saison courante. Fallback rétrocompat sur
@@ -11414,12 +11471,9 @@ function renderHomeCoach() {
               </div>
             </div>
           `;
-          // Dernière par joueuse
-          const latestByPlayer = {};
-          reviews.forEach(r => {
-            if (!latestByPlayer[r.pid] || (r.updatedAt || 0) > (latestByPlayer[r.pid].updatedAt || 0)) latestByPlayer[r.pid] = r;
-          });
-          const latest = Object.values(latestByPlayer);
+          // Dernière par joueuse UNIQUEMENT (cf. latestTeamReviewByPlayer) :
+          // « l'état d'esprit actuel » ne cumule pas l'historique.
+          const latest = Object.values(latestTeamReviewByPlayer(reviews));
           // Moyennes (null-safe : un champ sans valeur → avg = null pour ce champ)
           const avg = {};
           TEAM_REVIEW_FIELDS.forEach(f => {
@@ -11441,7 +11495,7 @@ function renderHomeCoach() {
             <div style="padding:0 18px;margin-bottom:18px">
               <div onclick="openTeamReviewsDashboard()" style="padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer">
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-                  <div style="font-family:'JetBrains Mono';font-size:10px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em">Moyenne équipe</div>
+                  <div style="font-family:'JetBrains Mono';font-size:10px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em">Ressenti actuel · dernier de chacune</div>
                   <div style="font-family:'Anton';font-size:28px;color:${color};line-height:1">${overallAvg == null ? '—' : overallAvg.toFixed(1)}<span style="color:var(--ink-4);font-size:14px">/5</span></div>
                 </div>
                 <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">
@@ -11849,7 +11903,10 @@ function ffbbPlayerEnsureData() {
 // utilisatrice : relocaliser depuis Accueil vers Forme, où il prend tout
 // son sens (à côté du ressenti physique / mental).
 function teamReviewCta(p) {
-  const myReviews = (state.teamReviews || []).filter(r => r.pid === p.id);
+  // activeTeamReviews : un ressenti retiré par l'admin ne doit pas continuer
+  // d'afficher « Dernière : <date> » à la joueuse.
+  const myReviews = activeTeamReviews().filter(r => r.pid === p.id)
+    .sort((a, b) => _teamReviewIsNewer(a, b) ? 1 : -1);
   const last = myReviews.length > 0 ? myReviews[myReviews.length - 1] : null;
   return `
     <div style="padding:0 18px;margin-bottom:18px">
@@ -34941,7 +34998,9 @@ function saveTeamReview() {
   // Dedupe : une seule entrée par (player, date). Si la joueuse soumet
   // 2× le même jour, on remplace son entrée existante au lieu d'empiler.
   // Avant : push() systématique → state grossit + sync upsert PK conflict.
-  const existingIdx = state.teamReviews.findIndex(x => x.pid === r.pid && x.date === today);
+  // On ignore les entrées supprimées : réutiliser l'id d'un ressenti retiré par
+  // l'admin le ressusciterait. La nouvelle saisie repart sur un id neuf.
+  const existingIdx = state.teamReviews.findIndex(x => x.pid === r.pid && x.date === today && !x.deletedAt);
   if (existingIdx >= 0) {
     review.id = state.teamReviews[existingIdx].id; // garder l'ID pour upsert idempotent
     state.teamReviews[existingIdx] = review;
@@ -34963,7 +35022,9 @@ function saveTeamReview() {
 // ============================================================
 
 function openTeamReviewsDashboard() {
-  const reviews = state.teamReviews || [];
+  // activeTeamReviews() : un ressenti supprimé par l'admin n'est plus ni
+  // affiché, ni compté, ni consultable dans l'historique.
+  const reviews = activeTeamReviews();
 
   // SAISON : on scope l'effectif à la saison courante (denominator joueuses,
   // section "pas encore donné leur ressenti"). Les reviews elles-mêmes ne
@@ -34972,17 +35033,12 @@ function openTeamReviewsDashboard() {
   const _seasonPool = currentSeasonPlayers();
   const _seasonIds = new Set(_seasonPool.map(p => p.id));
 
-  // Dernière review par joueuse (filtrée saison)
-  const latestByPlayer = {};
-  reviews.forEach(r => {
-    if (!_seasonIds.has(r.pid)) return; // ignore joueuses hors saison
-    if (!latestByPlayer[r.pid] || r.updatedAt > latestByPlayer[r.pid].updatedAt) {
-      latestByPlayer[r.pid] = r;
-    }
-  });
+  // Dernière review par joueuse, et ELLE SEULE (cf. latestTeamReviewByPlayer).
+  const latestByPlayer = latestTeamReviewByPlayer(reviews, { playerIds: _seasonIds });
 
   // Moyennes globales sur la dernière review de chaque joueuse
   const latest = Object.values(latestByPlayer);
+  const canDelete = isAdminCoach();
   const avg = {};
   TEAM_REVIEW_FIELDS.forEach(f => {
     const vals = latest.map(r => r[f.key]).filter(v => v != null);
@@ -35009,8 +35065,8 @@ function openTeamReviewsDashboard() {
           <div class="empty-desc">Les joueuses peuvent en envoyer depuis leur Home</div>
         </div>
       ` : `
-        <!-- Moyennes équipe -->
-        <div class="eyebrow-muted mb-2">Moyennes équipe · dernière entrée de chaque joueuse</div>
+        <!-- Ressenti ACTUEL : une seule entrée par joueuse, la plus récente -->
+        <div class="eyebrow-muted mb-2">Ressenti actuel équipe · dernier de chaque joueuse</div>
         <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:18px">
           ${TEAM_REVIEW_FIELDS.map(f => {
             const v = avg[f.key];
@@ -35036,7 +35092,7 @@ function openTeamReviewsDashboard() {
         <!-- Détail par joueuse -->
         <div class="eyebrow-muted mb-2" style="margin-top:14px">Détail par joueuse</div>
         <div style="display:flex;flex-direction:column;gap:8px">
-          ${latest.sort((a,b)=>b.updatedAt-a.updatedAt).map(r => {
+          ${latest.sort((a,b) => _teamReviewIsNewer(a,b) ? -1 : 1).map(r => {
             const p = state.players.find(x => x.id === r.pid);
             if (!p) return '';
             const histCount = reviews.filter(x => x.pid === r.pid).length;
@@ -35048,6 +35104,7 @@ function openTeamReviewsDashboard() {
                     <div style="font-family:'Anton';font-size:13px;text-transform:uppercase">#${p.num} ${esc(p.name)}</div>
                     <div style="font-size:9px;color:var(--ink-4);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${formatDate(r.date)}${histCount>1?` · ${histCount} entrées`:''}</div>
                   </div>
+                  ${canDelete ? `<button class="btn-icon danger" onclick="event.stopPropagation();deleteTeamReview('${r.id}')" aria-label="Supprimer le ressenti de ${esc(p.name)}">🗑</button>` : ''}
                   <div style="font-size:14px;color:var(--ink-3)">›</div>
                 </div>
                 <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-bottom:${r.comment?'10px':'0'}">
@@ -35084,10 +35141,16 @@ function openTeamReviewsDashboard() {
   `);
 }
 
+// HISTORIQUE d'une joueuse : TOUTES ses entrées non supprimées, dans le temps.
+// C'est le pendant de la règle « dernier ressenti seulement » : les entrées
+// précédentes ne comptent plus dans les moyennes, mais elles ne sont pas
+// perdues pour autant — le coach les relit ici.
 function openTeamReviewHistory(pid) {
   const p = state.players.find(x => x.id === pid);
   if (!p) return;
-  const reviews = (state.teamReviews || []).filter(r => r.pid === pid).sort((a,b) => b.updatedAt - a.updatedAt);
+  const reviews = activeTeamReviews().filter(r => r.pid === pid)
+    .sort((a,b) => _teamReviewIsNewer(a,b) ? -1 : 1);
+  const canDelete = isAdminCoach();
 
   openModal(`
     <div class="modal-header">
@@ -35099,10 +35162,13 @@ function openTeamReviewHistory(pid) {
     </div>
     <div class="modal-body">
       <div style="display:flex;flex-direction:column;gap:10px">
-        ${reviews.map(r => `
+        ${reviews.map((r, i) => `
           <div class="review-card">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-              <div style="font-family:'JetBrains Mono';font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:var(--ink-3)">${formatDate(r.date, 'long')}</div>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">
+              <div style="font-family:'JetBrains Mono';font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:var(--ink-3)">
+                ${formatDate(r.date, 'long')}${i === 0 ? ` · <span style="color:var(--orange)">actuel</span>` : ''}
+              </div>
+              ${canDelete ? `<button class="btn-icon danger" onclick="deleteTeamReview('${r.id}')" aria-label="Supprimer ce ressenti du ${formatDate(r.date, 'long')}">🗑</button>` : ''}
             </div>
             <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:${r.comment?'10px':'0'}">
               ${TEAM_REVIEW_FIELDS.map(f => {
@@ -35127,6 +35193,42 @@ function openTeamReviewHistory(pid) {
       </div>
     </div>
   `);
+}
+
+// RETRAIT D'UN RESSENTI PAR L'ADMIN (test, hors sujet, propos déplacés).
+//
+// Réservé à l'admin_coach — PAS `_denyIfScopedCoach()` : ce garde ne bloque que
+// les coachs d'équipe, et laisserait passer un appel fait depuis une session
+// joueuse (currentCoach() y est null, donc isScopedCoach() est faux).
+// isAdminCoach() exige au contraire un coach admin identifié.
+//
+// SOFT-DELETE, jamais un DELETE dur : `deletedAt` + `deletedBy` (id du coach,
+// pour dire qui a retiré la parole d'une joueuse et quand). Un DELETE dur ne
+// tiendrait pas de toute façon — le premier appareil dont le localStorage
+// contient encore la ligne la repousserait au flush suivant (cf. playbook sync).
+function deleteTeamReview(id) {
+  if (!isAdminCoach()) { try { showToast('🔒 Action réservée à l\'admin'); } catch (e) {} return; }
+  const r = (state.teamReviews || []).find(x => x.id === id);
+  if (!r || r.deletedAt) return;
+  const p = (state.players || []).find(x => x.id === r.pid);
+  const who = p ? p.name : 'cette joueuse';
+  const msg = `Supprimer ce ressenti de ${who} (${formatDate(r.date, 'long')}) ?\n\n`
+    + `Il disparaîtra de l'app — moyennes et historique compris — et ne sera plus récupérable depuis l'app.\n\n`
+    + `Les autres ressentis de ${who} sont conservés.`;
+  let ok = false; try { ok = confirm(msg); } catch (e) { ok = true; }
+  if (!ok) return;
+  r.deletedAt = Date.now();
+  r.deletedBy = (currentCoach() || {}).id || null;
+  r.updatedAt = Date.now();   // LWW : sans ça, un autre appareil réécrirait la ligne
+  persist();
+  if (window.PbSync) PbSync.flushNow(state).catch(() => {});
+  // Rouvrir l'écran d'où l'on vient : l'historique s'il ne reste rien à y voir
+  // renvoie au tableau de bord, pour ne jamais laisser une modale vide.
+  closeModal();
+  const rest = activeTeamReviews().filter(x => x.pid === r.pid).length;
+  setTimeout(() => { rest > 0 ? openTeamReviewHistory(r.pid) : openTeamReviewsDashboard(); }, 50);
+  render();
+  try { showToast('🗑️ Ressenti supprimé'); } catch (e) {}
 }
 
 // ============================================================
@@ -41626,7 +41728,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-10.115';
+const APP_VERSION = '2026-08-11.116';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
