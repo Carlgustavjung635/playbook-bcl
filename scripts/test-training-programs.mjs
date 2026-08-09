@@ -14,6 +14,9 @@ const TRAINING_DEFAULT_CONFIG = {
   points: { min: 10, med: 20, ultra: 30 },
   squad_multiplier: 2,
   post_bonus: 10,
+  // v.115 — bonus course (cf. scripts/test-training-distance-bonus.mjs)
+  distance_bonus: 20,
+  improvement_bonus: 40,
   remind_hour: 9
 };
 const TRAINING_LEVELS = ['min', 'med', 'ultra'];
@@ -39,15 +42,20 @@ function _trainingConfig(program) {
     },
     squad_multiplier: num(raw.squad_multiplier, TRAINING_DEFAULT_CONFIG.squad_multiplier),
     post_bonus: num(raw.post_bonus, TRAINING_DEFAULT_CONFIG.post_bonus),
+    distance_bonus: num(raw.distance_bonus, TRAINING_DEFAULT_CONFIG.distance_bonus),
+    improvement_bonus: num(raw.improvement_bonus, TRAINING_DEFAULT_CONFIG.improvement_bonus),
     remind_hour: num(raw.remind_hour, TRAINING_DEFAULT_CONFIG.remind_hour)
   };
 }
-function _computePoints({ level, hasSquad, hasPost, config } = {}) {
+function _computePoints({ level, hasSquad, hasPost, hasDistance, hasImprovement, config } = {}) {
   const cfg = _trainingConfig({ scoringConfig: config || {} });
   const lvl = TRAINING_LEVELS.includes(level) ? level : 'min';
   const base = cfg.points[lvl];
-  const total = (base * (hasSquad ? cfg.squad_multiplier : 1)) + (hasPost ? cfg.post_bonus : 0);
-  return { base, total: Math.round(total) };
+  const distance = hasDistance ? cfg.distance_bonus : 0;
+  const improvement = hasImprovement ? cfg.improvement_bonus : 0;
+  const total = (base * (hasSquad ? cfg.squad_multiplier : 1))
+    + (hasPost ? cfg.post_bonus : 0) + distance + improvement;
+  return { base, distance, improvement, total: Math.round(total) };
 }
 function _trainingDayStartMs(dateStr) {
   if (!dateStr || typeof dateStr !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return null;

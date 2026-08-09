@@ -22622,6 +22622,15 @@ const TRAINING_DEFAULT_CONFIG = {
   points: { min: 10, med: 20, ultra: 30 },
   squad_multiplier: 2,
   post_bonus: 10,
+  // BONUS COURSE (v.115) — AUCUNE MIGRATION : `scoring_config` est un jsonb et
+  // _trainingConfig retombe sur ce défaut clé par clé, donc les programmes
+  // publiés avant aujourd'hui héritent de 20/40 sans qu'on touche à la base.
+  //   • distance_bonus    : elle a SAISI sa distance (peu importe la valeur).
+  //   • improvement_bonus : elle a fait MIEUX que la fois d'avant sur la même
+  //     séance récurrente (lundi vs lundi). Progressif, donc jamais acquis.
+  // Le coach peut mettre 0 pour les désactiver programme par programme.
+  distance_bonus: 20,
+  improvement_bonus: 40,
   remind_hour: 9
 };
 const TRAINING_LEVELS = ['min', 'med', 'ultra'];
@@ -22675,23 +22684,133 @@ function _trainingConfig(program) {
     },
     squad_multiplier: num(raw.squad_multiplier, TRAINING_DEFAULT_CONFIG.squad_multiplier),
     post_bonus: num(raw.post_bonus, TRAINING_DEFAULT_CONFIG.post_bonus),
+    distance_bonus: num(raw.distance_bonus, TRAINING_DEFAULT_CONFIG.distance_bonus),
+    improvement_bonus: num(raw.improvement_bonus, TRAINING_DEFAULT_CONFIG.improvement_bonus),
     remind_hour: num(raw.remind_hour, TRAINING_DEFAULT_CONFIG.remind_hour)
   };
 }
 
 // FORMULE FIGÉE (ne pas « améliorer » sans reprise de l'historique) :
 //   total = (base_points × squad_multiplier) + post_bonus
-// Le multiplicateur squad porte sur la BASE SEULE ; le bonus post est additif et
-// n'est jamais multiplié. Ex : med + squad + post = 20×2 + 10 = 50.
+//                                            + distance_bonus + improvement_bonus
+// Le multiplicateur squad porte sur la BASE SEULE ; TOUS les bonus sont additifs
+// et ne sont jamais multipliés. Ex : med + squad + post = 20×2 + 10 = 50, et le
+// même exercice avec distance saisie et record battu = 50 + 20 + 40 = 110.
 // Le total est arrondi (Math.round) : un multiplicateur décimal (1.5) doit rendre
 // un entier — points_total est une colonne `integer`, un float y serait tronqué
 // par le driver, donc on arrondit ici, explicitement.
-function _computePoints({ level, hasSquad, hasPost, config } = {}) {
+//
+// RÉTROCOMPATIBILITÉ (v.115) : `hasDistance` et `hasImprovement` sont OPTIONNELS
+// et faux par défaut. Tout appelant écrit avant ce commit rend donc EXACTEMENT
+// le même total qu'avant — c'est ce qui garantit qu'aucune validation
+// historique ne change de valeur, y compris quand elle est relue ou recalculée.
+function _computePoints({ level, hasSquad, hasPost, hasDistance, hasImprovement, config } = {}) {
   const cfg = _trainingConfig({ scoringConfig: config || {} });
   const lvl = TRAINING_LEVELS.includes(level) ? level : 'min';
   const base = cfg.points[lvl];
-  const total = (base * (hasSquad ? cfg.squad_multiplier : 1)) + (hasPost ? cfg.post_bonus : 0);
-  return { base, total: Math.round(total) };
+  const distance = hasDistance ? cfg.distance_bonus : 0;
+  const improvement = hasImprovement ? cfg.improvement_bonus : 0;
+  const total = (base * (hasSquad ? cfg.squad_multiplier : 1))
+    + (hasPost ? cfg.post_bonus : 0) + distance + improvement;
+  return { base, distance, improvement, total: Math.round(total) };
+}
+
+// Baseline de progression : la distance de la validation PRÉCÉDENTE de la même
+// joueuse sur la MÊME séance récurrente. `sessionId` porte à lui seul ce
+// « même type de séance » : une session appartient à UN programme et à UN jour
+// de la semaine (day_of_week), donc comparer à session_id égal, c'est comparer
+// lundi à lundi — jamais lundi à mardi, dont les formats de course diffèrent.
+//
+// POURQUOI ON SAUTE LES SÉANCES SANS DISTANCE plutôt que de prendre la
+// précédente au sens strict : une séance validée sans saisir de km ne dit RIEN
+// de sa forme. La traiter comme une baseline nulle offrirait le bonus à
+// n'importe quel chiffre la fois suivante ; la traiter comme un mur (aucune
+// comparaison possible) punirait un simple oubli. On remonte donc au dernier
+// repère RÉEL. `null` = elle n'en a aucun → aucun bonus de progression, c'est
+// sa séance de référence (cf. cas « première séance de ce type »).
+function _trainingPrevDistanceKm(sessionId, playerId, datePlanned, excludeId) {
+  if (!sessionId || !playerId || typeof datePlanned !== 'string' || !datePlanned) return null;
+  const prev = (state.trainingCompletions || []).filter(c =>
+    !c.deletedAt && c.sessionId === sessionId && c.playerId === playerId &&
+    c.id !== excludeId &&
+    typeof c.datePlanned === 'string' &&
+    // Comparaison lexicographique : les dates sont en 'YYYY-MM-DD', format dans
+    // lequel l'ordre alphabétique EST l'ordre chronologique.
+    c.datePlanned < datePlanned &&
+    Number.isFinite(Number(c.runningDistanceKm)) && Number(c.runningDistanceKm) > 0
+  ).sort((a, b) => (a.datePlanned < b.datePlanned ? 1 : (a.datePlanned > b.datePlanned ? -1 : 0)));
+  return prev.length ? Number(prev[0].runningDistanceKm) : null;
+}
+
+// A-t-elle battu son repère précédent sur cette séance ? Strictement supérieur :
+// égaler sa distance n'est pas progresser.
+function _trainingIsImprovement(sessionId, playerId, datePlanned, km, excludeId) {
+  const n = Number(km);
+  if (!Number.isFinite(n) || n <= 0) return false;
+  const prev = _trainingPrevDistanceKm(sessionId, playerId, datePlanned, excludeId);
+  return prev !== null && n > prev;
+}
+
+// Décomposition d'une validation DÉJÀ ENREGISTRÉE, pour l'afficher au coach et à
+// la joueuse.
+//
+// POURQUOI ON RECONSTRUIT AU LIEU DE STOCKER DEUX COLONNES DE PLUS : le total
+// est figé dans la ligne (points_total), et deux colonnes supplémentaires
+// exigeraient une migration appliquée AVANT le déploiement — sans quoi
+// `_flushEntity` échouerait sur toute la table training_completions et les
+// validations resteraient bloquées en local, en silence (un simple
+// console.warn). On dérive donc l'écart entre le total figé et la partie
+// historique de la formule.
+//
+// INVARIANT TESTÉ : base×squad + post + distance + improvement + adjust
+// === points_total, TOUJOURS. Une validation d'avant v.115 a un écart nul et
+// n'affiche donc AUCUN bonus course — c'est très exactement la non-rétroactivité
+// demandée, obtenue sans dater les lignes. Et un total forcé à la main par le
+// coach tombe dans `adjust` au lieu d'inventer un bonus qui n'a pas été donné.
+function _trainingBreakdown(c, program) {
+  const cfg = _trainingConfig(program);
+  const base = Number(c.basePoints) || 0;
+  const squadOn = !!c.squadTeammateId;
+  // Post compté sur photo OU message : c'est la règle du recalcul coach
+  // (_tceComputed), plus permissive que la validation joueuse qui exige les deux.
+  const postOn = !!(c.postPhotoUrl || (c.postMessage || '').trim());
+  const legacy = Math.round(base * (squadOn ? cfg.squad_multiplier : 1) + (postOn ? cfg.post_bonus : 0));
+  const total = Number(c.pointsTotal) || 0;
+  const gap = total - legacy;
+  const km = Number.isFinite(Number(c.runningDistanceKm)) ? Number(c.runningDistanceKm) : null;
+  const hasKm = !!(km && km > 0);
+  const prevKm = _trainingPrevDistanceKm(c.sessionId, c.playerId, c.datePlanned, c.id);
+  const improved = !!(hasKm && prevKm !== null && km > prevKm);
+  // Hypothèse principale : ce que le barème ACTUEL attribuerait aujourd'hui.
+  let distance = hasKm ? cfg.distance_bonus : 0;
+  let improvement = improved ? cfg.improvement_bonus : 0;
+  let adjust = 0;
+  if (distance + improvement !== gap) {
+    // L'hypothèse ne tombe pas juste (barème changé depuis, validation
+    // antérieure à v.115, séance de référence supprimée…). On cherche la
+    // combinaison qui explique l'écart AU CENTIME, et on ne se rabat sur
+    // « ajustement » que si aucune ne colle.
+    const hit = [[distance, improvement], [distance, 0], [0, improvement], [0, 0]]
+      .find(([d, i]) => d + i === gap);
+    if (hit) { distance = hit[0]; improvement = hit[1]; }
+    else { distance = 0; improvement = 0; adjust = gap; }
+  }
+  return {
+    base, squadMult: squadOn ? cfg.squad_multiplier : 1, squadOn,
+    post: postOn ? cfg.post_bonus : 0, postOn,
+    distance, improvement, adjust, total, km, prevKm
+  };
+}
+
+// Décomposition en une ligne lisible : « 20 × 2 + 10 + 20 + 40 = 90 ».
+function _trainingBreakdownLine(b) {
+  let s = String(b.base);
+  if (b.squadOn) s += ' × ' + b.squadMult;
+  if (b.post) s += ' + ' + b.post;
+  if (b.distance) s += ' + ' + b.distance;
+  if (b.improvement) s += ' + ' + b.improvement;
+  if (b.adjust) s += (b.adjust > 0 ? ' + ' : ' − ') + Math.abs(b.adjust);
+  return s + ' = ' + b.total;
 }
 
 // Minuit UTC du jour 'YYYY-MM-DD'. null si la date est absente/malformée : les
@@ -23284,6 +23403,9 @@ function _twScoringHtml() {
   const ex = _computePoints({ level: 'med', hasSquad: true, hasPost: true, config: c });
   const exMin = _computePoints({ level: 'min', config: c });
   const exUltra = _computePoints({ level: 'ultra', hasSquad: true, hasPost: true, config: c });
+  // Exemple « tout coché » : c'est le plafond réel du barème, le seul chiffre qui
+  // permet au coach de juger si ses bonus course pèsent trop lourd.
+  const exMax = _computePoints({ level: 'ultra', hasSquad: true, hasPost: true, hasDistance: true, hasImprovement: true, config: c });
   return `
     <div class="eyebrow-muted" style="margin-bottom:8px">Points par niveau de contrat</div>
     ${row('🟢 Minimum', 'points.min', c.points.min)}
@@ -23292,12 +23414,15 @@ function _twScoringHtml() {
     <div class="eyebrow-muted" style="margin:14px 0 8px">Bonus</div>
     ${row('👯 Multiplicateur squad', 'squad_multiplier', c.squad_multiplier, 'Multiplie les points du niveau (photo + coéquipière obligatoires).')}
     ${row('📸 Bonus post', 'post_bonus', c.post_bonus, 'S\'ajoute au total, sans être multiplié (photo + message obligatoires).')}
+    ${row('🏃 Bonus distance', 'distance_bonus', c.distance_bonus, 'Elle a saisi sa distance, quelle qu\'elle soit. 0 pour désactiver. N\'apparaît que sur les séances où tu demandes la distance (étape 3).')}
+    ${row('📈 Bonus progression', 'improvement_bonus', c.improvement_bonus, 'Elle a fait plus de km que la dernière fois sur CETTE séance (lundi vs lundi). Jamais acquis : il se rejoue à chaque séance. 0 pour désactiver.')}
     ${row('🔔 Heure du rappel', 'remind_hour', c.remind_hour, 'Notification quotidienne les jours actifs (0-23).')}
     <div style="margin-top:16px;padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:11px;color:var(--ink-2);line-height:1.7">
       <b>Exemples</b><br>
       Minimum seule → <b>${exMin.total} pts</b><br>
       Medium + squad + post → ${c.points.med}×${c.squad_multiplier} + ${c.post_bonus} = <b>${ex.total} pts</b><br>
-      Ultra + squad + post → ${c.points.ultra}×${c.squad_multiplier} + ${c.post_bonus} = <b>${exUltra.total} pts</b>
+      Ultra + squad + post → ${c.points.ultra}×${c.squad_multiplier} + ${c.post_bonus} = <b>${exUltra.total} pts</b><br>
+      Le même + distance + record battu → ${exUltra.total} + ${c.distance_bonus} + ${c.improvement_bonus} = <b>${exMax.total} pts</b> <span style="color:var(--ink-3)">(maximum)</span>
     </div>`;
 }
 
@@ -23421,10 +23546,11 @@ function _twBlockEditorHtml() {
       <label class="fld-label">Consignes (optionnel)</label>
       <textarea rows="3" placeholder="Dos droit, respiration…" onchange="_twBlockField('instructions',this.value)">${esc(b.instructions)}</textarea>
     </div>
-    <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--bg-3);border-radius:8px;cursor:pointer;margin-bottom:14px">
+    <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--bg-3);border-radius:8px;cursor:pointer;margin-bottom:4px">
       <input type="checkbox" ${b.track_distance ? 'checked' : ''} onchange="_twBlockTrack(this.checked)" style="width:20px;height:20px;flex:none">
       <span style="font-size:13px">📏 Demander la distance parcourue à la validation</span>
     </label>
+    <div style="font-size:10px;color:var(--ink-3);margin-bottom:14px;line-height:1.5">C'est ce réglage qui ouvre les bonus course (+${_tw().config.distance_bonus} distance, +${_tw().config.improvement_bonus} progression) sur cette séance. Sans lui, aucune distance n'est demandée et aucun bonus n'est jouable.</div>
     <div class="eyebrow-muted" style="margin-bottom:8px">Les 3 niveaux de contrat</div>
     <div style="font-size:10px;color:var(--ink-3);margin-bottom:8px;line-height:1.5">Laisse un niveau vide pour qu'il n'apparaisse pas chez la joueuse. Un drill lié affiche un bouton « Lancer » qui ouvre le drill en plein écran.</div>
     ${lvlRow('min', '🟢', 'Minimum')}
@@ -23457,6 +23583,7 @@ function _twPublishHtml() {
     ${line('Jours', esc(w.daysActive.map(d => TRAINING_DAY_LABELS[d]).join(', ') || '—'))}
     ${line('Séances prévues', dates.length)}
     ${line('Barème', `${w.config.points.min}/${w.config.points.med}/${w.config.points.ultra} · ×${w.config.squad_multiplier} · +${w.config.post_bonus}`)}
+    ${line('Bonus course', `🏃 +${w.config.distance_bonus} distance · 📈 +${w.config.improvement_bonus} progression`)}
     ${line('Rappel', w.config.remind_hour + 'h')}
     ${w.daysActive.map(d => {
       const s = w.sessions[d];
@@ -24216,6 +24343,9 @@ function renderCompletionsTimeline(comps, opts) {
     // porte la distance (ou son absence), sans quoi le badge laisserait croire
     // que la course a forcément été faite.
     const fmt = _completionRunFormat(c);
+    // Badge « record » : dérivé du total FIGÉ (cf. _trainingBreakdown), donc une
+    // séance d'avant v.115 n'en porte jamais, même si ses km montent.
+    const rowBd = _trainingBreakdown(c, activeTrainingPrograms().find(x => x.id === c.programId));
     const thumbs = [
       c.squadPhotoUrl ? { url: c.squadPhotoUrl, kind: 'squad' } : null,
       c.postPhotoUrl ? { url: c.postPhotoUrl, kind: 'post' } : null
@@ -24228,7 +24358,7 @@ function renderCompletionsTimeline(comps, opts) {
           <div style="font-size:12px;color:var(--ink-2);overflow-wrap:break-word">${esc((s && s.name) || 'Séance')}${fmt ? ` <span class="td-fmt-tag">${esc(fmt.label)}</span>` : ''}</div>
           <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px">${esc(day)} · ${lvlIcon} ${esc(TRAINING_LEVEL_LABEL[c.contractLevel] || '')}${esc(lateBadge)}</div>
           <div style="font-size:11px;color:var(--ink-3);margin-top:3px;overflow-wrap:break-word">
-            ${mate ? '👯 ' + esc(mate.name) + ' ' : ''}${Number.isFinite(c.runningDistanceKm) && c.runningDistanceKm > 0 ? '🏃 ' + c.runningDistanceKm + ' km ' : (fmt ? '<span style="opacity:.7">🏃 pas de distance</span> ' : '')}${c.postMessage ? '💬 ' : ''}${c.editedAt ? '✎ corrigée ' : ''}${c.coachNote ? '📣 ' : ''}${_coachNotePending(c) ? '<span style="color:var(--orange)">✍ mot non envoyé</span> ' : ''}
+            ${mate ? '👯 ' + esc(mate.name) + ' ' : ''}${Number.isFinite(c.runningDistanceKm) && c.runningDistanceKm > 0 ? '🏃 ' + c.runningDistanceKm + ' km ' : (fmt ? '<span style="opacity:.7">🏃 pas de distance</span> ' : '')}${rowBd.improvement ? '<span style="color:var(--green,#15803d)">📈 record </span>' : ''}${c.postMessage ? '💬 ' : ''}${c.editedAt ? '✎ corrigée ' : ''}${c.coachNote ? '📣 ' : ''}${_coachNotePending(c) ? '<span style="color:var(--orange)">✍ mot non envoyé</span> ' : ''}
           </div>
           ${thumbs.length ? `<div class="td-thumbs">
             ${thumbs.map(t => `<img class="td-thumb" src="${esc(t.url)}" loading="lazy" alt="">`).join('')}
@@ -24273,6 +24403,11 @@ function openTrainingCompletionDetail(id) {
   // liste de définitions, et la classe .td-kv l'empile sous 23em (sinon la colonne
   // de valeur tombe à ~90px et chaque date passe sur trois lignes).
   const line = (label, val) => val ? `<dl class="td-kv"><dt>${label}</dt><dd>${val}</dd></dl>` : '';
+  const bd = _trainingBreakdown(c, p);
+  const bdRow = (label, val) => `
+    <div style="display:flex;justify-content:space-between;gap:8px;font-size:11px;line-height:1.7;color:var(--ink-2)">
+      <span>${label}</span><span style="font-family:'JetBrains Mono';flex:none">${val}</span>
+    </div>`;
   openModal(`
     <div class="modal-header">
       <div>
@@ -24285,9 +24420,21 @@ function openTrainingCompletionDetail(id) {
       <div style="text-align:center;padding:12px;background:var(--bg-3);border-radius:10px;margin-bottom:14px">
         <div style="font-family:'Anton';font-size:34px;color:var(--orange);line-height:1">${c.pointsTotal || 0}</div>
         <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">points</div>
-        <div style="font-size:10px;color:var(--ink-3);margin-top:5px">
-          base ${c.basePoints || 0}${c.squadTeammateId ? ' × ' + cfg.squad_multiplier + ' (squad)' : ''}${c.postPhotoUrl ? ' + ' + cfg.post_bonus + ' (post)' : ''}
+        <div style="font-size:10px;color:var(--ink-3);margin-top:5px">${_trainingBreakdownLine(bd)}</div>
+      </div>
+
+      <!-- DÉCOMPOSITION — reconstruite depuis le total figé (cf. _trainingBreakdown) -->
+      <div style="border:1px solid var(--border-soft);border-radius:10px;padding:10px 12px;margin-bottom:14px">
+        ${bdRow(`${TRAINING_LEVEL_LABEL[c.contractLevel] || c.contractLevel} · base`, bd.base + ' pts')}
+        ${bd.squadOn ? bdRow('👯 En squad', '× ' + bd.squadMult) : ''}
+        ${bd.post ? bdRow('📸 Post', '+ ' + bd.post) : ''}
+        ${bd.distance ? bdRow('🏃 Distance renseignée' + (bd.km ? ` <span style="color:var(--ink-3)">(${bd.km} km)</span>` : ''), '+ ' + bd.distance) : ''}
+        ${bd.improvement ? bdRow('📈 Progression' + (bd.prevKm !== null ? ` <span style="color:var(--ink-3)">(avant : ${bd.prevKm} km)</span>` : ''), '+ ' + bd.improvement) : ''}
+        ${bd.adjust ? bdRow('✎ Ajustement coach', (bd.adjust > 0 ? '+ ' : '− ') + Math.abs(bd.adjust)) : ''}
+        <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;font-weight:700;border-top:1px solid var(--border-soft);margin-top:6px;padding-top:6px">
+          <span>Total</span><span style="font-family:'JetBrains Mono';flex:none">${bd.total} pts</span>
         </div>
+        ${(!bd.distance && !bd.improvement && bd.km) ? `<div style="font-size:10px;color:var(--ink-3);margin-top:7px;line-height:1.6">Validation antérieure aux bonus course (v.115) : son score d'origine est conservé tel quel.</div>` : ''}
       </div>
 
       ${line('Jour prévu', esc(formatDate(c.datePlanned, 'long')))}
@@ -24399,14 +24546,27 @@ function _tcePoints(k, v) { const e = _tce(); if (!e) return; e.points = Math.ma
 function _tceAuto() { const e = _tce(); if (!e) return; e.pointsTouched = false; renderEditCompletionModal(); }
 // Recalcul auto : squad compté dès qu'une coéquipière est désignée (cf. override
 // documenté ci-dessus), post compté dès qu'il y a une photo OU un message.
+//
+// BONUS COURSE SUR UNE VALIDATION ANCIENNE : le recalcul applique le barème
+// D'AUJOURD'HUI, bonus course compris. Corriger une séance d'avant v.115 peut
+// donc en relever le total — c'est voulu et ce n'est PAS une rétroactivité
+// silencieuse : rien ne bouge tant qu'un coach n'ouvre pas cette modale, l'écart
+// lui est affiché en toutes lettres (« 40 pts → 90 pts »), il peut forcer la
+// valeur d'origine, et la correction est tracée (updated_by / edited_at).
 function _tceComputed() {
-  const e = _tce(); if (!e) return { base: 0, total: 0 };
+  const e = _tce(); if (!e) return { base: 0, total: 0, distance: 0, improvement: 0 };
   const c = _trainingCompletionById(e.id);
   const p = c ? activeTrainingPrograms().find(x => x.id === c.programId) : null;
+  const km = Number(e.distanceKm);
+  const hasKm = Number.isFinite(km) && km > 0;
   return _computePoints({
     level: e.level,
     hasSquad: !!e.squadTeammateId,
     hasPost: !!(e.postPhotoUrl || (e.postMessage || '').trim()),
+    hasDistance: hasKm,
+    // Repère de progression pris sur les AUTRES validations (la ligne corrigée
+    // est exclue), sinon une séance se comparerait à elle-même.
+    hasImprovement: !!(c && _trainingIsImprovement(c.sessionId, c.playerId, c.datePlanned, km, c.id)),
     config: p ? p.scoringConfig : {}
   });
 }
@@ -24420,6 +24580,7 @@ function renderEditCompletionModal() {
   const s = (state.trainingSessions || []).find(x => x.id === c.sessionId);
   const cfg = _trainingConfig(p);
   const auto = _tceComputed();
+  const prevKm = _trainingPrevDistanceKm(c.sessionId, c.playerId, c.datePlanned, c.id);
   const shown = e.pointsTouched ? e.points : auto.total;
   const mates = _trainingPoolFor(p).filter(x => x.id !== c.playerId);
   openModal(`
@@ -24461,8 +24622,13 @@ function renderEditCompletionModal() {
         : `<div style="font-size:10px;color:var(--ink-3);margin-bottom:14px">Aucune photo de post.${c.postPhotoUrl ? ' <b>Sera retirée</b> à l\'enregistrement.' : ''}</div>`}
 
       <div class="fld">
-        <label class="fld-label">🏃 Distance (km)</label>
+        <label class="fld-label">🏃 Distance (km) <span style="color:var(--ink-3);text-transform:none;font-weight:400">(+${cfg.distance_bonus})</span></label>
         <input type="number" min="0" step="0.1" value="${esc(String(e.distanceKm))}" placeholder="5.2" onchange="_tceSet('distanceKm',this.value)">
+        <div style="font-size:10px;color:var(--ink-3);margin-top:3px;line-height:1.6">
+          ${prevKm !== null
+            ? `Repère sur cette séance : <b>${prevKm} km</b> → <b>+${cfg.improvement_bonus}</b> au-dessus.${auto.improvement ? ' <span style="color:var(--green,#15803d)">📈 dépassé</span>' : ''}`
+            : 'Aucune séance antérieure avec distance : pas de bonus progression possible.'}
+        </div>
       </div>
 
       <div class="fld">
@@ -24477,7 +24643,7 @@ function renderEditCompletionModal() {
           <div style="font-size:11px;color:var(--ink-3);flex:none">pts</div>
         </div>
         <div style="font-size:10px;color:var(--ink-3);line-height:1.5">
-          Barème actuel : ${auto.base}${e.squadTeammateId ? ' × ' + cfg.squad_multiplier : ''}${(e.postPhotoUrl || (e.postMessage || '').trim()) ? ' + ' + cfg.post_bonus : ''} = <b>${auto.total}</b> pts.
+          Barème actuel : ${auto.base}${e.squadTeammateId ? ' × ' + cfg.squad_multiplier : ''}${(e.postPhotoUrl || (e.postMessage || '').trim()) ? ' + ' + cfg.post_bonus : ''}${auto.distance ? ' + ' + auto.distance + ' (distance)' : ''}${auto.improvement ? ' + ' + auto.improvement + ' (progression)' : ''} = <b>${auto.total}</b> pts.
           ${e.pointsTouched
             ? ` Valeur forcée. <a href="javascript:void(0)" onclick="_tceAuto()" style="color:var(--orange)">↺ revenir à ${auto.total}</a>`
             : ' Suit le recalcul automatique.'}
@@ -25179,7 +25345,7 @@ function renderTrainingSession() {
           </div>
         </div>
         ${b.instructions ? `<div class="md-content" style="font-size:11px;color:var(--ink-2);margin-bottom:8px">${mdToHtml(b.instructions)}</div>` : ''}
-        ${b.track_distance ? `<div style="font-size:10px;color:var(--ink-3);margin-bottom:8px">📏 Ta distance te sera demandée à la validation.</div>` : ''}
+        ${b.track_distance ? `<div style="font-size:10px;color:var(--ink-3);margin-bottom:8px">📏 Ta distance te sera demandée à la validation${cfg.distance_bonus > 0 ? ` · <b style="color:var(--orange)">+${cfg.distance_bonus} pts</b>` : ''}.</div>` : ''}
         ${d ? `<button class="btn btn-primary btn-block" onclick="launchTrainingDrill('${d.id}')" style="margin-top:4px">▶ Lancer · ${esc(_twDrillLabel(d))}</button>` : ''}
       </div>`;
   }).join('');
@@ -25197,6 +25363,14 @@ function renderTrainingSession() {
       ${done ? `
         <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--green,#15803d);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:${done.coachNote || done.editedAt ? '8px' : '14px'}">
           ✓ <b>Séance validée</b> — ${esc(_completionSummary(done))}
+          ${(() => {
+            // Détail du calcul, après coup : elle doit pouvoir vérifier que ses
+            // bonus course lui ont bien été comptés, sans passer par le coach.
+            const b = _trainingBreakdown(done, p);
+            return (b.distance || b.improvement)
+              ? `<div style="font-size:10px;color:var(--ink-3);margin-top:5px;line-height:1.6">${_trainingBreakdownLine(b)}${b.distance ? ' · 🏃 distance +' + b.distance : ''}${b.improvement ? ' · <span style="color:var(--green,#15803d)">📈 record +' + b.improvement + '</span>' : ''}</div>`
+              : '';
+          })()}
         </div>
         ${done.coachNote ? `
           <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:8px">
@@ -25227,7 +25401,7 @@ function renderTrainingSession() {
         `).join('')}
       </div>
       <div style="font-size:10px;color:var(--ink-3);margin-bottom:14px">
-        ${cfg.points[lvl]} pts de base · ×${cfg.squad_multiplier} en squad · +${cfg.post_bonus} avec un post
+        ${cfg.points[lvl]} pts de base · ×${cfg.squad_multiplier} en squad · +${cfg.post_bonus} avec un post${_trainingHasDistance(s, lvl) && cfg.distance_bonus > 0 ? ` · +${cfg.distance_bonus} avec ta distance` : ''}${_trainingHasDistance(s, lvl) && cfg.improvement_bonus > 0 ? ` · +${cfg.improvement_bonus} si tu bats ta dernière` : ''}
       </div>
 
       ${blocksHtml || `<div class="empty"><div class="empty-icon">🤷</div><div class="empty-title">Rien à ce niveau</div><div class="empty-desc">Le coach n'a rien défini pour ce contrat.</div></div>`}
@@ -25303,16 +25477,35 @@ function _tvaToggle(k) { const a = _tva(); if (!a) return; a[k] = !a[k]; renderT
 // Total en direct : squad et post ne comptent que si leur pièce justificative est
 // bien là — cocher la case ne suffit pas, sinon l'aperçu mentirait sur le total.
 function _tvaPoints() {
-  const a = _tva(); if (!a) return { base: 0, total: 0 };
+  const a = _tva(); if (!a) return { base: 0, total: 0, distance: 0, improvement: 0 };
   const p = activeTrainingPrograms().find(x => x.id === a.programId);
   return _computePoints({
     level: a.level,
     hasSquad: _tvaSquadOk(), hasPost: _tvaPostOk(),
+    hasDistance: _tvaDistanceOk(), hasImprovement: _tvaImprovementOk(),
     config: p ? p.scoringConfig : {}
   });
 }
 function _tvaSquadOk() { const a = _tva(); return !!(a && a.squadOn && a.squadPhotoUrl && a.squadTeammateId); }
 function _tvaPostOk() { const a = _tva(); return !!(a && a.postOn && a.postPhotoUrl && (a.postMessage || '').trim()); }
+// Distance saisie : un nombre strictement positif. Un « 0 » tapé n'est pas une
+// distance parcourue, et une saisie illisible ne doit pas offrir de points.
+function _tvaKm() { const a = _tva(); const n = Number(a && a.distanceKm); return (Number.isFinite(n) && n > 0) ? n : null; }
+function _tvaDistanceOk() { return _tvaKm() !== null; }
+// Progression : comparée à SA propre dernière distance sur CETTE séance
+// récurrente. La validation n'existe pas encore → rien à exclure.
+function _tvaImprovementOk() {
+  const a = _tva(); const km = _tvaKm();
+  if (!a || km === null) return false;
+  const pid = (state.auth && state.auth.role === 'player') ? state.auth.playerId : null;
+  return _trainingIsImprovement(a.sessionId, pid, a.datePlanned, km, null);
+}
+// Le repère qu'elle doit battre, pour le lui DIRE au lieu de la laisser deviner.
+function _tvaPrevKm() {
+  const a = _tva(); if (!a) return null;
+  const pid = (state.auth && state.auth.role === 'player') ? state.auth.playerId : null;
+  return _trainingPrevDistanceKm(a.sessionId, pid, a.datePlanned, null);
+}
 
 async function _tvaPhoto(kind, event) {
   // Garde AVANT la lecture du fichier : un upload Storage est une écriture, même
@@ -25352,6 +25545,15 @@ function renderTrainingValidate() {
   const me = currentPlayer();
   const mates = _trainingPoolFor(p).filter(x => !me || x.id !== me.id);
   const squadOk = _tvaSquadOk(), postOk = _tvaPostOk();
+  const kmOk = _tvaDistanceOk(), impOk = _tvaImprovementOk();
+  const prevKm = _tvaPrevKm();
+  // Détail du calcul, ligne par ligne : le compteur géant seul ne dit pas d'où
+  // viennent les points, donc il n'apprend rien sur ce qu'elle peut gagner en
+  // plus. Chaque ligne acquise est affichée en couleur, les autres en gris.
+  const dtl = (on, label, val) => `
+    <div style="display:flex;justify-content:space-between;gap:8px;font-size:11px;line-height:1.7;${on ? 'color:var(--ink-2)' : 'color:var(--ink-3);opacity:.6'}">
+      <span>${label}</span><span style="font-family:'JetBrains Mono';flex:none">${val}</span>
+    </div>`;
 
   openModal(`
     <div class="modal-header">
@@ -25366,7 +25568,19 @@ function renderTrainingValidate() {
         <div style="font-family:'Anton';font-size:38px;color:var(--orange);line-height:1">${pts.total}</div>
         <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">points</div>
         <div style="font-size:10px;color:var(--ink-3);margin-top:6px">
-          ${pts.base}${squadOk ? ' × ' + cfg.squad_multiplier : ''}${postOk ? ' + ' + cfg.post_bonus : ''} = ${pts.total}
+          ${pts.base}${squadOk ? ' × ' + cfg.squad_multiplier : ''}${postOk ? ' + ' + cfg.post_bonus : ''}${kmOk && pts.distance ? ' + ' + pts.distance : ''}${impOk && pts.improvement ? ' + ' + pts.improvement : ''} = ${pts.total}
+        </div>
+      </div>
+
+      <!-- DÉTAIL DU CALCUL -->
+      <div style="border:1px solid var(--border-soft);border-radius:10px;padding:10px 12px;margin-bottom:16px">
+        ${dtl(true, `${TRAINING_LEVEL_LABEL[a.level]} · base`, pts.base + ' pts')}
+        ${dtl(squadOk, '👯 En squad', '× ' + cfg.squad_multiplier)}
+        ${dtl(postOk, '📸 Post', '+ ' + cfg.post_bonus)}
+        ${(needDistance && cfg.distance_bonus > 0) ? dtl(kmOk, '🏃 Distance renseignée', '+ ' + cfg.distance_bonus) : ''}
+        ${(needDistance && cfg.improvement_bonus > 0) ? dtl(impOk, '📈 Mieux que la dernière fois' + (prevKm !== null ? ` <span style="opacity:.75">(${prevKm} km)</span>` : ''), '+ ' + cfg.improvement_bonus) : ''}
+        <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;font-weight:700;border-top:1px solid var(--border-soft);margin-top:6px;padding-top:6px">
+          <span>Total</span><span style="font-family:'JetBrains Mono';flex:none">${pts.total} pts</span>
         </div>
       </div>
 
@@ -25413,8 +25627,18 @@ function renderTrainingValidate() {
       ${needDistance ? `
         <div class="fld" style="margin-top:6px">
           <label class="fld-label">🏃 Distance parcourue (km)</label>
-          <input type="number" min="0" step="0.1" value="${esc(String(a.distanceKm))}" placeholder="5.2" onchange="_tvaSet('distanceKm',this.value)">
-          <div style="font-size:10px;color:var(--ink-3);margin-top:3px">Optionnel — ne change pas tes points, c'est pour ton suivi.</div>
+          <input type="number" min="0" step="0.1" value="${esc(String(a.distanceKm))}" placeholder="5.2" onchange="_tvaSet('distanceKm',this.value);renderTrainingValidate()">
+          <div style="font-size:10px;color:var(--ink-3);margin-top:3px;line-height:1.6">
+            ${cfg.distance_bonus > 0
+              ? `<b style="color:var(--orange)">+${cfg.distance_bonus} pts</b> rien que pour la renseigner.`
+              : 'Optionnel — c\'est pour ton suivi.'}
+            ${cfg.improvement_bonus > 0
+              ? (prevKm !== null
+                  ? `<br>La dernière fois sur cette séance : <b>${prevKm} km</b> → <b style="color:var(--orange)">+${cfg.improvement_bonus} pts</b> si tu fais mieux.`
+                  : `<br>C'est ta séance de référence : le bonus progression sera jouable la prochaine fois.`)
+              : ''}
+          </div>
+          ${impOk ? `<div style="font-size:11px;color:var(--green,#15803d);margin-top:6px;font-weight:600">📈 Tu bats ta dernière distance · +${cfg.improvement_bonus} pts</div>` : ''}
         </div>` : ''}
 
       ${a.busy ? `<div style="text-align:center;font-size:11px;color:var(--ink-3);padding:8px">⏳ Envoi de la photo…</div>` : ''}
@@ -25451,7 +25675,15 @@ function confirmTrainingCompletion() {
     state._trainingValidate = null; state._trainingView = null; closeModal(); render(); return;
   }
   const squadOk = _tvaSquadOk(), postOk = _tvaPostOk();
-  const pts = _computePoints({ level: a.level, hasSquad: squadOk, hasPost: postOk, config: p.scoringConfig });
+  // Les bonus course sont évalués ICI, une dernière fois, et non repris de
+  // l'aperçu : entre l'ouverture de la modale et le clic, une autre validation
+  // a pu arriver par la sync et déplacer son repère de progression.
+  const kmOk = _tvaDistanceOk(), impOk = _tvaImprovementOk();
+  const pts = _computePoints({
+    level: a.level, hasSquad: squadOk, hasPost: postOk,
+    hasDistance: kmOk, hasImprovement: impOk,
+    config: p.scoringConfig
+  });
   const km = Number(a.distanceKm);
   const c = {
     id: uid(), programId: a.programId, sessionId: a.sessionId, playerId: pid,
@@ -25471,7 +25703,7 @@ function confirmTrainingCompletion() {
   state._trainingValidate = null;
   state._trainingView = null;
   closeModal();
-  try { showToast('💪 Séance validée · +' + pts.total + ' pts'); } catch (e) {}
+  try { showToast((impOk ? '📈 Record battu · ' : '💪 Séance validée · ') + '+' + pts.total + ' pts'); } catch (e) {}
   try { _trainingNotifyCoachCompletion(p, c); } catch (e) {}
   try { render(); } catch (e) {}
 }
@@ -31588,7 +31820,7 @@ function openEventInstance(parentId, dateStr) {
   const present = _seasonPool.filter(p => _convocResp(c, dateStr, p.id).status === 'present');
   const absent = _seasonPool.filter(p => _convocResp(c, dateStr, p.id).status === 'absent');
   const ovKey = '__inst_' + parentId + '_' + dateStr;
-  // v.114 — Sur un ENTRAÎNEMENT, la joueuse ne voit AUCUN décompte d'effectif :
+  // v.115 — Sur un ENTRAÎNEMENT, la joueuse ne voit AUCUN décompte d'effectif :
   // ni « X Présentes », ni « Y Absentes », ni liste. La v.111 ne masquait que
   // les absentes, mais « 14 Présentes » sur un effectif de 16 se soustrait de
   // tête — le chiffre des présentes trahit le même secret par le complément.
@@ -41394,7 +41626,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-10.114';
+const APP_VERSION = '2026-08-10.115';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.

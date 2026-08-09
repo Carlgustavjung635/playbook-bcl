@@ -539,13 +539,54 @@ t('distance demandée (un bloc course a track_distance)', () => {
   assert(ctx.__lastModal.includes('Distance parcourue'), 'input distance absent alors qu\'un bloc course le demande');
   ctx._tvaSet('distanceKm', '5.2');
 });
+// v.115 — saisir la distance vaut +20 (distance_bonus). Pas de bonus
+// progression ici : c'est sa PREMIÈRE séance de ce type, donc aucun repère.
+t('distance saisie → l\'aperçu passe de 50 à 70 (+20 distance, sans progression)', () => {
+  assert(ctx._tvaDistanceOk(), 'distance non reconnue');
+  assert(!ctx._tvaImprovementOk(), 'bonus progression accordé sans séance de référence !');
+  assert(ctx._tvaPoints().total === 70, 'attendu 70, reçu ' + ctx._tvaPoints().total);
+});
+t('l\'écran de validation DÉTAILLE le calcul (et ne se contente pas du total)', () => {
+  ctx.renderTrainingValidate();
+  const m = ctx.__lastModal;
+  assert(m.includes('Distance renseignée'), 'ligne « distance renseignée » absente du détail');
+  assert(m.includes('Mieux que la dernière fois'), 'ligne « progression » absente du détail');
+  assert(m.includes('+ 20'), 'montant du bonus distance non affiché');
+  assert(m.includes('+ 40'), 'montant du bonus progression non affiché');
+  assert(m.includes('70 pts'), 'total détaillé faux');
+  // Première séance du type : on lui dit qu\'elle pose SA référence, au lieu de
+  // lui promettre un bonus qu\'elle ne peut pas gagner.
+  assert(m.includes('séance de référence'), 'absence de repère non expliquée');
+});
+// Le wizard est coach-only : on repasse coach le temps de ces 2 checks, puis on
+// rend l'identité joueuse aux tests suivants (qui valident encore des séances).
+const __playerAuth = ctx.state.auth;
+t('étape 2 du wizard : les deux bonus course sont réglables par le coach', () => {
+  ctx.state.auth = { role: 'coach', coachId: 'admin' };
+  ctx.openTrainingWizard();
+  ctx._twGo(2);
+  const m = ctx.__lastModal;
+  assert(m.includes("_twNum('distance_bonus'"), 'champ distance_bonus absent du barème coach');
+  assert(m.includes("_twNum('improvement_bonus'"), 'champ improvement_bonus absent du barème coach');
+  assert(m.includes('130 pts'), 'exemple « plafond » (30×2+10+20+40) absent');
+});
+t('le coach peut désactiver un bonus en le mettant à 0', () => {
+  ctx._twNum('distance_bonus', 0);
+  assert(ctx._tw().config.distance_bonus === 0, 'distance_bonus non remis à 0');
+  ctx._twNum('improvement_bonus', 0);
+  assert(ctx._tw().config.improvement_bonus === 0, 'improvement_bonus non remis à 0');
+  ctx._twGo(2);
+  assert(ctx.__lastModal.includes('70 pts'), 'avec les bonus à 0, le plafond doit retomber au barème v.113');
+  ctx.state._trainingWizard = null;
+  ctx.state.auth = __playerAuth;
+});
 
-t('confirmTrainingCompletion() écrit la validation à 50 pts', () => {
+t('confirmTrainingCompletion() écrit la validation à 70 pts (50 + 20 distance)', () => {
   ctx.confirmTrainingCompletion();
   const comps = ctx.state.trainingCompletions;
   assert(comps.length === 1, 'attendu 1 validation, reçu ' + comps.length);
   const c = comps[0];
-  assert(c.pointsTotal === 50, 'points_total = ' + c.pointsTotal + ' (attendu 50)');
+  assert(c.pointsTotal === 70, 'points_total = ' + c.pointsTotal + ' (attendu 70)');
   assert(c.basePoints === 20, 'base_points = ' + c.basePoints + ' (attendu 20, figé)');
   assert(c.contractLevel === 'med', 'niveau non figé');
   assert(c.datePlanned === LUN, 'date_planned fausse');
@@ -564,13 +605,13 @@ t('barème changé APRÈS coup → l\'historique n\'est pas réécrit', () => {
   ctx.state.trainingPrograms[0].scoringConfig = { points: { min: 1, med: 1, ultra: 1 }, squad_multiplier: 1, post_bonus: 0 };
   const lb = ctx._trainingLeaderboard(P().id);
   const me = lb.find(r => r.id === 'p1');
-  assert(me.points === 50, 'points recalculés depuis le barème courant (' + me.points + ') — doivent rester figés à 50');
+  assert(me.points === 70, 'points recalculés depuis le barème courant (' + me.points + ') — doivent rester figés à 70');
   ctx.state.trainingPrograms[0].scoringConfig = { points: { min: 10, med: 20, ultra: 30 }, squad_multiplier: 2, post_bonus: 10 };
 });
 t('classement : effectif entier, joueuses à 0 incluses', () => {
   const lb = ctx._trainingLeaderboard(P().id);
   assert(lb.length === 3, 'attendu 3 joueuses, reçu ' + lb.length);
-  assert(lb[0].id === 'p1' && lb[0].points === 50, 'tête de classement fausse');
+  assert(lb[0].id === 'p1' && lb[0].points === 70, 'tête de classement fausse');
   assert(lb[1].points === 0 && lb[2].points === 0, 'joueuses à 0 absentes');
   assert(lb[0].km === 5.2, 'km non agrégés');
   assert(lb[0].squads === 1 && lb[0].posts === 1, 'compteurs squad/post faux');

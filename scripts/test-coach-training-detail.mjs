@@ -526,6 +526,38 @@ t('détail : toutes les données, photos zoomables, message', () => {
   assert(h.includes('✎ Modifier') && h.includes('🗑'), 'actions de correction absentes');
 });
 
+// --- v.115 : décomposition du score dans le panneau de détail ---------------
+// cA1 a 6.2 km MAIS un total figé à 70 = 30×2 + 10, c'est-à-dire le barème
+// d'avant les bonus course. Le panneau ne doit donc afficher AUCUN bonus : lui
+// en inventer un ferait mentir l'écran sur ce qu'elle a réellement gagné.
+t('détail : une validation d\'avant v.115 n\'affiche aucun bonus course', () => {
+  seed();
+  ctx.openTrainingCompletionDetail('cA1');
+  const h = M();
+  assert(h.includes('30 × 2 + 10 = 70'), 'décomposition absente ou fausse : ' + (h.match(/\d+ × \d+[^<]*/) || ['—'])[0]);
+  assert(!h.includes('Distance renseignée'), 'bonus distance inventé sur une validation rétro');
+  assert(!h.includes('Progression'), 'bonus progression inventé sur une validation rétro');
+  assert(h.includes('antérieure aux bonus course'), 'la raison de l\'absence de bonus n\'est pas expliquée au coach');
+});
+
+t('détail : une validation v.115 affiche distance ET progression', () => {
+  seed();
+  const c = S.trainingCompletions.find(x => x.id === 'cA1');
+  // Même séance (même sessionId), une semaine plus tôt, 5 km : le repère.
+  S.trainingCompletions.push(Object.assign({}, c, {
+    id: 'cREF', datePlanned: iso(NOW - 8 * DAY), runningDistanceKm: 5, pointsTotal: 70,
+  }));
+  // Et on rejoue cA1 comme une validation v.115 : 70 + 20 (distance) + 40 (record).
+  c.pointsTotal = 130;
+  ctx.openTrainingCompletionDetail('cA1');
+  const h = M();
+  assert(h.includes('Distance renseignée'), 'bonus distance non affiché');
+  assert(h.includes('Progression'), 'bonus progression non affiché');
+  assert(h.includes('avant : 5 km'), 'le repère battu n\'est pas rappelé au coach');
+  assert(h.includes('30 × 2 + 10 + 20 + 40 = 130'), 'décomposition fausse');
+  seed();
+});
+
 t('détail : une joueuse ne peut pas l\'ouvrir', () => {
   S.auth = { role: 'player', playerId: 'pA' };
   ctx.__lastModal = '(rien)';
@@ -563,14 +595,15 @@ t('édition : préremplie avec les valeurs de la validation', () => {
 
 t('édition : changer le niveau recalcule le total au barème courant', () => {
   ctx._tceSet('level', 'min');
-  // min(10) × squad(2) + post(10) = 30
-  assert(ctx._tceComputed().total === 30, 'total auto = ' + ctx._tceComputed().total);
-  assert(M().includes('70 pts → <b>30 pts</b>'), 'avant/après non affiché');
+  // min(10) × squad(2) + post(10) + distance(20, v.115 : 6.2 km saisis) = 50.
+  // Pas de bonus progression : cA1 est la seule validation de sa séance (s'+jour).
+  assert(ctx._tceComputed().total === 50, 'total auto = ' + ctx._tceComputed().total);
+  assert(M().includes('70 pts → <b>50 pts</b>'), 'avant/après non affiché');
 });
 
 t('édition : retirer la squad retire le multiplicateur', () => {
   ctx._tceSet('squadTeammateId', '');
-  assert(ctx._tceComputed().total === 20, 'total = ' + ctx._tceComputed().total);  // 10 + 10 post
+  assert(ctx._tceComputed().total === 40, 'total = ' + ctx._tceComputed().total);  // 10 + 10 post + 20 distance
 });
 
 t('édition : un total forcé n\'est plus écrasé par le recalcul', () => {
@@ -599,7 +632,7 @@ t('enregistrer : écrit les champs ET la trace d\'audit', () => {
   assert(c.squadTeammateId === null, 'squad non retirée');
   assert(c.runningDistanceKm === 7.5, 'km = ' + c.runningDistanceKm);
   assert(c.basePoints === 20, 'base = ' + c.basePoints);
-  assert(c.pointsTotal === 30, 'total = ' + c.pointsTotal);   // 20 + 10 post
+  assert(c.pointsTotal === 50, 'total = ' + c.pointsTotal);   // 20 + 10 post + 20 distance (7.5 km)
   assert(c.notes.includes('montre'), 'notes non enregistrées');
   assert(c.updatedBy === 'admin', 'auteur = ' + c.updatedBy);
   assert(c.editedAt > 0, 'editedAt absent');
@@ -609,8 +642,8 @@ t('enregistrer : écrit les champs ET la trace d\'audit', () => {
 
 t('enregistrer : le classement suit la correction', () => {
   const row = ctx._trainingLeaderboard('prog1').find(r => r.id === 'pA');
-  // 30 (corrigée) + 20 + 20 + 10 = 80
-  assert(row.points === 80, 'points classement = ' + row.points);
+  // 50 (corrigée, bonus distance compris) + 20 + 20 + 10 = 100
+  assert(row.points === 100, 'points classement = ' + row.points);
 });
 
 t('enregistrer : retirer une photo la retire vraiment', () => {
