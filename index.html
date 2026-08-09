@@ -450,10 +450,16 @@
   .md-content hr { border: 0; border-top: 1px solid var(--border); margin: 12px 0; }
   .md-content blockquote { margin: 8px 0; padding: 6px 12px; border-left: 3px solid var(--orange); background: rgba(var(--accent-rgb),0.06); color: var(--ink-2); border-radius: 0 6px 6px 0; }
 
-  /* ========== BANDEAU AUTO-UPDATE ========== */
+  /* ========== BANDEAU AUTO-UPDATE ==========
+     EN TÊTE, pas en pied. En bas il vivait à 78 px du sol, coincé entre la barre
+     de navigation et le pouce : sur un écran de téléphone c'est la zone que l'œil
+     balaie en dernier, et le bandeau passait inaperçu déploiement après
+     déploiement. Une mise à jour disponible est une information de CHROME
+     d'application — sa place est en haut, sous l'encoche, là où l'app annonce
+     déjà tout ce qui concerne son propre état. */
   #update-banner {
     position: fixed; left: 50%; transform: translateX(-50%);
-    bottom: calc(78px + env(safe-area-inset-bottom)); z-index: 9500;
+    top: calc(env(safe-area-inset-top) + 10px); z-index: 9700;
     width: calc(100% - 28px); max-width: 520px;
     display: flex; align-items: center; gap: 10px;
     padding: 10px 12px 10px 14px; border-radius: 12px;
@@ -41239,9 +41245,18 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-09.109';
+const APP_VERSION = '2026-08-10.110';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
+// Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
+// Avant, le ✕ remettait simplement `_updateBannerShown` à false et laissait
+// passer le throttle : le même bandeau, pour la même version, revenait une
+// minute plus tard, indéfiniment. Fermer voulait dire « redemande-moi dans
+// 60 s » — c'est du harcèlement, pas un report. Désormais ✕ vaut pour la
+// version fermée, et UNIQUEMENT pour elle : un nouveau déploiement (version
+// différente) rouvre le bandeau, ce qui est bien le seul cas où il a quelque
+// chose de neuf à dire.
+let _updateDismissedVersion = null;
 // Une seule tentative de rechargement AUTOMATIQUE par session : si le HTML servi
 // restait périmé (déploiement à moitié propagé, CDN en retard), recharger en
 // boucle transformerait l'app en machine à clignoter. Après cet essai, on
@@ -41272,6 +41287,10 @@ async function checkForUpdate(opts) {
       _cacheBustReload(remote);
       return;
     }
+    // Le filet automatique n'a joué qu'une fois par session, et seulement au
+    // retour au premier plan. Tout le reste du temps — app ouverte en continu,
+    // déploiement pendant l'utilisation — c'est le bandeau qui prend le relais.
+    if (remote === _updateDismissedVersion) return; // ✕ déjà dit pour CETTE version
     showUpdateBanner(remote);
   } catch (e) { /* hors ligne / fichier absent → on ignore */ }
 }
@@ -41293,27 +41312,30 @@ function _cacheBustReload(v) {
     location.replace(u.toString());
   } catch (e) { location.reload(); }
 }
+// Version actuellement annoncée par le bandeau — c'est elle que le ✕ reporte.
+let _updateBannerVersion = null;
 function showUpdateBanner(remote) {
   if (_updateBannerShown) return;
   _updateBannerShown = true;
+  const v = (remote || '').replace(/[^\w.\-]/g, '');
+  _updateBannerVersion = remote || null;
   let el = document.getElementById('update-banner');
   if (!el) { el = document.createElement('div'); el.id = 'update-banner'; document.body.appendChild(el); }
-  const v = (remote || '').replace(/[^\w.\-]/g, '');
   el.innerHTML =
     '<span class="ub-text">🔄 Nouvelle version disponible</span>' +
     `<button class="ub-reload" onclick="_cacheBustReload('${v}')">Recharger</button>` +
     '<button class="ub-close" onclick="dismissUpdateBanner()" aria-label="Fermer">✕</button>';
 }
-// Fermer le bandeau le REPOUSSE, il ne l'annule pas. Avant, le ✕ laissait
-// _updateBannerShown à true : checkForUpdate sortait immédiatement pour le reste
-// de la session, et une PWA n'étant jamais vraiment fermée, la mise à jour
-// pouvait ne plus jamais être proposée.
+// Fermer le bandeau le REPOUSSE, il ne l'annule pas — mais le report vaut pour
+// la VERSION fermée, pas pour une minute. Cf. `_updateDismissedVersion` : le
+// prochain déploiement rouvre le bandeau, la version déjà refusée non.
 function dismissUpdateBanner() {
   try {
     const el = document.getElementById('update-banner');
     if (el) el.remove();
   } catch (e) {}
   _updateBannerShown = false;
+  _updateDismissedVersion = _updateBannerVersion;
   _lastUpdateCheck = Date.now();   // laisse passer le throttle d'une minute
 }
 
@@ -41405,6 +41427,16 @@ try { initPullToRefresh(); } catch (e) { console.warn('[ptr] init', e && e.messa
 // Auto-update : check au boot (après stabilisation) + à chaque retour au 1er plan
 // (PWA rouverte sans être tuée → détecte un déploiement survenu entre-temps).
 setTimeout(() => { try { checkForUpdate({ force: true }); } catch (e) {} }, 4000);
+// …ET un battement toutes les 5 minutes tant que l'app est à l'écran. C'était
+// le maillon manquant : hors de ce battement, les SEULS moments de vérification
+// étaient le boot et le retour au premier plan. Une PWA gardée ouverte (le cas
+// normal : on ne « ferme » pas une app sur téléphone) ne repassait donc par
+// aucun des deux, et un déploiement survenu pendant l'utilisation restait
+// invisible jusqu'à ce que le système finisse par tuer l'onglet — parfois des
+// jours. `document.hidden` évite de sonder en arrière-plan pour rien.
+setInterval(() => {
+  try { if (!document.hidden) checkForUpdate(); } catch (e) {}
+}, 300000);
 try { _ambientStart(); } catch (e) {} // alertes ambiantes de déroulé (coach)
 try { _trainingRemindStart(); } catch (e) {} // rappel prépa quotidien (cf. la limite documentée sur _trainingRemindCheck)
 document.addEventListener('visibilitychange', () => {

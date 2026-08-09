@@ -10,8 +10,16 @@ import assert from 'node:assert';
 // fallait le remarquer puis le taper, et le ✕ le supprimait jusqu'à la fin de
 // la session — une PWA n'étant jamais vraiment fermée, des correctifs déployés
 // n'étaient jamais exécutés par l'appareil.
+// v.110 : le ✕ vaut désormais pour la VERSION fermée, pas pour une minute.
+// Avant, il remettait seulement `bannerShown` à false et laissait passer le
+// throttle : le même bandeau, pour la même version, revenait 60 s plus tard,
+// indéfiniment. Fermer voulait dire « redemande-moi dans une minute ».
 function makeChecker(APP_VERSION) {
-  const st = { bannerShown: false, lastCheck: 0, fetchCount: 0, reloads: 0, autoTried: false, modalOpen: false };
+  const st = {
+    bannerShown: false, lastCheck: 0, fetchCount: 0, reloads: 0,
+    autoTried: false, modalOpen: false,
+    bannerVersion: null, dismissedVersion: null,
+  };
   async function checkForUpdate(opts, remoteVersion, now, ok = true) {
     opts = opts || {};
     if (st.bannerShown) return;
@@ -26,10 +34,13 @@ function makeChecker(APP_VERSION) {
       st.reloads++;
       return;
     }
+    if (remote === st.dismissedVersion) return;  // ✕ déjà dit pour CETTE version
     st.bannerShown = true;
+    st.bannerVersion = remote;
   }
   function dismissUpdateBanner(now) {
     st.bannerShown = false;
+    st.dismissedVersion = st.bannerVersion;
     st.lastCheck = now;
   }
   return { st, checkForUpdate, dismissUpdateBanner };
@@ -140,23 +151,29 @@ console.log('SCÉNARIO 6 — retour au 1er plan : rechargement AUTOMATIQUE');
   });
 }
 
-console.log('SCÉNARIO 7 — fermer le bandeau le REPOUSSE, ne l\'annule pas');
+console.log('SCÉNARIO 7 — le ✕ vaut pour UNE VERSION, pas pour une minute');
 {
   const { st, checkForUpdate, dismissUpdateBanner } = makeChecker('v1');
-  await t('après un ✕, un check ultérieur peut le réafficher', async () => {
+  await t('après un ✕, la MÊME version ne revient plus harceler', async () => {
     await checkForUpdate({ force: true }, 'v2', 100000);
     assert.strictEqual(st.bannerShown, true);
-    dismissUpdateBanner(1000);
+    dismissUpdateBanner(100000);
     assert.strictEqual(st.bannerShown, false);
-    await checkForUpdate({}, 'v2', 100000 + 61000);   // après le throttle
-    assert.strictEqual(st.bannerShown, true, 'le ✕ a supprimé la mise à jour pour toute la session');
+    await checkForUpdate({}, 'v2', 100000 + 61000);   // throttle passé
+    assert.strictEqual(st.bannerShown, false, 'le même bandeau revient en boucle après le ✕');
   });
+  await t('…mais un NOUVEAU déploiement le rouvre', async () => {
+    await checkForUpdate({}, 'v3', 100000 + 200000);
+    assert.strictEqual(st.bannerShown, true, 'une version inédite doit rouvrir le bandeau');
+  });
+}
+{
+  const { st, checkForUpdate, dismissUpdateBanner } = makeChecker('v1');
   await t('le ✕ respecte quand même le throttle d\'une minute', async () => {
-    const { st: s2, checkForUpdate: c2, dismissUpdateBanner: d2 } = makeChecker('v1');
-    await c2({ force: true }, 'v2', 100000);
-    d2(100000);
-    await c2({}, 'v2', 100500);                        // trop tôt
-    assert.strictEqual(s2.bannerShown, false, 'le bandeau revient en boucle');
+    await checkForUpdate({ force: true }, 'v2', 100000);
+    dismissUpdateBanner(100000);
+    await checkForUpdate({}, 'v3', 100500);            // trop tôt, même pour une version neuve
+    assert.strictEqual(st.fetchCount, 1, 'le throttle a sauté après le ✕');
   });
 }
 
