@@ -112,6 +112,21 @@ catch (e) { console.log('✗ ÉVALUATION: ' + e.message); process.exit(1); }
 try { vm.runInContext(moduleBlock, ctx, { filename: 'index.module.js' }); }
 catch (e) { console.log('✗ ÉVALUATION MODULE: ' + e.message); process.exit(1); }
 
+// Storage observable : la suppression physique d'une photo est un effet de bord
+// réseau, et c'est justement ce qu'on veut voir partir (ou ne pas partir).
+const storageRemovals = [];
+let storageShouldFail = false;
+ctx.sb.storage = {
+  from: (bucket) => ({
+    remove: (paths) => {
+      storageRemovals.push({ bucket, paths });
+      return Promise.resolve(storageShouldFail ? { error: new Error('boom') } : { error: null });
+    },
+    upload: () => Promise.resolve({ error: null }),
+    getPublicUrl: (n) => ({ data: { publicUrl: 'https://x/storage/v1/object/public/pintade-proofs/' + n } })
+  })
+};
+
 const R = [];
 const t = (label, fn) => { try { fn(); R.push('✓ ' + label); } catch (e) { R.push('✗ ' + label + ' → ' + e.message); } };
 const ok = (c, m) => { if (!c) throw new Error(m || 'assertion'); };
@@ -216,7 +231,8 @@ function lastReq() { const l = S.pintadeRequests.filter(q => !q.deletedAt); retu
 // La porteuse OUVRE l'app : c'est cet instant, et lui seul, qui arme les 30 s.
 function ouvrir(q) { return ctx._pintadeMarkOpened(q || ctx.pintadeActiveRequest()); }
 // Réussite : on simule ce que fait submitPintadeProof après un upload OK.
-function reussite(q) { q.photoUrl = 'https://cdn/x.jpg'; q.status = 'ok'; q.resolvedAt = NOW; q.updatedAt = NOW; }
+function proofUrl(id) { return 'https://orertxlsvkdqayybgwaq.supabase.co/storage/v1/object/public/pintade-proofs/proof-' + id + '-123.jpg'; }
+function reussite(q) { q.photoUrl = proofUrl(q.id); q.status = 'ok'; q.resolvedAt = NOW; q.updatedAt = NOW; }
 // Les DEUX façons de rater, chacune laissant le créneau de demande rouvert
 // derrière elle (pour pouvoir en enchaîner plusieurs).
 function ratePasVue()  { demande(); advance(2 * H + 60000); }                    // jamais ouverte
@@ -654,7 +670,7 @@ t('le feed montre la photo des preuves réussies', () => {
   const p = startGarde('pA', 30, 'player', 'pB');
   demande(); ouvrir(); reussite(lastReq());
   const row = ctx._pintadeFeedRow(ctx.pintadeRequestsOf(p.id)[0]);
-  ok(/https:\/\/cdn\/x\.jpg/.test(row), 'photo absente');
+  ok(/pintade-proofs\/proof-/.test(row), 'photo absente');
   ok(/validée/i.test(row), 'libellé de réussite absent');
 });
 t('le libellé du demandeur est FIGÉ (un renommage ne casse pas le feed)', () => {
@@ -1239,9 +1255,10 @@ t('une joueuse ne peut pas toucher au texte', () => {
 //   • l'auto-libération déjà déclenchée est le seul cas non dérivé : le coach
 //     choisit, et l'annulation rend la garde à la porteuse.
 // =============================================================================
-function invalider(q, reason, undo) {
+function invalider(q, reason, opts) {
   S.auth = { role: 'coach', coachId: 'admin' };
-  return ctx.pintadeInvalidateProof(q.id, reason || '', !!undo);
+  storageRemovals.length = 0;
+  return ctx.pintadeInvalidateProof(q.id, reason || '', opts || {});
 }
 
 t('une preuve invalidée compte comme un raté, pas comme une réussite', () => {
@@ -1347,7 +1364,7 @@ t('le bouton d\'invalidation n\'existe que pour le coach', () => {
 });
 
 // --- LE CAS DÉLICAT : l'auto-libération a déjà eu lieu ------------------------
-t('invalider la preuve déclenchante propose d\'annuler la libération', () => {
+t('la modale ANNONCE l\'annulation de la libération — sans la mettre au vote', () => {
   seed('coach');
   const p = startGarde('pA', 30, 'coach');
   for (let i = 0; i < 5; i++) preuveOk('pB');
@@ -1356,9 +1373,14 @@ t('invalider la preuve déclenchante propose d\'annuler la libération', () => {
   ok(ctx._pintadeAutoReleaseFrom(q.id), 'la libération n\'est pas reliée à la preuve');
   S.auth = { role: 'coach', coachId: 'admin' };
   ctx.openPintadeInvalidate(q.id);
-  ok(/déjà libéré/.test(ctx.__lastModal || ''), 'la modale ne prévient pas du transfert déjà fait');
-  ok(/annuler aussi la libération/.test(ctx.__lastModal || ''), 'aucune option d\'annulation');
-  ok(/juste marquer invalide/.test(ctx.__lastModal || ''), 'aucune option « ne rien annuler »');
+  const m = ctx.__lastModal || '';
+  ok(/La libération sera annulée/.test(m), 'la modale ne prévient pas de la conséquence');
+  ok(/retournera à/.test(m), 'la modale ne dit pas à qui la garde revient');
+  // UN SEUL chemin : laisser le choix permettrait un état incohérent — une
+  // porteuse libérée par une preuve que le coach vient lui-même de rejeter.
+  ok(!/juste marquer invalide/.test(m), 'le second chemin (incohérent) est toujours proposé');
+  ok((m.match(/_pintadeSubmitInvalidate/g) || []).length === 1,
+    'plusieurs boutons de validation : ' + (m.match(/_pintadeSubmitInvalidate/g) || []).length);
   ok(p, 'garde-fou');
 });
 t('…y compris quand on invalide une preuve du MILIEU de la série', () => {
@@ -1371,19 +1393,32 @@ t('…y compris quand on invalide une preuve du MILIEU de la série', () => {
   ok(ctx._pintadeAutoReleaseFrom(troisieme[2].id),
     'seule la 6e est reliée — invalider une preuve du milieu passerait inaperçu');
 });
-t('« Non, juste marquer invalide » laisse la nouvelle porteuse en place', () => {
+t('l\'annulation est AUTOMATIQUE : aucun appelant ne peut la contourner', () => {
   seed('coach');
-  startGarde('pA', 30, 'coach');
+  const p = startGarde('pA', 30, 'coach');
   for (let i = 0; i < 5; i++) preuveOk('pB');
   const { q } = preuveOk('pC');
-  const nouvelle = ctx.pintadeActivePeriod();
-  invalider(q, 'litige', false);
-  ok(ctx.pintadeActivePeriod().id === nouvelle.id, 'la garde a été annulée sans qu\'on le demande');
-  ok(ctx.pintadeActivePeriod().holderId === 'pC', 'porteuse = ' + ctx.pintadeActivePeriod().holderId);
+  ok(ctx.pintadeActivePeriod().holderId === 'pC', 'préalable faux');
+  // Même en demandant explicitement le contraire, la libération tombe : une
+  // preuve rejetée ne peut avoir libéré personne.
+  invalider(q, 'litige', { undoRelease: false });
+  ok(ctx.pintadeActivePeriod().id === p.id, 'la libération a survécu à l\'invalidation');
+  ok(ctx.pintadeActivePeriod().holderId === 'pA', 'porteuse = ' + ctx.pintadeActivePeriod().holderId);
   const inc = (S.pintadeIncidents || []).find(i => i.incidentType === 'coach_invalidated_proof');
-  ok(inc.metadata.hadTriggeredRelease === true && inc.metadata.releaseUndone === false, JSON.stringify(inc.metadata));
+  ok(inc.metadata.hadTriggeredRelease === true && inc.metadata.releaseUndone === true, JSON.stringify(inc.metadata));
+  ok(inc.coachDecision === 'invalidate_and_undo_release', 'décision tracée = ' + inc.coachDecision);
 });
-t('« Oui, annuler » rend la garde à la porteuse et efface la garde née à tort', () => {
+t('invalider une preuve SANS libération ne touche à aucune garde', () => {
+  seed('coach');
+  const p = startGarde('pA', 30, 'coach');
+  const { q } = preuveOk('pB');
+  invalider(q, 'hors sujet');
+  ok(ctx.pintadeActivePeriod().id === p.id && ctx.pintadeActivePeriod().holderId === 'pA', 'garde abîmée');
+  const inc = (S.pintadeIncidents || []).find(i => i.incidentType === 'coach_invalidated_proof');
+  ok(inc.metadata.hadTriggeredRelease === false && inc.metadata.releaseUndone === false, JSON.stringify(inc.metadata));
+  ok(inc.coachDecision === 'invalidate', 'décision tracée = ' + inc.coachDecision);
+});
+t('l\'annulation rend la garde à la porteuse et efface la garde née à tort', () => {
   seed('coach');
   const p = startGarde('pA', 30, 'coach');
   for (let i = 0; i < 5; i++) preuveOk('pB');
@@ -1401,17 +1436,20 @@ t('« Oui, annuler » rend la garde à la porteuse et efface la garde née à to
   const inc = (S.pintadeIncidents || []).find(i => i.incidentType === 'coach_invalidated_proof');
   ok(inc.metadata.releaseUndone === true, JSON.stringify(inc.metadata));
 });
-t('annuler la libération prévient les deux joueuses concernées', () => {
+t('annuler la libération prévient les deux joueuses ET le coach', () => {
   seed('coach');
   startGarde('pA', 30, 'coach');
   for (let i = 0; i < 5; i++) preuveOk('pB');
   const { q } = preuveOk('pC');
   pushes.length = 0;
-  invalider(q, '', true);
+  invalider(q, '');
   const undone = pushes.filter(x => (x.payload || {}).type === 'pintade_release_undone');
-  ok(undone.length === 2, 'notifications d\'annulation = ' + undone.length);
+  ok(undone.length === 3, 'notifications d\'annulation = ' + undone.length);
   ok(undone.some(x => (x.keys || []).includes('player:pC')), 'la nouvelle porteuse n\'est pas prévenue');
   ok(undone.some(x => (x.keys || []).includes('player:pA')), 'l\'ancienne porteuse n\'est pas prévenue');
+  // Récap coach : un transfert annulé est ce qu'on relit trois jours plus tard
+  // en se demandant qui porte quoi.
+  ok(undone.some(x => (x.keys || []).some(k => String(k).startsWith('coach:'))), 'le coach n\'a pas de récapitulatif');
 });
 t('après annulation, la porteuse peut se relibérer normalement', () => {
   seed('coach');
@@ -1424,6 +1462,79 @@ t('après annulation, la porteuse peut se relibérer normalement', () => {
   for (let i = 0; i < 5; i++) preuveOk('pB');
   const { freed } = preuveOk('pC');
   ok(freed && freed.successorId === 'pC', 'la libération ne peut plus se redéclencher');
+});
+// --- SUPPRESSION PHYSIQUE DE LA PHOTO ----------------------------------------
+// Masquer la ligne ne suffit pas pour une image réellement déplacée : le fichier
+// reste ouvert à qui possède l'URL. Le coach peut donc effacer l'objet du
+// bucket. La LIGNE, elle, survit — c'est la trace de l'incident.
+t('la photo n\'est PAS supprimée par défaut', () => {
+  seed('coach');
+  startGarde('pA', 30, 'coach');
+  const { q } = preuveOk('pB');
+  invalider(q, 'hors sujet');
+  ok(storageRemovals.length === 0, 'suppression déclenchée sans qu\'on la demande');
+  ok(q.photoUrl, 'URL effacée sans qu\'on la demande');
+  ok(ctx._pintadePhotoWasDeleted(q) === false, 'la photo passe pour supprimée');
+});
+t('cochée, la photo part vraiment du bucket — et l\'URL est détachée AVANT', () => {
+  seed('coach');
+  startGarde('pA', 30, 'coach');
+  const { q } = preuveOk('pB');
+  const url = q.photoUrl;
+  invalider(q, 'peluche absente', { deletePhoto: true });
+  ok(storageRemovals.length === 1, 'aucun appel au Storage : ' + storageRemovals.length);
+  ok(storageRemovals[0].bucket === 'pintade-proofs', 'bucket = ' + storageRemovals[0].bucket);
+  ok(storageRemovals[0].paths.length === 1 && /^proof-.+\.jpg$/.test(storageRemovals[0].paths[0]),
+    'chemin envoyé = ' + JSON.stringify(storageRemovals[0].paths));
+  // Détachée d'abord : même si le Storage refuse, plus personne ne la voit.
+  ok(!q.photoUrl, 'l\'URL est restée dans le dossier : ' + q.photoUrl);
+  ok(url && url !== q.photoUrl, 'garde-fou');
+  // La LIGNE survit : c'est la trace.
+  ok(!q.deletedAt && ctx._pintadeStatus(q) === 'invalidated_by_coach', 'la demande a été effacée');
+});
+t('le nom du fichier reste tracé dans l\'incident (ménage possible si l\'appel rate)', () => {
+  seed('coach');
+  startGarde('pA', 30, 'coach');
+  const { q } = preuveOk('pB');
+  invalider(q, '', { deletePhoto: true });
+  const inc = (S.pintadeIncidents || []).find(i => i.incidentType === 'coach_invalidated_proof');
+  ok(inc.metadata.photoDeleted === true, JSON.stringify(inc.metadata));
+  ok(/^proof-.+\.jpg$/.test(inc.metadata.photoPath || ''), 'chemin non tracé : ' + inc.metadata.photoPath);
+});
+t('un Storage qui refuse ne fait PAS échouer l\'invalidation', () => {
+  seed('coach');
+  const p = startGarde('pA', 30, 'coach');
+  const { q } = preuveOk('pB');
+  storageShouldFail = true;
+  const done = invalider(q, 'peluche absente', { deletePhoto: true });
+  storageShouldFail = false;
+  ok(done === true, 'l\'invalidation a échoué parce que le réseau a hoqueté');
+  ok(ctx._pintadeStatus(q) === 'invalidated_by_coach', 'statut = ' + ctx._pintadeStatus(q));
+  ok(ctx.pintadeStreak(p.id) === 1, 'la comptabilité n\'a pas été appliquée');
+});
+t('« photo supprimée » est DÉRIVÉ, donc visible par toutes — pas seulement le coach', () => {
+  seed('coach');
+  startGarde('pA', 30, 'coach');
+  const { q } = preuveOk('pB');
+  invalider(q, 'hors sujet', { deletePhoto: true });
+  ok(ctx._pintadePhotoWasDeleted(q) === true, 'la suppression n\'est pas dérivable');
+  // Aller-retour base COMPLET : un drapeau posé en mémoire ne survivrait pas.
+  const back = ctx._pintadeRequestFromRow(Object.assign({}, ctx._dumpPintadeRequestRow(q),
+    { period_id: q.periodId, holder_id: q.holderId }));
+  ok(ctx._pintadePhotoWasDeleted(back) === true, 'perdu à l\'aller-retour base');
+  // …et une joueuse voit la même chose.
+  S.auth = { role: 'player', playerId: 'pB' };
+  const row = ctx._pintadeFeedRow(q);
+  ok(/photo supprimée/.test(row), 'la joueuse ne voit pas que la photo a été retirée');
+  ok(!/<img/.test(row), 'une image est encore rendue');
+});
+t('_pintadeStoragePath refuse tout ce qui ne vient pas de NOTRE bucket', () => {
+  ok(ctx._pintadeStoragePath('https://x/storage/v1/object/public/pintade-proofs/proof-a-1.jpg') === 'proof-a-1.jpg');
+  ok(ctx._pintadeStoragePath('https://evil.example/pintade-proofs/../../etc/passwd') === '',
+    'un chemin de traversée est accepté');
+  ok(ctx._pintadeStoragePath('https://x/storage/v1/object/public/autre-bucket/a.jpg') === '',
+    'un bucket étranger est accepté');
+  ok(ctx._pintadeStoragePath('') === '' && ctx._pintadeStoragePath(null) === '', 'entrée vide mal gérée');
 });
 t('aller-retour base : les trois colonnes d\'invalidation survivent', () => {
   seed('coach');

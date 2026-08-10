@@ -19934,10 +19934,65 @@ function _pintadeAutoReleaseFrom(reqId) {
 function pintadeCanInvalidate(q) {
   return !!(q && _pintadeIsCoach() && _pintadeStatus(q) === 'ok');
 }
+// LA PHOTO A-T-ELLE ÉTÉ SUPPRIMÉE ? Dérivé, pas stocké — et c'est important :
+// un drapeau posé en mémoire sur l'appareil du coach n'aurait aucune colonne
+// pour voyager. Lui verrait « photo supprimée », toutes les autres une ligne
+// muette. Le raisonnement tient tout seul : une demande ne passe à 'ok' que
+// dans `submitPintadeProof`, APRÈS que l'URL de la photo a été posée. Une
+// preuve invalidée sans URL est donc forcément une preuve dont l'image a été
+// retirée du bucket.
+function _pintadePhotoWasDeleted(q) {
+  return !!(q && _pintadeStatus(q) === 'invalidated_by_coach' && !q.photoUrl);
+}
 // L'invalidation elle-même. `undoRelease` n'est consulté que si la preuve avait
 // déclenché une auto-libération.
-function pintadeInvalidateProof(reqId, reason, undoRelease) {
+// Le chemin de l'objet dans le bucket, retrouvé depuis l'URL publique. Les
+// preuves sont déposées à plat (`proof-<demande>-<horodatage>.jpg`) : le dernier
+// segment suffit. On refuse tout ce qui ne vient pas de NOTRE bucket — une URL
+// étrangère n'a rien à faire dans un appel `remove()`.
+// On exige le PRÉFIXE COMPLET du Storage, pas la simple présence du nom du
+// bucket quelque part dans l'URL : « https://ailleurs/pintade-proofs/../../x »
+// contient bien la chaîne, et prendre son dernier segment enverrait un nom
+// arbitraire à `remove()`. Et parce que le préfixe est suivi du nom de fichier
+// À PLAT, tout segment supplémentaire (donc tout « / » restant) est un signe
+// que l'URL n'est pas celle qu'on croit.
+const PINTADE_BUCKET_PREFIX = '/storage/v1/object/public/pintade-proofs/';
+function _pintadeStoragePath(url) {
+  if (!url || typeof url !== 'string') return '';
+  const at = url.indexOf(PINTADE_BUCKET_PREFIX);
+  if (at < 0) return '';
+  try {
+    const name = decodeURIComponent(url.slice(at + PINTADE_BUCKET_PREFIX.length).split('?')[0]);
+    return /^[\w.\-]+$/.test(name) ? name : '';   // pas de « / », pas de « .. »
+  } catch (e) { return ''; }
+}
+// Suppression PHYSIQUE de la photo. Volontairement séparée et best-effort :
+// l'invalidation ne doit jamais échouer parce que le réseau a hoqueté sur le
+// Storage. On a déjà détaché l'URL du dossier avant d'arriver ici — donc même
+// si l'appel rate, plus personne ne voit l'image ; le nom du fichier part dans
+// la console ET dans le journal d'incident pour qu'un ménage reste possible.
+async function _pintadeDeletePhotoObject(path) {
+  if (!path || !window.sb) return false;
+  try {
+    const { error } = await sb.storage.from('pintade-proofs').remove([path]);
+    if (error) throw error;
+    return true;
+  } catch (e) {
+    console.warn('[pintade] photo non supprimée du storage (' + path + ') :', e && e.message);
+    return false;
+  }
+}
+// `opts` : { deletePhoto: bool }.
+//
+// L'ANNULATION DE L'AUTO-LIBÉRATION N'EST PLUS UNE OPTION. Si la preuve
+// invalidée avait libéré la porteuse, la libération tombe avec elle —
+// automatiquement. Proposer deux chemins revenait à demander au coach de
+// trancher une question qui n'en est pas une : une preuve rejetée n'a pas pu
+// libérer qui que ce soit. Il ne reste qu'une confirmation, qui annonce la
+// conséquence au lieu de la mettre au vote.
+function pintadeInvalidateProof(reqId, reason, opts) {
   if (!_pintadeIsCoach()) return false;
+  const o = (opts && typeof opts === 'object') ? opts : {};
   const q = (state.pintadeRequests || []).find(x => x && x.id === reqId && !x.deletedAt);
   if (!pintadeCanInvalidate(q)) return false;
   const now = Date.now();
@@ -19953,10 +20008,20 @@ function pintadeInvalidateProof(reqId, reason, undoRelease) {
   q.updatedAt = now;
   // `resolvedAt` reste tel quel : la photo EST arrivée à cet instant-là.
 
-  let undone = false;
-  if (release && undoRelease) {
-    undone = _pintadeUndoAutoRelease(release, period, now);
+  // PHOTO SUPPRIMÉE — pour une image réellement déplacée (nudité, cadrage
+  // agressif), retirer la ligne du feed ne suffit pas : le fichier reste
+  // accessible à qui a l'URL. On DÉTACHE d'abord (plus personne ne la voit,
+  // synchronisé tout de suite), on efface l'objet ensuite. Jamais l'inverse :
+  // si la suppression échouait après coup, une URL morte resterait affichée.
+  // La ligne, elle, survit — c'est la trace de l'incident.
+  let photoPath = '';
+  if (o.deletePhoto && q.photoUrl) {
+    photoPath = _pintadeStoragePath(q.photoUrl);
+    q.photoUrl = '';
   }
+
+  // Une preuve rejetée n'a pas pu libérer : la libération tombe avec elle.
+  const undone = release ? _pintadeUndoAutoRelease(release, period, now) : false;
 
   _pintadeLogIncident(period, {
     incidentType: 'coach_invalidated_proof',
@@ -19967,9 +20032,14 @@ function pintadeInvalidateProof(reqId, reason, undoRelease) {
       requesterId: q.requesterId || null,
       holderId: q.holderId || null,
       hadTriggeredRelease: !!release,
-      releaseUndone: undone
+      releaseUndone: undone,
+      // Le nom du fichier reste tracé : c'est ce qui permet un ménage manuel
+      // si le Storage a refusé l'appel.
+      photoDeleted: !!photoPath,
+      photoPath: photoPath || null
     }
   });
+  if (photoPath) { try { _pintadeDeletePhotoObject(photoPath); } catch (e) {} }
   persist(); _pintadeFlush();
 
   // La porteuse doit l'apprendre de l'app, pas de ses coéquipières.
@@ -20033,6 +20103,16 @@ function _pintadeUndoAutoRelease(incident, releasedPeriod, now) {
         url: '/', tag: 'pintade-undo-back-' + incident.id, type: 'pintade_release_undone'
       });
     }
+    // Récapitulatif au coach : il vient d'agir, mais il peut avoir invalidé
+    // depuis un autre appareil que celui qu'il a sous les yeux — et surtout,
+    // un transfert annulé est ce qu'on relit trois jours plus tard en se
+    // demandant qui porte quoi.
+    notifyPush([_pushCoachKey()], {
+      title: '🕊 Libération annulée',
+      body: 'Preuve invalidée : la pintade retourne à ' + backTo
+        + (meta.newHolderId ? ' (retirée à ' + _pintadePlayerLabel(meta.newHolderId) + ')' : '') + '.',
+      url: '/', tag: 'pintade-undo-coach-' + incident.id, type: 'pintade_release_undone'
+    });
   } catch (e) {}
   return true;
 }
@@ -20511,10 +20591,11 @@ function _pintadeFeedRow(q) {
   // et donnerait l'impression que le coach réécrit le passé en douce. Il l'a
   // fait, ça se voit, et le motif est là quand il l'a écrit.
   if (st === 'invalidated_by_coach') {
+    const gone = _pintadePhotoWasDeleted(q);
     return `<div class="pintade-feed-row" style="border-color:rgba(239,68,68,0.4)">
-      ${q.photoUrl ? `<img src="${esc(q.photoUrl)}" alt="Preuve invalidée" loading="lazy" onclick="_pintadeViewProof('${esc(q.id)}')" style="opacity:.5;filter:grayscale(1)">` : '<div class="pintade-feed-ico">❌</div>'}
+      ${q.photoUrl ? `<img src="${esc(q.photoUrl)}" alt="Preuve invalidée" loading="lazy" onclick="_pintadeViewProof('${esc(q.id)}')" style="opacity:.5;filter:grayscale(1)">` : `<div class="pintade-feed-ico">${gone ? '🚫' : '❌'}</div>`}
       <div style="flex:1;min-width:0">
-        <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;color:var(--red,#ef4444);line-height:1.25">❌ Invalidée par le coach</div>
+        <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;color:var(--red,#ef4444);line-height:1.25">❌ Invalidée par le coach${gone ? ' — photo supprimée' : ''}</div>
         ${q.invalidationReason ? `<div style="font-size:11px;color:var(--ink-2);line-height:1.5;margin-top:4px">« ${esc(q.invalidationReason)} »</div>` : ''}
         <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;line-height:1.5">Photo reçue à ${_pintadeFmtTime(q.resolvedAt || q.requestedAt)}${q.invalidatedAt ? ' · invalidée le ' + _pintadeFmtDateTime(q.invalidatedAt) : ''}<br>${when} · demandé par ${who}</div>
       </div></div>`;
@@ -20575,23 +20656,34 @@ function openPintadeInvalidate(reqId) {
   // Le cas délicat : cette preuve a DÉJÀ libéré la porteuse et transféré la
   // peluche. On ne choisit pas à la place du coach — les deux options sont
   // défendables, et lui seul sait ce qui s'est passé dans le vestiaire.
+  // UN SEUL CHEMIN. La libération n'est pas mise au vote : une preuve rejetée
+  // n'a pas pu libérer qui que ce soit. On ANNONCE la conséquence — le coach
+  // doit savoir ce qu'il déclenche — mais il n'a pas à arbitrer une question
+  // qui n'en est pas une. Deux boutons l'auraient laissé choisir un état
+  // incohérent : porteuse libérée par une preuve que lui-même vient de rejeter.
   const releaseBlock = release ? `
     <div style="margin-top:14px;padding:12px;border-radius:10px;background:rgba(239,68,68,0.10);border:1.5px solid var(--red,#ef4444)">
-      <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;color:var(--red,#ef4444);line-height:1.3">⚠ Cette preuve a déjà libéré ${who}</div>
+      <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;color:var(--red,#ef4444);line-height:1.3">⚠ La libération sera annulée</div>
       <div style="font-size:12px;color:var(--ink);line-height:1.55;margin-top:7px">
-        La pintade a été transférée automatiquement${release.metadata && release.metadata.newHolderId
-          ? ' à <strong>' + esc(_pintadePlayerLabel(release.metadata.newHolderId)) + '</strong>' : ''}.
-        Veux-tu aussi annuler ce transfert et rendre la garde à ${who} ?
+        Cette preuve avait libéré ${who}${release.metadata && release.metadata.newHolderId
+          ? ' et transféré la pintade à <strong>' + esc(_pintadePlayerLabel(release.metadata.newHolderId)) + '</strong>' : ''}.
+        La garde retournera à <strong>${who}</strong>, et les deux joueuses seront prévenues.
       </div>
     </div>` : '';
-  const footer = release ? `
+  const footer = `
     <button class="btn btn-primary btn-block mb-2" style="background:var(--red,#ef4444);border-color:var(--red,#ef4444)"
-      onclick="_pintadeSubmitInvalidate('${esc(q.id)}', true)">Oui, annuler aussi la libération</button>
-    <button class="btn btn-secondary btn-block mb-2" onclick="_pintadeSubmitInvalidate('${esc(q.id)}', false)">Non, juste marquer invalide</button>
-    <button class="btn btn-ghost btn-block" onclick="closeModal();setTimeout(()=>openPintadeScreen(),50)">Annuler</button>` : `
-    <button class="btn btn-primary btn-block mb-2" style="background:var(--red,#ef4444);border-color:var(--red,#ef4444)"
-      onclick="_pintadeSubmitInvalidate('${esc(q.id)}', false)">❌ Invalider la preuve</button>
+      onclick="_pintadeSubmitInvalidate('${esc(q.id)}')">${release ? '❌ Invalider et annuler la libération' : '❌ Invalider la preuve'}</button>
     <button class="btn btn-ghost btn-block" onclick="closeModal();setTimeout(()=>openPintadeScreen(),50)">Annuler</button>`;
+  // Suppression physique : proposée SEULEMENT s'il y a une image, et décochée
+  // par défaut. Irréversible, donc jamais un effet de bord d'un autre geste.
+  const photoBlock = q.photoUrl ? `
+    <label style="display:flex;gap:10px;align-items:flex-start;margin-top:14px;padding:11px 12px;background:var(--bg-1);border:1px solid var(--border);border-radius:8px;cursor:pointer">
+      <input type="checkbox" id="pintade-delete-photo" style="margin-top:2px;flex:0 0 auto">
+      <span style="flex:1;min-width:0">
+        <span style="display:block;font-size:13px;color:var(--ink);line-height:1.45">Supprimer aussi la photo <strong>définitivement</strong></span>
+        <span style="display:block;font-size:11px;color:var(--ink-3);line-height:1.45;margin-top:3px">Pour une image déplacée ou hors sujet. Le fichier est effacé du serveur : masquer la ligne ne suffirait pas, l'URL resterait ouverte à qui l'a. La trace de l'incident, elle, est conservée.</span>
+      </span>
+    </label>` : '';
   openModal(`
     <div class="modal-header">
       <div>
@@ -20611,19 +20703,26 @@ function openPintadeInvalidate(reqId) {
         placeholder="Ex. : la peluche n'est pas sur la photo"
         style="width:100%;margin-top:6px;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-1);color:var(--ink);font-size:13px;font-family:inherit;resize:vertical"></textarea>
       <div style="font-size:11px;color:var(--ink-3);line-height:1.5;margin-top:6px">Le motif est envoyé à ${who} et affiché dans le feed.</div>
+      ${photoBlock}
       ${releaseBlock}
     </div>
     <div class="modal-footer">${footer}</div>`);
 }
-function _pintadeSubmitInvalidate(reqId, undoRelease) {
-  let reason = '';
+function _pintadeSubmitInvalidate(reqId) {
+  let reason = '', deletePhoto = false;
   try {
     const el = document.getElementById('pintade-invalidate-reason');
     if (el) reason = el.value || '';
+    const cb = document.getElementById('pintade-delete-photo');
+    deletePhoto = !!(cb && cb.checked);
   } catch (e) {}
-  const done = pintadeInvalidateProof(reqId, reason, !!undoRelease);
+  const done = pintadeInvalidateProof(reqId, reason, { deletePhoto: deletePhoto });
   closeModal();
-  try { if (typeof showToast === 'function') showToast(done ? '❌ Preuve invalidée' : 'Action impossible'); } catch (e) {}
+  try {
+    if (typeof showToast === 'function') {
+      showToast(done ? (deletePhoto ? '❌ Preuve invalidée · photo supprimée' : '❌ Preuve invalidée') : 'Action impossible');
+    }
+  } catch (e) {}
   setTimeout(() => { try { openPintadeScreen(); } catch (e) {} }, 60);
 }
 
@@ -42002,7 +42101,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-11.117';
+const APP_VERSION = '2026-08-11.118';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
