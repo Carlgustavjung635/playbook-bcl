@@ -1220,6 +1220,225 @@ t('une joueuse ne peut pas toucher au texte', () => {
   ok(!ctx.__lastModal, 'l\'écran de configuration s\'ouvre pour une joueuse');
 });
 
+// =============================================================================
+// INVALIDATION D'UNE PREUVE PAR LE COACH (migration 20260811_002)
+// -----------------------------------------------------------------------------
+// Le jeu ne sait juger qu'une chose : la photo est-elle arrivée dans les temps.
+// Il ne sait pas si la peluche y figure. Une preuve est donc valide PAR DÉFAUT,
+// et le coach peut revenir dessus après coup.
+//
+// CE QUI EST VERROUILLÉ ICI :
+//   • une invalidation compte comme un RATÉ partout (série, prolongations,
+//     plafond d'arbitrage) — sinon l'acte serait cosmétique ;
+//   • le recalcul est RÉTROACTIF et gratuit : il découle du statut, aucun
+//     compteur n'est stocké ;
+//   • seul le coach peut invalider, et seulement une preuve RÉUSSIE ;
+//   • `resolvedAt` n'est jamais réécrit : on annote l'histoire, on ne la
+//     réécrit pas ;
+//   • la preuve invalidée RESTE dans le feed (un trou serait pire) ;
+//   • l'auto-libération déjà déclenchée est le seul cas non dérivé : le coach
+//     choisit, et l'annulation rend la garde à la porteuse.
+// =============================================================================
+function invalider(q, reason, undo) {
+  S.auth = { role: 'coach', coachId: 'admin' };
+  return ctx.pintadeInvalidateProof(q.id, reason || '', !!undo);
+}
+
+t('une preuve invalidée compte comme un raté, pas comme une réussite', () => {
+  seed('coach');
+  const p = startGarde('pA', 30, 'coach');
+  const { q } = preuveOk('pB');
+  ok(ctx.pintadeOkStreak(p.id) === 1, 'série OK = ' + ctx.pintadeOkStreak(p.id));
+  ok(invalider(q, 'la peluche n\'est pas dessus'), 'invalidation refusée');
+  ok(ctx._pintadeStatus(q) === 'invalidated_by_coach', 'statut = ' + ctx._pintadeStatus(q));
+  ok(ctx.pintadeOkStreak(p.id) === 0, 'la série de réussites n\'est pas repartie de zéro');
+  ok(ctx.pintadeStreak(p.id) === 1, 'ratés consécutifs = ' + ctx.pintadeStreak(p.id));
+  ok(ctx.pintadeOkTotal(p.id) === 0, 'toujours comptée comme réussite');
+  ok(ctx.pintadeFailTotal(p.id) === 1, 'pas comptée comme raté');
+});
+t('le recalcul de la série est RÉTROACTIF (rien n\'est stocké)', () => {
+  seed('coach');
+  const p = startGarde('pA', 30, 'coach');
+  const a = preuveOk('pB').q, b = preuveOk('pB').q, c = preuveOk('pB').q;
+  ok(ctx.pintadeOkStreak(p.id) === 3, 'série = ' + ctx.pintadeOkStreak(p.id));
+  // On invalide celle du MILIEU : la série d'après repart de la suivante.
+  invalider(b, 'hors sujet');
+  ok(ctx.pintadeOkStreak(p.id) === 1, 'série après invalidation du milieu = ' + ctx.pintadeOkStreak(p.id));
+  ok(ctx.pintadeOkTotal(p.id) === 2, 'réussites = ' + ctx.pintadeOkTotal(p.id));
+  ok(a && c, 'garde-fou');
+});
+t('une invalidation peut faire franchir le plafond → arbitrage dû', () => {
+  seed('coach');
+  const p = startGarde('pA', 30, 'coach');
+  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, { maxConsecutiveFails: 3, autoReleaseAfterOk: 0, updatedAt: NOW });
+  ratePasVue(); rateTropLente();                    // 2 ratés secs
+  ok(ctx.pintadeStreak(p.id) === 2, 'série de ratés = ' + ctx.pintadeStreak(p.id));
+  const { q } = preuveOk('pB');                     // une réussite remet à zéro
+  ok(ctx.pintadeStreak(p.id) === 0, 'la réussite n\'a pas remis la série à zéro');
+  invalider(q, 'photo de la pintade de sa voisine');
+  ok(ctx.pintadeStreak(p.id) === 3, 'série après invalidation = ' + ctx.pintadeStreak(p.id));
+  ok(ctx.pintadeAlertPending(ctx.pintadeActivePeriod()) === true, 'aucun arbitrage réclamé au coach');
+});
+t('seul le coach invalide, et seulement une preuve RÉUSSIE', () => {
+  seed('coach');
+  startGarde('pA', 30, 'coach');
+  const { q } = preuveOk('pB');
+  S.auth = { role: 'player', playerId: 'pB' };
+  ok(ctx.pintadeInvalidateProof(q.id, 'moi je veux', false) === false, 'une joueuse a pu invalider');
+  ok(ctx._pintadeStatus(q) === 'ok', 'statut abîmé par la tentative');
+  ok(ctx.pintadeCanInvalidate(q) === false, 'le bouton s\'affiche pour une joueuse');
+  // Un raté n'est pas invalidable : il n'y a rien à retirer.
+  S.auth = { role: 'coach', coachId: 'admin' };
+  ratePasVue();
+  const bad = lastReq();
+  ok(ctx.pintadeCanInvalidate(bad) === false, 'un raté est proposé à l\'invalidation');
+  ok(ctx.pintadeInvalidateProof(bad.id, '', false) === false, 'un raté a pu être invalidé');
+  // …et invalider deux fois ne fait rien de plus.
+  ok(invalider(q) === true, 'invalidation refusée au coach');
+  ok(ctx.pintadeInvalidateProof(q.id, '', false) === false, 'double invalidation acceptée');
+});
+t('l\'histoire est annotée, pas réécrite (resolvedAt intact) + traçabilité', () => {
+  seed('coach');
+  const p = startGarde('pA', 30, 'coach');
+  const { q } = preuveOk('pB');
+  const resolved = q.resolvedAt;
+  invalider(q, '  peluche absente  ');
+  ok(q.resolvedAt === resolved, 'resolvedAt a été réécrit');
+  ok(q.invalidatedAt && q.invalidatedAt >= resolved, 'invalidatedAt manquant');
+  ok(String(q.invalidatedBy || '').startsWith('coach:'), 'invalidatedBy = ' + q.invalidatedBy);
+  ok(q.invalidationReason === 'peluche absente', 'motif non nettoyé : ' + JSON.stringify(q.invalidationReason));
+  ok(q.updatedAt >= q.invalidatedAt, 'updatedAt non bumpé → le LWW réécrira la ligne');
+  const inc = (S.pintadeIncidents || []).find(i => i.incidentType === 'coach_invalidated_proof');
+  ok(inc && inc.metadata.requestId === q.id, 'incident non tracé');
+  ok(inc.periodId === p.id && inc.notes === 'peluche absente', JSON.stringify(inc));
+});
+t('la porteuse est prévenue, motif compris', () => {
+  seed('coach');
+  startGarde('pA', 30, 'coach');
+  const { q } = preuveOk('pB');
+  pushes.length = 0;
+  invalider(q, 'peluche absente');
+  const p = pushes.find(x => (x.payload || {}).type === 'pintade_proof_invalidated');
+  ok(p, 'aucune notification à la porteuse');
+  ok((p.keys || []).includes('player:pA'), 'destinataire = ' + JSON.stringify(p.keys));
+  ok(/peluche absente/.test(p.payload.body), 'motif absent du message : ' + p.payload.body);
+});
+t('la preuve invalidée RESTE dans le feed, marquée', () => {
+  seed('coach');
+  startGarde('pA', 30, 'coach');
+  const { q } = preuveOk('pB');
+  invalider(q, 'hors sujet');
+  const row = ctx._pintadeFeedRow(q);
+  ok(/Invalidée par le coach/.test(row), 'la ligne ne dit pas qu\'elle est invalidée');
+  ok(/hors sujet/.test(row), 'le motif n\'apparaît pas');
+  ok(!/Preuve validée/.test(row), 'elle passe encore pour validée');
+  ok(!/trop lente/.test(row), 'elle est présentée comme une lenteur — c\'est faux');
+});
+t('le bouton d\'invalidation n\'existe que pour le coach', () => {
+  seed('coach');
+  startGarde('pA', 30, 'coach');
+  const { q } = preuveOk('pB');
+  S.auth = { role: 'coach', coachId: 'admin' };
+  ok(/openPintadeInvalidate/.test(ctx._pintadeFeedRow(q)), 'le coach n\'a pas le bouton');
+  S.auth = { role: 'player', playerId: 'pB' };
+  ok(!/openPintadeInvalidate/.test(ctx._pintadeFeedRow(q)), 'une joueuse voit le bouton');
+  S.auth = { role: 'player', playerId: 'pA' };
+  ok(!/openPintadeInvalidate/.test(ctx._pintadeFeedRow(q)), 'la porteuse voit le bouton');
+});
+
+// --- LE CAS DÉLICAT : l'auto-libération a déjà eu lieu ------------------------
+t('invalider la preuve déclenchante propose d\'annuler la libération', () => {
+  seed('coach');
+  const p = startGarde('pA', 30, 'coach');
+  for (let i = 0; i < 5; i++) preuveOk('pB');
+  const { q, freed } = preuveOk('pC');
+  ok(freed && freed.successorId === 'pC', 'la libération n\'a pas eu lieu');
+  ok(ctx._pintadeAutoReleaseFrom(q.id), 'la libération n\'est pas reliée à la preuve');
+  S.auth = { role: 'coach', coachId: 'admin' };
+  ctx.openPintadeInvalidate(q.id);
+  ok(/déjà libéré/.test(ctx.__lastModal || ''), 'la modale ne prévient pas du transfert déjà fait');
+  ok(/annuler aussi la libération/.test(ctx.__lastModal || ''), 'aucune option d\'annulation');
+  ok(/juste marquer invalide/.test(ctx.__lastModal || ''), 'aucune option « ne rien annuler »');
+  ok(p, 'garde-fou');
+});
+t('…y compris quand on invalide une preuve du MILIEU de la série', () => {
+  seed('coach');
+  startGarde('pA', 30, 'coach');
+  const troisieme = [];
+  for (let i = 0; i < 5; i++) troisieme.push(preuveOk('pB').q);
+  preuveOk('pC');
+  // La 3e de la série de six : la casser invalide la libération tout autant.
+  ok(ctx._pintadeAutoReleaseFrom(troisieme[2].id),
+    'seule la 6e est reliée — invalider une preuve du milieu passerait inaperçu');
+});
+t('« Non, juste marquer invalide » laisse la nouvelle porteuse en place', () => {
+  seed('coach');
+  startGarde('pA', 30, 'coach');
+  for (let i = 0; i < 5; i++) preuveOk('pB');
+  const { q } = preuveOk('pC');
+  const nouvelle = ctx.pintadeActivePeriod();
+  invalider(q, 'litige', false);
+  ok(ctx.pintadeActivePeriod().id === nouvelle.id, 'la garde a été annulée sans qu\'on le demande');
+  ok(ctx.pintadeActivePeriod().holderId === 'pC', 'porteuse = ' + ctx.pintadeActivePeriod().holderId);
+  const inc = (S.pintadeIncidents || []).find(i => i.incidentType === 'coach_invalidated_proof');
+  ok(inc.metadata.hadTriggeredRelease === true && inc.metadata.releaseUndone === false, JSON.stringify(inc.metadata));
+});
+t('« Oui, annuler » rend la garde à la porteuse et efface la garde née à tort', () => {
+  seed('coach');
+  const p = startGarde('pA', 30, 'coach');
+  for (let i = 0; i < 5; i++) preuveOk('pB');
+  const { q } = preuveOk('pC');
+  const nee = ctx.pintadeActivePeriod();
+  ok(nee.holderId === 'pC', 'préalable faux');
+  invalider(q, 'peluche absente', true);
+  const now = ctx.pintadeActivePeriod();
+  ok(now && now.id === p.id, 'la garde de pA n\'a pas repris : ' + (now && now.holderId));
+  ok(now.holderId === 'pA' && now.ended === false, JSON.stringify({ h: now.holderId, e: now.ended }));
+  const nee2 = (S.pintadeHolders || []).find(h => h.id === nee.id);
+  ok(nee2 && nee2.deletedAt, 'la garde née à tort survit');
+  // L'idempotence se relâche : la libération pourra se redéclencher plus tard.
+  ok(ctx._pintadeAutoReleaseDone(p.id) === false, 'l\'auto-libération reste verrouillée à jamais');
+  const inc = (S.pintadeIncidents || []).find(i => i.incidentType === 'coach_invalidated_proof');
+  ok(inc.metadata.releaseUndone === true, JSON.stringify(inc.metadata));
+});
+t('annuler la libération prévient les deux joueuses concernées', () => {
+  seed('coach');
+  startGarde('pA', 30, 'coach');
+  for (let i = 0; i < 5; i++) preuveOk('pB');
+  const { q } = preuveOk('pC');
+  pushes.length = 0;
+  invalider(q, '', true);
+  const undone = pushes.filter(x => (x.payload || {}).type === 'pintade_release_undone');
+  ok(undone.length === 2, 'notifications d\'annulation = ' + undone.length);
+  ok(undone.some(x => (x.keys || []).includes('player:pC')), 'la nouvelle porteuse n\'est pas prévenue');
+  ok(undone.some(x => (x.keys || []).includes('player:pA')), 'l\'ancienne porteuse n\'est pas prévenue');
+});
+t('après annulation, la porteuse peut se relibérer normalement', () => {
+  seed('coach');
+  const p = startGarde('pA', 30, 'coach');
+  for (let i = 0; i < 5; i++) preuveOk('pB');
+  invalider(preuveOk('pC').q, 'litige', true);
+  ok(ctx.pintadeActivePeriod().id === p.id, 'la garde de pA n\'a pas repris');
+  // La série repart de zéro (l'invalidation est un raté) : il faut 6 preuves.
+  ok(ctx.pintadeOkStreak(p.id) === 0, 'série = ' + ctx.pintadeOkStreak(p.id));
+  for (let i = 0; i < 5; i++) preuveOk('pB');
+  const { freed } = preuveOk('pC');
+  ok(freed && freed.successorId === 'pC', 'la libération ne peut plus se redéclencher');
+});
+t('aller-retour base : les trois colonnes d\'invalidation survivent', () => {
+  seed('coach');
+  startGarde('pA', 30, 'coach');
+  const { q } = preuveOk('pB');
+  invalider(q, 'peluche absente');
+  const row = ctx._dumpPintadeRequestRow(q);
+  ok(row.status === 'invalidated_by_coach', 'statut poussé = ' + row.status);
+  ok(row.invalidated_by && row.invalidated_at && row.invalidation_reason === 'peluche absente', JSON.stringify(row));
+  const back = ctx._pintadeRequestFromRow(Object.assign({}, row, { period_id: q.periodId, holder_id: q.holderId }));
+  ok(back.status === 'invalidated_by_coach', 'statut relu = ' + back.status);
+  ok(back.invalidationReason === 'peluche absente', 'motif perdu');
+  ok(back.invalidatedAt === q.invalidatedAt, 'horodatage perdu à l\'aller-retour');
+});
+
 console.log('\n' + R.join('\n'));
 const bad = R.filter(r => r.startsWith('✗'));
 console.log('\n' + (R.length - bad.length) + '/' + R.length + ' OK');

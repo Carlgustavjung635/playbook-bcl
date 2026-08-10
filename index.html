@@ -6007,8 +6007,12 @@ function _pintadeHolderFromRow(r) {
 //   failed_timeout → elle a vu, et le chrono a filé
 // Les deux valeurs v.106 se traduisent : 'failed' = la porteuse avait constaté
 // elle-même, donc elle avait vu ; 'expired' = personne n'avait rien vu passer.
+//   invalidated_by_coach → photo arrivée à temps, mais rejetée APRÈS COUP par
+//                          le coach (peluche absente, cadrage malhonnête…).
+//                          Compte comme un raté partout (migration _20260811_002).
 function _pintadeNormStatusDb(s) {
-  if (['pending', 'awaiting_photo', 'ok', 'failed_not_seen', 'failed_timeout'].includes(s)) return s;
+  if (['pending', 'awaiting_photo', 'ok', 'failed_not_seen', 'failed_timeout',
+       'invalidated_by_coach'].includes(s)) return s;
   if (s === 'failed') return 'failed_timeout';
   if (s === 'expired') return 'failed_not_seen';
   return 'pending';
@@ -6030,6 +6034,13 @@ function _dumpPintadeRequestRow(q) {
     photo_url: q.photoUrl || null,
     status: _pintadeNormStatusDb(q.status),
     resolved_at: q.resolvedAt ? new Date(q.resolvedAt).toISOString() : null,
+    // Invalidation par le coach (migration 20260811_002). `resolved_at` n'est
+    // JAMAIS réécrit : il reste l'instant où la photo est arrivée. On annote
+    // l'histoire, on ne la réécrit pas.
+    invalidated_by: q.invalidatedBy || null,
+    invalidated_at: q.invalidatedAt ? new Date(q.invalidatedAt).toISOString() : null,
+    invalidation_reason: (typeof q.invalidationReason === 'string' && q.invalidationReason.trim())
+      ? q.invalidationReason.slice(0, 2000) : null,
     deleted_at: q.deletedAt ? new Date(q.deletedAt).toISOString() : null,
     updated_at: q.updatedAt ? new Date(q.updatedAt).toISOString() : new Date().toISOString()
   };
@@ -6054,6 +6065,9 @@ function _pintadeRequestFromRow(r) {
     photoUrl: r.photo_url || '',
     status: _pintadeNormStatusDb(r.status),
     resolvedAt: r.resolved_at ? Date.parse(r.resolved_at) : null,
+    invalidatedBy: r.invalidated_by || null,
+    invalidatedAt: r.invalidated_at ? Date.parse(r.invalidated_at) : null,
+    invalidationReason: r.invalidation_reason || '',
     createdAt: r.created_at ? Date.parse(r.created_at) : null,
     updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
     deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
@@ -19339,7 +19353,8 @@ function _pintadeIsHolder() {
 // partagent aucune portée, et un appel qui franchirait la frontière échouerait
 // à l'exécution sans que rien ne le signale à la lecture. À garder alignées
 // toutes les deux avec la contrainte CHECK de la migration _002.
-const PINTADE_STATUSES = ['pending', 'awaiting_photo', 'ok', 'failed_not_seen', 'failed_timeout'];
+const PINTADE_STATUSES = ['pending', 'awaiting_photo', 'ok', 'failed_not_seen', 'failed_timeout',
+  'invalidated_by_coach'];
 const PINTADE_STATUS_LEGACY = { failed: 'failed_timeout', expired: 'failed_not_seen' };
 function _pintadeNormStatus(s) {
   if (PINTADE_STATUSES.includes(s)) return s;
@@ -19358,9 +19373,14 @@ function _pintadeStatus(q) {
   }
   return _pintadeNormStatus(q.status);
 }
+// UN SEUL endroit décide de ce qui « compte comme un raté ». C'est ce qui rend
+// l'invalidation par le coach rétroactive GRATUITEMENT : la série en cours, les
+// prolongations, le plafond d'arbitrage et la jauge de libération dérivent tous
+// de `_pintadeTally`, qui dérive d'ici. Rien à recompter, aucun compteur en base
+// à corriger — changer le statut d'une demande suffit à réécrire l'histoire.
 function _pintadeIsFail(q) {
   const s = _pintadeStatus(q);
-  return s === 'failed_not_seen' || s === 'failed_timeout';
+  return s === 'failed_not_seen' || s === 'failed_timeout' || s === 'invalidated_by_coach';
 }
 // Une demande « vivante » = elle attend encore quelque chose de la porteuse,
 // que ce soit une connexion ou une photo.
@@ -19851,6 +19871,172 @@ function _pintadeMaybeAutoRelease(period, triggerRequest) {
 }
 // Le coach doit-il désigner une porteuse à la suite d'une auto-libération ?
 // Vrai tant que personne ne porte la peluche et qu'un incident l'attend.
+// ============================================================
+// INVALIDATION D'UNE PREUVE PAR LE COACH (migration 20260811_002)
+// ------------------------------------------------------------
+// Le jeu ne sait juger qu'une chose : la photo est-elle arrivée dans les temps.
+// Il ne sait pas si la peluche y figure, si le cadrage est honnête, si la
+// joueuse a photographié la pintade de sa voisine. Une preuve est donc VALIDE
+// PAR DÉFAUT — l'automatisme ne doit pas soupçonner — mais le coach peut
+// revenir dessus.
+//
+// LE RECALCUL EST GRATUIT. Toute la comptabilité (série en cours, ratés
+// ouvrant droit à prolongation, plafond d'arbitrage, jauge des 6 preuves) se
+// dérive à la lecture depuis le statut de chaque demande, via `_pintadeTally`.
+// Changer le statut d'UNE demande recalcule donc rétroactivement TOUT, sans
+// migration de données ni compteur à corriger. C'est exactement ce pour quoi
+// ce module refuse de stocker ses compteurs.
+//
+// LE CAS DÉLICAT, ET LE SEUL : l'auto-libération. C'est la seule écriture non
+// dérivée du module (elle CRÉE une garde). Si la preuve invalidée est celle qui
+// a déclenché une libération, on ne peut plus se contenter de recalculer : une
+// porteuse a changé, une notification est partie. On demande donc au coach ce
+// qu'il veut faire, au lieu de choisir à sa place.
+// ============================================================
+
+// L'auto-libération que cette preuve a rendue possible, s'il y en a une.
+//
+// ATTENTION AU RACCOURCI : se contenter de comparer à `triggerRequestId` (la
+// 6e preuve, celle qui a déclenché) laisserait passer les cinq autres. Or
+// invalider la TROISIÈME d'une série de six casse la série tout autant : la
+// libération n'aurait jamais dû avoir lieu. On cherche donc si la preuve fait
+// partie de la SÉRIE qui a produit la libération — soit les `goal` réussites
+// consécutives qui se terminent sur la demande déclenchante.
+function _pintadeAutoReleaseFrom(reqId) {
+  if (!reqId) return null;
+  const q = (state.pintadeRequests || []).find(x => x && x.id === reqId && !x.deletedAt);
+  if (!q) return null;
+  const inc = (state.pintadeIncidents || []).find(i =>
+    i && !i.deletedAt && i.incidentType === 'auto_release_success_streak'
+    && i.periodId === q.periodId);
+  if (!inc) return null;
+  const triggerId = (inc.metadata || {}).triggerRequestId || null;
+  if (triggerId === reqId) return inc;                    // la déclenchante elle-même
+  if (!triggerId) return null;
+  // On remonte depuis la déclenchante en collectant les réussites consécutives.
+  const list = pintadeRequestsOf(q.periodId);
+  const at = list.findIndex(x => x.id === triggerId);
+  if (at < 0) return null;
+  const goal = Math.max(1, Number((inc.metadata || {}).streakCount || inc.streakCount) || 0);
+  let found = 0;
+  for (let i = at; i >= 0 && found < goal; i--) {
+    const s = _pintadeStatus(list[i]);
+    if (s === 'pending' || s === 'awaiting_photo') continue;   // n'a jamais compté
+    if (s !== 'ok' && list[i].id !== reqId) break;             // la série s'arrête là
+    found++;
+    if (list[i].id === reqId) return inc;                      // elle en fait partie
+  }
+  return null;
+}
+// Une preuve n'est invalidable que si elle a été RÉUSSIE. Invalider un raté n'a
+// pas de sens, et invalider une demande dont le chrono tourne encore
+// reviendrait à trancher avant la fin du jeu.
+function pintadeCanInvalidate(q) {
+  return !!(q && _pintadeIsCoach() && _pintadeStatus(q) === 'ok');
+}
+// L'invalidation elle-même. `undoRelease` n'est consulté que si la preuve avait
+// déclenché une auto-libération.
+function pintadeInvalidateProof(reqId, reason, undoRelease) {
+  if (!_pintadeIsCoach()) return false;
+  const q = (state.pintadeRequests || []).find(x => x && x.id === reqId && !x.deletedAt);
+  if (!pintadeCanInvalidate(q)) return false;
+  const now = Date.now();
+  const period = (state.pintadeHolders || []).find(h => h && h.id === q.periodId) || null;
+  const release = _pintadeAutoReleaseFrom(q.id);
+
+  q.status = 'invalidated_by_coach';
+  q.invalidatedBy = _pintadeMeId();
+  q.invalidatedAt = now;
+  q.invalidationReason = (reason || '').toString().trim().slice(0, 2000);
+  // `updatedAt` bumpé sinon le LWW de PbSync réécrit la ligne depuis le serveur
+  // et l'invalidation disparaît à la première synchro.
+  q.updatedAt = now;
+  // `resolvedAt` reste tel quel : la photo EST arrivée à cet instant-là.
+
+  let undone = false;
+  if (release && undoRelease) {
+    undone = _pintadeUndoAutoRelease(release, period, now);
+  }
+
+  _pintadeLogIncident(period, {
+    incidentType: 'coach_invalidated_proof',
+    coachDecision: undone ? 'invalidate_and_undo_release' : 'invalidate',
+    notes: q.invalidationReason,
+    metadata: {
+      requestId: q.id,
+      requesterId: q.requesterId || null,
+      holderId: q.holderId || null,
+      hadTriggeredRelease: !!release,
+      releaseUndone: undone
+    }
+  });
+  persist(); _pintadeFlush();
+
+  // La porteuse doit l'apprendre de l'app, pas de ses coéquipières.
+  try {
+    if (q.holderId) {
+      const when = _pintadeFmtTime(q.resolvedAt || q.requestedAt);
+      notifyPush(['player:' + q.holderId], {
+        title: '🕊 Preuve invalidée',
+        body: 'Le coach a invalidé ta preuve de ' + when
+          + (q.invalidationReason ? ' — ' + q.invalidationReason : '')
+          + '. Elle compte comme un raté.',
+        url: '/', tag: 'pintade-invalidated-' + q.id, type: 'pintade_proof_invalidated'
+      });
+    }
+  } catch (e) {}
+
+  // L'invalidation peut faire franchir le plafond de ratés consécutifs : c'est
+  // un arbitrage dû, exactement comme si le raté était arrivé tout seul.
+  try { if (period) maybeShowPintadeCoachAlert(); } catch (e) {}
+  return true;
+}
+// Annule une auto-libération : la garde libérée reprend, la garde créée dans la
+// foulée est effacée. On SOFT-delete l'incident, ce qui relâche du même coup
+// l'idempotence — si la porteuse réenchaîne des preuves, la libération pourra
+// se redéclencher normalement.
+//
+// LIMITE ASSUMÉE : si des demandes ont déjà été postées sur la garde annulée,
+// elles restent en base, rattachées à une garde effacée — donc invisibles. On
+// ne les supprime pas : ce sont des faits, et personne n'a rien fait de mal.
+function _pintadeUndoAutoRelease(incident, releasedPeriod, now) {
+  if (!incident) return false;
+  const meta = incident.metadata || {};
+  // 1. Effacer la garde née de la libération.
+  if (meta.newPeriodId) {
+    const np = (state.pintadeHolders || []).find(h => h && h.id === meta.newPeriodId);
+    if (np && !np.deletedAt) { np.deletedAt = now; np.updatedAt = now; }
+  }
+  // 2. Rouvrir la garde libérée à tort.
+  const prev = releasedPeriod
+    || (state.pintadeHolders || []).find(h => h && h.id === incident.periodId);
+  if (prev) {
+    prev.ended = false; prev.endedAt = null; prev.endedReason = null;
+    prev.updatedAt = now;
+  }
+  // 3. Retirer l'incident du journal (soft) → l'idempotence se relâche.
+  incident.deletedAt = now; incident.updatedAt = now;
+
+  try {
+    const backTo = _pintadePlayerLabel(meta.releasedHolderId);
+    if (meta.newHolderId) {
+      notifyPush(['player:' + meta.newHolderId], {
+        title: '🕊 Fausse alerte',
+        body: 'La preuve qui avait libéré ' + backTo + ' a été invalidée : la pintade lui revient.',
+        url: '/', tag: 'pintade-undo-' + incident.id, type: 'pintade_release_undone'
+      });
+    }
+    if (meta.releasedHolderId) {
+      notifyPush(['player:' + meta.releasedHolderId], {
+        title: '🕊 La pintade te revient',
+        body: 'Le coach a invalidé la preuve qui t\'avait libérée. Ta garde reprend.',
+        url: '/', tag: 'pintade-undo-back-' + incident.id, type: 'pintade_release_undone'
+      });
+    }
+  } catch (e) {}
+  return true;
+}
+
 function pintadeCoachPickPending() {
   if (pintadeActivePeriod()) return false;
   return (state.pintadeIncidents || []).some(i =>
@@ -20308,11 +20494,29 @@ function _pintadeFeedRow(q) {
       </div></div>`;
   }
   if (st === 'ok') {
+    // Le bouton d'invalidation n'existe QUE pour le coach, et seulement sur une
+    // preuve réussie : c'est le seul cas où il y a quelque chose à retirer.
+    const canKill = pintadeCanInvalidate(q);
     return `<div class="pintade-feed-row">
       ${q.photoUrl ? `<img src="${esc(q.photoUrl)}" alt="Preuve" loading="lazy" onclick="_pintadeViewProof('${esc(q.id)}')">` : '<div class="pintade-feed-ico">✅</div>'}
       <div style="flex:1;min-width:0">
         <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;color:#22c55e">✅ Preuve validée</div>
         <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;line-height:1.5">${_pintadeFmtTime(q.resolvedAt || q.requestedAt)} · demandé par ${who}<br>${when}</div>
+        ${canKill ? `<button class="btn btn-secondary" style="margin-top:8px;min-height:32px;padding:0 12px;font-size:11px"
+          onclick="event.stopPropagation();openPintadeInvalidate('${esc(q.id)}')">❌ Invalider cette preuve</button>` : ''}
+      </div></div>`;
+  }
+  // INVALIDÉE APRÈS COUP. Elle reste dans le feed, avec sa photo : l'effacer
+  // laisserait un trou inexplicable dans une histoire que toute l'équipe suit,
+  // et donnerait l'impression que le coach réécrit le passé en douce. Il l'a
+  // fait, ça se voit, et le motif est là quand il l'a écrit.
+  if (st === 'invalidated_by_coach') {
+    return `<div class="pintade-feed-row" style="border-color:rgba(239,68,68,0.4)">
+      ${q.photoUrl ? `<img src="${esc(q.photoUrl)}" alt="Preuve invalidée" loading="lazy" onclick="_pintadeViewProof('${esc(q.id)}')" style="opacity:.5;filter:grayscale(1)">` : '<div class="pintade-feed-ico">❌</div>'}
+      <div style="flex:1;min-width:0">
+        <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;color:var(--red,#ef4444);line-height:1.25">❌ Invalidée par le coach</div>
+        ${q.invalidationReason ? `<div style="font-size:11px;color:var(--ink-2);line-height:1.5;margin-top:4px">« ${esc(q.invalidationReason)} »</div>` : ''}
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;line-height:1.5">Photo reçue à ${_pintadeFmtTime(q.resolvedAt || q.requestedAt)}${q.invalidatedAt ? ' · invalidée le ' + _pintadeFmtDateTime(q.invalidatedAt) : ''}<br>${when} · demandé par ${who}</div>
       </div></div>`;
   }
   // LE POST DE RATÉ. Il n'est PAS une ligne écrite quelque part — il se dérive
@@ -20353,6 +20557,74 @@ function _pintadeViewProof(reqId) {
       <img src="${esc(q.photoUrl)}" alt="Preuve pintade">
     </div>`;
   document.body.style.overflow = 'hidden';
+}
+
+// --- COACH : INVALIDER UNE PREUVE --------------------------------------------
+// Confirmation OBLIGATOIRE, parce que l'acte est public : la porteuse reçoit une
+// notification, le feed l'affiche à toute l'équipe, et sa série repart de zéro.
+// Le motif reste FACULTATIF — on ne force pas le coach à se justifier pour agir
+// — mais il est mis en avant, parce qu'« invalidée » sans raison sur un jeu
+// collectif, c'est ce qui déclenche les disputes.
+function openPintadeInvalidate(reqId) {
+  if (!_pintadeIsCoach()) return;
+  const q = (state.pintadeRequests || []).find(x => x && x.id === reqId && !x.deletedAt);
+  if (!pintadeCanInvalidate(q)) return;
+  const who = esc(_pintadePlayerLabel(q.holderId));
+  const when = _pintadeFmtDateTime(q.resolvedAt || q.requestedAt);
+  const release = _pintadeAutoReleaseFrom(q.id);
+  // Le cas délicat : cette preuve a DÉJÀ libéré la porteuse et transféré la
+  // peluche. On ne choisit pas à la place du coach — les deux options sont
+  // défendables, et lui seul sait ce qui s'est passé dans le vestiaire.
+  const releaseBlock = release ? `
+    <div style="margin-top:14px;padding:12px;border-radius:10px;background:rgba(239,68,68,0.10);border:1.5px solid var(--red,#ef4444)">
+      <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;color:var(--red,#ef4444);line-height:1.3">⚠ Cette preuve a déjà libéré ${who}</div>
+      <div style="font-size:12px;color:var(--ink);line-height:1.55;margin-top:7px">
+        La pintade a été transférée automatiquement${release.metadata && release.metadata.newHolderId
+          ? ' à <strong>' + esc(_pintadePlayerLabel(release.metadata.newHolderId)) + '</strong>' : ''}.
+        Veux-tu aussi annuler ce transfert et rendre la garde à ${who} ?
+      </div>
+    </div>` : '';
+  const footer = release ? `
+    <button class="btn btn-primary btn-block mb-2" style="background:var(--red,#ef4444);border-color:var(--red,#ef4444)"
+      onclick="_pintadeSubmitInvalidate('${esc(q.id)}', true)">Oui, annuler aussi la libération</button>
+    <button class="btn btn-secondary btn-block mb-2" onclick="_pintadeSubmitInvalidate('${esc(q.id)}', false)">Non, juste marquer invalide</button>
+    <button class="btn btn-ghost btn-block" onclick="closeModal();setTimeout(()=>openPintadeScreen(),50)">Annuler</button>` : `
+    <button class="btn btn-primary btn-block mb-2" style="background:var(--red,#ef4444);border-color:var(--red,#ef4444)"
+      onclick="_pintadeSubmitInvalidate('${esc(q.id)}', false)">❌ Invalider la preuve</button>
+    <button class="btn btn-ghost btn-block" onclick="closeModal();setTimeout(()=>openPintadeScreen(),50)">Annuler</button>`;
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">Preuve du ${esc(when)}</div>
+        <div class="modal-title">❌ Invalider la preuve</div>
+      </div>
+      <button class="modal-close" onclick="closeModal();setTimeout(()=>openPintadeScreen(),50)">✕</button>
+    </div>
+    <div class="modal-body">
+      ${q.photoUrl ? `<img src="${esc(q.photoUrl)}" alt="Preuve" style="width:100%;max-height:220px;object-fit:contain;border-radius:10px;background:var(--bg-3);margin-bottom:12px">` : ''}
+      <div style="font-size:13px;color:var(--ink);line-height:1.6">
+        Invalider la preuve de <strong>${who}</strong> ? Elle sera comptée comme un <strong>raté</strong> :
+        sa série de preuves repart de zéro et ses ratés consécutifs augmentent de un.
+      </div>
+      <label style="display:block;margin-top:14px;font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.03em">Motif (facultatif)</label>
+      <textarea id="pintade-invalidate-reason" rows="2" maxlength="2000"
+        placeholder="Ex. : la peluche n'est pas sur la photo"
+        style="width:100%;margin-top:6px;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-1);color:var(--ink);font-size:13px;font-family:inherit;resize:vertical"></textarea>
+      <div style="font-size:11px;color:var(--ink-3);line-height:1.5;margin-top:6px">Le motif est envoyé à ${who} et affiché dans le feed.</div>
+      ${releaseBlock}
+    </div>
+    <div class="modal-footer">${footer}</div>`);
+}
+function _pintadeSubmitInvalidate(reqId, undoRelease) {
+  let reason = '';
+  try {
+    const el = document.getElementById('pintade-invalidate-reason');
+    if (el) reason = el.value || '';
+  } catch (e) {}
+  const done = pintadeInvalidateProof(reqId, reason, !!undoRelease);
+  closeModal();
+  try { if (typeof showToast === 'function') showToast(done ? '❌ Preuve invalidée' : 'Action impossible'); } catch (e) {}
+  setTimeout(() => { try { openPintadeScreen(); } catch (e) {} }, 60);
 }
 
 // --- COACH : GÉRER LA PINTADE ------------------------------------------------
@@ -20465,6 +20737,8 @@ function openPintadeCoachAlert() {
       <div style="padding:10px 12px;background:var(--bg-3);border-radius:8px;margin-bottom:14px;font-size:11px;font-family:'JetBrains Mono';color:var(--ink-3);line-height:1.7;text-transform:uppercase">
         🌙 ${pintadeFailKind(period.id, 'failed_not_seen')} pas vue(s) — ${pintadeRules().connectWindowHours} h sans connexion<br>
         💀 ${pintadeFailKind(period.id, 'failed_timeout')} trop lente(s) — écran ouvert, chrono écoulé
+        ${pintadeFailKind(period.id, 'invalidated_by_coach')
+          ? `<br>❌ ${pintadeFailKind(period.id, 'invalidated_by_coach')} invalidée(s) — par toi, après coup` : ''}
       </div>
       ${CHOICES.map(c => `
         <label style="display:flex;gap:10px;align-items:flex-start;padding:10px;background:var(--bg-1);border:1px solid var(--border);border-radius:8px;margin-bottom:6px;cursor:pointer">
@@ -41728,7 +42002,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-11.116';
+const APP_VERSION = '2026-08-11.117';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
