@@ -1528,6 +1528,103 @@ t('« photo supprimée » est DÉRIVÉ, donc visible par toutes — pas seulemen
   ok(/photo supprimée/.test(row), 'la joueuse ne voit pas que la photo a été retirée');
   ok(!/<img/.test(row), 'une image est encore rendue');
 });
+// --- SUPPRIMER LA PHOTO SANS INVALIDER (v.119) -------------------------------
+// Deux besoins distincts : une photo peut être déplacée sans que la preuve soit
+// contestable, et on ne s'aperçoit pas toujours du problème au moment où l'on
+// tranche. Le geste est donc disponible à tout moment, et il ne juge RIEN.
+function supprimerPhoto(q) {
+  S.auth = { role: 'coach', coachId: 'admin' };
+  storageRemovals.length = 0;
+  return ctx.pintadeDeleteProofPhoto(q.id);
+}
+t('supprimer la photo NE touche ni au statut ni à la comptabilité', () => {
+  seed('coach');
+  const p = startGarde('pA', 30, 'coach');
+  const { q } = preuveOk('pB');
+  ok(supprimerPhoto(q) === true, 'suppression refusée');
+  ok(ctx._pintadeStatus(q) === 'ok', 'le statut a bougé : ' + ctx._pintadeStatus(q));
+  ok(ctx.pintadeOkStreak(p.id) === 1, 'la série a bougé : ' + ctx.pintadeOkStreak(p.id));
+  ok(ctx.pintadeStreak(p.id) === 0, 'un raté est apparu');
+  ok(!q.photoUrl, 'l\'URL est restée');
+  ok(storageRemovals.length === 1 && /^proof-.+\.jpg$/.test(storageRemovals[0].paths[0]),
+    'objet non effacé : ' + JSON.stringify(storageRemovals));
+});
+t('…et la mention apparaît sur une preuve restée VALIDE', () => {
+  seed('coach');
+  startGarde('pA', 30, 'coach');
+  const { q } = preuveOk('pB');
+  supprimerPhoto(q);
+  ok(ctx._pintadePhotoWasDeleted(q) === true, 'suppression non dérivable sur une preuve valide');
+  const row = ctx._pintadeFeedRow(q);
+  ok(/Preuve validée — photo supprimée/.test(row), 'le feed ne le dit pas : ' + row.slice(0, 200));
+  ok(!/<img/.test(row), 'une image est encore rendue');
+});
+t('la dérivation passe par le JOURNAL — donc elle voyage', () => {
+  seed('coach');
+  startGarde('pA', 30, 'coach');
+  const { q } = preuveOk('pB');
+  supprimerPhoto(q);
+  const inc = (S.pintadeIncidents || []).find(i => i.incidentType === 'coach_deleted_photo');
+  ok(inc && inc.metadata.requestId === q.id, 'incident non tracé');
+  ok(inc.metadata.photoDeleted === true, JSON.stringify(inc.metadata));
+  ok(/^proof-.+\.jpg$/.test(inc.metadata.photoPath || ''), 'chemin non tracé');
+  ok(inc.metadata.statusAtDeletion === 'ok', 'statut au moment du geste = ' + inc.metadata.statusAtDeletion);
+  // Le journal est synchronisé : la mention survit à un aller-retour base.
+  const back = ctx._pintadeRequestFromRow(Object.assign({}, ctx._dumpPintadeRequestRow(q),
+    { period_id: q.periodId, holder_id: q.holderId }));
+  ok(ctx._pintadePhotoWasDeleted(back) === true, 'perdu à l\'aller-retour base');
+});
+t('sur une preuve DÉJÀ invalidée, la photo reste supprimable', () => {
+  seed('coach');
+  startGarde('pA', 30, 'coach');
+  const { q } = preuveOk('pB');
+  invalider(q, 'hors sujet');                        // sans cocher la suppression
+  ok(q.photoUrl, 'la photo a été supprimée sans qu\'on le demande');
+  ok(ctx.pintadeCanDeletePhoto(q) === true, 'le bouton a disparu alors que la photo est là');
+  ok(supprimerPhoto(q) === true, 'suppression refusée après invalidation');
+  ok(ctx._pintadeStatus(q) === 'invalidated_by_coach', 'le statut a bougé');
+  const row = ctx._pintadeFeedRow(q);
+  ok(/Invalidée par le coach — photo supprimée/.test(row), 'mention absente : ' + row.slice(0, 200));
+});
+t('un RATÉ avec photo est aussi nettoyable (le chrono n\'excuse pas l\'image)', () => {
+  seed('coach');
+  const p = startGarde('pA', 30, 'coach');
+  demande(); ouvrir();
+  const q = lastReq();
+  q.photoUrl = proofUrl(q.id); q.status = 'failed_timeout'; q.resolvedAt = NOW;
+  S.auth = { role: 'coach', coachId: 'admin' };
+  ok(ctx.pintadeCanDeletePhoto(q) === true, 'aucun moyen de retirer une photo hors délai');
+  ok(/openPintadeDeletePhoto/.test(ctx._pintadeFeedRow(q)), 'bouton absent de la ligne de raté');
+  ok(supprimerPhoto(q) === true, 'suppression refusée');
+  ok(ctx.pintadeStreak(p.id) === 1, 'la comptabilité a bougé : ' + ctx.pintadeStreak(p.id));
+});
+t('le bouton est coach-only et DISPARAÎT une fois la photo partie', () => {
+  seed('coach');
+  startGarde('pA', 30, 'coach');
+  const { q } = preuveOk('pB');
+  S.auth = { role: 'coach', coachId: 'admin' };
+  ok(/openPintadeDeletePhoto/.test(ctx._pintadeFeedRow(q)), 'le coach n\'a pas le bouton');
+  S.auth = { role: 'player', playerId: 'pB' };
+  ok(!/openPintadeDeletePhoto/.test(ctx._pintadeFeedRow(q)), 'une joueuse voit le bouton');
+  ok(ctx.pintadeDeleteProofPhoto(q.id) === false, 'une joueuse a pu supprimer la photo');
+  ok(q.photoUrl, 'la photo a sauté quand même');
+  supprimerPhoto(q);
+  S.auth = { role: 'coach', coachId: 'admin' };
+  // Un bouton qui ne fait plus rien est un piège.
+  ok(!/openPintadeDeletePhoto/.test(ctx._pintadeFeedRow(q)), 'le bouton survit à la suppression');
+  ok(ctx.pintadeDeleteProofPhoto(q.id) === false, 'double suppression acceptée');
+});
+t('la modale autonome ne laisse PAS croire qu\'elle invalide', () => {
+  seed('coach');
+  startGarde('pA', 30, 'coach');
+  const { q } = preuveOk('pB');
+  S.auth = { role: 'coach', coachId: 'admin' };
+  ctx.openPintadeDeletePhoto(q.id);
+  const m = ctx.__lastModal || '';
+  ok(/Supprimer définitivement/.test(m), 'pas de bouton de confirmation');
+  ok(/reste <strong>valide<\/strong>/.test(m), 'la modale ne rassure pas sur le statut de la preuve');
+  ok(!/_pintadeSubmitInvalidate/.test(m), 'la modale peut invalider par mégarde');
+});
 t('_pintadeStoragePath refuse tout ce qui ne vient pas de NOTRE bucket', () => {
   ok(ctx._pintadeStoragePath('https://x/storage/v1/object/public/pintade-proofs/proof-a-1.jpg') === 'proof-a-1.jpg');
   ok(ctx._pintadeStoragePath('https://evil.example/pintade-proofs/../../etc/passwd') === '',

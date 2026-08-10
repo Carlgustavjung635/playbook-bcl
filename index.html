@@ -19934,15 +19934,32 @@ function _pintadeAutoReleaseFrom(reqId) {
 function pintadeCanInvalidate(q) {
   return !!(q && _pintadeIsCoach() && _pintadeStatus(q) === 'ok');
 }
-// LA PHOTO A-T-ELLE ÉTÉ SUPPRIMÉE ? Dérivé, pas stocké — et c'est important :
-// un drapeau posé en mémoire sur l'appareil du coach n'aurait aucune colonne
-// pour voyager. Lui verrait « photo supprimée », toutes les autres une ligne
-// muette. Le raisonnement tient tout seul : une demande ne passe à 'ok' que
-// dans `submitPintadeProof`, APRÈS que l'URL de la photo a été posée. Une
-// preuve invalidée sans URL est donc forcément une preuve dont l'image a été
-// retirée du bucket.
+// LA PHOTO A-T-ELLE ÉTÉ SUPPRIMÉE ? Toujours dérivé, jamais un drapeau en
+// mémoire — celui-ci n'aurait aucune colonne pour voyager, et le coach verrait
+// « photo supprimée » là où toutes les autres verraient une ligne muette.
+//
+// LA SOURCE A CHANGÉ EN v.119. La v.118 déduisait la suppression du STATUT
+// (« invalidée et plus d'URL »). Ça tenait tant que supprimer une photo
+// impliquait de l'invalider. Depuis que les deux gestes sont indépendants, une
+// photo retirée d'une preuve encore VALIDE ne serait signalée nulle part.
+//
+// On lit donc le JOURNAL D'INCIDENTS, qui est déjà synchronisé et qui trace
+// chaque suppression (les deux chemins y écrivent `metadata.photoDeleted`).
+// Il couvre au passage les suppressions faites en v.118, dont l'incident
+// d'invalidation portait déjà la même marque.
+//
+// Le repli sur le statut reste, pour le cas d'un journal pas encore
+// redescendu : mieux vaut une mention exacte tirée d'une déduction sûre
+// (une demande ne passe à 'ok' qu'APRÈS que l'URL est posée, donc 'ok' ou
+// 'invalidée' sans URL = image retirée) qu'une ligne muette.
 function _pintadePhotoWasDeleted(q) {
-  return !!(q && _pintadeStatus(q) === 'invalidated_by_coach' && !q.photoUrl);
+  if (!q) return false;
+  if (q.photoUrl) return false;                    // elle est là, la question est close
+  const logged = (state.pintadeIncidents || []).some(i =>
+    i && !i.deletedAt && i.metadata && i.metadata.photoDeleted && i.metadata.requestId === q.id);
+  if (logged) return true;
+  const s = _pintadeStatus(q);
+  return s === 'ok' || s === 'invalidated_by_coach';
 }
 // L'invalidation elle-même. `undoRelease` n'est consulté que si la preuve avait
 // déclenché une auto-libération.
@@ -19982,6 +19999,54 @@ async function _pintadeDeletePhotoObject(path) {
     return false;
   }
 }
+// SUPPRIMER LA PHOTO, TOUT SEUL (v.119)
+// ------------------------------------------------------------
+// La v.118 ne savait effacer une image qu'en même temps qu'on invalidait la
+// preuve. Deux besoins pourtant distincts : une photo peut être déplacée sans
+// que la preuve soit contestable (elle montre bien la peluche, et autre chose
+// avec), et on ne s'aperçoit pas toujours du problème au moment où l'on
+// tranche. Le geste est donc disponible à tout moment, sur n'importe quelle
+// preuve qui a encore une image.
+//
+// Ni le statut ni la comptabilité ne bougent : retirer une image n'est pas un
+// jugement sur la preuve. Une seule chose change — l'image n'existe plus.
+function pintadeCanDeletePhoto(q) {
+  return !!(q && _pintadeIsCoach() && q.photoUrl);
+}
+function pintadeDeleteProofPhoto(reqId) {
+  if (!_pintadeIsCoach()) return false;
+  const q = (state.pintadeRequests || []).find(x => x && x.id === reqId && !x.deletedAt);
+  if (!pintadeCanDeletePhoto(q)) return false;
+  const now = Date.now();
+  const period = (state.pintadeHolders || []).find(h => h && h.id === q.periodId) || null;
+  const path = _pintadeStoragePath(q.photoUrl);
+
+  // MÊME ORDRE QUE PARTOUT : on détache d'abord (synchronisé tout de suite,
+  // plus personne ne voit l'image), on efface l'objet ensuite. L'inverse
+  // laisserait une URL morte affichée si le Storage refusait.
+  q.photoUrl = '';
+  q.updatedAt = now;                 // sinon le LWW de PbSync ressuscite l'URL
+
+  _pintadeLogIncident(period, {
+    incidentType: 'coach_deleted_photo',
+    coachDecision: 'delete_photo',
+    notes: '',
+    metadata: {
+      requestId: q.id,
+      holderId: q.holderId || null,
+      // Même marque que l'incident d'invalidation : c'est elle que lit
+      // `_pintadePhotoWasDeleted`, quel que soit le chemin emprunté.
+      photoDeleted: true,
+      photoPath: path || null,
+      // Le statut au moment du geste, pour relire l'histoire sans ambiguïté.
+      statusAtDeletion: _pintadeStatus(q)
+    }
+  });
+  persist(); _pintadeFlush();
+  if (path) { try { _pintadeDeletePhotoObject(path); } catch (e) {} }
+  return true;
+}
+
 // `opts` : { deletePhoto: bool }.
 //
 // L'ANNULATION DE L'AUTO-LIBÉRATION N'EST PLUS UNE OPTION. Si la preuve
@@ -20577,13 +20642,15 @@ function _pintadeFeedRow(q) {
     // Le bouton d'invalidation n'existe QUE pour le coach, et seulement sur une
     // preuve réussie : c'est le seul cas où il y a quelque chose à retirer.
     const canKill = pintadeCanInvalidate(q);
+    const gone = _pintadePhotoWasDeleted(q);
     return `<div class="pintade-feed-row">
-      ${q.photoUrl ? `<img src="${esc(q.photoUrl)}" alt="Preuve" loading="lazy" onclick="_pintadeViewProof('${esc(q.id)}')">` : '<div class="pintade-feed-ico">✅</div>'}
+      ${q.photoUrl ? `<img src="${esc(q.photoUrl)}" alt="Preuve" loading="lazy" onclick="_pintadeViewProof('${esc(q.id)}')">` : `<div class="pintade-feed-ico">${gone ? '🚫' : '✅'}</div>`}
       <div style="flex:1;min-width:0">
-        <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;color:#22c55e">✅ Preuve validée</div>
+        <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;color:#22c55e">✅ Preuve validée${gone ? ' — photo supprimée' : ''}</div>
         <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;line-height:1.5">${_pintadeFmtTime(q.resolvedAt || q.requestedAt)} · demandé par ${who}<br>${when}</div>
         ${canKill ? `<button class="btn btn-secondary" style="margin-top:8px;min-height:32px;padding:0 12px;font-size:11px"
           onclick="event.stopPropagation();openPintadeInvalidate('${esc(q.id)}')">❌ Invalider cette preuve</button>` : ''}
+        ${_pintadePhotoBtn(q)}
       </div></div>`;
   }
   // INVALIDÉE APRÈS COUP. Elle reste dans le feed, avec sa photo : l'effacer
@@ -20598,6 +20665,7 @@ function _pintadeFeedRow(q) {
         <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;color:var(--red,#ef4444);line-height:1.25">❌ Invalidée par le coach${gone ? ' — photo supprimée' : ''}</div>
         ${q.invalidationReason ? `<div style="font-size:11px;color:var(--ink-2);line-height:1.5;margin-top:4px">« ${esc(q.invalidationReason)} »</div>` : ''}
         <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;line-height:1.5">Photo reçue à ${_pintadeFmtTime(q.resolvedAt || q.requestedAt)}${q.invalidatedAt ? ' · invalidée le ' + _pintadeFmtDateTime(q.invalidatedAt) : ''}<br>${when} · demandé par ${who}</div>
+        ${_pintadePhotoBtn(q)}
       </div></div>`;
   }
   // LE POST DE RATÉ. Il n'est PAS une ligne écrite quelque part — il se dérive
@@ -20625,7 +20693,18 @@ function _pintadeFeedRow(q) {
     <div style="flex:1;min-width:0">
       <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;color:${color};line-height:1.25">${title}</div>
       <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;line-height:1.5">${esc(detail)}<br>${when} · demandé par ${who}</div>
+      ${_pintadePhotoBtn(q)}
     </div></div>`;
+}
+// Le bouton de suppression, partout où une image subsiste — y compris sur un
+// raté : une photo arrivée hors délai peut être tout aussi déplacée qu'une
+// autre, et rien ne justifierait de la laisser en ligne parce que le chrono
+// avait filé. Discret (secondaire, petite cible), et il DISPARAÎT dès que la
+// photo n'est plus là : un bouton qui ne fait plus rien est un piège.
+function _pintadePhotoBtn(q) {
+  if (!pintadeCanDeletePhoto(q)) return '';
+  return `<button class="btn btn-ghost" style="margin-top:6px;min-height:30px;padding:0 10px;font-size:11px;color:var(--ink-3)"
+    onclick="event.stopPropagation();openPintadeDeletePhoto('${esc(q.id)}')">🗑 Supprimer la photo</button>`;
 }
 function _pintadeViewProof(reqId) {
   const q = (state.pintadeRequests || []).find(x => x.id === reqId);
@@ -20723,6 +20802,52 @@ function _pintadeSubmitInvalidate(reqId) {
       showToast(done ? (deletePhoto ? '❌ Preuve invalidée · photo supprimée' : '❌ Preuve invalidée') : 'Action impossible');
     }
   } catch (e) {}
+  setTimeout(() => { try { openPintadeScreen(); } catch (e) {} }, 60);
+}
+
+// --- COACH : SUPPRIMER LA PHOTO, SANS RIEN JUGER -----------------------------
+// Geste volontairement SÉPARÉ de l'invalidation : ici on ne conteste pas la
+// preuve, on retire une image. Le libellé le dit — « le déroulé de la partie
+// n'est pas touché » — parce que la confusion inverse coûterait cher : croire
+// qu'on efface une photo et découvrir qu'on a remis une joueuse au piquet.
+function openPintadeDeletePhoto(reqId) {
+  if (!_pintadeIsCoach()) return;
+  const q = (state.pintadeRequests || []).find(x => x && x.id === reqId && !x.deletedAt);
+  if (!pintadeCanDeletePhoto(q)) return;
+  const who = esc(_pintadePlayerLabel(q.holderId));
+  const when = _pintadeFmtDateTime(q.resolvedAt || q.requestedAt);
+  const invalidee = _pintadeStatus(q) === 'invalidated_by_coach';
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">Preuve du ${esc(when)}</div>
+        <div class="modal-title">🗑 Supprimer la photo</div>
+      </div>
+      <button class="modal-close" onclick="closeModal();setTimeout(()=>openPintadeScreen(),50)">✕</button>
+    </div>
+    <div class="modal-body">
+      <img src="${esc(q.photoUrl)}" alt="Preuve" style="width:100%;max-height:240px;object-fit:contain;border-radius:10px;background:var(--bg-3);margin-bottom:12px">
+      <div style="font-size:13px;color:var(--ink);line-height:1.6">
+        Supprimer <strong>définitivement</strong> la photo de ${who} ? Le fichier est effacé du serveur :
+        masquer la ligne ne suffirait pas, l'URL resterait ouverte à qui la possède.
+      </div>
+      <div style="margin-top:12px;padding:11px 12px;background:var(--bg-3);border-radius:8px;font-size:12px;color:var(--ink-2);line-height:1.55">
+        L'événement reste tracé dans le feed, avec la mention « photo supprimée ».
+        ${invalidee
+          ? 'La preuve reste invalidée.'
+          : 'La preuve reste <strong>valide</strong> et le déroulé de la partie n\'est pas touché — supprimer une image n\'est pas un jugement sur la preuve.'}
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary btn-block mb-2" style="background:var(--red,#ef4444);border-color:var(--red,#ef4444)"
+        onclick="_pintadeSubmitDeletePhoto('${esc(q.id)}')">🗑 Supprimer définitivement</button>
+      <button class="btn btn-ghost btn-block" onclick="closeModal();setTimeout(()=>openPintadeScreen(),50)">Annuler</button>
+    </div>`);
+}
+function _pintadeSubmitDeletePhoto(reqId) {
+  const done = pintadeDeleteProofPhoto(reqId);
+  closeModal();
+  try { if (typeof showToast === 'function') showToast(done ? '🗑 Photo supprimée' : 'Action impossible'); } catch (e) {}
   setTimeout(() => { try { openPintadeScreen(); } catch (e) {} }, 60);
 }
 
@@ -42101,7 +42226,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-11.118';
+const APP_VERSION = '2026-08-11.119';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
