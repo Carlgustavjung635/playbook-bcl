@@ -5923,6 +5923,9 @@ function _dumpPintadeRulesRow(r) {
     max_consecutive_fails: _pintadeClampInt(r.maxConsecutiveFails, 1, 10, 3),
     // Auto-libération après N preuves consécutives (migration _003). 0 = coupée.
     auto_release_after_ok: _pintadeClampInt(r.autoReleaseAfterOk, 0, 50, 6),
+    // Repos nocturne (migration 20260812_001) — heures pleines, Europe/Paris.
+    rest_start_hour: _pintadeClampInt(r.restStartHour, 0, 23, 23),
+    rest_end_hour: _pintadeClampInt(r.restEndHour, 0, 23, 7),
     // Règles du jeu écrites par le coach. NULL = pas personnalisé → le front
     // affiche SON texte par défaut. On ne pousse donc jamais ce défaut : gelé
     // en base, il ne suivrait plus les évolutions du jeu (cf. migration _003).
@@ -5945,6 +5948,8 @@ function _pintadeRulesFromRow(r) {
     extensionHoursPerFail: _pintadeClampInt(r.extension_hours_per_fail, 0, 168, 24),
     maxConsecutiveFails: _pintadeClampInt(r.max_consecutive_fails, 1, 10, 3),
     autoReleaseAfterOk: _pintadeClampInt(r.auto_release_after_ok, 0, 50, 6),
+    restStartHour: _pintadeClampInt(r.rest_start_hour, 0, 23, 23),
+    restEndHour: _pintadeClampInt(r.rest_end_hour, 0, 23, 7),
     // '' plutôt que null : le front distingue « vide » de « absent » à un seul
     // endroit (l'écran de configuration), et partout ailleurs une chaîne vide
     // retombe naturellement sur le texte par défaut.
@@ -19158,6 +19163,10 @@ const PINTADE_RULES_DEFAULT = {
   extensionHoursPerFail: 24,
   maxConsecutiveFails: 3,
   autoReleaseAfterOk: 6,
+  // Repos nocturne (migration 20260812_001). Heures pleines en Europe/Paris.
+  // start === end = mécanique désactivée.
+  restStartHour: 23,
+  restEndHour: 7,
   rulesText: '',              // vide = pas personnalisé → PINTADE_RULES_TEXT_DEFAULT
   sanctionFeedPost: true,
   sanctionExtension: true,
@@ -19193,10 +19202,11 @@ Une peluche géante circule dans l'équipe. Une joueuse est désignée porteuse 
 - La porteuse doit **avoir la peluche avec elle en permanence** dès qu'elle croise quelqu'un du groupe (coach ou coéquipière).
 - N'importe qui peut lui demander une **preuve photo** à tout moment depuis l'app.
 - Une seule demande possible **toutes les 2 heures** — laissez-la vivre.
+- 💤 **Heures de repos** : entre 23h et 7h, personne ne peut demander de preuve. La porteuse a la paix la nuit.
 
 ## Comment ça marche
 1. Tu reçois une notification « 🕊 Preuve demandée »
-2. Tu as **2 h pour ouvrir l'app** — passé ce délai c'est raté (tu dormais peut-être, on comprend)
+2. Tu as **2 h pour ouvrir l'app** — et si le délai tombait pendant les heures de repos, tu as jusqu'à la fin du repos : on ne rate pas en dormant
 3. Une fois l'écran ouvert, tu as **30 secondes** pour photographier la peluche
 4. Photo prise → ✅ preuve validée, elle part dans le feed
 
@@ -19463,6 +19473,75 @@ function pintadeNextSlotAt(periodId) {
   if (!last) return 0;
   return last + (pintadeRules().rateLimitHours || 0) * PINTADE_H;
 }
+// ============================================================
+// LES HEURES DE REPOS (migration 20260812_001)
+// ------------------------------------------------------------
+// Le jeu tournait 24 h sur 24. La v.107 avait déjà empêché les 30 secondes de
+// la photo de s'écouler pendant qu'elle dort, mais rien n'interdisait la
+// DEMANDE : réveiller quelqu'un reste réveiller quelqu'un, et c'est la première
+// chose qui fait couper ses notifications — donc qui tue le jeu.
+//
+// Les heures s'entendent en EUROPE/PARIS, pas dans le fuseau de l'appareil. Un
+// téléphone resté à l'heure d'ailleurs (voyage, tablette mal réglée, émulateur)
+// n'a aucune raison de décaler le couvre-feu de toute l'équipe. `Intl` fait la
+// conversion, heure d'été comprise — la refaire à la main avec des décalages en
+// dur casserait deux fois par an.
+const PINTADE_TZ = 'Europe/Paris';
+// Borne locale au bloc CLASSIQUE. `_pintadeClampInt` fait la même chose mais vit
+// dans le bloc <script type="module"> : l'appeler d'ici passerait la relecture
+// et planterait à l'exécution, les deux blocs ne partageant aucune portée.
+function _pintadeHour(v, dflt) {
+  const n = Math.round(Number(v));
+  return Number.isFinite(n) ? Math.min(23, Math.max(0, n)) : dflt;
+}
+function _pintadeParisHour(ts) {
+  const d = new Date(ts || Date.now());
+  try {
+    const h = new Intl.DateTimeFormat('fr-FR', {
+      timeZone: PINTADE_TZ, hour: '2-digit', hour12: false
+    }).format(d);
+    const n = parseInt(h, 10);
+    if (n >= 0 && n <= 24) return n % 24;          // '24' existe sur certains moteurs
+  } catch (e) { /* Intl indisponible → heure locale, mieux que rien */ }
+  return d.getHours();
+}
+function pintadeRestHours() {
+  const r = pintadeRules();
+  return { start: _pintadeHour(r.restStartHour, 23), end: _pintadeHour(r.restEndHour, 7) };
+}
+// start === end → aucune heure ne peut être à la fois >= et < la même valeur :
+// la mécanique se désactive d'elle-même, sans drapeau supplémentaire.
+function pintadeRestEnabled() { const { start, end } = pintadeRestHours(); return start !== end; }
+// Le passage de minuit est le cas NORMAL (23 → 7), pas l'exception.
+function _pintadeIsRestHour(hour) {
+  const { start, end } = pintadeRestHours();
+  if (start === end) return false;
+  return start > end ? (hour >= start || hour < end) : (hour >= start && hour < end);
+}
+function pintadeIsRestAt(ts) { return _pintadeIsRestHour(_pintadeParisHour(ts)); }
+function pintadeIsRestNow() { return pintadeIsRestAt(Date.now()); }
+// Instant où le repos se termine, à partir de `ts`. Avance heure par heure
+// plutôt que de bricoler une date : les 24 pas couvrent le passage de minuit,
+// le changement d'heure et les plages « à l'endroit » sans un seul cas
+// particulier. On se cale sur le début de l'heure de fin (7 h 00 pile).
+function pintadeRestEndsAt(ts) {
+  const from = ts || Date.now();
+  if (!pintadeIsRestAt(from)) return 0;
+  for (let i = 1; i <= 24; i++) {
+    const t = from + i * PINTADE_H;
+    if (!pintadeIsRestAt(t)) {
+      const d = new Date(t);
+      d.setMinutes(0, 0, 0);                       // 7 h 00, pas 7 h 43
+      return d.getTime();
+    }
+  }
+  return from;                                     // plage dégénérée : on ne bloque pas
+}
+function pintadeRestLabel() {
+  const { start, end } = pintadeRestHours();
+  return start + 'h' + ' → ' + end + 'h';
+}
+
 // Pourquoi le bouton « Demander une preuve » est grisé — une raison lisible
 // plutôt qu'un bouton mort sans explication. null = c'est bon, vas-y.
 function pintadeRequestBlockedReason() {
@@ -19470,6 +19549,13 @@ function pintadeRequestBlockedReason() {
   if (!period) return 'Aucune pintade en circulation.';
   if (!state.auth || (state.auth.role !== 'coach' && state.auth.role !== 'player')) return 'Connecte-toi pour demander une preuve.';
   if (_pintadeIsHolder()) return "C'est toi qui l'as. Tu ne vas pas te piéger toi-même.";
+  // LE REPOS PASSE AVANT le rate limit : c'est la raison la plus parlante, et
+  // celle qui dure le plus longtemps. Annoncer « dans 40 min » quand il reste
+  // sept heures de nuit serait un mensonge.
+  if (pintadeIsRestNow()) {
+    const { end } = pintadeRestHours();
+    return '😴 Repos jusqu\'à ' + end + 'h. La porteuse a la paix la nuit.';
+  }
   if (pintadeActiveRequest(period.id)) return 'Une demande est déjà en cours.';
   const slot = pintadeNextSlotAt(period.id);
   const wait = slot - Date.now();
@@ -19477,6 +19563,30 @@ function pintadeRequestBlockedReason() {
   return null;
 }
 function pintadeCanRequest() { return pintadeRequestBlockedReason() === null; }
+
+// L'ÉCHÉANCE DE CONNEXION NE DOIT PAS EXPIRER PENDANT QU'ELLE DORT.
+//
+// Interdire les demandes pendant le repos ne suffit pas : à 22 h 50, avec une
+// fenêtre de 2 h, l'échéance tombe à 00 h 50 — en pleine nuit. Elle dort, elle
+// ne voit rien, elle récolte un « pas vue ». C'est exactement le mode de panne
+// que la v.107 avait corrigé, revenu par la frontière du couvre-feu, et il
+// aurait rendu faux le texte des règles qu'on affiche aux joueuses.
+//
+// Si l'échéance calculée tombe dans le repos, on la reporte à la fin du repos.
+// On ne DÉDUIT pas les heures dormies de la fenêtre (ce serait l'option B, plus
+// subtile mais illisible pour les joueuses) : on garantit simplement qu'elle a
+// les yeux ouverts quand le compte à rebours se termine.
+function _pintadeConnectDeadline(from, rules) {
+  const r = rules || pintadeRules();
+  const base = from + (r.connectWindowHours || 2) * PINTADE_H;
+  if (!pintadeIsRestEnabledFor(r) || !pintadeIsRestAt(base)) return base;
+  return pintadeRestEndsAt(base) || base;
+}
+// Même lecture que `pintadeRestEnabled`, mais sur un jeu de règles fourni :
+// `requestPintadeProof` travaille sur les règles FIGÉES de la demande.
+function pintadeIsRestEnabledFor(r) {
+  return _pintadeHour(r.restStartHour, 23) !== _pintadeHour(r.restEndHour, 7);
+}
 
 // --- ÉCRITURES ---------------------------------------------------------------
 // Demander une preuve. Seul le CHRONO 1 (connexion) démarre ici : la porteuse
@@ -19498,7 +19608,7 @@ function requestPintadeProof() {
     requestedAt: now,
     // Échéances FIGÉES elles aussi : si le coach change les réglages pendant
     // qu'un chrono tourne, la demande déjà partie garde le contrat annoncé.
-    connectDeadlineAt: now + (r.connectWindowHours || 2) * PINTADE_H,
+    connectDeadlineAt: _pintadeConnectDeadline(now, r),
     // Le chrono de la photo n'existe pas encore : il naîtra à l'ouverture.
     openedAt: null, photoDeadlineAt: null,
     photoUrl: '', status: 'pending', resolvedAt: null,
@@ -20557,7 +20667,7 @@ function openPintadeScreen() {
       ` : `
         <button class="btn ${blocked === null ? 'btn-primary' : 'btn-secondary'} btn-block"
           ${blocked === null ? 'onclick="requestPintadeProof();closeModal();setTimeout(()=>openPintadeScreen(),80)"' : 'disabled aria-disabled="true" style="opacity:.5;cursor:not-allowed"'}>
-          🎯 Demander une preuve
+          ${pintadeIsRestNow() ? '😴 Repos jusqu\'à ' + pintadeRestHours().end + 'h' : '🎯 Demander une preuve'}
         </button>
         <div style="font-size:11px;color:${blocked === null ? '#22c55e' : 'var(--ink-3)'};font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.03em;text-align:center;margin:8px 0 14px;line-height:1.5">
           ${blocked === null ? 'Créneau ouvert · ' + r.connectWindowHours + ' h pour se connecter, puis ' + r.proofTimeoutSeconds + ' s' : esc(blocked)}
@@ -21041,6 +21151,16 @@ function openPintadeRules() {
       <input id="${id}" type="number" min="${min}" max="${max}" value="${val}" inputmode="numeric">
       <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;line-height:1.45">${esc(hint)}</div>
     </div>`;
+  // Liste déroulante d'heures pleines : rien à saisir de travers, et une
+  // meilleure cible tactile qu'un champ numérique au pouce.
+  const hourSel = (id, label, val) => `
+    <div class="fld" style="flex:1;min-width:0;margin-bottom:0">
+      <label style="font-size:12px">${esc(label)}</label>
+      <select id="${id}" style="width:100%">
+        ${Array.from({ length: 24 }, (_, h) =>
+          `<option value="${h}"${h === _pintadeHour(val, 0) ? ' selected' : ''}>${h}h</option>`).join('')}
+      </select>
+    </div>`;
   const sw = (id, label, hint, on) => `
     <label style="display:flex;gap:10px;align-items:flex-start;padding:10px;background:var(--bg-1);border:1px solid var(--border);border-radius:8px;margin-bottom:6px;cursor:pointer">
       <input type="checkbox" id="${id}" ${on ? 'checked' : ''} style="margin-top:3px">
@@ -21082,6 +21202,21 @@ function openPintadeRules() {
       ${num('pr-ext', 'Prolongation par raté (heures)', 'Ajoutée automatiquement à la fin de garde. 0 = pas de prolongation.', r.extensionHoursPerFail, 0, 168)}
       ${num('pr-max', 'Plafond de ratés consécutifs', 'Au-delà, plus AUCUNE sanction automatique : le système t\'attend.', r.maxConsecutiveFails, 1, 10)}
       ${num('pr-auto', 'Libération après N preuves', 'Preuves réussies d\'affilée qui libèrent la porteuse. La pintade passe alors à l\'autrice de la dernière demande. 0 = mécanique désactivée.', r.autoReleaseAfterOk, 0, 50)}
+
+      <!-- LES HEURES DE REPOS. Deux listes déroulantes plutôt que deux champs
+           libres : on choisit une heure pleine, il n'y a rien à saisir de
+           travers, et la cible tactile est meilleure au pouce. -->
+      <div class="eyebrow-muted" style="margin:16px 0 8px">💤 Heures de repos</div>
+      <div style="display:flex;gap:10px">
+        ${hourSel('pr-rest-start', 'Début du repos', r.restStartHour)}
+        ${hourSel('pr-rest-end', 'Fin du repos', r.restEndHour)}
+      </div>
+      <div style="font-size:11px;color:var(--ink-3);line-height:1.5;margin:6px 0 4px">
+        Aucune demande de preuve ne peut être créée pendant cette période, et une demande lancée juste avant
+        laisse à la porteuse jusqu'à la fin du repos pour ouvrir l'app — elle ne peut pas rater en dormant.
+        Heures françaises. <strong>Mets les deux sur la même valeur pour désactiver le repos.</strong>
+      </div>
+
       <div class="eyebrow-muted" style="margin:16px 0 8px">Sanctions actives</div>
       ${sw('pr-s-feed', '📰 Post dans le feed', 'Chaque raté apparaît publiquement.', r.sanctionFeedPost)}
       ${sw('pr-s-ext', '⏱ Prolongation automatique', 'Chaque raté rallonge la garde.', r.sanctionExtension)}
@@ -21111,6 +21246,8 @@ function _pintadeSaveRules() {
     extensionHoursPerFail: clamp(v('pr-ext'), 0, 168, 24),
     maxConsecutiveFails: clamp(v('pr-max'), 1, 10, 3),
     autoReleaseAfterOk: clamp(v('pr-auto'), 0, 50, 6),
+    restStartHour: clamp(v('pr-rest-start'), 0, 23, 23),
+    restEndHour: clamp(v('pr-rest-end'), 0, 23, 7),
     // Texte identique au défaut → on stocke '' plutôt qu'une copie. Le coach
     // qui n'a rien changé continue ainsi de suivre les évolutions du jeu, au
     // lieu de figer la version du jour à son insu.
@@ -21175,7 +21312,7 @@ function _pintadeResetRulesText() {
 }
 function _pintadeResetRules() {
   if (!_pintadeIsCoach()) return;
-  if (!confirm('Revenir aux règles par défaut ?\n\n30 jours · 1 demande / 2 h · 2 h pour se connecter · 30 s pour la photo · +24 h par raté · plafond 3 ratés · libération à 6 preuves.\n\nLe TEXTE des règles repasse lui aussi à la version de l\'app.')) return;
+  if (!confirm('Revenir aux règles par défaut ?\n\n30 jours · 1 demande / 2 h · 2 h pour se connecter · 30 s pour la photo · +24 h par raté · plafond 3 ratés · libération à 6 preuves · repos 23h → 7h.\n\nLe TEXTE des règles repasse lui aussi à la version de l\'app.')) return;
   state.pintadeRules = Object.assign({}, PINTADE_RULES_DEFAULT, { updatedBy: _pintadeMeId(), updatedAt: Date.now() });
   persist(); _pintadeFlush();
   closeModal(); render();
@@ -42226,7 +42363,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-11.119';
+const APP_VERSION = '2026-08-12.120';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.

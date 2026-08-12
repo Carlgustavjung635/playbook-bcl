@@ -149,6 +149,13 @@ ctx.Date = D;
 const advance = ms => { NOW += ms; };
 const H = 3600000;
 
+// LE REPOS NOCTURNE, neutralise par defaut dans les scenarios.
+// Le defaut du jeu est 23h -> 7h ; or les scenarios qui enchainent des
+// demandes avancent l'horloge de plusieurs heures et traversent la nuit.
+// Sans ca, la moitie du fichier testerait le couvre-feu au lieu de son sujet.
+// start === end desactive la mecanique (cf. index.html). Le repos a sa
+// propre section de tests, plus bas.
+const SANS_REPOS = { restStartHour: 0, restEndHour: 0 };
 function seed(role, pid) {
   for (const k of Object.keys(fields)) delete fields[k];
   for (const k of Object.keys(store)) delete store[k];
@@ -496,7 +503,7 @@ t('interrupteur « prolongation » coupé → aucune prolongation, la série com
   seed('player', 'pB');
   const p = startGarde('pA', 30, 'player', 'pB');
   const base = p.endAt;
-  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, { sanctionExtension: false, updatedAt: NOW });
+  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, SANS_REPOS, { sanctionExtension: false, updatedAt: NOW });
   nRates(2);
   ok(ctx.pintadePeriodEnd(p) === base, 'prolongé alors que la sanction est coupée');
   ok(ctx.pintadeStreak(p.id) === 2, 'la série doit rester comptée');
@@ -684,7 +691,7 @@ t('feed privé : masqué aux joueuses, visible du coach', () => {
   seed('player', 'pB');
   const p = startGarde('pA', 30, 'player', 'pB');
   ratePasVue();
-  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, { feedPublic: false, updatedAt: NOW });
+  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, SANS_REPOS, { feedPublic: false, updatedAt: NOW });
   ctx.openPintadeScreen();
   ok(/privé/i.test(ctx.__lastModal), 'feed exposé à une joueuse');
   ok(!/pas vu la demande/.test(ctx.__lastModal), 'le raté fuite malgré le feed privé');
@@ -779,7 +786,7 @@ t('les réglages sont bornés à l\'enregistrement, fenêtre de connexion compri
 });
 t('la fenêtre de connexion réglée est bien celle appliquée', () => {
   seed('player', 'pB');
-  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, { connectWindowHours: 8, updatedAt: NOW });
+  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, SANS_REPOS, { connectWindowHours: 8, updatedAt: NOW });
   startGarde('pA', 30, 'player', 'pB');
   demande();
   const q = lastReq();
@@ -980,6 +987,7 @@ t('la nouvelle porteuse repart d\'une ardoise vierge', () => {
 });
 t('UN SEUL RATÉ remet la série de réussites à zéro', () => {
   seed('coach');
+  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, SANS_REPOS, { updatedAt: NOW });
   const p = startGarde('pA', 30, 'coach');
   for (let i = 0; i < 5; i++) preuveOk('pB');
   ok(ctx.pintadeOkStreak(p.id) === 5, 'série = ' + ctx.pintadeOkStreak(p.id));
@@ -1034,7 +1042,7 @@ t('une demandeuse partie de l\'effectif renvoie la décision au coach', () => {
 });
 t('le coach peut couper la mécanique (seuil 0)', () => {
   seed('coach');
-  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, { autoReleaseAfterOk: 0, updatedAt: NOW });
+  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, SANS_REPOS, { autoReleaseAfterOk: 0, updatedAt: NOW });
   const p = startGarde('pA', 30, 'coach');
   for (let i = 0; i < 8; i++) {
     const r = preuveOk('pB');
@@ -1046,7 +1054,7 @@ t('le coach peut couper la mécanique (seuil 0)', () => {
 });
 t('le seuil est réglable par le coach', () => {
   seed('coach');
-  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, { autoReleaseAfterOk: 3, updatedAt: NOW });
+  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, SANS_REPOS, { autoReleaseAfterOk: 3, updatedAt: NOW });
   startGarde('pA', 30, 'coach');
   preuveOk('pB'); preuveOk('pB');
   ok(ctx.pintadeActivePeriod().holderId === 'pA', 'libérée trop tôt');
@@ -1128,7 +1136,7 @@ t('un texte par défaut existe et couvre les règles réellement appliquées', (
 });
 t('le texte du coach remplace le défaut, partout', () => {
   seed('coach');
-  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, { rulesText: '# Mes règles\n- Sois sympa', updatedAt: NOW });
+  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, SANS_REPOS, { rulesText: '# Mes règles\n- Sois sympa', updatedAt: NOW });
   ok(ctx.pintadeRulesText() === '# Mes règles\n- Sois sympa', ctx.pintadeRulesText());
   ok(ctx.pintadeRulesTextIsCustom() === true, 'le texte du coach passe pour le défaut');
   startGarde('pA', 30, 'coach');
@@ -1158,7 +1166,7 @@ t('les règles sont lisibles même quand personne ne porte la peluche', () => {
 });
 t('le Markdown est rendu, et le HTML collé par le coach est neutralisé', () => {
   seed('coach');
-  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, {
+  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, SANS_REPOS, {
     rulesText: '# Titre\n- point\n**gras**\n<img src=x onerror="alert(1)">', updatedAt: NOW });
   startGarde('pA', 30, 'coach');
   S._pintadeRulesOpen = true;
@@ -1287,7 +1295,7 @@ t('le recalcul de la série est RÉTROACTIF (rien n\'est stocké)', () => {
 t('une invalidation peut faire franchir le plafond → arbitrage dû', () => {
   seed('coach');
   const p = startGarde('pA', 30, 'coach');
-  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, { maxConsecutiveFails: 3, autoReleaseAfterOk: 0, updatedAt: NOW });
+  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, SANS_REPOS, { maxConsecutiveFails: 3, autoReleaseAfterOk: 0, updatedAt: NOW });
   ratePasVue(); rateTropLente();                    // 2 ratés secs
   ok(ctx.pintadeStreak(p.id) === 2, 'série de ratés = ' + ctx.pintadeStreak(p.id));
   const { q } = preuveOk('pB');                     // une réussite remet à zéro
@@ -1453,6 +1461,7 @@ t('annuler la libération prévient les deux joueuses ET le coach', () => {
 });
 t('après annulation, la porteuse peut se relibérer normalement', () => {
   seed('coach');
+  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT, SANS_REPOS, { updatedAt: NOW });
   const p = startGarde('pA', 30, 'coach');
   for (let i = 0; i < 5; i++) preuveOk('pB');
   invalider(preuveOk('pC').q, 'litige', true);
@@ -1645,6 +1654,152 @@ t('aller-retour base : les trois colonnes d\'invalidation survivent', () => {
   ok(back.status === 'invalidated_by_coach', 'statut relu = ' + back.status);
   ok(back.invalidationReason === 'peluche absente', 'motif perdu');
   ok(back.invalidatedAt === q.invalidatedAt, 'horodatage perdu à l\'aller-retour');
+});
+
+// =============================================================================
+// LES HEURES DE REPOS (migration 20260812_001)
+// -----------------------------------------------------------------------------
+// Le jeu tournait 24 h sur 24. La v.107 avait déjà empêché les 30 secondes de la
+// photo de s'écouler pendant qu'elle dort, mais rien n'interdisait la DEMANDE.
+//
+// CE QUI EST VERROUILLÉ ICI :
+//   • le passage de minuit est le cas NORMAL (23 → 7), pas l'exception ;
+//   • une plage « à l'endroit » (sieste 13 → 15) marche aussi ;
+//   • start === end désactive la mécanique, sans drapeau supplémentaire ;
+//   • les heures s'entendent en Europe/Paris, PAS dans le fuseau de l'appareil ;
+//   • et surtout : l'échéance de connexion ne peut pas expirer pendant le repos
+//     — sinon interdire les demandes de nuit ne servirait à rien, il suffirait
+//     d'en lancer une à 22 h 55 pour la faire rater en dormant.
+// =============================================================================
+function reglesRepos(start, end, extra) {
+  S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT,
+    { restStartHour: start, restEndHour: end, updatedAt: NOW }, extra || {});
+}
+// Positionne l'horloge du test à une heure de PARIS donnée, ce jour-là.
+function aParis(hour) {
+  for (let i = 0; i < 48; i++) {
+    if (ctx._pintadeParisHour(NOW) === hour) return;
+    NOW += H;
+  }
+  throw new Error('heure de Paris introuvable : ' + hour);
+}
+
+t('le passage de minuit est le cas NORMAL (23 → 7)', () => {
+  seed('coach'); reglesRepos(23, 7);
+  [23, 0, 3, 6].forEach(h => ok(ctx._pintadeIsRestHour(h) === true, h + 'h devrait être du repos'));
+  [7, 8, 12, 22].forEach(h => ok(ctx._pintadeIsRestHour(h) === false, h + 'h ne devrait PAS être du repos'));
+});
+t('une plage à l\'endroit marche aussi (sieste 13 → 15)', () => {
+  seed('coach'); reglesRepos(13, 15);
+  [13, 14].forEach(h => ok(ctx._pintadeIsRestHour(h) === true, h + 'h devrait être du repos'));
+  [12, 15, 23, 0].forEach(h => ok(ctx._pintadeIsRestHour(h) === false, h + 'h ne devrait PAS être du repos'));
+});
+t('start === end désactive la mécanique', () => {
+  seed('coach'); reglesRepos(9, 9);
+  ok(ctx.pintadeRestEnabled() === false, 'le repos se croit actif');
+  for (let h = 0; h < 24; h++) ok(ctx._pintadeIsRestHour(h) === false, h + 'h bloqué alors que le repos est coupé');
+});
+t('les heures s\'entendent en EUROPE/PARIS, pas dans le fuseau de l\'appareil', () => {
+  seed('coach'); reglesRepos(23, 7);
+  // 2026-08-10T21:30:00Z = 23 h 30 à Paris (heure d'été, UTC+2) → repos.
+  ok(ctx.pintadeIsRestAt(RealDate.parse('2026-08-10T21:30:00Z')) === true, 'minuit parisien non reconnu');
+  // …et 05 h 30 UTC = 07 h 30 à Paris → le repos est fini.
+  ok(ctx.pintadeIsRestAt(RealDate.parse('2026-08-10T05:30:00Z')) === false, 'le réveil parisien n\'est pas vu');
+  // En hiver (UTC+1) la même conversion doit suivre le changement d'heure.
+  ok(ctx.pintadeIsRestAt(RealDate.parse('2026-01-15T22:30:00Z')) === true, 'heure d\'hiver mal convertie');
+});
+t('pendant le repos, la demande est REFUSÉE — et le bouton le dit', () => {
+  seed('player', 'pB');
+  startGarde('pA', 30, 'player', 'pB');
+  reglesRepos(23, 7);
+  aParis(2);                                   // 2 h du matin
+  ok(ctx.pintadeIsRestNow() === true, 'préalable faux : ' + ctx._pintadeParisHour(NOW) + 'h');
+  const why = ctx.pintadeRequestBlockedReason();
+  ok(/Repos jusqu/.test(why || ''), 'raison donnée : ' + why);
+  ok(ctx.pintadeCanRequest() === false, 'le créneau est ouvert en pleine nuit');
+  const avant = (S.pintadeRequests || []).length;
+  ok(ctx.requestPintadeProof() === false, 'une demande est partie en pleine nuit');
+  ok((S.pintadeRequests || []).length === avant, 'une demande a été écrite malgré le refus');
+});
+t('le repos passe AVANT le rate limit (la raison la plus longue prime)', () => {
+  seed('player', 'pB');
+  startGarde('pA', 30, 'player', 'pB');
+  reglesRepos(23, 7);
+  aParis(14); demande();                       // une demande en journée
+  aParis(2);                                   // …puis on arrive dans la nuit
+  const why = ctx.pintadeRequestBlockedReason();
+  ok(/Repos jusqu/.test(why || ''), 'on annonce « dans X min » en pleine nuit : ' + why);
+});
+t('hors repos, tout redevient normal', () => {
+  seed('player', 'pB');
+  startGarde('pA', 30, 'player', 'pB');
+  reglesRepos(23, 7);
+  aParis(10);
+  ok(ctx.pintadeIsRestNow() === false, 'il est ' + ctx._pintadeParisHour(NOW) + 'h et on se croit la nuit');
+  ok(ctx.pintadeCanRequest() === true, 'bloqué en pleine journée : ' + ctx.pintadeRequestBlockedReason());
+});
+
+// --- LE TROU DE LA FRONTIÈRE -------------------------------------------------
+t('une demande juste AVANT le repos ne peut pas expirer pendant la nuit', () => {
+  seed('player', 'pB');
+  startGarde('pA', 30, 'player', 'pB');
+  reglesRepos(23, 7, { connectWindowHours: 2 });
+  aParis(22);                                  // 22 h : la fenêtre de 2 h finit à 0 h
+  demande();
+  const q = lastReq();
+  const h = ctx._pintadeParisHour(q.connectDeadlineAt);
+  ok(!ctx.pintadeIsRestAt(q.connectDeadlineAt),
+    'échéance en plein repos (' + h + 'h) → elle rate en dormant, comme avant la v.107');
+  ok(h === 7, 'échéance reportée à ' + h + 'h au lieu de la fin du repos');
+  // …et elle ne rate PAS tant que le repos dure.
+  aParis(3);
+  ok(ctx._pintadeStatus(q) === 'pending', 'ratée en pleine nuit : ' + ctx._pintadeStatus(q));
+});
+t('…mais une demande en pleine journée garde sa fenêtre normale', () => {
+  seed('player', 'pB');
+  startGarde('pA', 30, 'player', 'pB');
+  reglesRepos(23, 7, { connectWindowHours: 2 });
+  aParis(10);
+  demande();
+  const q = lastReq();
+  ok(q.connectDeadlineAt === NOW + 2 * H, 'fenêtre rallongée sans raison');
+});
+t('repos coupé → aucune échéance n\'est reportée', () => {
+  seed('player', 'pB');
+  startGarde('pA', 30, 'player', 'pB');
+  reglesRepos(9, 9, { connectWindowHours: 2 });
+  aParis(22);
+  demande();
+  ok(lastReq().connectDeadlineAt === NOW + 2 * H, 'report appliqué alors que le repos est coupé');
+});
+
+// --- CONFIG COACH + TEXTE ----------------------------------------------------
+t('l\'écran de configuration expose les deux heures', () => {
+  seed('coach'); reglesRepos(23, 7);
+  ctx.openPintadeRules();
+  const m = ctx.__lastModal || '';
+  ok(/id="pr-rest-start"/.test(m) && /id="pr-rest-end"/.test(m), 'listes déroulantes absentes');
+  ok(/<option value="23" selected>23h<\/option>/.test(m), 'heure de début non présélectionnée');
+  ok(/<option value="7" selected>7h<\/option>/.test(m), 'heure de fin non présélectionnée');
+  ok(/désactiver le repos/.test(m), 'on n\'explique pas comment couper la mécanique');
+});
+t('les deux heures font l\'aller-retour base', () => {
+  seed('coach'); reglesRepos(1, 6);
+  const row = ctx._dumpPintadeRulesRow(S.pintadeRules);
+  ok(row.rest_start_hour === 1 && row.rest_end_hour === 6, JSON.stringify(row));
+  const back = ctx._pintadeRulesFromRow(row);
+  ok(back.restStartHour === 1 && back.restEndHour === 6, JSON.stringify(back));
+  // Une base pas encore migrée retombe sur les défauts, sans planter.
+  const vieux = ctx._pintadeRulesFromRow({ id: 'default' });
+  ok(vieux.restStartHour === 23 && vieux.restEndHour === 7, JSON.stringify(vieux));
+});
+t('le texte par défaut annonce les heures de repos', () => {
+  seed('coach');
+  const txt = ctx.pintadeRulesText();     // rulesText vide → texte de référence
+  ok(/Heures de repos/.test(txt), 'les règles n\'en parlent pas');
+  ok(/23h et 7h/.test(txt), 'les heures par défaut ne sont pas citées');
+  ok(/on ne rate pas en dormant/.test(txt),
+    'la garantie de la frontière n\'est pas annoncée aux joueuses');
 });
 
 console.log('\n' + R.join('\n'));
