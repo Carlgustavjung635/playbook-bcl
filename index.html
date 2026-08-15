@@ -767,6 +767,130 @@
     .bday-confetti { display: none; }
     .bday-cake, .bday-msg { animation: none; }
   }
+
+  /* ==== SCORE GÉNÉRAL (v.126) — widget accueil joueuse ====================
+     `position: relative` sur la carte : le texte flottant « +X pts » est
+     positionné par rapport À ELLE, pour que le gain parte visuellement du
+     chiffre qui vient de bouger et pas d'un coin de l'écran. */
+  .pts-card { position: relative; overflow: hidden; }
+  .pts-value {
+    font-family: 'Anton', sans-serif; font-size: 42px; line-height: 1;
+    color: var(--orange); display: inline-block;
+  }
+  .pts-value.pts-bump { animation: ptsBump 0.6s cubic-bezier(.34,1.56,.64,1); }
+  @keyframes ptsBump {
+    0%   { transform: scale(1); }
+    35%  { transform: scale(1.22); }
+    100% { transform: scale(1); }
+  }
+  /* Le texte flottant. `pointer-events: none` : purement décoratif, il ne doit
+     jamais voler le tap qui ouvre l'historique en dessous. */
+  .pts-float {
+    position: absolute; left: 50%; top: 46%; transform: translateX(-50%);
+    font-family: 'Anton', sans-serif; font-size: 26px; letter-spacing: 0.02em;
+    pointer-events: none; z-index: 3; white-space: nowrap;
+    text-shadow: 0 2px 10px rgba(0,0,0,.35);
+    animation: ptsFloat 2s cubic-bezier(.22,.61,.36,1) forwards;
+  }
+  @keyframes ptsFloat {
+    0%   { opacity: 0; transform: translate(-50%, 10px) scale(0.85); }
+    18%  { opacity: 1; transform: translate(-50%, 0) scale(1); }
+    70%  { opacity: 1; }
+    100% { opacity: 0; transform: translate(-50%, -58px) scale(1.06); }
+  }
+  /* Barre de progression vers le prochain rang. */
+  .pts-bar { height: 7px; border-radius: 4px; background: var(--bg-3); overflow: hidden; }
+  .pts-bar-fill {
+    height: 100%; border-radius: 4px;
+    background: linear-gradient(90deg, var(--orange), var(--orange-2, var(--orange)));
+    transition: width .5s ease-out;
+  }
+  /* Mini-courbe 7 jours : des barres, pas une polyline — lisible à 320 px de
+     large, et une barre à zéro se voit (un point sur une ligne plate, non). */
+  .pts-spark { display: flex; align-items: flex-end; gap: 4px; height: 42px; }
+  .pts-spark-col { flex: 1 1 0; display: flex; flex-direction: column; justify-content: flex-end; height: 100%; min-width: 0; }
+  .pts-spark-bar { width: 100%; border-radius: 3px 3px 0 0; background: var(--orange); opacity: .85; min-height: 2px; }
+  .pts-spark-bar.is-empty { background: var(--border); opacity: 1; }
+  .pts-spark-lbl {
+    font-family: 'JetBrains Mono', monospace; font-size: 8px; color: var(--ink-4);
+    text-align: center; margin-top: 4px; text-transform: uppercase;
+  }
+  /* Pastille de source dans la timeline. */
+  .pts-dot { flex: 0 0 auto; width: 30px; height: 30px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 15px; }
+  .pts-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; }
+  .pts-row + .pts-row { border-top: 1px solid var(--border-soft); }
+  .pts-row-main { flex: 1; min-width: 0; }
+  .pts-row-delta { flex: 0 0 auto; font-family: 'Anton', sans-serif; font-size: 16px; }
+  /* ---- LA BANQUE (v.126) --------------------------------------------------
+     La ligne « en banque » et son bouton « Récolter ». Le bouton est la SEULE
+     zone cliquable de la carte qui ne mène pas à l'historique : il porte donc
+     un fond plein et une couleur d'accent, pour qu'on ne l'active pas par
+     erreur en voulant ouvrir le détail. */
+  .pts-bank {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    margin-top: 12px; padding: 10px 12px; border-radius: 10px;
+    background: var(--bg-3); border: 1px solid var(--border-soft);
+  }
+  .pts-bank.is-full { border-color: rgba(245,158,11,.55); background: rgba(245,158,11,.09); }
+  .pts-bank-amount { font-family: 'Anton', sans-serif; font-size: 22px; line-height: 1; color: #f59e0b; }
+  .pts-bank.is-empty .pts-bank-amount { color: var(--ink-4); }
+  /* Cible tactile ≥ 44 px de haut : c'est un bouton de récompense, on ne le
+     rate pas parce qu'on a le téléphone dans une main. */
+  .pts-harvest-btn {
+    flex: 0 0 auto; min-height: 44px; padding: 0 16px; border: 0; border-radius: 10px;
+    font-family: 'Anton', sans-serif; font-size: 14px; letter-spacing: 0.03em;
+    text-transform: uppercase; cursor: pointer; color: #1a1206;
+    background: linear-gradient(180deg, #fbbf24, #f59e0b);
+    box-shadow: 0 2px 10px rgba(245,158,11,.35);
+    animation: ptsHarvestPulse 2.4s ease-in-out infinite;
+  }
+  .pts-harvest-btn:disabled {
+    background: var(--bg-2); color: var(--ink-4); cursor: default;
+    box-shadow: none; animation: none; opacity: .75;
+  }
+  @keyframes ptsHarvestPulse {
+    0%, 100% { transform: scale(1); box-shadow: 0 2px 10px rgba(245,158,11,.35); }
+    50%      { transform: scale(1.035); box-shadow: 0 4px 18px rgba(245,158,11,.55); }
+  }
+  /* Les pièces. Elles volent de la banque vers le score : `--dx` / `--dy` sont
+     posées en JS depuis la position RÉELLE des deux éléments, parce qu'elle
+     dépend de la largeur de l'écran et de la présence du bloc « objectif ». */
+  .pts-coin {
+    position: absolute; z-index: 4; pointer-events: none;
+    width: 20px; height: 20px; border-radius: 50%;
+    background: radial-gradient(circle at 34% 30%, #fde68a, #f59e0b 62%, #b45309);
+    box-shadow: 0 0 10px rgba(245,158,11,.65);
+    animation: ptsCoinFly .85s cubic-bezier(.4,.02,.2,1) forwards;
+  }
+  @keyframes ptsCoinFly {
+    0%   { opacity: 0; transform: translate(0, 0) scale(.5); }
+    12%  { opacity: 1; transform: translate(0, 0) scale(1); }
+    /* Le crochet vers le haut à mi-parcours : une pièce qui suit la diagonale
+       exacte a l'air tirée à la ficelle, pas lancée. */
+    55%  { opacity: 1; transform: translate(calc(var(--dx) * .55), calc(var(--dy) * .5 - 26px)) scale(1.08); }
+    100% { opacity: 0; transform: translate(var(--dx), var(--dy)) scale(.45); }
+  }
+  .pts-confetti {
+    position: absolute; z-index: 5; pointer-events: none;
+    width: 7px; height: 11px; border-radius: 1px; opacity: 0;
+    animation: ptsConfetti 1.1s ease-out forwards;
+  }
+  @keyframes ptsConfetti {
+    0%   { opacity: 1; transform: translate(0, 0) rotate(0deg); }
+    100% { opacity: 0; transform: translate(var(--dx), var(--dy)) rotate(var(--rot)); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    /* Le gain reste ANNONCÉ (repli en toast dans animatePointsGain) : on retire
+       le mouvement, jamais l'information. */
+    .pts-float { display: none; }
+    .pts-value.pts-bump { animation: none; }
+    .pts-bar-fill { transition: none; }
+    /* La récolte, elle, se fait quand même — elle est déclenchée par un clic et
+       elle ÉCRIT. Seule la mise en scène disparaît : ni pièces, ni confettis,
+       ni bouton qui pulse. Le résultat est annoncé par un toast. */
+    .pts-coin, .pts-confetti { display: none; }
+    .pts-harvest-btn { animation: none; }
+  }
   /* ---- Responsive : breakpoints STANDARDS, aucun device de référence ----
      small < 480px · medium 480-767px · large ≥ 768px.
      Tenu à 320 / 375 / 390 / 414 / 428 px : cibles tactiles ≥ 44 px, et aucun
@@ -4450,7 +4574,15 @@ const ENTITIES = [
       countdown_ms: Number.isFinite(c.countdownMs) ? c.countdownMs : null,
       tiers: Array.isArray(c.tiers) ? c.tiers.filter(t => t && typeof t.threshold === 'number').map(t => ({ name: String(t.name || ''), threshold: t.threshold })) : [],
       tags: Array.isArray(c.tags) ? c.tags.filter(t => typeof t === 'string' && t.trim()).map(t => t.trim()) : [],
-      favorited_by: Array.isArray(c.favoritedBy) ? c.favoritedBy.filter(Boolean) : []
+      favorited_by: Array.isArray(c.favoritedBy) ? c.favoritedBy.filter(Boolean) : [],
+      // SYSTÈME DE POINTS (migration 20260815_003). Borné 0-1000 comme le CHECK :
+      // une valeur hors bornes ferait échouer TOUT le lot d'upsert des défis.
+      // Défaut 5 pour un défi antérieur à la migration — même valeur que le
+      // DEFAULT SQL, donc aucun aller-retour ne change la valeur d'un défi.
+      // `== null` et pas `||` : 0 est une valeur LÉGITIME (« ce défi ne rapporte
+      // rien ») que `||` transformerait silencieusement en 5.
+      points_reward: (c.pointsReward == null || !Number.isFinite(Number(c.pointsReward)))
+        ? 5 : Math.min(1000, Math.max(0, Math.round(Number(c.pointsReward))))
     }])),
     apply: (state, rows) => {
       const byId = Object.fromEntries((state.challenges || []).map(c => [c.id, c]));
@@ -4471,7 +4603,11 @@ const ENTITIES = [
         target: (r.target != null) ? r.target : ((byId[r.id] || {}).target != null ? (byId[r.id] || {}).target : null),
         teamScore: (r.team_score != null) ? r.team_score : ((byId[r.id] || {}).teamScore != null ? (byId[r.id] || {}).teamScore : null),
         seasonId: r.season_id || (byId[r.id] || {}).seasonId || null,
-        teamTag: r.team_tag || 'e1'  // rétrocompat : colonne absente → 'e1'
+        teamTag: r.team_tag || 'e1',  // rétrocompat : colonne absente → 'e1'
+        // SYSTÈME DE POINTS. Colonne absente (client en avance sur la migration)
+        // → 5, la même valeur que le DEFAULT SQL : le défi ne change pas de
+        // tarif selon l'appareil qui le lit.
+        pointsReward: Number.isFinite(r.points_reward) ? r.points_reward : 5
       }));
     }
   },
@@ -5759,6 +5895,87 @@ const ENTITIES = [
       }
       state.ardoiseRules = mapped;
     }
+  },
+  // ==========================================================================
+  // SYSTÈME DE POINTS (cf. migrations 20260815_003 et _004) — trois entités.
+  //
+  // `pointsRules` est un SINGLETON (une ligne, id 'default'), sur le modèle de
+  // `pintadeRules` / `team`. `pointsLedger` et `pointsHarvests` sont des
+  // collections classiques.
+  //
+  // LE LEDGER NE CONTIENT PAS TOUS LES POINTS, et c'est voulu : le score de
+  // saison est DÉRIVÉ à la lecture depuis les sources qui font déjà foi
+  // (séances de prépa validées, instances de convoc clôturées, scores de défis,
+  // gages confirmés, ardoises validées). Le ledger ne stocke que ce qui n'est
+  // dérivable de rien — ajustements manuels du coach et surcharges ponctuelles.
+  // Cf. l'en-tête de la migration : c'est le même patron que les compteurs auto
+  // des défis et les sanctions de la pintade.
+  // ==========================================================================
+  {
+    key: 'pointsRules', table: 'points_rules', pk: 'id', realtime: true, auth: 'anon',
+    // Tant que le coach n'a rien réglé, state.pointsRules vaut null : on ne
+    // pousse RIEN. Pousser des défauts front écraserait la ligne seedée par la
+    // migration — et les réglages d'un coach depuis un appareil qui n'aurait
+    // pas encore lu le serveur (le mode de panne de la v.104).
+    dump: (state) => state.pointsRules ? { 'default': _dumpPointsRulesRow(state.pointsRules) } : {},
+    apply: (state, rows) => {
+      const r = rows.find(x => x.id === 'default') || rows[0];
+      if (!r) return;
+      const mapped = _pointsRulesFromRow(r);
+      const loc = state.pointsRules;
+      if (loc && (loc.updatedAt || 0) > (mapped.updatedAt || 0)) {
+        _reassertRows('points_rules', [_dumpPointsRulesRow(loc)]);
+        return;
+      }
+      state.pointsRules = mapped;
+    }
+  },
+  {
+    key: 'pointsLedger', table: 'player_points_ledger', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.pointsLedger || []).map(e => [e.id, _dumpPointsLedgerRow(e)])),
+    apply: (state, rows) => {
+      const local = state.pointsLedger || [];
+      const localById = Object.fromEntries(local.map(e => [e.id, e]));
+      const remoteIds = new Set(rows.map(r => r.id));
+      const ahead = [];
+      const fromRemote = rows.map(r => {
+        const mapped = _pointsLedgerFromRow(r);
+        const loc = localById[r.id];
+        if (loc && (loc.updatedAt || 0) > (mapped.updatedAt || 0)) { ahead.push(loc); return loc; }
+        return mapped;
+      });
+      const pendingLocal = local.filter(e => !remoteIds.has(e.id) && typeof e.id === 'string' && e.id.startsWith('x'));
+      state.pointsLedger = [...pendingLocal, ...fromRemote];
+      if (ahead.length) _reassertRows('player_points_ledger', ahead.map(_dumpPointsLedgerRow));
+    }
+  },
+  {
+    // LE REPÈRE DE RÉCOLTE (cf. migration 20260815_004).
+    //
+    // Une ligne par (joueuse, saison), d'id DÉTERMINISTE `playerId|seasonId` —
+    // donc pas d'id 'x…' et pas d'anti-wipe à prévoir : deux appareils qui
+    // récoltent en même temps écrivent la MÊME clé, et le last-writer-wins par
+    // `updatedAt` tranche sans jamais créer de doublon.
+    key: 'pointsHarvests', table: 'player_points_harvests', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.pointsHarvests || []).map(h => [h.id, _dumpPointsHarvestRow(h)])),
+    apply: (state, rows) => {
+      const local = state.pointsHarvests || [];
+      const localById = Object.fromEntries(local.map(h => [h.id, h]));
+      const remoteIds = new Set(rows.map(r => r.id));
+      const ahead = [];
+      const fromRemote = rows.map(r => {
+        const mapped = _pointsHarvestFromRow(r);
+        const loc = localById[r.id];
+        // LWW indispensable : la joueuse récolte, puis un écho realtime
+        // concurrent la ramènerait à son repère d'avant — c'est-à-dire une
+        // banque qui se re-remplit toute seule et une animation qui rejoue.
+        if (loc && (loc.updatedAt || 0) > (mapped.updatedAt || 0)) { ahead.push(loc); return loc; }
+        return mapped;
+      });
+      const pendingLocal = local.filter(h => !remoteIds.has(h.id));
+      state.pointsHarvests = [...pendingLocal, ...fromRemote];
+      if (ahead.length) _reassertRows('player_points_harvests', ahead.map(_dumpPointsHarvestRow));
+    }
   }
 ];
 
@@ -6488,6 +6705,125 @@ function _ardoiseAssignmentFromRow(r) {
     deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
   };
 }
+// --- SYSTÈME DE POINTS : sérialisation (module) -----------------------------
+// cf. migrations 20260815_003 et _004. Comme partout ailleurs dans ce bloc, les
+// listes de valeurs des contraintes CHECK sont réécrites EN DUR : les constantes
+// du bloc <script> classique (POINTS_SOURCES, POINTS_DEFAULT_RULES) ne
+// franchissent pas la frontière des blocs. Une valeur hors enum ferait échouer
+// TOUT le lot d'upsert de la table — et un lot en échec est rejoué
+// indéfiniment, donc la synchro du ledger gèlerait pour tout le monde. On borne
+// AVANT d'envoyer.
+const _POINTS_SOURCE_TYPES_DB = [
+  'training_completion', 'training_attendance', 'challenge_score',
+  'ardoise_done', 'gage_done', 'manual_adjustment'
+];
+// Idem pour l'état de banque (migration 20260815_004).
+const _POINTS_LEDGER_STATES_DB = ['pending', 'claimed', 'canceled'];
+function _pointsClampInt(v, min, max, dflt) {
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n)) return dflt;
+  return Math.min(max, Math.max(min, n));
+}
+function _dumpPointsRulesRow(r) {
+  return {
+    id: 'default',
+    attendance_points: _pointsClampInt(r.attendancePoints, 0, 1000, 10),
+    challenge_default_points: _pointsClampInt(r.challengeDefaultPoints, 0, 1000, 5),
+    gage_done_points: _pointsClampInt(r.gageDonePoints, 0, 1000, 15),
+    updated_by: r.updatedBy || null,
+    updated_at: r.updatedAt ? new Date(r.updatedAt).toISOString() : null
+  };
+}
+function _pointsRulesFromRow(r) {
+  // Défauts clé par clé, et non « objet entier ou rien » : une colonne encore
+  // absente (déploiement en avance d'une migration) rend la clé indéfinie, pas
+  // le barème entier inutilisable.
+  const num = (v, d) => Number.isFinite(Number(v)) ? Number(v) : d;
+  return {
+    attendancePoints: num(r.attendance_points, 10),
+    challengeDefaultPoints: num(r.challenge_default_points, 5),
+    gageDonePoints: num(r.gage_done_points, 15),
+    updatedBy: r.updated_by || null,
+    updatedAt: r.updated_at ? Date.parse(r.updated_at) : null
+  };
+}
+function _dumpPointsLedgerRow(e) {
+  return {
+    id: e.id,
+    player_id: e.playerId || null,
+    season_id: e.seasonId || null,
+    // Borné : `points_delta` est un `integer` NOT NULL. Un NaN (champ de saisie
+    // vidé) passerait un `null` et ferait échouer le lot entier.
+    points_delta: _pointsClampInt(e.pointsDelta, -100000, 100000, 0),
+    source_type: _POINTS_SOURCE_TYPES_DB.includes(e.sourceType) ? e.sourceType : 'manual_adjustment',
+    source_id: e.sourceId || null,
+    reason: e.reason || null,
+    created_by: e.createdBy || null,
+    // Banque (migration 20260815_004). Hors enum → 'pending' : le CHECK ferait
+    // échouer TOUT le lot d'upsert, et un lot en échec est rejoué indéfiniment.
+    // 'pending' comme repli plutôt que 'claimed' — un point qui attend d'être
+    // récolté se voit et se rattrape d'un clic, un point encaissé en silence non.
+    state: _POINTS_LEDGER_STATES_DB.includes(e.state) ? e.state : 'pending',
+    claimed_at: e.claimedAt ? new Date(e.claimedAt).toISOString() : null,
+    deleted_at: e.deletedAt ? new Date(e.deletedAt).toISOString() : null,
+    updated_at: e.updatedAt ? new Date(e.updatedAt).toISOString() : (e.createdAt ? new Date(e.createdAt).toISOString() : null)
+  };
+}
+function _pointsLedgerFromRow(r) {
+  return {
+    id: r.id,
+    playerId: r.player_id || null,
+    seasonId: r.season_id || null,
+    pointsDelta: Number.isFinite(r.points_delta) ? r.points_delta : (parseInt(r.points_delta, 10) || 0),
+    sourceType: _POINTS_SOURCE_TYPES_DB.includes(r.source_type) ? r.source_type : 'manual_adjustment',
+    sourceId: r.source_id || null,
+    reason: r.reason || '',
+    createdBy: r.created_by || null,
+    // Colonne encore absente (front déployé avant la migration) → `undefined`,
+    // qui doit se lire 'claimed' et NON 'pending' : sinon, le jour du
+    // déploiement, tous les ajustements déjà comptés retomberaient d'un coup
+    // dans la banque et le score de chaque joueuse chuterait sans raison. Le
+    // défaut 'pending' n'a de sens que pour une ligne QU'ON ÉCRIT.
+    state: _POINTS_LEDGER_STATES_DB.includes(r.state) ? r.state : 'claimed',
+    claimedAt: r.claimed_at ? Date.parse(r.claimed_at) : null,
+    createdAt: r.created_at ? Date.parse(r.created_at) : null,
+    updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
+    deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
+  };
+}
+// --- LE REPÈRE DE RÉCOLTE (migration 20260815_004) ---------------------------
+// `claimed_keys` part en jsonb : c'est un tableau de chaînes, passthrough direct
+// comme les stages de drills. On le BORNE quand même (200 entrées, 200 car.),
+// parce qu'une clé est construite depuis un id de source et qu'un jsonb qui
+// enfle sans limite finit par faire échouer le lot d'upsert de la table.
+function _dumpPointsHarvestRow(h) {
+  const keys = Array.isArray(h.claimedKeys) ? h.claimedKeys : [];
+  return {
+    id: h.id,
+    player_id: h.playerId || null,
+    season_id: h.seasonId || null,
+    claimed_through: h.claimedThrough ? new Date(h.claimedThrough).toISOString() : null,
+    claimed_keys: keys.filter(k => typeof k === 'string').slice(0, 200).map(k => k.slice(0, 200)),
+    claimed_total: _pointsClampInt(h.claimedTotal, 0, 100000000, 0),
+    last_claimed_at: h.lastClaimedAt ? new Date(h.lastClaimedAt).toISOString() : null,
+    deleted_at: h.deletedAt ? new Date(h.deletedAt).toISOString() : null,
+    updated_at: h.updatedAt ? new Date(h.updatedAt).toISOString() : new Date().toISOString()
+  };
+}
+function _pointsHarvestFromRow(r) {
+  return {
+    id: r.id,
+    playerId: r.player_id || null,
+    seasonId: r.season_id || null,
+    claimedThrough: r.claimed_through ? Date.parse(r.claimed_through) : 0,
+    claimedKeys: Array.isArray(r.claimed_keys) ? r.claimed_keys.filter(k => typeof k === 'string') : [],
+    claimedTotal: Number.isFinite(r.claimed_total) ? r.claimed_total : (parseInt(r.claimed_total, 10) || 0),
+    lastClaimedAt: r.last_claimed_at ? Date.parse(r.last_claimed_at) : null,
+    createdAt: r.created_at ? Date.parse(r.created_at) : null,
+    updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
+    deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
+  };
+}
 function _dumpArdoiseRulesRow(r) {
   return {
     id: 'default',
@@ -7077,6 +7413,11 @@ const K = {
   ardoiseAssignments: 'pb8_ardoise_assignments',   // [{ id, playerId, menuId, drawnAt, deadlineAt, status, proofPhotoUrl, parentId, ... }] — LES DETTES
   ardoiseRules: 'pb8_ardoise_rules',               // { id:'default', deadlineDays, maxDebts, autoPenaltyOnExpire, ... } — singleton
   ardoisePushed: 'pb8_ardoise_pushed',             // map { "<assignmentId>": ts } — filigrane anti-doublon des push de pénalité (LOCAL, jamais sync)
+  // === SYSTÈME DE POINTS (cf. migrations 20260815_003 et _004) ===
+  pointsRules: 'pb8_points_rules',                 // { attendancePoints, challengeDefaultPoints, gageDonePoints } — singleton
+  pointsLedger: 'pb8_points_ledger',               // [{ id, playerId, seasonId, pointsDelta, sourceType, sourceId, reason, state, claimedAt }] — ajustements + surcharges UNIQUEMENT (le reste est dérivé)
+  pointsHarvests: 'pb8_points_harvests',           // [{ id:"<playerId>|<seasonId>", claimedThrough, claimedKeys[], claimedTotal }] — le REPÈRE DE RÉCOLTE (banque)
+  pointsSeen: 'pb8_points_seen',                   // map { "<playerId>:<seasonId>": total } — dernier total VU par la joueuse, pour animer le delta (local, jamais sync)
   notifSnooze: 'pb8_notif_snooze',                 // map { "<role>:<playerId|->": "YYYY-MM-DD" } — « Plus tard » du rappel notifs (local)
   // NB : le repli du BANDEAU notifs n'a volontairement PAS de clé ici. Il vit
   // dans window._notifBannerHidden, donc il repart à zéro au prochain
@@ -7532,6 +7873,20 @@ let state = {
   ardoiseAssignments: load(K.ardoiseAssignments, []),
   ardoiseRules: load(K.ardoiseRules, null),
 
+  // === SYSTÈME DE POINTS (cf. migrations 20260815_003 et _004) ===
+  // `pointsRules` est un OBJET (singleton, comme pintadeRules) ; null tant que
+  // le serveur n'a rien renvoyé → le front lit ses défauts (pointsRules()).
+  // `pointsLedger` NE CONTIENT PAS tous les points : le score de saison est
+  // dérivé des sources à la lecture (cf. l'en-tête de la migration). Cette
+  // liste ne porte que les ajustements manuels du coach et les surcharges
+  // ponctuelles d'un événement dérivé.
+  // `pointsHarvests` porte le REPÈRE DE RÉCOLTE : une ligne par (joueuse,
+  // saison) qui dit jusqu'où les gains ont été encaissés. C'est lui, et lui
+  // seul, qui sépare le score de la banque.
+  pointsRules: load(K.pointsRules, null),
+  pointsLedger: load(K.pointsLedger, []),
+  pointsHarvests: load(K.pointsHarvests, []),
+
   // === JOUEUSES GUESTS (Phase 5 — cf. migration 20260524_009_guest_players) ===
   // guestPlayers : humains temporaires identifiés par leur nom (copine d'une
   //   joueuse, essayeuse). [{ id, name, note, promotedToPlayerId, firstSeenAt,
@@ -7602,6 +7957,7 @@ Object.defineProperty(state, 'offseason', {
 
 function persist() {
   invalidateAutoScoreCache(); // compteurs auto recomputés à la lecture : cache à jour
+  invalidatePointsCache();    // idem pour le score de saison (présences dérivées)
   save(K.auth, state.auth);
   save(K.section, state.section);
   save(K.plays, state.plays);
@@ -7649,6 +8005,9 @@ function persist() {
   save(K.ardoiseMenus, state.ardoiseMenus);
   save(K.ardoiseAssignments, state.ardoiseAssignments);
   save(K.ardoiseRules, state.ardoiseRules);
+  save(K.pointsRules, state.pointsRules);
+  save(K.pointsLedger, state.pointsLedger);
+  save(K.pointsHarvests, state.pointsHarvests);
   // FIX Option B : pendant l'édition d'un plan, bumper updatedAt de l'entrée
   // courante AVANT le save → la garde anti-écho de l'apply() trainingPlans peut
   // distinguer une édition locale fraîche d'un écho realtime obsolète (qui
@@ -8195,6 +8554,499 @@ function challengePeriodShortLabel(period) {
   if (period === 'month') return 'Mois';
   if (period === 'trimester') return 'Trimestre';
   return 'Saison';
+}
+
+// ============================================================================
+// SYSTÈME DE POINTS GÉNÉRAL (cf. migrations 20260815_003 et _004)
+// ----------------------------------------------------------------------------
+// UN score par joueuse et par saison, alimenté par tous les axes : prépa
+// physique, présence aux entraînements, défis, gages, ardoise, et les
+// ajustements du coach.
+//
+// LE SCORE EST DÉRIVÉ, PAS STOCKÉ
+// -------------------------------
+// Il n'existe nulle part de compteur « total de X ». À chaque lecture, on
+// reconstruit la liste des gains depuis les sources qui font DÉJÀ foi :
+// séances de prépa validées, instances de convocation clôturées, scores de
+// défis, tirages de gages confirmés. Même patron que les compteurs auto des
+// défis (`computeAutoScoresFromSource`) et que les sanctions de la pintade.
+//
+// Ce n'est pas une élégance gratuite, c'est ce qui évite quatre pannes que ce
+// dépôt a déjà payées ailleurs : le double comptage quand deux appareils voient
+// le même événement, la ligne figée qui survit à la correction de sa source, le
+// score qui ment tant qu'une joueuse n'a pas ouvert l'app, et le lot d'upsert
+// gelé par une écriture automatique de trop. Ça rend aussi le backfill sans
+// objet : tout l'historique est là dès le premier rendu.
+//
+// CE QUI EST STOCKÉ (`state.pointsLedger`)
+// ----------------------------------------
+//   • les ajustements manuels du coach — ils n'ont de source nulle part ;
+//   • les SURCHARGES : une ligne dont (sourceType, sourceId) désigne un
+//     événement dérivé REMPLACE la valeur dérivée. C'est ce qui permet de
+//     rectifier un cas particulier sans toucher au barème de tout le monde ;
+//   • les points d'un module sans source dérivable ici (ardoise).
+//
+// UNE SEULE PORTE DE LECTURE : `playerPointsEntries()`. Toute vue qui compte
+// des points passe par elle, sinon une vue oubliée afficherait un total qui ne
+// tient pas compte des surcharges.
+// ============================================================================
+
+// Métadonnées d'affichage par source. La couleur sert à la fois à la pastille
+// de la timeline et au texte flottant de l'animation (cf. animatePointsGain).
+const POINTS_SOURCES = [
+  { id: 'training_completion', label: 'Prépa physique',       short: 'Prépa',    emoji: '💪', color: '#22c55e' },
+  { id: 'training_attendance', label: 'Présence entraînement', short: 'Présence', emoji: '📋', color: '#3b82f6' },
+  { id: 'challenge_score',     label: 'Défi',                  short: 'Défi',     emoji: '🏆', color: '#f59e0b' },
+  { id: 'ardoise_done',        label: 'Ardoise',               short: 'Ardoise',  emoji: '🍽️', color: '#ef4444' },
+  { id: 'gage_done',           label: 'Gage',                  short: 'Gage',     emoji: '🎁', color: '#a855f7' },
+  { id: 'manual_adjustment',   label: 'Ajustement coach',      short: 'Coach',    emoji: '✍️', color: '#94a3b8' },
+];
+function pointsSourceMeta(id) {
+  return POINTS_SOURCES.find(s => s.id === id)
+    || { id: id || '?', label: 'Autre', short: 'Autre', emoji: '•', color: 'var(--ink-3)' };
+}
+
+// Barème. Défauts DUPLIQUÉS ici et en base (colonnes `points_rules`) : le front
+// doit savoir compter avant d'avoir lu le serveur, et le bouton « réinitialiser »
+// a besoin des valeurs côté client de toute façon.
+const POINTS_DEFAULT_RULES = {
+  attendancePoints: 10,
+  challengeDefaultPoints: 5,
+  gageDonePoints: 15,
+};
+// Fusion CLÉ PAR CLÉ, jamais « objet entier ou rien » : une colonne pas encore
+// migrée rend une clé indéfinie, elle ne doit pas invalider tout le barème.
+function pointsRules() {
+  const raw = (state.pointsRules && typeof state.pointsRules === 'object') ? state.pointsRules : {};
+  const num = (v, d) => Number.isFinite(Number(v)) ? Number(v) : d;
+  return {
+    attendancePoints: num(raw.attendancePoints, POINTS_DEFAULT_RULES.attendancePoints),
+    challengeDefaultPoints: num(raw.challengeDefaultPoints, POINTS_DEFAULT_RULES.challengeDefaultPoints),
+    gageDonePoints: num(raw.gageDonePoints, POINTS_DEFAULT_RULES.gageDonePoints),
+  };
+}
+// Ce que rapporte CE défi. `== null` et pas `||` : 0 (« ce défi ne rapporte
+// rien ») est une valeur légitime que `||` écraserait par le défaut.
+function challengePointsReward(c) {
+  if (!c) return 0;
+  if (c.pointsReward == null || !Number.isFinite(Number(c.pointsReward))) return pointsRules().challengeDefaultPoints;
+  return Math.min(1000, Math.max(0, Math.round(Number(c.pointsReward))));
+}
+
+// Clé de rapprochement dérivé ↔ stocké. Doit être calculée IDENTIQUEMENT des
+// deux côtés, sinon une surcharge coach ne remplace rien et s'ajoute.
+function _pointsKey(sourceType, sourceId) { return sourceType + '|' + (sourceId || ''); }
+
+// --- MÉMO -------------------------------------------------------------------
+// La dérivation des présences parcourt toutes les convocations et déplie leurs
+// récurrences : trop cher pour être refait une fois par joueuse à chaque rendu
+// (le classement coach en appellerait une quinzaine). On calcule donc UNE fois
+// par saison, pour tout le monde, et on invalide à chaque persist() — donc à
+// chaque clôture, RSVP, validation de séance ou ajustement.
+let _pointsMemo = { attendance: {}, };
+function invalidatePointsCache() { _pointsMemo = { attendance: {} }; }
+
+// Présences dérivées : { playerId: [ {sourceId, at, date, label} ] }.
+// Mêmes règles que la clôture et que les compteurs auto (présomption favorable :
+// toute joueuse de l'effectif non explicitement absente est comptée présente) —
+// diverger ici afficherait un nombre de présences différent du défi « Présences ».
+function _pointsAttendanceBySeason(seasonId) {
+  if (!seasonId || !_seasonsLoaded()) return {};
+  if (_pointsMemo.attendance[seasonId]) return _pointsMemo.attendance[seasonId];
+  const season = (state.seasons || []).find(s => s.id === seasonId);
+  const todayISO = isoDate(new Date());
+  const from = (season && season.startDate) || '2000-01-01';
+  const to = (season && season.endDate && season.endDate < todayISO) ? season.endDate : todayISO;
+  const out = {};
+  (state.convocations || []).forEach(c => {
+    // Les MATCHS ne rapportent pas de points de présence : `training_attendance`
+    // dit ce qu'il dit. Un match se joue sur sélection, pas sur assiduité —
+    // créditer la présence à un match reviendrait à payer la compo du coach.
+    if (c.type === 'match') return;
+    const team = c.teamTag === 'both' ? 'all' : (c.teamTag === 'e2' ? 'e2' : 'e1');
+    // Hors de la boucle : le tag équipe est constant pour une convocation, et
+    // une convoc récurrente peut compter des dizaines d'instances.
+    const pool = getSeasonPlayers(seasonId, { team });
+    let instances = [];
+    try { instances = getConvocInstances(c, from, to); } catch (e) { instances = []; }
+    instances.forEach(inst => {
+      // Seules les instances CLÔTURÉES comptent : avant la clôture, l'appel
+      // n'est pas fait et les RSVP sont des intentions, pas des présences.
+      if (!inst.closed) return;
+      // La saison de la DATE, jamais celle de la convocation : une convoc
+      // récurrente traverse la bascule de saison (c'est le bug de la PR #69).
+      if (getSeasonIdForDate(inst.date) !== seasonId) return;
+      const responses = inst.responses || {};
+      pool.forEach(p => {
+        const r = responses[p.id];
+        if (r && r.status && r.status !== 'present') return;
+        (out[p.id] = out[p.id] || []).push({
+          sourceId: c.id + '|' + inst.date,
+          at: Date.parse(inst.date + 'T12:00:00'),
+          date: inst.date,
+          label: inst.title || c.title || 'Entraînement'
+        });
+      });
+    });
+  });
+  _pointsMemo.attendance[seasonId] = out;
+  return out;
+}
+
+// Saison à créditer pour un événement daté. La saison de la DATE prime toujours ;
+// un fallback sur la saison ACTIVE couvre les données legacy sans rattachement.
+function _pointsSeasonOf(dateStr, explicitSeasonId) {
+  return getSeasonIdForDate(dateStr) || explicitSeasonId || getActiveSeasonId() || null;
+}
+
+// Les gains DÉRIVÉS d'une joueuse sur une saison. Chaque entrée porte sa clé de
+// rapprochement, son horodatage et de quoi s'afficher sans relire la source.
+function _derivePointsEntries(playerId, seasonId) {
+  const out = [];
+  if (!playerId) return out;
+  const rules = pointsRules();
+
+  // 1) PRÉPA PHYSIQUE — points figés dans la ligne à la validation (v.115).
+  // On les relit tels quels : re-scorer une séance déjà validée changerait
+  // rétroactivement un total annoncé à la joueuse le jour où elle l'a gagné.
+  (state.trainingCompletions || []).forEach(c => {
+    if (c.playerId !== playerId || c.deletedAt) return;
+    const sid = _pointsSeasonOf(c.datePlanned, null);
+    if (sid !== seasonId) return;
+    const pts = Number(c.pointsTotal) || 0;
+    if (!pts) return;
+    out.push({
+      key: _pointsKey('training_completion', c.id),
+      sourceType: 'training_completion', sourceId: c.id,
+      delta: pts,
+      at: c.dateCompleted || c.createdAt || Date.parse((c.datePlanned || '2000-01-01') + 'T12:00:00'),
+      label: 'Séance validée',
+      detail: c.datePlanned ? formatDate(c.datePlanned, 'short') : '',
+      stored: false
+    });
+  });
+
+  // 2) PRÉSENCES — barème global, appliqué à la lecture. Changer
+  // `attendance_points` recalcule donc aussi les présences déjà acquises : c'est
+  // assumé, « une présence vaut 10 » est une règle et non un prix historique.
+  // Le coach qui veut geler un cas particulier pose une surcharge (ledger).
+  if (rules.attendancePoints > 0) {
+    (_pointsAttendanceBySeason(seasonId)[playerId] || []).forEach(a => {
+      out.push({
+        key: _pointsKey('training_attendance', a.sourceId),
+        sourceType: 'training_attendance', sourceId: a.sourceId,
+        delta: rules.attendancePoints,
+        at: a.at,
+        label: a.label,
+        detail: formatDate(a.date, 'short'),
+        stored: false
+      });
+    });
+  }
+
+  // 3) DÉFIS — une seule fois par défi, dès qu'un score y est enregistré.
+  //
+  // Les défis AUTO sont EXCLUS, et c'est le point à ne pas rater : leurs
+  // compteurs (« Présences », « Ponctualité ») dérivent EUX-MÊMES des instances
+  // clôturées. Les créditer paierait la même séance deux fois — une fois en
+  // présence, une fois en défi. Les défis COLLECTIFS le sont aussi : leur score
+  // est un compteur d'équipe, sans attribution individuelle possible.
+  (state.challenges || []).forEach(c => {
+    if (c.autoCount || c.scope === 'season' || c.scope === 'collective') return;
+    const sid = c.seasonId || getActiveSeasonId();
+    if (sid !== seasonId) return;
+    const reward = challengePointsReward(c);
+    if (reward <= 0) return;
+    const series = _challengeSeriesOf(c, playerId);
+    const raw = (c.scores || {})[playerId];
+    const hasScore = series.length > 0 || (raw != null && Number(raw) !== 0);
+    if (!hasScore) return;
+    // `challenge_scores` n'a pas d'horodatage : on prend la dernière tentative
+    // connue, sinon la date de fin du défi, sinon sa dernière modification. La
+    // timeline a besoin d'une date — l'absence d'horodatage ne doit pas faire
+    // disparaître le gain.
+    const lastSeries = series.length ? series[series.length - 1] : null;
+    const at = (lastSeries && lastSeries.createdAt)
+      || (c.endDate ? Date.parse(c.endDate + 'T12:00:00') : null)
+      || c.updatedAt || null;
+    out.push({
+      key: _pointsKey('challenge_score', c.id),
+      sourceType: 'challenge_score', sourceId: c.id,
+      delta: reward,
+      at: at,
+      label: c.title || 'Défi',
+      detail: _fmtChallengeScore(c, series.length ? _recomputeChallengeAggregate(c, playerId) : Number(raw) || 0),
+      stored: false
+    });
+  });
+
+  // 4) GAGES — seulement 'coach_confirmed'. Accepter un gage ne le fait pas
+  // passer : c'est la confirmation du coach qui atteste qu'il a été tenu.
+  if (rules.gageDonePoints > 0) {
+    (state.gageDraws || []).forEach(d => {
+      if (d.playerId !== playerId || d.status !== 'coach_confirmed') return;
+      const when = d.confirmedAt || d.completedAt || d.drawnAt || d.createdAt || null;
+      const sid = _pointsSeasonOf(when ? isoDate(new Date(when)) : null, d.seasonId);
+      if (sid !== seasonId) return;
+      out.push({
+        key: _pointsKey('gage_done', d.id),
+        sourceType: 'gage_done', sourceId: d.id,
+        delta: rules.gageDonePoints,
+        at: when,
+        label: 'Gage tenu',
+        // Le TEXTE du gage n'est volontairement pas repris : l'historique de
+        // points n'est pas un endroit où republier ce qu'une joueuse a dû faire.
+        detail: '',
+        stored: false
+      });
+    });
+  }
+
+  // 5) ARDOISE — dérivée comme le reste, depuis les assignations validées.
+  //
+  // La v.124 laissait ce cas de côté : le module tournait sur une autre branche,
+  // et le plan était qu'il insère ses propres lignes `ardoise_done` dans le
+  // ledger. Les deux chantiers vivent maintenant dans le même fichier, et
+  // dériver coûte huit lignes là où écrire aurait coûté les quatre pannes que
+  // tout ce module cherche à éviter. On dérive.
+  //
+  // `pointsAwarded` est FIGÉ dans l'assignation à la validation (même posture
+  // que `pointsTotal` côté prépa) : on le relit tel quel, sans re-tarifer une
+  // ardoise déjà réglée parce que le chef a changé son menu depuis. Le filtre
+  // de statut est celui du module — diverger afficherait un total de points
+  // différent du « X réglées » de l'écran Ardoise, pour les mêmes dettes.
+  (state.ardoiseAssignments || []).forEach(a => {
+    if (!a || a.deletedAt || a.playerId !== playerId) return;
+    if (!ARDOISE_DONE_STATUSES.includes(a.status)) return;
+    const pts = Number(a.pointsAwarded) || 0;
+    if (!pts) return;
+    const when = a.validatedAt || a.assignedAt || a.drawnAt || null;
+    const sid = _pointsSeasonOf(when ? isoDate(new Date(when)) : null, a.seasonId);
+    if (sid !== seasonId) return;
+    out.push({
+      key: _pointsKey('ardoise_done', a.id),
+      sourceType: 'ardoise_done', sourceId: a.id,
+      delta: pts,
+      at: when,
+      label: 'Ardoise réglée',
+      // Ni le menu ni les exos : l'historique de points n'est pas un endroit où
+      // republier ce qu'une joueuse a dû faire pour rembourser sa dette (même
+      // raison que pour les gages).
+      detail: '',
+      stored: false
+    });
+  });
+
+  return out;
+}
+
+// FUSION dérivé ↔ stocké. Pure (aucune lecture de state) : c'est la règle la
+// plus facile à casser du module, donc celle qui est verrouillée par un test
+// (scripts/test-points-system.mjs). Une ligne stockée dont la clé désigne un
+// événement dérivé le REMPLACE ; les autres s'ajoutent.
+//
+// Une surcharge à 0 point est un cas NORMAL — « cette présence-là ne compte
+// pas » — et doit donc annuler le gain dérivé, pas être ignorée. C'est pour ça
+// que le filtre porte sur la présence d'une clé, jamais sur sa valeur.
+function _pointsMergeEntries(derived, storedRows, metaOf) {
+  const stored = (storedRows || []).filter(Boolean);
+  const overridden = new Set(stored.filter(e => e.sourceId).map(e => _pointsKey(e.sourceType, e.sourceId)));
+  const out = (derived || []).filter(d => !overridden.has(d.key));
+  stored.forEach(e => {
+    const meta = (metaOf || pointsSourceMeta)(e.sourceType);
+    out.push({
+      key: _pointsKey(e.sourceType, e.sourceId || e.id),
+      sourceType: e.sourceType, sourceId: e.sourceId,
+      delta: Number(e.pointsDelta) || 0,
+      at: e.createdAt || e.updatedAt || null,
+      label: e.reason || meta.label,
+      detail: e.sourceId ? 'Corrigé par le coach' : '',
+      stored: true, ledgerId: e.id, reason: e.reason || '',
+      // Banque : une ligne de ledger porte son PROPRE état, contrairement à un
+      // gain dérivé (dont l'état se lit sur le repère de récolte). Une ligne
+      // écrite avant la migration 20260815_004 n'a pas d'état → 'claimed', pour
+      // ne pas faire retomber dans la banque des points déjà comptés.
+      state: e.state || 'claimed', claimedAt: e.claimedAt || null
+    });
+  });
+  return out.sort((a, b) => (b.at || 0) - (a.at || 0));
+}
+
+// LA porte de lecture. Toute vue qui compte des points passe par ici.
+function playerPointsEntries(playerId, seasonId) {
+  if (!playerId) return [];
+  const stored = (state.pointsLedger || []).filter(e =>
+    e && !e.deletedAt && e.playerId === playerId && (e.seasonId || null) === (seasonId || null));
+  return _pointsMergeEntries(_derivePointsEntries(playerId, seasonId), stored);
+}
+
+// ============================================================================
+// LA BANQUE (v.126) — cf. migration 20260815_004
+// ----------------------------------------------------------------------------
+// Un gain ne tombe plus sur le score : il tombe dans la BANQUE, et c'est le
+// bouton « 🎁 Récolter » de la joueuse qui l'encaisse. Rien ne se perd si elle
+// attend — le geste ne sert qu'à transformer un relevé de compte en moment.
+//
+// COMMENT ON SÉPARE LES DEUX SANS UNE LIGNE PAR GAIN
+// ---------------------------------------------------
+// Le score reste DÉRIVÉ des sources (cf. l'en-tête du module) : il n'existe
+// nulle part de ligne « +10 pts pour la séance de mardi » qu'on pourrait
+// marquer « encaissée ». La frontière vit donc dans un REPÈRE — une ligne par
+// (joueuse, saison) qui dit jusqu'où les gains ont été pris — et non dans N
+// lignes qu'il faudrait écrire, dédupliquer entre appareils et réconcilier à
+// chaque correction de source.
+//
+// Trois règles, dans cet ordre, décident si un gain est encaissé :
+//   1. un MALUS l'est toujours — cf. plus bas, c'est la règle qui compte ;
+//   2. une ligne de LEDGER porte son propre état (`state`) ;
+//   3. un gain DÉRIVÉ est encaissé si le repère l'a dépassé, ou si sa clé est
+//      dans la liste de rattrapage (gain sans date, ou daté dans le futur).
+// ============================================================================
+
+function _pointsHarvestId(playerId, seasonId) { return playerId + '|' + (seasonId || '-'); }
+
+// Le repère d'une joueuse pour une saison, TOUJOURS sous forme exploitable —
+// même quand la ligne n'existe pas. Absence de ligne = repère à zéro = tout est
+// en banque : c'est le bon défaut pour une joueuse arrivée avant la migration,
+// et le premier « Récolter » encaisse alors toute son histoire d'un coup.
+function pointsHarvestOf(playerId, seasonId) {
+  const id = _pointsHarvestId(playerId, seasonId);
+  const row = (state.pointsHarvests || []).find(h => h && !h.deletedAt && h.id === id) || null;
+  return {
+    id, row,
+    claimedThrough: (row && Number(row.claimedThrough)) || 0,
+    claimedKeys: new Set((row && Array.isArray(row.claimedKeys)) ? row.claimedKeys : []),
+    claimedTotal: (row && Number(row.claimedTotal)) || 0,
+    lastClaimedAt: (row && row.lastClaimedAt) || null,
+  };
+}
+
+// Ce gain est-il déjà sur le score ? Pure (repère injecté) → testable.
+function _pointsEntryClaimed(e, harvest) {
+  // 1) UNE SANCTION NE SE REFUSE PAS. Un malus entre au score immédiatement,
+  // quoi qu'en dise la base. Sans cette ligne, il suffirait de ne jamais
+  // appuyer sur « Récolter » pour ne jamais le subir — et le bouton
+  // demanderait à la joueuse de valider sa propre punition, avec des confettis.
+  // La garde est ici, à la LECTURE, et pas seulement à l'écriture : elle couvre
+  // aussi les lignes posées par une version antérieure du front.
+  if ((Number(e.delta) || 0) < 0) return true;
+  // 2) Ligne de ledger : son état fait foi.
+  if (e.stored) return e.state !== 'pending';
+  // 3) Gain dérivé : le repère, puis la liste de rattrapage.
+  if (harvest.claimedKeys.has(e.key)) return true;
+  return e.at != null && e.at < harvest.claimedThrough;
+}
+
+// LA porte de lecture de la banque : { score, bank, total, claimed[], pending[] }.
+// Toute vue qui affiche un score OU une banque passe par ici, sinon un écran
+// afficherait « 1 240 » et le suivant « 1 640 » pour la même joueuse.
+function playerPointsSplit(playerId, seasonId) {
+  const entries = playerPointsEntries(playerId, seasonId);
+  const harvest = pointsHarvestOf(playerId, seasonId);
+  const claimed = [], pending = [];
+  entries.forEach(e => (_pointsEntryClaimed(e, harvest) ? claimed : pending).push(e));
+  const sum = list => list.reduce((s, e) => s + (Number(e.delta) || 0), 0);
+  return {
+    entries, claimed, pending, harvest,
+    score: sum(claimed),   // ce que le gros chiffre affiche
+    bank: sum(pending),    // ce qui attend dans la banque
+    total: sum(entries),   // score + banque — la vérité du classement
+  };
+}
+function playerPointsClaimed(playerId, seasonId) { return playerPointsSplit(playerId, seasonId).score; }
+function playerPointsBank(playerId, seasonId) { return playerPointsSplit(playerId, seasonId).bank; }
+
+function playerPointsTotal(playerId, seasonId) {
+  return playerPointsEntries(playerId, seasonId).reduce((sum, e) => sum + (Number(e.delta) || 0), 0);
+}
+// All-time : somme de TOUTES les saisons connues. Le cumul principal reste celui
+// de la saison en cours (remise à zéro à chaque saison) ; celui-ci se lit en
+// secondaire, pour la fierté du chemin parcouru.
+function playerPointsAllTime(playerId) {
+  const ids = (state.seasons || []).map(s => s.id);
+  if (!ids.length) return playerPointsTotal(playerId, state.currentSeasonId || null);
+  return ids.reduce((sum, sid) => sum + playerPointsTotal(playerId, sid), 0);
+}
+// Total par source : { sourceType: points }.
+function playerPointsBySource(playerId, seasonId) {
+  const out = {};
+  playerPointsEntries(playerId, seasonId).forEach(e => {
+    out[e.sourceType] = (out[e.sourceType] || 0) + (Number(e.delta) || 0);
+  });
+  return out;
+}
+// Points gagnés sur une fenêtre [sinceMs, untilMs[. Sert au « cette semaine »
+// de la joueuse et à la progression semaine/semaine du classement coach.
+function playerPointsBetween(playerId, seasonId, sinceMs, untilMs) {
+  return playerPointsEntries(playerId, seasonId)
+    .filter(e => e.at != null && e.at >= sinceMs && (untilMs == null || e.at < untilMs))
+    .reduce((sum, e) => sum + (Number(e.delta) || 0), 0);
+}
+// Cumul jour par jour sur les N derniers jours → [{ date, gained, total }].
+// C'est la série du petit graphique de l'accueil joueuse. Pure (state injecté
+// via `entries`, jour de référence via `todayMidnightMs`) → testable.
+//
+// LE SOCLE = TOUT CE QUI N'EST PAS DANS LA FENÊTRE. Sans lui, la courbe
+// repartirait de zéro tous les lundis et afficherait une chute là où il n'y a
+// qu'un bord de fenêtre.
+//
+// « Pas dans la fenêtre » couvre trois cas, et les trois comptent :
+//   • AVANT — le cas évident ;
+//   • SANS HORODATAGE — un défi dont on ne sait pas dater le score ;
+//   • APRÈS — et celui-là n'est pas théorique : un défi encore ouvert est daté
+//     de sa date de FIN, donc dans le futur. Le laisser hors du cumul faisait
+//     terminer la courbe en dessous du total affiché juste au-dessus d'elle.
+//
+// L'INVARIANT à tenir : le dernier point de la courbe vaut TOUJOURS le total
+// général. Une courbe qui contredit le grand chiffre qu'elle accompagne est
+// pire que pas de courbe.
+function _pointsDailySeries(entries, days, todayMidnightMs) {
+  days = Math.max(2, Math.min(90, days || 7));
+  const startMs = todayMidnightMs - (days - 1) * 86400000;
+  const endMs = startMs + days * 86400000;
+  let running = (entries || []).filter(e => e.at == null || e.at < startMs || e.at >= endMs)
+    .reduce((s, e) => s + (Number(e.delta) || 0), 0);
+  const out = [];
+  for (let i = 0; i < days; i++) {
+    const dayStart = startMs + i * 86400000;
+    const gained = (entries || [])
+      .filter(e => e.at != null && e.at >= dayStart && e.at < dayStart + 86400000)
+      .reduce((s, e) => s + (Number(e.delta) || 0), 0);
+    running += gained;
+    out.push({ dayStart, gained, total: running });
+  }
+  return out;
+}
+function playerPointsDaily(playerId, seasonId, days) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  return _pointsDailySeries(playerPointsEntries(playerId, seasonId), days, today.getTime())
+    .map(d => ({ date: isoDate(new Date(d.dayStart)), gained: d.gained, total: d.total }));
+}
+
+// Classement d'une saison : [{ player, total, weekDelta, prevWeekDelta }], trié.
+// Le pool vient de getSeasonPlayers → une joueuse partie en cours de saison n'y
+// figure plus, exactement comme dans les autres vues d'effectif.
+function seasonPointsRanking(seasonId, opts) {
+  opts = opts || {};
+  const sid = seasonId || state.currentSeasonId || getActiveSeasonId();
+  const pool = (_seasonsLoaded() && sid)
+    ? getSeasonPlayers(sid, { team: opts.team || 'all' })
+    : (state.players || []);
+  const now = Date.now();
+  const weekAgo = now - 7 * 86400000;
+  const twoWeeksAgo = now - 14 * 86400000;
+  return pool.map(p => ({
+    player: p,
+    total: playerPointsTotal(p.id, sid),
+    weekDelta: playerPointsBetween(p.id, sid, weekAgo, null),
+    prevWeekDelta: playerPointsBetween(p.id, sid, twoWeeksAgo, weekAgo),
+  })).sort((a, b) => b.total - a.total || String(a.player.name || '').localeCompare(String(b.player.name || '')));
+}
+// Rang (1-based) d'une joueuse, et l'effectif classé. null si hors effectif.
+function playerPointsRank(playerId, seasonId) {
+  const rank = seasonPointsRanking(seasonId);
+  const i = rank.findIndex(r => r.player.id === playerId);
+  return i < 0 ? null : { rank: i + 1, of: rank.length, ranking: rank };
 }
 
 // Ressentis équipe VIVANTS : un ressenti supprimé par l'admin (soft-delete,
@@ -10759,8 +11611,19 @@ function _adminPanelBody() {
     <button class="btn btn-secondary btn-block mb-2" style="text-align:left" onclick="closeModal();setTimeout(()=>openArdoiseCoach('exos'),50)">
       🏋 Bibliothèque d'exos (partagée avec la prépa)
     </button>
-    <button class="btn btn-secondary btn-block" style="text-align:left" onclick="closeModal();setTimeout(()=>openArdoiseCoach('config'),50)">
+    <button class="btn btn-secondary btn-block mb-3" style="text-align:left" onclick="closeModal();setTimeout(()=>openArdoiseCoach('config'),50)">
       ⚙️ Règles de l'Ardoise
+    </button>
+
+    <!-- SCORE GÉNÉRAL — réservé à l'admin : le barème retarife les DEUX
+         effectifs d'un coup, contrairement à l'ajustement d'une joueuse (que
+         tout coach peut faire, depuis le classement). -->
+    <div class="eyebrow-muted" style="margin-bottom:6px">Score général</div>
+    <button class="btn btn-secondary btn-block mb-2" style="text-align:left" onclick="closeModal();setTimeout(()=>openPointsRanking(),50)">
+      🏆 Classement de l'équipe
+    </button>
+    <button class="btn btn-secondary btn-block" style="text-align:left" onclick="closeModal();setTimeout(()=>openPointsRulesConfig(),50)">
+      ⚙️ Barème des points
     </button>
   `;
 }
@@ -12187,6 +13050,992 @@ function playTile(p, opts) {
 // 5. programme (renderPlayerProgramme : prépa estivale)
 // ============================================================
 
+// ============================================================================
+// SCORE GÉNÉRAL — CÔTÉ JOUEUSE (v.126)
+// ----------------------------------------------------------------------------
+// Le widget d'accueil, l'animation de gain, et l'historique détaillé.
+//
+// Tout ce qui s'affiche ici vient de `playerPointsEntries()` : aucune vue ne
+// recompte de son côté, sinon une surcharge du coach serait honorée à un
+// endroit et ignorée à l'autre.
+// ============================================================================
+
+// L'objectif affiché sous la barre. Deux régimes, parce que « top 3 » ne veut
+// rien dire quand on est déjà 2e : au-delà du podium on vise le podium, dessus
+// on vise celle juste devant. Première → plus d'objectif, la barre est pleine.
+function _pointsNextGoal(playerId, seasonId) {
+  const r = playerPointsRank(playerId, seasonId);
+  if (!r) return null;
+  const { rank, ranking } = r;
+  const mine = ranking[rank - 1].total;
+  if (rank === 1) return { done: true, label: '🥇 1re de l\'équipe', target: mine, mine, rank, of: r.of };
+  const podiumIdx = Math.min(2, ranking.length - 1); // 3e place (ou la dernière si effectif < 3)
+  const chaseIdx = rank > 3 ? podiumIdx : rank - 2;
+  const target = ranking[chaseIdx] ? ranking[chaseIdx].total : mine;
+  const missing = Math.max(0, target - mine);
+  return {
+    done: false, target, mine, missing, rank, of: r.of,
+    label: rank > 3
+      ? `${missing} pts pour entrer dans le top 3`
+      : `${missing} pts pour passer ${ranking[chaseIdx] ? esc(ranking[chaseIdx].player.name) : 'devant'}`
+  };
+}
+
+// Mini-courbe 7 jours. Des barres de GAIN quotidien, pas la courbe du cumul :
+// le cumul ne descend jamais, donc il monte doucement et ne raconte rien —
+// alors qu'une barre vide dit « rien gagné mercredi », ce qui est l'information.
+function _pointsSparkline(series) {
+  const max = Math.max(1, ...series.map(d => d.gained));
+  const dayLetters = ['D', 'L', 'M', 'M', 'J', 'V', 'S'];
+  return `<div class="pts-spark">${series.map(d => {
+    const h = d.gained > 0 ? Math.max(8, Math.round((d.gained / max) * 100)) : 0;
+    return `<div class="pts-spark-col" title="${esc(formatDate(d.date, 'short'))} · ${d.gained} pts">
+      <div class="pts-spark-bar ${d.gained > 0 ? '' : 'is-empty'}" style="height:${d.gained > 0 ? h : 3}%"></div>
+    </div>`;
+  }).join('')}</div>
+  <div style="display:flex;gap:4px;margin-top:2px">${series.map(d => {
+    const dow = new Date(d.date + 'T12:00:00').getDay();
+    return `<div class="pts-spark-lbl" style="flex:1 1 0">${dayLetters[dow]}</div>`;
+  }).join('')}</div>`;
+}
+
+function renderPointsPlayerCard() {
+  if (!(state.auth && state.auth.role === 'player')) return '';
+  const pid = state.auth.playerId;
+  if (!pid) return '';
+  const sid = state.currentSeasonId || getActiveSeasonId();
+  // Le gros chiffre = ce qui est ENCAISSÉ ; la banque = ce qui attend le bouton.
+  // Le RANG et l'objectif, eux, se calculent sur le total (score + banque) : ne
+  // pas récolter est un délai, pas un moindre mérite — faire glisser une joueuse
+  // au classement parce qu'elle n'a pas ouvert l'app depuis trois jours
+  // publierait son assiduité de connexion à toute l'équipe.
+  const split = playerPointsSplit(pid, sid);
+  const entries = split.entries;
+  const total = split.score;
+  const bank = split.bank;
+  const bySource = {};
+  entries.forEach(e => { bySource[e.sourceType] = (bySource[e.sourceType] || 0) + (Number(e.delta) || 0); });
+
+  // Rien gagné, rien à montrer ? On affiche quand même la carte, mais en mode
+  // « ça démarre ici ». Masquer le widget tant que le score est à zéro le
+  // rendrait invisible exactement pour celles à qui il doit donner envie.
+  const goal = _pointsNextGoal(pid, sid);
+  const pct = (goal && !goal.done && goal.target > 0) ? Math.min(100, Math.round((goal.mine / goal.target) * 100)) : 100;
+  const series = playerPointsDaily(pid, sid, 7);
+  const weekGain = series.reduce((s, d) => s + d.gained, 0);
+
+  const chips = POINTS_SOURCES
+    .map(s => ({ s, v: bySource[s.id] || 0 }))
+    .filter(x => x.v !== 0)
+    .sort((a, b) => b.v - a.v)
+    .map(x => `<span style="font-size:10px;font-family:'JetBrains Mono';background:var(--bg-3);border-radius:10px;padding:3px 8px;white-space:nowrap">
+      <span style="color:${x.s.color}">${x.s.emoji}</span> ${x.v > 0 ? '+' : ''}${x.v}
+    </span>`).join('');
+
+  return `
+    <div style="padding:0 18px;margin-bottom:14px">
+      <div class="card pts-card" id="pts-card" onclick="openPointsHistory()" style="padding:16px;cursor:pointer">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px">
+          <div style="min-width:0">
+            <div class="eyebrow">🏆 Mon score</div>
+            <div style="margin-top:6px;display:flex;align-items:baseline;gap:8px;flex-wrap:wrap">
+              <span class="pts-value" id="pts-value">${total}</span>
+              <span style="font-size:12px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">pts · saison</span>
+            </div>
+          </div>
+          ${goal ? `<div style="text-align:right;flex:0 0 auto">
+            <div style="font-family:'Anton';font-size:22px;line-height:1">${goal.rank}<span style="font-size:12px;color:var(--ink-3)">/${goal.of}</span></div>
+            <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;margin-top:2px">de l'équipe</div>
+          </div>` : ''}
+        </div>
+
+        <!-- LA BANQUE. Toujours affichée, même vide : c'est elle qui explique
+             d'où viennent les points, et un bloc qui apparaît/disparaît selon
+             le solde ferait sauter la carte à chaque gain. Bouton grisé à 0.
+             stopPropagation : la carte entière ouvre l'historique, le bouton
+             ne doit pas le faire au passage. -->
+        <div class="pts-bank ${bank > 0 ? 'is-full' : 'is-empty'}" id="pts-bank">
+          <div style="min-width:0">
+            <div style="font-size:9px;color:var(--ink-4);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:.05em">🏦 En banque</div>
+            <div style="display:flex;align-items:baseline;gap:6px;margin-top:3px">
+              <span class="pts-bank-amount" id="pts-bank-amount">${bank > 0 ? '+' : ''}${bank}</span>
+              <span style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono'">${bank > 0 ? `pts à récolter` : 'rien à récolter'}</span>
+            </div>
+          </div>
+          <button class="pts-harvest-btn" id="pts-harvest-btn" ${bank > 0 ? '' : 'disabled'}
+                  aria-label="${bank > 0 ? 'Récolter ' + bank + ' points' : 'Rien à récolter'}"
+                  onclick="event.stopPropagation();harvestPoints()">🎁 Récolter</button>
+        </div>
+
+        ${goal ? `
+          <div style="margin-top:12px">
+            <div class="pts-bar"><div class="pts-bar-fill" style="width:${pct}%"></div></div>
+            <div style="margin-top:5px;font-size:10px;color:${goal.done ? 'var(--orange)' : 'var(--ink-3)'};font-family:'JetBrains Mono'">${goal.done ? goal.label : goal.label}</div>
+          </div>
+        ` : ''}
+
+        ${chips ? `<div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:5px">${chips}</div>` : `
+          <div style="margin-top:12px;font-size:11px;color:var(--ink-3);line-height:1.5">
+            Ton compteur démarre ici : chaque présence, chaque séance validée, chaque défi le fait monter.
+          </div>
+        `}
+
+        <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border-soft)">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <span style="font-size:9px;color:var(--ink-4);font-family:'JetBrains Mono';text-transform:uppercase">7 derniers jours</span>
+            <span style="font-size:10px;color:${weekGain > 0 ? 'var(--orange)' : 'var(--ink-4)'};font-family:'JetBrains Mono'">${weekGain > 0 ? '+' : ''}${weekGain} pts</span>
+          </div>
+          ${_pointsSparkline(series)}
+        </div>
+
+        <div style="margin-top:12px;display:flex;align-items:center;justify-content:space-between">
+          <span style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">Voir le détail</span>
+          <span style="color:var(--orange);font-family:'Anton';font-size:18px">›</span>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// --- ANIMATION DU GAIN ------------------------------------------------------
+// Le filigrane du dernier total VU, par joueuse et par saison. Local, jamais
+// synchronisé : c'est une propriété de CET appareil (« ce que TU as déjà vu »),
+// pas une donnée d'équipe. Le synchroniser ferait disparaître l'animation sur
+// le téléphone d'une joueuse parce que le coach a ouvert son écran.
+function _pointsSeenKey(playerId, seasonId) { return playerId + ':' + (seasonId || '-'); }
+function _pointsSeenTotal(playerId, seasonId) {
+  const map = load(K.pointsSeen, {});
+  const v = map[_pointsSeenKey(playerId, seasonId)];
+  return Number.isFinite(v) ? v : null;
+}
+function _setPointsSeenTotal(playerId, seasonId, total) {
+  const map = load(K.pointsSeen, {});
+  map[_pointsSeenKey(playerId, seasonId)] = total;
+  save(K.pointsSeen, map);
+}
+
+// Appelé à CHAQUE rendu (depuis _doRender) : c'est le seul point de passage qui
+// suit aussi bien une action locale qu'une arrivée par realtime — un ajustement
+// posé par le coach depuis son appareil doit s'animer sur celui de la joueuse.
+function _pointsCheckGain() {
+  try {
+    if (!(state.auth && state.auth.role === 'player')) return;
+    const pid = state.auth.playerId;
+    if (!pid) return;
+    // Le widget n'est pas à l'écran (elle est sur un autre onglet) : on ne
+    // touche PAS au filigrane. Le gain sera annoncé quand elle reviendra sur son
+    // accueil, au lieu d'être consommé dans le vide.
+    if (!document.getElementById('pts-card')) return;
+    const sid = state.currentSeasonId || getActiveSeasonId();
+    const total = playerPointsTotal(pid, sid);
+    const seen = _pointsSeenTotal(pid, sid);
+    // PREMIÈRE OUVERTURE : on mémorise sans rien annoncer. Sinon toute son
+    // histoire lui serait jetée à la figure comme un gain de l'instant.
+    if (seen == null) { _setPointsSeenTotal(pid, sid, total); return; }
+    if (total === seen) return;
+    _setPointsSeenTotal(pid, sid, total);
+    // Un malus s'annonce aussi. Le cacher serait pire : elle verrait le chiffre
+    // baisser sans explication au rendu suivant.
+    const last = playerPointsEntries(pid, sid)[0];
+    animatePointsGain(total - seen, last ? last.sourceType : null);
+  } catch (e) { /* l'animation ne doit jamais casser un rendu */ }
+}
+
+// `delta` signé, `sourceType` pour la couleur. Repli explicite en toast si la
+// personne a demandé moins d'animations : on retire le mouvement, jamais
+// l'information.
+function animatePointsGain(delta, sourceType) {
+  const d = Math.round(Number(delta) || 0);
+  if (!d) return;
+  const meta = pointsSourceMeta(sourceType);
+  const txt = (d > 0 ? '+' : '') + d + ' pts';
+  const reduced = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  const card = document.getElementById('pts-card');
+  if (reduced || !card) {
+    try { showToast(meta.emoji + ' ' + txt + ' · score mis à jour'); } catch (e) {}
+    return;
+  }
+  const el = document.createElement('div');
+  el.className = 'pts-float';
+  el.style.color = d > 0 ? meta.color : 'var(--red)';
+  el.textContent = meta.emoji + ' ' + txt;
+  card.appendChild(el);
+  // 2 s d'animation + une marge : l'élément se retire tout seul, aucun timer
+  // à annuler si la joueuse quitte l'écran entre-temps (le nœud part avec le
+  // innerHTML du prochain rendu, et le setTimeout ne trouve alors plus de parent).
+  setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, 2200);
+  const val = document.getElementById('pts-value');
+  if (val) {
+    val.classList.remove('pts-bump');
+    void val.offsetWidth; // force le redémarrage de l'animation CSS
+    val.classList.add('pts-bump');
+  }
+}
+
+// ============================================================================
+// LA RÉCOLTE (v.126)
+// ----------------------------------------------------------------------------
+// L'ÉCRITURE D'ABORD, LA MISE EN SCÈNE ENSUITE. On mute l'état et on persiste
+// avant de lancer la moindre animation : un téléphone verrouillé au milieu des
+// confettis, une PWA tuée par iOS, un rechargement — et la joueuse retrouve ses
+// points récoltés. L'inverse (animer puis écrire) perdrait la récolte dans
+// exactement les cas où elle est la plus frustrante à refaire.
+// ============================================================================
+function harvestPoints() {
+  if (!(state.auth && state.auth.role === 'player')) return;
+  const pid = state.auth.playerId;
+  if (!pid) return;
+  const sid = state.currentSeasonId || getActiveSeasonId();
+  const split = playerPointsSplit(pid, sid);
+  const gain = split.bank;
+  // Le bouton est déjà désactivé à 0, mais la garde reste : un double-tap peut
+  // passer entre le clic et le re-rendu, et récolter deux fois rejouerait
+  // l'animation sur une banque vide.
+  if (gain <= 0 || !split.pending.length) return;
+
+  const now = Date.now();
+  // Ce que le NOUVEAU repère ne couvrira pas : un gain sans date, ou daté dans
+  // le futur (un défi encore ouvert est daté de sa date de fin). Sans cette
+  // liste, ces gains-là resteraient en banque à vie et le bouton ne
+  // s'éteindrait jamais. On la recalcule à chaque récolte depuis la liste
+  // complète des gains, ce qui la PURGE de tout ce que le repère couvre
+  // désormais — elle reste donc minuscule au lieu d'enfler à chaque semaine.
+  const keys = split.entries
+    .filter(e => !e.stored && (e.at == null || e.at >= now))
+    .map(e => e.key);
+
+  const prev = split.harvest.row;
+  if (prev) {
+    prev.claimedThrough = now;
+    prev.claimedKeys = keys;
+    prev.claimedTotal = (Number(prev.claimedTotal) || 0) + gain;
+    prev.lastClaimedAt = now;
+    prev.updatedAt = now;
+    prev.deletedAt = null;
+  } else {
+    state.pointsHarvests = state.pointsHarvests || [];
+    state.pointsHarvests.push({
+      // Id DÉTERMINISTE : deux appareils qui récoltent la même saison écrivent
+      // la même clé, et le last-writer-wins tranche — au lieu de créer deux
+      // repères concurrents dont l'un ramènerait la banque à son état d'avant.
+      id: _pointsHarvestId(pid, sid),
+      playerId: pid, seasonId: sid || null,
+      claimedThrough: now, claimedKeys: keys,
+      claimedTotal: gain, lastClaimedAt: now,
+      createdAt: now, updatedAt: now, deletedAt: null
+    });
+  }
+
+  // Les lignes de ledger en banque passent au score. Elles portent leur propre
+  // état : le repère ne les concerne pas.
+  (state.pointsLedger || []).forEach(e => {
+    if (!e || e.deletedAt || e.playerId !== pid) return;
+    if ((e.seasonId || null) !== (sid || null)) return;
+    if (e.state !== 'pending') return;
+    e.state = 'claimed';
+    e.claimedAt = now;
+    e.updatedAt = now;
+  });
+
+  persist();
+
+  // Le filigrane de l'animation « +X pts » suit le total GÉNÉRAL, que la récolte
+  // ne change pas (les points passent d'une poche à l'autre). On le resynchronise
+  // quand même : si un gain est arrivé pendant que la carte était à l'écran, il
+  // serait annoncé une seconde fois par-dessus les confettis.
+  try { _setPointsSeenTotal(pid, sid, playerPointsTotal(pid, sid)); } catch (e) {}
+
+  _animateHarvest(split.score, gain);
+}
+
+// La mise en scène. Elle ne décide de RIEN : tout est déjà écrit quand elle
+// démarre, et son seul effet de bord est un render() final.
+function _animateHarvest(fromScore, gain) {
+  const reduced = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  const card = document.getElementById('pts-card');
+  const val = document.getElementById('pts-value');
+  const bankEl = document.getElementById('pts-bank-amount');
+
+  // Repli : mouvement retiré, information gardée. Même posture que
+  // animatePointsGain — et il couvre aussi le cas « la carte n'est plus à
+  // l'écran » (la joueuse a changé d'onglet entre le clic et le rendu).
+  if (reduced || !card || !val || !bankEl) {
+    try { render(); } catch (e) {}
+    try { showToast('🎉 +' + gain + ' pts récoltés !'); } catch (e) {}
+    return;
+  }
+
+  const target = fromScore + gain;
+  const cardRect = card.getBoundingClientRect();
+  const from = bankEl.getBoundingClientRect();
+  const to = val.getBoundingClientRect();
+  const startX = from.left - cardRect.left + from.width / 2 - 10;
+  const startY = from.top - cardRect.top + from.height / 2 - 10;
+  const dx = (to.left - cardRect.left + to.width / 2 - 10) - startX;
+  const dy = (to.top - cardRect.top + to.height / 2 - 10) - startY;
+
+  const nodes = [];
+  const cleanup = () => nodes.forEach(n => { if (n.parentNode) n.parentNode.removeChild(n); });
+
+  // Le nombre de pièces dit l'ordre de grandeur du gain sans le chiffrer : 6
+  // pour une présence isolée, 14 pour un mois d'assiduité. Au-delà, ça
+  // ressemble à un bug d'affichage plutôt qu'à une récompense.
+  const coins = Math.max(6, Math.min(14, Math.round(gain / 12) + 5));
+  for (let i = 0; i < coins; i++) {
+    const c = document.createElement('div');
+    c.className = 'pts-coin';
+    // Dispersion au départ : sans elle, les pièces se superposent exactement et
+    // on n'en voit qu'une seule, plus lumineuse.
+    const jx = (i % 2 ? 1 : -1) * (4 + (i * 3) % 16);
+    c.style.left = (startX + jx) + 'px';
+    c.style.top = startY + 'px';
+    c.style.setProperty('--dx', (dx - jx) + 'px');
+    c.style.setProperty('--dy', dy + 'px');
+    c.style.animationDelay = (i * 55) + 'ms';
+    card.appendChild(c);
+    nodes.push(c);
+  }
+
+  // Le compteur. easeOutCubic : il part vite et se pose — l'inverse (linéaire)
+  // donne l'impression d'un chargement, pas d'un encaissement.
+  const DUR = 1700, DELAY = 350;
+  const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now()) + DELAY;
+  let raf = 0;
+  const step = (nowTs) => {
+    const p = Math.min(1, Math.max(0, (nowTs - t0) / DUR));
+    const eased = 1 - Math.pow(1 - p, 3);
+    // `val` peut avoir été remplacé par un rendu concurrent (arrivée realtime) :
+    // on s'arrête proprement au lieu de jeter dans une rAF.
+    if (!val.isConnected) return;
+    val.textContent = String(Math.round(fromScore + (target - fromScore) * eased));
+    if (p < 1) raf = requestAnimationFrame(step);
+  };
+  raf = requestAnimationFrame(step);
+
+  // Les confettis, une fois le compteur arrivé : ils saluent le résultat, ils
+  // n'accompagnent pas le trajet.
+  const confettiTimer = setTimeout(() => {
+    if (!card.isConnected) return;
+    const cx = to.left - cardRect.left + to.width / 2;
+    const cy = to.top - cardRect.top + to.height / 2;
+    const colors = ['#f59e0b', '#fbbf24', '#22c55e', '#3b82f6', '#ef4444', '#a855f7'];
+    for (let i = 0; i < 22; i++) {
+      const angle = (Math.PI * 2 * i) / 22 + (i % 3) * 0.11;
+      const dist = 55 + (i * 7) % 60;
+      const f = document.createElement('div');
+      f.className = 'pts-confetti';
+      f.style.left = cx + 'px';
+      f.style.top = cy + 'px';
+      f.style.background = colors[i % colors.length];
+      f.style.setProperty('--dx', Math.round(Math.cos(angle) * dist) + 'px');
+      // + 30 px : la gravité, sinon la gerbe reste en suspension et fait sticker.
+      f.style.setProperty('--dy', Math.round(Math.sin(angle) * dist + 30) + 'px');
+      f.style.setProperty('--rot', Math.round(angle * 180 / Math.PI + 180) + 'deg');
+      f.style.animationDelay = (i * 8) + 'ms';
+      card.appendChild(f);
+      nodes.push(f);
+    }
+    try { showToast('🎉 +' + gain + ' pts récoltés !'); } catch (e) {}
+  }, DELAY + DUR - 150);
+
+  // Fin de scène à ~3 s : on retire les nœuds et on re-rend la carte dans son
+  // état réel (banque à zéro, bouton grisé, chips à jour). Le render() est
+  // VOLONTAIREMENT à la fin : le déclencher plus tôt effacerait la carte en
+  // pleine animation, pièces comprises.
+  setTimeout(() => {
+    if (raf) cancelAnimationFrame(raf);
+    clearTimeout(confettiTimer);
+    cleanup();
+    try { render(); } catch (e) {}
+  }, 3000);
+}
+
+// --- HISTORIQUE DÉTAILLÉ ----------------------------------------------------
+// Filtre éphémère (une variable, pas de localStorage) : c'est un tri de
+// consultation, pas une préférence — le retrouver la semaine suivante ferait
+// croire à un historique amputé.
+let _pointsHistoryFilter = 'all';
+function setPointsHistoryFilter(f) {
+  _pointsHistoryFilter = f;
+  const el = document.getElementById('pts-history-body');
+  if (el) el.innerHTML = _pointsHistoryBody();
+}
+function _pointsHistoryBody() {
+  const pid = state.auth.playerId;
+  const sid = state.currentSeasonId || getActiveSeasonId();
+  // MÊME découpage que la carte d'accueil : la tuile « Saison » affiche le score
+  // ENCAISSÉ, pas le total. Un détail qui annoncerait 1 640 sous une carte qui
+  // dit 1 240 ferait douter des deux.
+  const split = playerPointsSplit(pid, sid);
+  const all = split.entries;
+  const total = split.score;
+  const bank = split.bank;
+  const pendingKeys = new Set(split.pending.map(e => e.key));
+  const now = Date.now();
+  const weekTotal = all.filter(e => e.at != null && e.at >= now - 7 * 86400000).reduce((s, e) => s + e.delta, 0);
+  const monthTotal = all.filter(e => e.at != null && e.at >= now - 30 * 86400000).reduce((s, e) => s + e.delta, 0);
+  const allTime = playerPointsAllTime(pid);
+
+  const counts = {};
+  all.forEach(e => { counts[e.sourceType] = (counts[e.sourceType] || 0) + 1; });
+  const shown = _pointsHistoryFilter === 'all' ? all : all.filter(e => e.sourceType === _pointsHistoryFilter);
+
+  const tabs = [{ id: 'all', label: 'Tout', emoji: '•' }]
+    .concat(POINTS_SOURCES.filter(s => counts[s.id]).map(s => ({ id: s.id, label: s.short, emoji: s.emoji })))
+    .map(t => `<button class="segmented-btn ${_pointsHistoryFilter === t.id ? 'active' : ''}" onclick="setPointsHistoryFilter('${t.id}')" style="font-size:11px">${t.emoji} ${esc(t.label)}</button>`)
+    .join('');
+
+  return `
+    <div class="stat-grid mb-3">
+      <div class="stat-tile">
+        <div class="stat-tile-label">Saison ${bank > 0 ? '· en banque' : ''}</div>
+        <div class="stat-tile-value" style="font-size:24px">${total}${bank > 0 ? `<span style="color:#f59e0b"> +${bank}</span>` : ''}</div>
+        <div class="stat-tile-sub">${all.length} gain${all.length > 1 ? 's' : ''}</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-tile-label">7 jours · 30 jours</div>
+        <div class="stat-tile-value" style="font-size:24px">${weekTotal}<span style="color:var(--ink-4)"> · ${monthTotal}</span></div>
+        <div class="stat-tile-sub">${allTime} pts depuis le début</div>
+      </div>
+    </div>
+
+    <div class="segmented" style="flex-wrap:wrap;margin-bottom:12px">${tabs}</div>
+
+    ${shown.length ? shown.map(e => {
+      const meta = pointsSourceMeta(e.sourceType);
+      const when = e.at ? formatDate(isoDate(new Date(e.at)), 'short') : 'date inconnue';
+      return `
+        <div class="pts-row">
+          <div class="pts-dot" style="background:${meta.color}22;color:${meta.color}">${meta.emoji}</div>
+          <div class="pts-row-main">
+            <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;overflow-wrap:anywhere">${esc(e.label || meta.label)}</div>
+            <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">
+              ${esc(meta.label)} · ${esc(when)}${e.detail ? ' · ' + esc(e.detail) : ''}${pendingKeys.has(e.key) ? ' · <span style="color:#f59e0b">🏦 en banque</span>' : ''}
+            </div>
+          </div>
+          <div class="pts-row-delta" style="color:${e.delta >= 0 ? meta.color : 'var(--red)'}">${e.delta > 0 ? '+' : ''}${e.delta}</div>
+        </div>
+      `;
+    }).join('') : `
+      <div style="padding:24px;text-align:center;color:var(--ink-3);font-size:12px;font-style:italic">
+        Rien dans cette catégorie pour l'instant.
+      </div>
+    `}
+  `;
+}
+// ============================================================================
+// PROGRESSION PERSO SUR LES DÉFIS (v.126) — écran joueuse
+// ----------------------------------------------------------------------------
+// SES performances, et ELLES SEULES. Aucune moyenne d'équipe, aucun rang, aucun
+// « X est devant toi » : cet écran répond à « est-ce que je progresse ? », pas
+// à « est-ce que je suis meilleure qu'elle ? ». Le classement existe déjà sur
+// chaque carte de défi pour celles que ça motive ; ici, le seul adversaire est
+// la version d'elle-même d'il y a trois semaines.
+//
+// TOUTES SAISONS confondues, volontairement : une progression sur un exercice
+// ne s'arrête pas en juin. C'est le seul écran de l'app qui traverse les
+// saisons, et c'est le sens même d'un historique de progression.
+// ============================================================================
+
+// Un défi devient « meilleur » vers le haut ou vers le bas selon lowerIsBetter
+// (chrono). `better(a, b)` : a est-il meilleur que b ?
+function _challengeBetter(c, a, b) { return c.lowerIsBetter ? a < b : a > b; }
+
+function _challengeProgressData(pid) {
+  return (state.challenges || [])
+    .filter(c => !c.autoCount && c.scope !== 'collective' && c.scope !== 'season')
+    .map(c => {
+      const series = _challengeSeriesOf(c, pid);
+      const raw = (c.scores || {})[pid];
+      const attempts = series.map(s => ({ value: _challengeAttemptValue(c, s), at: s.createdAt || null }));
+      // Mode « simple » : pas d'historique de tentatives, juste un scalaire. On
+      // l'affiche quand même — sinon la moitié des défis disparaîtrait de son
+      // historique sans qu'elle comprenne pourquoi.
+      if (!attempts.length) {
+        if (raw == null || Number(raw) === 0) return null;
+        return { c, attempts: [], last: Number(raw), best: Number(raw), isRecord: false, count: 0, lastAt: c.updatedAt || null };
+      }
+      const values = attempts.map(a => a.value);
+      const best = values.reduce((acc, v) => _challengeBetter(c, v, acc) ? v : acc, values[0]);
+      const last = values[values.length - 1];
+      // « Nouveau record » : la DERNIÈRE tentative est (au moins à égalité) la
+      // meilleure, et il y en a eu d'autres avant. Un premier essai n'est pas un
+      // record, c'est juste un point de départ.
+      const isRecord = attempts.length > 1 && last === best;
+      return { c, attempts, last, best, isRecord, count: attempts.length, lastAt: attempts[attempts.length - 1].at };
+    })
+    .filter(Boolean)
+    .sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0));
+}
+
+// Barres normalisées entre le pire et le meilleur essai. Pour un chrono, la
+// barre la plus HAUTE reste la meilleure perf : on inverse l'échelle, sinon
+// progresser ferait descendre la courbe et se lirait comme une régression.
+function _challengeProgressChart(c, attempts) {
+  const vals = attempts.map(a => a.value);
+  const min = Math.min(...vals), max = Math.max(...vals);
+  const span = max - min;
+  return `<div class="pts-spark" style="height:52px">${attempts.map(a => {
+    // Toutes les perfs identiques (span 0) → toutes les barres pleines : une
+    // régularité parfaite n'est pas un plat à zéro.
+    let ratio = span === 0 ? 1 : (a.value - min) / span;
+    if (c.lowerIsBetter) ratio = 1 - ratio;
+    const h = Math.max(12, Math.round(ratio * 100));
+    const isBest = span === 0 || (c.lowerIsBetter ? a.value === min : a.value === max);
+    return `<div class="pts-spark-col" title="${esc(_fmtChallengeScore(c, a.value))}${a.at ? ' · ' + esc(formatDate(isoDate(new Date(a.at)), 'short')) : ''}">
+      <div class="pts-spark-bar" style="height:${h}%;background:${isBest ? 'var(--orange)' : 'var(--ink-4)'};opacity:${isBest ? 1 : .55}"></div>
+    </div>`;
+  }).join('')}</div>`;
+}
+
+function openChallengeProgress() {
+  const pid = (state.auth && state.auth.role === 'player') ? state.auth.playerId : null;
+  if (!pid) return;
+  const data = _challengeProgressData(pid);
+  const records = data.filter(d => d.isRecord).length;
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">📈 Ma progression</div>
+        <div class="modal-title">Mes défis</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      ${data.length ? `
+        <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:14px;font-size:11px;color:var(--ink-2);line-height:1.5">
+          ${data.length} défi${data.length > 1 ? 's' : ''} tenté${data.length > 1 ? 's' : ''}${records ? ` · <strong style="color:var(--orange)">${records} record${records > 1 ? 's' : ''} tout frais</strong>` : ''}.
+          Ici, tu ne te compares qu'à toi-même.
+        </div>
+        ${data.map(d => {
+          const c = d.c;
+          const unit = c.metric ? esc(c.metric) : '';
+          return `
+            <div class="list-section" style="margin-bottom:12px">
+              <div style="padding:12px 14px">
+                <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:8px">
+                  <div style="flex:1;min-width:0">
+                    <div style="font-family:'Anton';font-size:15px;text-transform:uppercase;overflow-wrap:anywhere">${esc(c.title || 'Défi')}</div>
+                    <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">
+                      ${d.count ? d.count + ' tentative' + (d.count > 1 ? 's' : '') : 'score enregistré'}${unit ? ' · ' + unit : ''}
+                    </div>
+                  </div>
+                  ${d.isRecord ? `<span class="chip chip-green" style="flex:0 0 auto">🏅 Nouveau record</span>` : ''}
+                </div>
+                <div style="display:flex;gap:10px;margin-bottom:${d.attempts.length > 1 ? '12px' : '0'}">
+                  <div style="flex:1;background:var(--bg-2);border-radius:8px;padding:8px 10px">
+                    <div style="font-size:9px;color:var(--ink-4);font-family:'JetBrains Mono';text-transform:uppercase">Record perso</div>
+                    <div style="font-family:'Anton';font-size:20px;color:var(--orange);margin-top:2px">${esc(_fmtChallengeScore(c, d.best))}</div>
+                  </div>
+                  <div style="flex:1;background:var(--bg-2);border-radius:8px;padding:8px 10px">
+                    <div style="font-size:9px;color:var(--ink-4);font-family:'JetBrains Mono';text-transform:uppercase">Dernier</div>
+                    <div style="font-family:'Anton';font-size:20px;margin-top:2px">${esc(_fmtChallengeScore(c, d.last))}</div>
+                  </div>
+                </div>
+                ${d.attempts.length > 1 ? `
+                  ${_challengeProgressChart(c, d.attempts)}
+                  <div style="margin-top:6px;font-size:9px;color:var(--ink-4);font-family:'JetBrains Mono';text-transform:uppercase">
+                    ${c.lowerIsBetter ? 'Plus haut = plus rapide' : 'Plus haut = mieux'} · de la plus ancienne à la plus récente
+                  </div>
+                ` : ''}
+              </div>
+            </div>
+          `;
+        }).join('')}
+      ` : `
+        <div style="padding:28px 18px;text-align:center">
+          <div style="font-size:40px;margin-bottom:10px">📈</div>
+          <div style="font-family:'Anton';font-size:15px;text-transform:uppercase;margin-bottom:6px">Rien à afficher… pour l'instant</div>
+          <div style="font-size:12px;color:var(--ink-3);line-height:1.6">
+            Enregistre un score sur un défi et ta courbe démarre. Une seule tentative suffit pour poser ton premier repère.
+          </div>
+        </div>
+      `}
+    </div>
+  `);
+}
+
+function openPointsHistory() {
+  if (!(state.auth && state.auth.role === 'player' && state.auth.playerId)) return;
+  _pointsHistoryFilter = 'all';
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">🏆 Mon score</div>
+        <div class="modal-title">Historique de mes points</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body" id="pts-history-body">${_pointsHistoryBody()}</div>
+  `);
+}
+
+// ============================================================================
+// SCORE GÉNÉRAL — CÔTÉ COACH (v.126)
+// ----------------------------------------------------------------------------
+// Le classement de l'équipe, l'ajustement manuel, le barème, l'export.
+//
+// DEUX NIVEAUX DE DROIT, et ils ne se valent pas :
+//   • AJUSTER une joueuse est un acte d'entraîneuse — tout coach peut le faire,
+//     y compris un coach scopé sur E2 pour ses propres joueuses.
+//   • Régler le BARÈME est un acte global : il retarife les deux effectifs d'un
+//     coup. Réservé à l'admin, et logé dans le panneau Admin pour cette raison.
+// ============================================================================
+
+function _pointsIsCoach() { return !!(state.auth && state.auth.role === 'coach'); }
+
+function _pointsRankingBody() {
+  const sid = state.currentSeasonId || getActiveSeasonId();
+  const rows = seasonPointsRanking(sid, { team: effectiveTeamFilter() });
+  const grand = rows.reduce((s, r) => s + r.total, 0);
+  const rules = pointsRules();
+  const medals = ['🥇', '🥈', '🥉'];
+  return `
+    <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:12px;font-size:11px;color:var(--ink-2);line-height:1.55">
+      Barème : <b>${rules.attendancePoints}</b> pts / présence · <b>${rules.challengeDefaultPoints}</b> pts / défi (par défaut) · <b>${rules.gageDonePoints}</b> pts / gage tenu.
+      Les points de prépa sont ceux figés à la validation de chaque séance.
+      <br><span style="color:var(--ink-3)">Le classement compte les points <b>gagnés</b>, récoltés ou non : ne pas avoir appuyé sur « Récolter » est un délai, pas un moindre mérite.</span>
+    </div>
+    ${rows.length ? rows.map((r, i) => {
+      // Progression : cette semaine COMPARÉE à la précédente. Le nombre brut de
+      // la semaine ne dit rien tout seul — c'est l'écart qui signale une joueuse
+      // qui décroche ou qui s'accroche.
+      const trend = r.weekDelta - r.prevWeekDelta;
+      const trendColor = trend > 0 ? 'var(--green)' : (trend < 0 ? 'var(--red)' : 'var(--ink-4)');
+      const trendIcon = trend > 0 ? '↗' : (trend < 0 ? '↘' : '→');
+      // La banque est indiquée, en petit : sans elle, une joueuse qui dit « j'ai
+      // 1 240 » et un coach qui lit 1 640 sur le même écran ne parlent pas de la
+      // même chose, et c'est le système de points qu'on soupçonne.
+      const bank = playerPointsBank(r.player.id, sid);
+      return `
+        <div class="pts-row">
+          <div style="flex:0 0 34px;text-align:center;font-family:'Anton';font-size:16px;color:${i < 3 ? 'var(--orange)' : 'var(--ink-3)'}">${medals[i] || (i + 1)}</div>
+          <div class="pts-row-main">
+            <div style="font-family:'Anton';font-size:14px;text-transform:uppercase;overflow-wrap:anywhere">#${esc(String(r.player.num || '?'))} ${esc(r.player.name || '')}</div>
+            <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">
+              7 j : ${r.weekDelta > 0 ? '+' : ''}${r.weekDelta} · <span style="color:${trendColor}">${trendIcon} ${trend > 0 ? '+' : ''}${trend} vs semaine passée</span>
+            </div>
+          </div>
+          <div style="flex:0 0 auto;text-align:right">
+            <div style="font-family:'Anton';font-size:19px;color:var(--orange)">${r.total}</div>
+            ${bank > 0 ? `<div style="font-size:9px;color:#f59e0b;font-family:'JetBrains Mono';margin-top:1px">🏦 ${bank}</div>` : ''}
+          </div>
+          <button class="btn btn-icon" style="flex:0 0 auto" title="Ajustement manuel" aria-label="Ajustement manuel pour ${esc(r.player.name || '')}" onclick="openPointsAdjust('${r.player.id}')">✍️</button>
+        </div>
+      `;
+    }).join('') : `
+      <div style="padding:24px;text-align:center;color:var(--ink-3);font-size:12px;font-style:italic">Aucune joueuse dans cet effectif.</div>
+    `}
+    <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border-soft);font-size:10px;color:var(--ink-4);font-family:'JetBrains Mono';text-transform:uppercase">
+      ${rows.length} joueuse${rows.length > 1 ? 's' : ''} · ${grand} pts cumulés
+    </div>
+  `;
+}
+function _refreshPointsRanking() {
+  const el = document.getElementById('pts-ranking-body');
+  if (el) el.innerHTML = _pointsRankingBody();
+}
+function openPointsRanking() {
+  if (!_pointsIsCoach()) return;
+  const season = getCurrentSeason();
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">🏆 Score général${season && season.name ? ' · ' + esc(season.name) : ''}</div>
+        <div class="modal-title">Classement de l'équipe</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body" id="pts-ranking-body">${_pointsRankingBody()}</div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="exportPointsRankingCsv()">⬇ Export CSV</button>
+      <button class="btn btn-secondary" onclick="closeModal()">Fermer</button>
+    </div>
+  `);
+}
+
+// --- AJUSTEMENT MANUEL ------------------------------------------------------
+// La SEULE écriture de ce module. Elle crée une ligne de ledger sans sourceId :
+// un ajustement ne rectifie aucun événement, il en est un.
+function openPointsAdjust(playerId) {
+  if (!_pointsIsCoach()) return;
+  const p = (state.players || []).find(x => x.id === playerId);
+  if (!p) return;
+  const sid = state.currentSeasonId || getActiveSeasonId();
+  const total = playerPointsTotal(playerId, sid);
+  const past = (state.pointsLedger || [])
+    .filter(e => e && !e.deletedAt && e.playerId === playerId && (e.seasonId || null) === (sid || null) && e.sourceType === 'manual_adjustment')
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">${esc(p.name || '')} · ${total} pts</div>
+        <div class="modal-title">✍️ Ajustement manuel</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="fld">
+        <label class="fld-label">Points (négatif pour un malus)</label>
+        <input id="pts-adj-delta" type="number" step="1" min="-1000" max="1000" inputmode="numeric" placeholder="Ex : 20 ou -10" oninput="_ptsAdjSyncDirect()">
+      </div>
+      <div class="fld">
+        <label class="fld-label">Motif</label>
+        <input id="pts-adj-reason" maxlength="120" placeholder="Ex : a encadré l'échauffement">
+        <div style="margin-top:6px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';line-height:1.5">
+          Le motif est VISIBLE par la joueuse dans son historique : c'est lui qui fait la différence entre une récompense et une punition inexpliquée.
+        </div>
+      </div>
+      <!-- BANQUE OU SCORE DIRECT. Un bonus passe par la banque : c'est une bonne
+           nouvelle, elle mérite son animation de récolte. Un MALUS, non — sinon
+           il suffirait de ne jamais appuyer sur « Récolter » pour ne jamais le
+           subir, et le bouton demanderait à la joueuse de valider elle-même sa
+           punition. La case est donc cochée ET verrouillée dès que le montant
+           passe sous zéro (cf. _ptsAdjSyncDirect). -->
+      <div class="fld">
+        <label style="display:flex;align-items:flex-start;gap:9px;cursor:pointer">
+          <input id="pts-adj-direct" type="checkbox" style="margin-top:2px;flex:0 0 auto">
+          <span style="font-size:12px;line-height:1.45">
+            Direct sur le score
+            <span id="pts-adj-direct-hint" style="display:block;margin-top:3px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';line-height:1.5">
+              Décoché, les points tombent dans sa banque : elle les encaissera elle-même avec le bouton « Récolter ».
+            </span>
+          </span>
+        </label>
+      </div>
+      ${past.length ? `
+        <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border-soft)">
+          <div class="eyebrow-muted" style="margin-bottom:6px">Ajustements précédents</div>
+          ${past.slice(0, 8).map(e => `
+            <div class="pts-row">
+              <div class="pts-row-main">
+                <div style="font-size:12px;overflow-wrap:anywhere">${esc(e.reason || '(sans motif)')}</div>
+                <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">${e.createdAt ? esc(formatDate(isoDate(new Date(e.createdAt)), 'short')) : ''}</div>
+              </div>
+              <div class="pts-row-delta" style="color:${e.pointsDelta >= 0 ? 'var(--green)' : 'var(--red)'}">${e.pointsDelta > 0 ? '+' : ''}${e.pointsDelta}</div>
+              <button class="btn btn-icon" style="flex:0 0 auto;color:var(--red)" title="Annuler cet ajustement" aria-label="Annuler cet ajustement" onclick="deletePointsAdjust('${e.id}','${playerId}')">🗑</button>
+            </div>
+          `).join('')}
+        </div>
+      ` : ''}
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Annuler</button>
+      <button class="btn btn-primary" onclick="savePointsAdjust('${playerId}')">Enregistrer</button>
+    </div>
+  `);
+  try { const el = document.getElementById('pts-adj-delta'); if (el) el.focus(); } catch (e) {}
+  _ptsAdjSyncDirect();
+}
+// Verrouille la case « direct sur le score » sur le SIGNE du montant. Un
+// `disabled` seul ne suffirait pas — un input désactivé n'est pas lu par
+// savePointsAdjust — c'est pourquoi la règle est REFAITE à l'enregistrement, et
+// une troisième fois à la lecture (_pointsEntryClaimed). Trois gardes pour une
+// règle, parce que c'est celle dont le contournement est le plus tentant.
+function _ptsAdjSyncDirect() {
+  const deltaEl = document.getElementById('pts-adj-delta');
+  const box = document.getElementById('pts-adj-direct');
+  const hint = document.getElementById('pts-adj-direct-hint');
+  if (!box) return;
+  const delta = Math.round(Number(deltaEl && deltaEl.value));
+  const isMalus = Number.isFinite(delta) && delta < 0;
+  if (isMalus) { box.checked = true; box.disabled = true; }
+  else { box.disabled = false; }
+  if (hint) {
+    hint.textContent = isMalus
+      ? 'Un malus ne passe jamais par la banque : il s\'applique tout de suite. Une sanction qu\'on peut refuser d\'encaisser n\'en est pas une.'
+      : 'Décoché, les points tombent dans sa banque : elle les encaissera elle-même avec le bouton « Récolter ».';
+  }
+}
+function savePointsAdjust(playerId) {
+  if (!_pointsIsCoach()) return;
+  const deltaEl = document.getElementById('pts-adj-delta');
+  const reasonEl = document.getElementById('pts-adj-reason');
+  const delta = Math.round(Number(deltaEl && deltaEl.value));
+  if (!Number.isFinite(delta) || delta === 0) { try { showToast('Indique un nombre de points (≠ 0)'); } catch (e) {} return; }
+  const reason = String((reasonEl && reasonEl.value) || '').trim().slice(0, 120);
+  // Motif OBLIGATOIRE : un ajustement anonyme apparaît chez la joueuse comme un
+  // « +/- N pts » sans cause. C'est exactement ce qui transforme un système de
+  // points en source de suspicion.
+  if (!reason) { try { showToast('Un motif est nécessaire — la joueuse le verra'); } catch (e) {} return; }
+  const now = Date.now();
+  const coach = (typeof currentCoach === 'function') ? currentCoach() : null;
+  // BANQUE OU SCORE DIRECT. La case du formulaire décide — SAUF pour un malus,
+  // qui est direct quoi qu'elle dise. On ne fait pas confiance à l'état de
+  // l'input : il est `disabled` dans ce cas-là, et un input désactivé se lit
+  // encore mais s'édite aussi (console, extension). La règle est donc REFAITE
+  // ici, à l'écriture.
+  const directEl = document.getElementById('pts-adj-direct');
+  const direct = delta < 0 || !!(directEl && directEl.checked);
+  state.pointsLedger = state.pointsLedger || [];
+  state.pointsLedger.push({
+    id: uid(),
+    playerId,
+    seasonId: state.currentSeasonId || getActiveSeasonId() || null,
+    pointsDelta: Math.min(1000, Math.max(-1000, delta)),
+    sourceType: 'manual_adjustment',
+    sourceId: null,               // un ajustement ne rectifie rien : il EST l'événement
+    reason,
+    createdBy: (coach && coach.id) || 'coach',
+    state: direct ? 'claimed' : 'pending',
+    claimedAt: direct ? now : null,
+    createdAt: now, updatedAt: now, deletedAt: null
+  });
+  persist();
+  closeModal();
+  render();
+  const _pl = (state.players || []).find(x => x.id === playerId);
+  try {
+    showToast((delta > 0 ? '+' : '') + delta + ' pts · ' + ((_pl && _pl.name) || '')
+      + (direct ? '' : ' · en banque'));
+  } catch (e) {}
+  // La joueuse doit l'apprendre, pas le découvrir. Le push la ramène sur son
+  // accueil, où l'animation « +X pts » se déclenchera au rendu — et où le
+  // bouton « Récolter » l'attendra si le bonus est passé par la banque.
+  try {
+    notifyPush(_pushPlayerKeys([playerId]), {
+      title: delta > 0
+        ? (direct ? '🏆 ' + delta + ' points de plus' : '🎁 ' + delta + ' points à récolter')
+        : '⚠️ ' + delta + ' points',
+      body: reason, url: '/', tag: 'points', type: 'points'
+    });
+  } catch (e) {}
+}
+// Soft-delete : un hard delete d'une ligne d'id « x… » serait repoussé par
+// n'importe quel client au flush suivant (l'ajustement reviendrait tout seul).
+function deletePointsAdjust(ledgerId, playerId) {
+  if (!_pointsIsCoach()) return;
+  const e = (state.pointsLedger || []).find(x => x.id === ledgerId);
+  if (!e) return;
+  let ok = false; try { ok = confirm('Annuler cet ajustement ? Les points reviennent à leur valeur d\'avant.'); } catch (err) { ok = true; }
+  if (!ok) return;
+  e.deletedAt = Date.now();
+  e.updatedAt = Date.now();
+  persist();
+  closeModal();
+  if (playerId) openPointsAdjust(playerId);
+  render();
+}
+
+// --- EXPORT CSV -------------------------------------------------------------
+// Séparateur `;` + BOM UTF-8 : ce qu'attend Excel en configuration française
+// (une virgule y produit une seule colonne, et sans BOM les accents sortent en
+// mojibake). Le périmètre exporté est celui du filtre effectif à l'écran.
+function exportPointsRankingCsv() {
+  if (!_pointsIsCoach()) return;
+  const sid = state.currentSeasonId || getActiveSeasonId();
+  const rows = seasonPointsRanking(sid, { team: effectiveTeamFilter() });
+  if (!rows.length) { try { showToast('Rien à exporter'); } catch (e) {} return; }
+  const cell = v => {
+    const s = (v === null || v === undefined) ? '' : String(v);
+    return /[";\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  // Une colonne par source : le total seul ne permet pas de comprendre d'où
+  // vient l'écart entre deux joueuses, et c'est la première question posée.
+  const head = ['Rang', 'Numéro', 'Joueuse', 'Total']
+    .concat(POINTS_SOURCES.map(s => s.label))
+    .concat(['7 derniers jours', 'Semaine précédente']);
+  const lines = [head.map(cell).join(';')];
+  rows.forEach((r, i) => {
+    const by = playerPointsBySource(r.player.id, sid);
+    lines.push([i + 1, r.player.num || '', r.player.name || '', r.total]
+      .concat(POINTS_SOURCES.map(s => by[s.id] || 0))
+      .concat([r.weekDelta, r.prevWeekDelta])
+      .map(cell).join(';'));
+  });
+  const fname = 'points-' + (sid || 'saison') + '-' + isoDate(new Date()) + '.csv';
+  if (typeof Blob === 'undefined' || typeof URL === 'undefined' || !URL.createObjectURL) {
+    try { showToast('⚠ Export indisponible ici'); } catch (e) {}
+    return;
+  }
+  try {
+    const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = fname;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => { try { URL.revokeObjectURL(url); } catch (e) {} }, 5000);
+    try { showToast('⬇ ' + rows.length + ' ligne' + (rows.length > 1 ? 's' : '') + ' exportée' + (rows.length > 1 ? 's' : '')); } catch (e) {}
+  } catch (e) {
+    console.error('[points] export csv', e && e.message ? e.message : e);
+    try { showToast('⚠ Export impossible'); } catch (e2) {}
+  }
+}
+
+// --- BARÈME (admin) ---------------------------------------------------------
+function openPointsRulesConfig() {
+  // isAdminCoach() et JAMAIS _denyIfScopedCoach() : ce dernier laisse passer une
+  // session JOUEUSE (currentCoach() vaut null → isScopedCoach() est faux).
+  if (!isAdminCoach()) return;
+  const r = pointsRules();
+  const num = (id, label, hint, val) => `
+    <div class="fld" style="margin-bottom:14px">
+      <label class="fld-label">${label}</label>
+      <input id="${id}" type="number" min="0" max="1000" step="1" inputmode="numeric" value="${val}">
+      <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px;line-height:1.5">${hint}</div>
+    </div>`;
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">🏆 Barème des points</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:14px;font-size:11px;color:var(--ink-2);line-height:1.55">
+        Le score est <b>recalculé</b> à chaque affichage. Changer une valeur ici
+        change donc aussi les points <b>déjà acquis</b> — « une présence vaut 10 »
+        est une règle, pas un prix historique. Pour geler un cas particulier,
+        utilise plutôt un ajustement manuel sur la joueuse concernée.
+      </div>
+      ${num('pr-attendance', 'Points par présence à un entraînement', 'Compté sur les entraînements CLÔTURÉS uniquement. Les matchs ne rapportent rien : ils se jouent sur sélection, pas sur assiduité.', r.attendancePoints)}
+      ${num('pr-challenge', 'Points par défi (valeur proposée à la création)', 'Ne retarife AUCUN défi existant : chaque défi porte sa propre valeur, modifiable dans son écran d\'édition.', r.challengeDefaultPoints)}
+      ${num('pr-gage', 'Points par gage tenu', 'Versés à la confirmation du coach, pas à l\'acceptation.', r.gageDonePoints)}
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="resetPointsRules()">↺ Valeurs par défaut</button>
+      <button class="btn btn-primary" onclick="savePointsRules()">Enregistrer</button>
+    </div>
+  `);
+}
+function _readPointsRuleInput(id, dflt) {
+  const el = document.getElementById(id);
+  if (!el) return dflt;
+  const n = Math.round(Number(el.value));
+  return Number.isFinite(n) ? Math.min(1000, Math.max(0, n)) : dflt;
+}
+function savePointsRules() {
+  if (!isAdminCoach()) return;
+  const cur = pointsRules();
+  const coach = (typeof currentCoach === 'function') ? currentCoach() : null;
+  state.pointsRules = {
+    attendancePoints: _readPointsRuleInput('pr-attendance', cur.attendancePoints),
+    challengeDefaultPoints: _readPointsRuleInput('pr-challenge', cur.challengeDefaultPoints),
+    gageDonePoints: _readPointsRuleInput('pr-gage', cur.gageDonePoints),
+    updatedBy: (coach && coach.id) || 'coach',
+    updatedAt: Date.now()
+  };
+  persist();
+  closeModal();
+  render();
+  try { showToast('🏆 Barème enregistré'); } catch (e) {}
+}
+function resetPointsRules() {
+  if (!isAdminCoach()) return;
+  let ok = false; try { ok = confirm('Revenir aux valeurs par défaut (10 / 5 / 15) ?'); } catch (e) { ok = true; }
+  if (!ok) return;
+  const coach = (typeof currentCoach === 'function') ? currentCoach() : null;
+  // On écrit les défauts EXPLICITEMENT plutôt que de remettre state.pointsRules
+  // à null : un null ne pousse rien (cf. le dump de l'entité), donc la ligne
+  // serveur garderait les anciennes valeurs et le prochain fetch les ramènerait.
+  state.pointsRules = Object.assign({}, POINTS_DEFAULT_RULES, {
+    updatedBy: (coach && coach.id) || 'coach',
+    updatedAt: Date.now()
+  });
+  persist();
+  closeModal();
+  render();
+  try { showToast('↺ Barème réinitialisé'); } catch (e) {}
+}
+
 function renderHomePlayer() {
   const p = currentPlayer();
   if (!p) return renderHomeCoach();
@@ -12237,6 +14086,11 @@ function renderHomePlayer() {
           </div>
         </div>
       `}
+
+      <!-- 1bis-0. Mon score de saison. Placé HAUT et juste après le prochain
+           événement : c'est le seul écran qui répond à « où j'en suis », et
+           l'animation « +X pts » n'a de sens que si la carte est vue. -->
+      ${renderPointsPlayerCard()}
 
       <!-- 1bis. Inbox messages (diffusions/sondages reçus) — audit #4 -->
       ${renderPlayerInbox()}
@@ -24256,6 +26110,10 @@ function renderTeam() {
         ${isCoach ? `
           <div style="display:flex;gap:6px;flex-wrap:wrap">
             ${_seasonsLoaded() ? `<button class="section-action-btn" onclick="openSeasonRosterEditor()" aria-label="Gérer l'effectif de la saison">👥 Effectif</button>` : ''}
+            <!-- Classement du score général. Toujours affiché, même effectif à
+                 zéro point : un état vide ne justifie jamais de supprimer le
+                 seul point d'entrée d'une feature (leçon de la v.113). -->
+            <button class="section-action-btn" onclick="openPointsRanking()" aria-label="Classement des points">🏆 Points</button>
             <button class="section-action-btn" onclick="openGagesCoach()" aria-label="Boîte à gages">🎁 Gages${(() => { const n = gagesPendingCount(); return n ? ` <span style="background:var(--orange);color:#fff;border-radius:10px;padding:0 5px;font-size:10px">${n}</span>` : ''; })()}</button>
             <button class="section-action-btn" onclick="managePlayers()" aria-label="Gérer les joueuses">⚙ Gérer</button>
           </div>
@@ -35809,6 +37667,10 @@ function renderChallenges() {
     <div style="padding:0 18px 12px;display:flex;justify-content:space-between;align-items:center">
       <div style="font-size:12px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em">${seasonChallenges.length} défi${seasonChallenges.length>1?'s':''}</div>
       ${isCoach ? `<button class="btn btn-primary" onclick="editChallenge()">+ Challenge</button>` : ''}
+      <!-- Progression perso (joueuse). Le bouton s'affiche même sans historique :
+           un écran de progression qui n'apparaît qu'une fois qu'on progresse ne
+           se découvre jamais — c'est la panne d'atteignabilité de la v.113. -->
+      ${state.auth.role === 'player' ? `<button class="btn btn-secondary" onclick="openChallengeProgress()">📈 Ma progression</button>` : ''}
     </div>
     ${seasonChallenges.length ? renderChallengeFilterBar() : ''}
     ${_noResults ? `<div style="margin:0 18px 18px;padding:18px;text-align:center;color:var(--ink-3);font-size:13px;font-style:italic;border:1px dashed var(--border);border-radius:8px">Aucun défi ne correspond au filtre.</div>` : ''}
@@ -35895,6 +37757,7 @@ function createChallengeFromIdea(idea) {
     scores: {},
     seasonId: state.currentSeasonId || null,
     teamTag: defaultEventTag(),  // multi-effectif : suit la pillule courante
+    pointsReward: pointsRules().challengeDefaultPoints,
   };
   if (idea.scope === 'collective') {
     challenge.target = idea.target;
@@ -36048,6 +37911,9 @@ function challengeCard(c, isCoach) {
           ${isAuto ? `<span class="chip chip-purple">AUTO</span>` : ''}
           ${_derived ? `<span class="chip chip-blue">📅 ${esc(challengePeriodShortLabel(_period))} · lecture seule</span>` : ''}
           ${c.endDate ? `<span class="chip">Fin ${formatDate(c.endDate)}</span>` : ''}
+          <!-- Ce que le défi verse au score général. Rien pour les défis AUTO :
+               leurs compteurs dérivent des présences, qui rapportent déjà. -->
+          ${(!isAuto && challengePointsReward(c) > 0) ? `<span class="chip chip-green">🏆 +${challengePointsReward(c)} pts</span>` : ''}
         </div>
         <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:4px">
           <div style="flex:1;min-width:0;font-family:'Anton';font-size:18px;text-transform:uppercase;letter-spacing:0.02em">${esc(c.title)}</div>
@@ -36540,13 +38406,28 @@ function renderChallengeFilterBar() {
 }
 // Recalcule le score agrégé d'une joueuse depuis ses séries (window → appelable
 // aussi par l'apply de l'entité challengeSeries, cf. bloc module).
+// Valeur d'UNE tentative, dans l'unité du mode. Extraite du corps de l'agrégat
+// (v.126) pour être partagée avec la courbe de progression perso : deux façons
+// de calculer la même chose auraient fini par diverger, et la joueuse aurait vu
+// une courbe qui ne colle pas à son propre classement.
+//   timed → durée en ms (plus petit = mieux) ;
+//   sinon → réussis, normalisés à series_size quand le nombre d'essais diffère.
+function _challengeAttemptValue(c, s) {
+  if (!c || !s) return 0;
+  if (c.mode === 'timed') return Number(s.durationMs) || 0;
+  const size = Number.isFinite(c.seriesSize) && c.seriesSize > 0 ? c.seriesSize : null;
+  const made = Number(s.made) || 0;
+  const att = Number.isFinite(s.attempts) && s.attempts > 0 ? s.attempts : size;
+  if (size && att && att !== size) return (made / att) * size;
+  return made;
+}
 function _recomputeChallengeAggregate(c, pid) {
   if (!c) return 0;
   const arr = _challengeSeriesOf(c, pid);
   if (!arr.length) return 0;
   const agg = ['average', 'best', 'sum', 'last'].includes(c.aggregate) ? c.aggregate : 'average';
   if (c.mode === 'timed') {
-    const durs = arr.map(s => Number(s.durationMs) || 0).filter(v => v > 0);
+    const durs = arr.map(s => _challengeAttemptValue(c, s)).filter(v => v > 0);
     if (!durs.length) return 0;
     if (agg === 'average') return Math.round(durs.reduce((a, b) => a + b, 0) / durs.length);
     if (agg === 'sum') return durs.reduce((a, b) => a + b, 0);
@@ -36554,13 +38435,7 @@ function _recomputeChallengeAggregate(c, pid) {
     return Math.min(...durs); // best = plus rapide (lowerIsBetter)
   }
   // series : valeur par série = réussis (normalisée à series_size si attempts diffère)
-  const size = Number.isFinite(c.seriesSize) && c.seriesSize > 0 ? c.seriesSize : null;
-  const vals = arr.map(s => {
-    const made = Number(s.made) || 0;
-    const att = Number.isFinite(s.attempts) && s.attempts > 0 ? s.attempts : size;
-    if (size && att && att !== size) return (made / att) * size;
-    return made;
-  });
+  const vals = arr.map(s => _challengeAttemptValue(c, s));
   if (agg === 'best') return Math.max(...vals);
   if (agg === 'sum') return vals.reduce((a, b) => a + b, 0);
   if (agg === 'last') return vals[vals.length - 1];
@@ -37085,7 +38960,7 @@ function _readChallengeTiers(lowerIsBetter, mode) {
 }
 function editChallenge(id) {
   const isNew = !id;
-  const c = isNew ? { id: uid(), title: '', desc: '', scope: 'individual', type: 'skill', metric: 'points', endDate: '', target: 0, teamScore: 0, scores: {}, mode: 'single', aggregate: 'average' } : state.challenges.find(x => x.id === id);
+  const c = isNew ? { id: uid(), title: '', desc: '', scope: 'individual', type: 'skill', metric: 'points', endDate: '', target: 0, teamScore: 0, scores: {}, mode: 'single', aggregate: 'average', pointsReward: pointsRules().challengeDefaultPoints } : state.challenges.find(x => x.id === id);
   openModal(`
     <div class="modal-header">
       <div class="modal-title">${isNew ? 'Nouveau challenge' : 'Modifier le challenge'}</div>
@@ -37125,6 +39000,21 @@ function editChallenge(id) {
       <div class="fld-row">
         <div class="fld"><label class="fld-label">Unité</label><input id="c-metric" value="${esc(c.metric)}" placeholder="Ex : LF, pompes, paniers"></div>
         <div class="fld"><label class="fld-label">Date de fin</label><input id="c-end" type="date" value="${c.endDate || ''}"></div>
+      </div>
+
+      <!-- SCORE GÉNÉRAL : ce que le défi verse au total de saison de la joueuse.
+           Masqué pour les défis AUTO (leurs compteurs dérivent des présences,
+           qui rapportent déjà leurs propres points) — mais l'éditeur ne sert
+           jamais à créer un défi auto, donc pas de garde ici. -->
+      <div class="fld">
+        <label class="fld-label">🏆 Points au score général</label>
+        <div style="display:flex;align-items:center;gap:8px">
+          <input id="c-points" type="number" min="0" max="1000" step="1" value="${challengePointsReward(c)}" style="width:90px;text-align:center">
+          <span style="font-size:12px;color:var(--ink-3)">pts pour chaque joueuse qui a un score</span>
+        </div>
+        <div style="margin-top:6px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';line-height:1.5">
+          Versés UNE fois par joueuse, dès qu'elle enregistre un score. 0 = ce défi ne rapporte rien.
+        </div>
       </div>
 
       <!-- MODE (individuel) : score simple / séries / chrono -->
@@ -37251,6 +39141,13 @@ function saveChallenge(id, isNew) {
   }
   // Paliers (tiers) : liste éditable {name, threshold}, triée par seuil.
   obj.tiers = _readChallengeTiers(obj.lowerIsBetter, obj.mode);
+  // SCORE GÉNÉRAL : ce que le défi verse. Champ absent (formulaire d'une version
+  // antérieure encore ouvert) → on PRÉSERVE la valeur existante plutôt que de
+  // retomber sur le défaut, sinon éditer un titre reviendrait à retarifer le défi.
+  const _ptsEl = document.getElementById('c-points');
+  obj.pointsReward = _ptsEl
+    ? Math.min(1000, Math.max(0, Math.round(Number(_ptsEl.value)) || 0))
+    : (existing ? challengePointsReward(existing) : pointsRules().challengeDefaultPoints);
   // Tags (recherche/filtre) + préserve les favoris existants.
   obj.tags = _readChallengeTags();
   obj.favoritedBy = existing ? (existing.favoritedBy || []) : [];
@@ -43768,6 +45665,31 @@ function notifFeed(opts) {
       });
     });
   });
+  // SCORE GÉNÉRAL — les ajustements du coach, et EUX SEULS. Le reste des points
+  // découle d'un geste qu'elle a déjà vu passer (elle a validé sa séance, elle
+  // était à l'entraînement) : le renotifier ferait un feed de bruit. Un
+  // ajustement, lui, tombe sans qu'elle ait rien fait — c'est le seul cas où la
+  // cloche a quelque chose à apprendre à quelqu'un.
+  //
+  // `oneShot` : l'id encode la ligne de ledger, donc « lu » est définitif et
+  // survit à un updated_at réécrit par une resynchro (cf. la panne « je marque
+  // lu, ça revient » des RSVP).
+  src('player', 'points-ajustement', () => {
+    const sid = state.currentSeasonId || getActiveSeasonId();
+    (state.pointsLedger || [])
+      .filter(e => e && !e.deletedAt && e.playerId === pid
+        && (e.seasonId || null) === (sid || null)
+        && e.sourceType === 'manual_adjustment')
+      .forEach(e => {
+        add('player', {
+          id: 'pts-' + e.id, ts: e.createdAt || e.updatedAt || 0, oneShot: true,
+          icon: (e.pointsDelta || 0) >= 0 ? '🏆' : '⚠️',
+          title: ((e.pointsDelta > 0 ? '+' : '') + (e.pointsDelta || 0)) + ' points',
+          detail: (e.reason || '').slice(0, 60),
+          action: 'openPointsHistory()'
+        });
+      });
+  });
   src('player', 'gages-a-tirer', () => {
     if (typeof pendingDraws !== 'function') return;
     const d = pendingDraws(pid);
@@ -44731,6 +46653,11 @@ function _doRender() {
   // Vignettes Instagram/Vimeo/TikTok : le DOM vient d'être remplacé, on
   // (re)tente l'hydratation. Cache d'abord → aucun appel réseau si déjà connu.
   try { _hydrateVideoThumbs(); } catch (e) {}
+  // SCORE GÉNÉRAL : le widget vient d'être (re)posé dans le DOM. On compare au
+  // dernier total vu et on anime le delta. Ici et pas ailleurs, parce que
+  // _doRender est le seul point de passage commun à une action locale ET à
+  // l'arrivée d'un ajustement du coach par realtime.
+  try { _pointsCheckGain(); } catch (e) {}
 }
 
 function render() {
@@ -45048,7 +46975,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-15.125';
+const APP_VERSION = '2026-08-15.126';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.

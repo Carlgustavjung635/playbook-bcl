@@ -6,26 +6,31 @@ function _challengeSeriesOf(c, pid) {
   return ((((c || {}).series || {})[pid]) || []).filter(s => !s.deletedAt)
     .slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
 }
+// Valeur d'UNE tentative, dans l'unité du mode (copie fidèle d'index.html —
+// partagée entre l'agrégat de classement et la courbe de progression perso).
+function _challengeAttemptValue(c, s) {
+  if (!c || !s) return 0;
+  if (c.mode === 'timed') return Number(s.durationMs) || 0;
+  const size = Number.isFinite(c.seriesSize) && c.seriesSize > 0 ? c.seriesSize : null;
+  const made = Number(s.made) || 0;
+  const att = Number.isFinite(s.attempts) && s.attempts > 0 ? s.attempts : size;
+  if (size && att && att !== size) return (made / att) * size;
+  return made;
+}
 function _recomputeChallengeAggregate(c, pid) {
   if (!c) return 0;
   const arr = _challengeSeriesOf(c, pid);
   if (!arr.length) return 0;
   const agg = ['average', 'best', 'sum', 'last'].includes(c.aggregate) ? c.aggregate : 'average';
   if (c.mode === 'timed') {
-    const durs = arr.map(s => Number(s.durationMs) || 0).filter(v => v > 0);
+    const durs = arr.map(s => _challengeAttemptValue(c, s)).filter(v => v > 0);
     if (!durs.length) return 0;
     if (agg === 'average') return Math.round(durs.reduce((a, b) => a + b, 0) / durs.length);
     if (agg === 'sum') return durs.reduce((a, b) => a + b, 0);
     if (agg === 'last') return durs[durs.length - 1];
     return Math.min(...durs);
   }
-  const size = Number.isFinite(c.seriesSize) && c.seriesSize > 0 ? c.seriesSize : null;
-  const vals = arr.map(s => {
-    const made = Number(s.made) || 0;
-    const att = Number.isFinite(s.attempts) && s.attempts > 0 ? s.attempts : size;
-    if (size && att && att !== size) return (made / att) * size;
-    return made;
-  });
+  const vals = arr.map(s => _challengeAttemptValue(c, s));
   if (agg === 'best') return Math.max(...vals);
   if (agg === 'sum') return vals.reduce((a, b) => a + b, 0);
   if (agg === 'last') return vals[vals.length - 1];
