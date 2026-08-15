@@ -211,11 +211,48 @@ t('avec des ressentis, la carte affiche les moyennes (comportement inchangé)', 
   ok(h.includes('2/2 joueuses'), 'le compteur ne suit pas les ressentis reçus');
   ok(!h.includes('Aucun ressenti cette saison'), 'l\'état vide s\'affiche alors qu\'il y a des ressentis');
 });
-t('un ressenti HORS saison ne remonte pas — et l\'accès reste ouvert', () => {
-  asCoach([REV('pX', shift(-900))]);
+// Calendrier RÉEL du club : une saison finie (30 juin), une saison à venir
+// (1er septembre), et entre les deux l'intersaison — juillet/août, la prépa
+// estivale. C'est la configuration exacte où le bug de v.116 est apparu.
+function withTwoSeasons() {
+  S.seasons = [
+    { id: 'S0', name: 'Saison passée', startDate: shift(-400), endDate: shift(-60), status: 'archived' },
+    { id: 'S1', name: 'Saison à venir', startDate: shift(+30), endDate: shift(+400), status: 'active' },
+  ];
+  S.activeSeasonId = 'S1'; S.currentSeasonId = 'S1';
+  S.seasonPlayers = ['pX', 'pY'].map(playerId => ({ seasonId: 'S1', playerId, teamTag: 'e1', joinedAt: shift(-400), leftAt: null }));
+}
+t('un ressenti de la saison PRÉCÉDENTE ne remonte pas — et l\'accès reste ouvert', () => {
+  asCoach([REV('pX', shift(-200))]);
+  withTwoSeasons();
   const h = ctx.renderHomeCoach();
   ok(h.includes('Aucun ressenti cette saison'), 'un ressenti d\'une autre saison est compté');
   ok(h.includes('openTeamReviewsDashboard()'), 'l\'accès au tableau de bord est perdu');
+});
+t('un ressenti écrit pendant l\'INTERSAISON compte pour la saison qui arrive', () => {
+  // LE BUG DE v.116 : juillet et août n'appartenaient à aucune saison, donc
+  // tout ce qui s'écrivait pendant la prépa estivale — le moment où on
+  // sollicite le plus les joueuses — devenait invisible pour toujours.
+  asCoach([REV('pX', shift(-10))]);
+  withTwoSeasons();
+  ok(ctx.currentSeasonTeamReviews().length === 1, 'le ressenti d\'intersaison est encore perdu');
+  const h = ctx.renderHomeCoach();
+  ok(!h.includes('Aucun ressenti cette saison'), 'la carte annonce toujours « aucun ressenti »');
+  ok(h.includes('1/2 joueuse'), 'le compteur reste à zéro');
+});
+t('après la fin de la dernière saison, plus rien ne tombe dans le vide', () => {
+  asCoach([REV('pX', shift(+500))]);
+  withTwoSeasons();
+  ok(ctx.currentSeasonTeamReviews().length === 1, 'la saison la plus récente a une borne haute');
+});
+t('les fenêtres de saison PAVENT le calendrier, sans trou ni chevauchement', () => {
+  asCoach([]);
+  withTwoSeasons();
+  const w0 = ctx.seasonDateWindow(S.seasons[0]);
+  const w1 = ctx.seasonDateWindow(S.seasons[1]);
+  ok(w0.to === shift(-60), 'la saison passée déborde sur la suivante');
+  ok(w1.after === shift(-60), 'un trou subsiste entre les deux saisons');
+  ok(w1.to === '9999-12-31', 'la saison la plus récente est bornée dans le futur');
 });
 t('le tableau de bord coach n\'est JAMAIS exposé à la joueuse', () => {
   asPlayer([]);

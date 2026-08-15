@@ -7794,18 +7794,45 @@ function activeTeamReviews() {
   return (state.teamReviews || []).filter(r => r && !r.deletedAt);
 }
 
+// FENÊTRE DE DATES D'UNE SAISON — SANS TROU DANS LE CALENDRIER.
+//
+// Une saison va du 1er septembre au 30 juin. Juillet et août n'appartiennent
+// donc à AUCUNE saison. Tout ce qu'une joueuse écrit pendant l'intersaison —
+// c'est-à-dire pendant la prépa estivale, quand elle est justement le plus
+// sollicitée — tombait dans ce trou et devenait invisible POUR TOUJOURS : trop
+// tard pour la saison finie, trop tôt pour celle qui arrive.
+//
+// On fait donc PAVER les saisons : la saison S couvre tout ce qui suit la fin
+// de la saison précédente, jusqu'à sa propre fin — et la saison la plus récente
+// n'a pas de borne haute. Un été rattache ainsi ses écrits à la saison qui
+// COMMENCE, ce qui est aussi la lecture naturelle (la prépa de septembre).
+// Bornes : `after` exclusive, `to` inclusive. Dates ISO YYYY-MM-DD →
+// comparaison lexicographique fiable.
+function seasonDateWindow(season) {
+  if (!season) return { after: '', to: '9999-12-31' };
+  const list = (state.seasons || []).filter(s => s && s.startDate)
+    .slice().sort((a, b) => a.startDate.localeCompare(b.startDate));
+  const i = list.findIndex(s => s.id === season.id);
+  // Saison inconnue de la liste → on retombe sur ses propres bornes.
+  if (i < 0) return { after: '', to: season.endDate || '9999-12-31' };
+  const prev = i > 0 ? list[i - 1] : null;
+  const isLast = i === list.length - 1;
+  return {
+    after: (prev && prev.endDate) ? prev.endDate : '',
+    to: isLast ? '9999-12-31' : (season.endDate || '9999-12-31'),
+  };
+}
+
 // Ressentis équipe de la saison courante. teamReviews n'a PAS de season_id en
-// base → on filtre par plage de dates [season.startDate, season.endDate] (option
-// retenue : zéro migration). r.date est une chaîne ISO YYYY-MM-DD (cf.
-// saveTeamReview) → comparaison lexicographique fiable. Fallback rétrocompat :
-// pas de saison définie (ou pas de date de début) → on renvoie tout.
+// base → on filtre par dates (option retenue : zéro migration), via la fenêtre
+// sans trou ci-dessus. Fallback rétrocompat : pas de saison définie (ou pas de
+// date de début) → on renvoie tout.
 function currentSeasonTeamReviews() {
   const all = activeTeamReviews();
   const season = getCurrentSeason();
   if (!season || !season.startDate) return all;
-  const start = season.startDate;
-  const end = season.endDate || '9999-12-31';
-  return all.filter(r => r.date && r.date >= start && r.date <= end);
+  const w = seasonDateWindow(season);
+  return all.filter(r => r.date && r.date > w.after && r.date <= w.to);
 }
 
 // LE DERNIER RESSENTI DE CHAQUE JOUEUSE, et lui seul.
@@ -42799,7 +42826,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-15.122';
+const APP_VERSION = '2026-08-15.123';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
