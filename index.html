@@ -59,6 +59,15 @@
     --topbar-bg: rgba(0, 0, 0, 0.85);
     --nav-bg: rgba(0, 0, 0, 0.92);
 
+    /* Fond des prises d'écran PLEIN ÉCRAN qui posent le texte DIRECTEMENT sur
+       le voile (pas de carte var(--bg-1) par-dessus) : modale « Message du
+       coach » / sondage. Un voile noir en dur + du texte var(--ink) = titre et
+       corps INVISIBLES sur les 4 thèmes clairs (dont BCL, le DÉFAUT). Chaque
+       thème pose donc son propre voile, dérivé de son --bg. Défaut sombre.
+       ⚠️ Ne PAS confondre avec .modal-backdrop / .img-viewer : eux sont de
+       vrais scrims (une carte opaque porte le texte) → noir en dur = correct. */
+    --overlay-bg: rgba(8, 10, 14, 0.94);
+
     /* === Accent thématisable — défaut : "Court" (orange BCL) ===
        Toute l'app dérive sa couleur d'accent de --accent-rgb (triplet RGB,
        source de vérité) + --orange-2 (variante claire). Un thème ne redéfinit
@@ -123,6 +132,7 @@
     --ink: #fff4ef; --ink-2: #e0bcb3; --ink-3: #a07c78; --ink-4: #6e544f;
     --accent-rgb: 251, 113, 90; --orange-2: #fda4af;
     --topbar-bg: rgba(22, 13, 16, 0.85); --nav-bg: rgba(15, 9, 11, 0.92);
+    --overlay-bg: rgba(22, 13, 16, 0.96);
   }
   /* 🌌 Midnight — bleu nuit indigo + violet électrique */
   :root[data-theme="midnight"] {
@@ -131,6 +141,7 @@
     --ink: #eef2ff; --ink-2: #bac6e6; --ink-3: #7c89ad; --ink-4: #525e7f;
     --accent-rgb: 129, 140, 248; --orange-2: #a5b4fc;
     --topbar-bg: rgba(10, 15, 30, 0.85); --nav-bg: rgba(7, 10, 22, 0.92);
+    --overlay-bg: rgba(10, 15, 30, 0.96);
   }
   /* 🏀 Hardwood — parquet espresso + ambre tan */
   :root[data-theme="hardwood"] {
@@ -139,6 +150,7 @@
     --ink: #fdf6ec; --ink-2: #ddc8aa; --ink-3: #a08a64; --ink-4: #6e5d46;
     --accent-rgb: 245, 158, 66; --orange-2: #fbbf24;
     --topbar-bg: rgba(27, 19, 11, 0.85); --nav-bg: rgba(19, 13, 7, 0.92);
+    --overlay-bg: rgba(27, 19, 11, 0.96);
   }
 
   /* --- 2 clairs (light mode) --- */
@@ -147,6 +159,7 @@
     --bg: #f7f7f5; --bg-1: #ffffff; --bg-2: #f0f0ec; --bg-3: #e7e7e1;
     --surface: #ffffff; --surface-2: #f2f2ee; --border: #dcdcd5; --border-soft: #ecece6;
     --ink: #1a1a1a; --ink-2: #4a4a4a; --ink-3: #767670; --ink-4: #a6a6a0;
+    --overlay-bg: rgba(247, 247, 245, 0.97);
     --accent-rgb: 234, 88, 12; --orange-2: #fb923c;
     /* Chrome OPAQUE en thème clair : le backdrop-filter échantillonne des fonds
        différents derrière la barre (contenu scrollé vs bg de la safe-area) →
@@ -158,6 +171,7 @@
     --bg: #eef2f7; --bg-1: #ffffff; --bg-2: #e4ebf3; --bg-3: #d8e2ee;
     --surface: #ffffff; --surface-2: #eef2f8; --border: #cbd5e1; --border-soft: #e2e8f0;
     --ink: #0f172a; --ink-2: #475569; --ink-3: #64748b; --ink-4: #94a3b8;
+    --overlay-bg: rgba(238, 242, 247, 0.97);
     --accent-rgb: 37, 99, 235; --orange-2: #60a5fa;
     --topbar-bg: var(--bg); --nav-bg: var(--bg);
   }
@@ -166,6 +180,7 @@
     --bg: #fafafa; --bg-1: #ffffff; --bg-2: #f2f0ee; --bg-3: #e9e6e2;
     --surface: #ffffff; --surface-2: #f5f3f1; --border: #dcd9d4; --border-soft: #eceae6;
     --ink: #1a1a1a; --ink-2: #525252; --ink-3: #737373; --ink-4: #a3a3a3;
+    --overlay-bg: rgba(250, 250, 250, 0.97);
     --accent-rgb: 196, 30, 58; --orange-2: #ea580c;
     --topbar-bg: var(--bg); --nav-bg: var(--bg);
   }
@@ -174,6 +189,7 @@
     --bg: #fdf4f8; --bg-1: #ffffff; --bg-2: #fbeaf1; --bg-3: #f6dde8;
     --surface: #ffffff; --surface-2: #fdf2f7; --border: #f0d4e0; --border-soft: #f8e6ee;
     --ink: #2a1620; --ink-2: #6b3a52; --ink-3: #9a6e83; --ink-4: #c9a9b8;
+    --overlay-bg: rgba(253, 244, 248, 0.97);
     --accent-rgb: 219, 39, 119; --orange-2: #ec4899;
     --topbar-bg: var(--bg); --nav-bg: var(--bg);
   }
@@ -32992,7 +33008,7 @@ function renderBroadcastPopup(b) {
   }
 
   return `
-    <div style="position:fixed;inset:0;z-index:9999;background:rgba(8,10,14,0.94);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);display:flex;flex-direction:column">
+    <div style="position:fixed;inset:0;z-index:9999;background:var(--overlay-bg);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);display:flex;flex-direction:column">
       <div style="flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:calc(28px + env(safe-area-inset-top)) 20px 12px;display:flex;flex-direction:column">
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">
           <div style="width:48px;height:48px;border-radius:50%;background:linear-gradient(135deg,var(--orange),var(--orange-2));display:flex;align-items:center;justify-content:center;font-size:24px;flex-shrink:0">${poll ? '📊' : '🏀'}</div>
@@ -45032,7 +45048,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-15.124';
+const APP_VERSION = '2026-08-15.125';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.

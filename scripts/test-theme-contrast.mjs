@@ -86,4 +86,56 @@ console.log('SCÉNARIO 4 — thèmes sombres restent sombres');
   t(`${id} : fond sombre`, () => assert.ok(lum(toRgb(themeTokens(id)['bg'])) < 0.1, `${id} bg pas sombre`));
 });
 
+console.log('SCÉNARIO 5 — voile plein écran (--overlay-bg) : le texte y est posé DIRECTEMENT');
+// Régression « Message du coach illisible » : la modale broadcast/sondage est une
+// prise d'écran totale qui pose titre + corps directement sur son voile, sans
+// carte var(--bg-1) intermédiaire. Le voile était un noir EN DUR → sur les 4
+// thèmes clairs (dont BCL, le DÉFAUT), var(--ink) sombre sur noir = invisible.
+t('la modale broadcast ne code plus son voile en dur', () => {
+  // Le noir historique ne doit plus survivre que comme VALEUR du token (défaut
+  // sombre), jamais comme couleur posée directement sur un élément.
+  const blacks = html.match(/[^\n]*rgba\(8\s*,\s*10\s*,\s*14[^\n]*/g) || [];
+  blacks.forEach(l => assert.ok(/--overlay-bg\s*:/.test(l), 'voile noir en dur : ' + l.trim().slice(0, 90)));
+  const overlay = html.match(/position:fixed;inset:0;z-index:9999;background:([^;]+);/);
+  assert.ok(overlay, 'voile de la modale broadcast introuvable');
+  assert.strictEqual(overlay[1], 'var(--overlay-bg)', 'le voile ne passe pas par le token');
+});
+
+// Le voile est semi-opaque : on COMPOSITE sur --bg (la page en dessous) avant de
+// mesurer, sinon on juge une couleur que personne ne voit.
+function overlayOver(k) {
+  const m = k['overlay-bg'].match(/rgba?\(([^)]+)\)/);
+  assert.ok(m, 'overlay-bg doit être une rgba()');
+  const p = m[1].split(',').map(x => parseFloat(x.trim()));
+  const a = p.length > 3 ? p[3] : 1;
+  const bg = toRgb(k['bg']);
+  return [0, 1, 2].map(i => Math.round(p[i] * a + bg[i] * (1 - a)));
+}
+function rgbHex(c) { return '#' + c.map(x => x.toString(16).padStart(2, '0')).join(''); }
+
+THEME_IDS.forEach(id => {
+  t(`${id} : ink/voile ≥ 4.5, ink-2/voile ≥ 4.5, ink-3/voile ≥ 3`, () => {
+    const k = themeTokens(id);
+    assert.ok(k['overlay-bg'], `${id} n'a pas de --overlay-bg`);
+    const ov = rgbHex(overlayOver(k));
+    const cInk = contrast(k['ink'], ov);
+    const cInk2 = contrast(k['ink-2'], ov);
+    const cInk3 = contrast(k['ink-3'], ov);
+    assert.ok(cInk >= 4.5, `${id} ink/voile = ${cInk.toFixed(2)} < 4.5`);
+    assert.ok(cInk2 >= 4.5, `${id} ink-2/voile = ${cInk2.toFixed(2)} < 4.5`);
+    assert.ok(cInk3 >= 3.0, `${id} ink-3/voile = ${cInk3.toFixed(2)} < 3.0`);
+  });
+});
+
+t('le voile suit la clarté du thème (clair reste clair, sombre reste sombre)', () => {
+  // Garde-fou de fond : un voile sombre sur un thème clair (ou l'inverse) est
+  // exactement le bug d'origine — il repasserait le contraste seulement si on
+  // inversait AUSSI les encres, ce qu'aucun thème ne fait.
+  THEME_IDS.forEach(id => {
+    const k = themeTokens(id);
+    const lBg = lum(toRgb(k['bg'])), lOv = lum(overlayOver(k));
+    assert.ok(Math.abs(lBg - lOv) < 0.15, `${id} : voile (${lOv.toFixed(3)}) trop loin du fond (${lBg.toFixed(3)})`);
+  });
+});
+
 console.log(`\n✅ ${pass} assertions OK — 12 thèmes, contrastes WCAG AA vérifiés (clair + sombre).`);
