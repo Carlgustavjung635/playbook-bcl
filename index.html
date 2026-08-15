@@ -12982,8 +12982,33 @@ function renderHomeCoach() {
           // inatteignable (v.109), ce compteur restait à 0 pour toujours :
           // deux invisibilités qui se nourrissaient l'une l'autre.
           // Le tableau de bord, lui, gère déjà son propre état vide.
-          const nbPlayers = currentSeasonPlayers().length;
-          if (reviews.length === 0) return `
+          // MÊME PÉRIMÈTRE QUE LE TABLEAU DE BORD (openTeamReviewsDashboard) :
+          // l'effectif de la saison, et lui seul. Sans ce filtre, le ressenti
+          // d'une joueuse partie continuait d'alimenter le numérateur d'un
+          // « X/21 » dont le dénominateur, lui, ne compte que les présentes :
+          // deux nombres qui ne parlaient pas du même groupe.
+          const seasonPool = currentSeasonPlayers();
+          const nbPlayers = seasonPool.length;
+          const seasonIds = new Set(seasonPool.map(p => p.id));
+          // Dernière par joueuse UNIQUEMENT (cf. latestTeamReviewByPlayer) :
+          // « l'état d'esprit actuel » ne cumule pas l'historique.
+          const latest = Object.values(latestTeamReviewByPlayer(reviews, { playerIds: seasonIds }));
+          if (latest.length === 0) {
+            // UN ÉTAT VIDE DOIT DIRE SOUS QUEL PÉRIMÈTRE IL EST VIDE.
+            // « Aucun ressenti cette saison » affiché alors que la base en
+            // contient (ressentis de la saison précédente, ou d'une joueuse
+            // qui n'est plus dans l'effectif) est un message qui se lit comme
+            // une panne : le coach voit des lignes côté base et l'app affirme
+            // qu'il n'y a rien. On annonce donc ce qui existe AILLEURS, avec
+            // le seul écran qui sait le montrer au bout du clic.
+            // Les ressentis supprimés par l'admin, eux, n'existent plus pour
+            // l'application (activeTeamReviews) : jamais comptés ici non plus.
+            const scoped = reviews.filter(r => seasonIds.has(r.pid)).length;
+            const elsewhere = Math.max(0, activeTeamReviews().length - scoped);
+            const hint = elsewhere > 0
+              ? `${elsewhere} ressenti${elsewhere > 1 ? 's' : ''} hors de cette saison ou hors effectif`
+              : 'Ambiance · rôle · temps de jeu · physique';
+            return `
             <div class="section-header">
               <div>
                 <div class="eyebrow">0/${nbPlayers} joueuse${nbPlayers > 1 ? 's' : ''}</div>
@@ -12995,16 +13020,14 @@ function renderHomeCoach() {
               <div onclick="openTeamReviewsDashboard()" style="padding:14px;background:var(--surface);border:1px dashed var(--border);border-radius:var(--radius);cursor:pointer;display:flex;align-items:center;gap:12px">
                 <div style="font-size:24px">💭</div>
                 <div style="flex:1;min-width:0">
-                  <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;letter-spacing:0.02em">Aucun ressenti cette saison</div>
-                  <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase;letter-spacing:0.04em">Ambiance · rôle · temps de jeu · physique</div>
+                  <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;letter-spacing:0.02em">Aucun ressenti sur cette saison</div>
+                  <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase;letter-spacing:0.04em">${hint}</div>
                 </div>
                 <div style="color:var(--ink-4);font-family:'Anton';font-size:16px">›</div>
               </div>
             </div>
           `;
-          // Dernière par joueuse UNIQUEMENT (cf. latestTeamReviewByPlayer) :
-          // « l'état d'esprit actuel » ne cumule pas l'historique.
-          const latest = Object.values(latestTeamReviewByPlayer(reviews));
+          }
           // Moyennes (null-safe : un champ sans valeur → avg = null pour ce champ)
           const avg = {};
           TEAM_REVIEW_FIELDS.forEach(f => {
@@ -47778,7 +47801,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-16.129';
+const APP_VERSION = '2026-08-16.130';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.

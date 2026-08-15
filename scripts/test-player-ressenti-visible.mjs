@@ -201,7 +201,7 @@ t('sans aucun ressenti, la section coach reste visible et accessible', () => {
   const h = ctx.renderHomeCoach();
   ok(h.includes('État d\'esprit équipe'), 'la section a disparu de l\'accueil coach');
   ok(h.includes('openTeamReviewsDashboard()'), 'plus aucun accès au tableau de bord des ressentis');
-  ok(h.includes('Aucun ressenti cette saison'), 'l\'état vide n\'est pas annoncé');
+  ok(h.includes('Aucun ressenti sur cette saison'), 'l\'état vide n\'est pas annoncé');
   ok(h.includes('0/2 joueuses'), 'le compteur 0/N n\'est pas rendu');
 });
 t('avec des ressentis, la carte affiche les moyennes (comportement inchangé)', () => {
@@ -209,7 +209,7 @@ t('avec des ressentis, la carte affiche les moyennes (comportement inchangé)', 
   const h = ctx.renderHomeCoach();
   ok(h.includes('Ressenti actuel'), 'la carte de moyennes a disparu');
   ok(h.includes('2/2 joueuses'), 'le compteur ne suit pas les ressentis reçus');
-  ok(!h.includes('Aucun ressenti cette saison'), 'l\'état vide s\'affiche alors qu\'il y a des ressentis');
+  ok(!h.includes('Aucun ressenti sur cette saison'), 'l\'état vide s\'affiche alors qu\'il y a des ressentis');
 });
 // Calendrier RÉEL du club : une saison finie (30 juin), une saison à venir
 // (1er septembre), et entre les deux l'intersaison — juillet/août, la prépa
@@ -226,7 +226,7 @@ t('un ressenti de la saison PRÉCÉDENTE ne remonte pas — et l\'accès reste o
   asCoach([REV('pX', shift(-200))]);
   withTwoSeasons();
   const h = ctx.renderHomeCoach();
-  ok(h.includes('Aucun ressenti cette saison'), 'un ressenti d\'une autre saison est compté');
+  ok(h.includes('Aucun ressenti sur cette saison'), 'un ressenti d\'une autre saison est compté');
   ok(h.includes('openTeamReviewsDashboard()'), 'l\'accès au tableau de bord est perdu');
 });
 t('un ressenti écrit pendant l\'INTERSAISON compte pour la saison qui arrive', () => {
@@ -237,7 +237,7 @@ t('un ressenti écrit pendant l\'INTERSAISON compte pour la saison qui arrive', 
   withTwoSeasons();
   ok(ctx.currentSeasonTeamReviews().length === 1, 'le ressenti d\'intersaison est encore perdu');
   const h = ctx.renderHomeCoach();
-  ok(!h.includes('Aucun ressenti cette saison'), 'la carte annonce toujours « aucun ressenti »');
+  ok(!h.includes('Aucun ressenti sur cette saison'), 'la carte annonce toujours « aucun ressenti »');
   ok(h.includes('1/2 joueuse'), 'le compteur reste à zéro');
 });
 t('après la fin de la dernière saison, plus rien ne tombe dans le vide', () => {
