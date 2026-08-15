@@ -99,6 +99,10 @@ const src = [
   extractDecl('const _POINTS_SOURCE_TYPES_DB = [', '];'),
   extractDecl('const _POINTS_LEDGER_STATES_DB = [', '];'),
   'let _pointsMemo = { attendance: {} };',
+  // Détection de schéma de `last_claimed_amount` (migration 20260816_002, feed
+  // du groupe) : le dump ne pousse la colonne qu'après l'avoir vue revenir du
+  // serveur, pour qu'une banque migrée SANS elle continue de se synchroniser.
+  'let _pointsHarvestAmountCol = false;',
   "let _pointsHistoryFilter = 'all';",
 ].concat(FNS.map(extractFn)).join('\n');
 

@@ -3814,6 +3814,85 @@
     border: none; font-size: 18px; cursor: pointer;
   }
 
+  /* ========== FEED DU GROUPE (cf. migration 20260816_001) ==========
+     Aucune couleur en dur : le mur vit sur les 10 thèmes, dont les 4 clairs.
+     Un fond « rgba(0,0,0,.04) » y paraîtrait sale et un texte blanc y serait
+     illisible — tout dérive de --surface / --ink / --accent-rgb. */
+  .feed-wrap { padding: 0 18px; margin-bottom: 18px; display: flex; flex-direction: column; gap: 8px; }
+  .feed-item {
+    background: var(--surface);
+    border: 1px solid var(--border-soft, var(--border));
+    border-radius: var(--radius);
+    padding: 12px 14px;
+  }
+  .feed-item-head { display: flex; align-items: flex-start; gap: 10px; }
+  .feed-avatar {
+    width: 34px; height: 34px; border-radius: 50%; object-fit: cover;
+    border: 1.5px solid var(--border); flex: 0 0 auto;
+  }
+  .feed-avatar-fallback {
+    display: flex; align-items: center; justify-content: center;
+    background: var(--bg-3); color: var(--orange);
+    font-family: 'Anton'; font-size: 14px;
+  }
+  .feed-item-main { flex: 1; min-width: 0; }
+  .feed-item-line { font-size: 13px; line-height: 1.45; color: var(--ink-2); }
+  .feed-item-icon { margin-right: 4px; }
+  .feed-item-who { font-family: 'Anton'; text-transform: uppercase; letter-spacing: 0.02em; color: var(--ink); }
+  .feed-item-text { color: var(--ink-2); }
+  .feed-item-meta {
+    margin-top: 3px; font-family: 'JetBrains Mono'; font-size: 10px;
+    text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-3);
+  }
+  /* La photo est un BOUTON (agrandissement au clic) : on lui retire son chrome
+     natif, sinon le thème clair lui pose un fond gris système. */
+  .feed-photo-btn {
+    display: block; width: 100%; margin: 10px 0 0; padding: 0;
+    border: 0; background: none; cursor: pointer; border-radius: 8px; overflow: hidden;
+  }
+  .feed-photo {
+    display: block; width: 100%; max-height: 200px; object-fit: cover;
+    border-radius: 8px; background: var(--bg-3);
+  }
+  .feed-reactions { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  .feed-react {
+    display: inline-flex; align-items: center; gap: 4px;
+    /* Cible tactile : 34 px. Un chip de 30 px comme ceux des filtres passe
+       quand on filtre une liste ; ici c'est L'interaction de la feature. */
+    min-height: 34px; padding: 0 11px;
+    border-radius: 17px; cursor: pointer;
+    background: var(--bg-3); border: 1px solid var(--border);
+    color: var(--ink-2); font-family: 'JetBrains Mono'; font-size: 11px;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  .feed-react.is-empty { opacity: 0.62; }
+  /* « J'ai réagi » doit se voir SANS la couleur seule : sur les thèmes clairs,
+     un voile d'accent à 16 % sur un chip déjà clair donnait un écart de 1.0
+     avec un chip neutre (mesuré) — autrement dit rien du tout. D'où trois
+     marqueurs cumulés : voile plus dense, bordure d'accent, texte plein. */
+  .feed-react.is-mine {
+    background: rgba(var(--accent-rgb), 0.26);
+    border-color: var(--orange);
+    color: var(--ink);
+    font-weight: 700;
+    opacity: 1;
+  }
+  .feed-react[disabled] { cursor: default; opacity: 0.4; }
+  .feed-react-emoji { font-size: 13px; line-height: 1; }
+  .feed-react-n { font-weight: 700; }
+  .feed-more { margin-top: 4px; }
+  .feed-empty {
+    padding: 22px 18px; text-align: center;
+    background: var(--surface); border: 1.5px dashed var(--border); border-radius: var(--radius);
+  }
+  .feed-empty-icon { font-size: 30px; opacity: 0.6; margin-bottom: 8px; }
+  .feed-empty-title { font-family: 'Anton'; font-size: 15px; text-transform: uppercase; letter-spacing: 0.02em; }
+  .feed-empty-sub { margin-top: 5px; font-size: 11px; color: var(--ink-3); line-height: 1.5; }
+  /* Tablette : le mur reste lisible sans s'étirer sur toute la largeur. */
+  @media (min-width: 768px) {
+    .feed-photo { max-height: 260px; }
+  }
+
   /* ========== SCROLLBAR ========== */
   ::-webkit-scrollbar { width: 4px; height: 4px; }
   ::-webkit-scrollbar-track { background: var(--bg-2); }
@@ -5976,6 +6055,30 @@ const ENTITIES = [
       state.pointsHarvests = [...pendingLocal, ...fromRemote];
       if (ahead.length) _reassertRows('player_points_harvests', ahead.map(_dumpPointsHarvestRow));
     }
+  },
+  {
+    // FEED DU GROUPE — RÉACTIONS uniquement (cf. migration 20260816_001).
+    // Aucune entité « activityFeed » : les événements sont dérivés, pas stockés.
+    key: 'feedReactions', table: 'activity_feed_reactions', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.feedReactions || []).map(r => [r.id, _dumpFeedReactionRow(r)])),
+    apply: (state, rows) => {
+      const local = state.feedReactions || [];
+      const localById = Object.fromEntries(local.map(r => [r.id, r]));
+      const remoteIds = new Set(rows.map(r => r.id));
+      const ahead = [];
+      const fromRemote = rows.map(r => {
+        const mapped = _feedReactionFromRow(r);
+        const loc = localById[r.id];
+        // LWW indispensable : une réaction se retire et se remet sur LA MÊME
+        // ligne (id déterministe). Sans ça, un écho realtime concurrent
+        // ressusciterait le ❤️ que la joueuse vient de retirer.
+        if (loc && (loc.updatedAt || 0) > (mapped.updatedAt || 0)) { ahead.push(loc); return loc; }
+        return mapped;
+      });
+      const pendingLocal = local.filter(r => !remoteIds.has(r.id) && typeof r.id === 'string' && r.id.startsWith('x'));
+      state.feedReactions = [...pendingLocal, ...fromRemote];
+      if (ahead.length) _reassertRows('activity_feed_reactions', ahead.map(_dumpFeedReactionRow));
+    }
   }
 ];
 
@@ -6796,9 +6899,21 @@ function _pointsLedgerFromRow(r) {
 // comme les stages de drills. On le BORNE quand même (200 entrées, 200 car.),
 // parce qu'une clé est construite depuis un id de source et qu'un jsonb qui
 // enfle sans limite finit par faire échouer le lot d'upsert de la table.
+// La colonne `last_claimed_amount` (migration 20260816_002, feed du groupe)
+// arrive APRÈS la table (migration 20260815_004). Entre les deux, un dump qui
+// la mentionnerait ferait échouer TOUT le lot d'upsert de la table — et un lot
+// en échec ne fait qu'un console.warn : la banque cesserait de se synchroniser
+// EN SILENCE (mode de panne déjà payé en v.115).
+// D'où une DÉTECTION DE SCHÉMA : on ne pousse la colonne qu'après avoir vu le
+// serveur la renvoyer au moins une fois. Aucune migration ne peut donc être
+// appliquée « dans le mauvais ordre » — au pire l'événement « gros lot » du
+// feed attend la migration, la banque, elle, ne bronche pas.
+let _pointsHarvestAmountCol = false;
 function _dumpPointsHarvestRow(h) {
   const keys = Array.isArray(h.claimedKeys) ? h.claimedKeys : [];
-  return {
+  const amountCol = _pointsHarvestAmountCol
+    ? { last_claimed_amount: _pointsClampInt(h.lastClaimedAmount, 0, 100000000, 0) } : {};
+  return Object.assign(amountCol, {
     id: h.id,
     player_id: h.playerId || null,
     season_id: h.seasonId || null,
@@ -6808,9 +6923,12 @@ function _dumpPointsHarvestRow(h) {
     last_claimed_at: h.lastClaimedAt ? new Date(h.lastClaimedAt).toISOString() : null,
     deleted_at: h.deletedAt ? new Date(h.deletedAt).toISOString() : null,
     updated_at: h.updatedAt ? new Date(h.updatedAt).toISOString() : new Date().toISOString()
-  };
+  });
 }
 function _pointsHarvestFromRow(r) {
+  // Le serveur a renvoyé la colonne → la migration 20260816_002 est passée, on
+  // peut la pousser à notre tour (cf. l'en-tête du dump ci-dessus).
+  if (r && r.last_claimed_amount !== undefined) _pointsHarvestAmountCol = true;
   return {
     id: r.id,
     playerId: r.player_id || null,
@@ -6819,6 +6937,7 @@ function _pointsHarvestFromRow(r) {
     claimedKeys: Array.isArray(r.claimed_keys) ? r.claimed_keys.filter(k => typeof k === 'string') : [],
     claimedTotal: Number.isFinite(r.claimed_total) ? r.claimed_total : (parseInt(r.claimed_total, 10) || 0),
     lastClaimedAt: r.last_claimed_at ? Date.parse(r.last_claimed_at) : null,
+    lastClaimedAmount: Number.isFinite(r.last_claimed_amount) ? r.last_claimed_amount : (parseInt(r.last_claimed_amount, 10) || 0),
     createdAt: r.created_at ? Date.parse(r.created_at) : null,
     updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
     deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
@@ -6851,6 +6970,40 @@ function _ardoiseRulesFromRow(r) {
     rulesTextMd: (typeof r.rules_text_md === 'string') ? r.rules_text_md : '',
     updatedBy: r.updated_by || null,
     updatedAt: r.updated_at ? Date.parse(r.updated_at) : 0
+  };
+}
+
+// --- FEED DU GROUPE : sérialisation des RÉACTIONS (module) -------------------
+// cf. migration 20260816_001. Seules les réactions sont stockées : les
+// ÉVÉNEMENTS du feed sont dérivés à la lecture de leurs sources (pbFeedEvents).
+// Les bornes des CHECK sont réécrites EN DUR ici — les constantes du bloc
+// <script> classique ne franchissent pas la frontière des blocs, et une valeur
+// hors bornes ferait échouer TOUT le lot d'upsert de la table.
+function _dumpFeedReactionRow(r) {
+  return {
+    id: r.id,
+    event_id: r.eventId || '',
+    actor_id: r.actorId || '',
+    actor_kind: r.actorKind === 'coach' ? 'coach' : 'player',
+    emoji: ['heart', 'fire', 'muscle', 'clap'].includes(r.emoji) ? r.emoji : 'heart',
+    event_at: r.eventAt ? new Date(r.eventAt).toISOString() : null,
+    season_id: r.seasonId || null,
+    deleted_at: r.deletedAt ? new Date(r.deletedAt).toISOString() : null,
+    updated_at: r.updatedAt ? new Date(r.updatedAt).toISOString() : new Date().toISOString()
+  };
+}
+function _feedReactionFromRow(r) {
+  return {
+    id: r.id,
+    eventId: r.event_id || '',
+    actorId: r.actor_id || '',
+    actorKind: r.actor_kind === 'coach' ? 'coach' : 'player',
+    emoji: ['heart', 'fire', 'muscle', 'clap'].includes(r.emoji) ? r.emoji : 'heart',
+    eventAt: r.event_at ? Date.parse(r.event_at) : null,
+    seasonId: r.season_id || null,
+    createdAt: r.created_at ? Date.parse(r.created_at) : null,
+    updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
+    deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
   };
 }
 
@@ -7418,6 +7571,12 @@ const K = {
   pointsLedger: 'pb8_points_ledger',               // [{ id, playerId, seasonId, pointsDelta, sourceType, sourceId, reason, state, claimedAt }] — ajustements + surcharges UNIQUEMENT (le reste est dérivé)
   pointsHarvests: 'pb8_points_harvests',           // [{ id:"<playerId>|<seasonId>", claimedThrough, claimedKeys[], claimedTotal }] — le REPÈRE DE RÉCOLTE (banque)
   pointsSeen: 'pb8_points_seen',                   // map { "<playerId>:<seasonId>": total } — dernier total VU par la joueuse, pour animer le delta (local, jamais sync)
+  // === FEED DU GROUPE (cf. migration 20260816_001) ===
+  // Les ÉVÉNEMENTS ne sont stockés NULLE PART : ils se dérivent de leurs sources
+  // à la lecture (pbFeedEvents). Seules les réactions sont une donnée propre.
+  feedReactions: 'pb8_feed_reactions',             // [{ id, eventId, actorId, actorKind, emoji, eventAt, ... }]
+  feedSeen: 'pb8_feed_seen',                       // map { "<identité>": ts } — filigrane « déjà vu » du compteur (LOCAL, jamais sync)
+  feedPurged: 'pb8_feed_purged',                   // map { "<identité>": ts } — dernier balayage 60 j des réactions (LOCAL)
   notifSnooze: 'pb8_notif_snooze',                 // map { "<role>:<playerId|->": "YYYY-MM-DD" } — « Plus tard » du rappel notifs (local)
   // NB : le repli du BANDEAU notifs n'a volontairement PAS de clé ici. Il vit
   // dans window._notifBannerHidden, donc il repart à zéro au prochain
@@ -7886,6 +8045,10 @@ let state = {
   pointsRules: load(K.pointsRules, null),
   pointsLedger: load(K.pointsLedger, []),
   pointsHarvests: load(K.pointsHarvests, []),
+  // === FEED DU GROUPE (cf. migration 20260816_001) ===
+  // UNE SEULE collection : les réactions. Les événements du mur se dérivent de
+  // leurs sources à chaque lecture (cf. l'en-tête de la migration).
+  feedReactions: load(K.feedReactions, []),
 
   // === JOUEUSES GUESTS (Phase 5 — cf. migration 20260524_009_guest_players) ===
   // guestPlayers : humains temporaires identifiés par leur nom (copine d'une
@@ -8008,6 +8171,7 @@ function persist() {
   save(K.pointsRules, state.pointsRules);
   save(K.pointsLedger, state.pointsLedger);
   save(K.pointsHarvests, state.pointsHarvests);
+  save(K.feedReactions, state.feedReactions);
   // FIX Option B : pendant l'édition d'un plan, bumper updatedAt de l'entrée
   // courante AVANT le save → la garde anti-écho de l'apply() trainingPlans peut
   // distinguer une édition locale fraîche d'un écho realtime obsolète (qui
@@ -12745,6 +12909,9 @@ function renderHomeCoach() {
         </div>
       `}
 
+      <!-- Le mur du groupe — vue IDENTIQUE à celle des joueuses (spec). -->
+      ${renderActivityFeed()}
+
       <div class="section-header">
         <div>
           <div class="eyebrow">À montrer aux joueuses</div>
@@ -13310,6 +13477,9 @@ function harvestPoints() {
     prev.claimedKeys = keys;
     prev.claimedTotal = (Number(prev.claimedTotal) || 0) + gain;
     prev.lastClaimedAt = now;
+    // Montant de CETTE récolte (le cumul ci-dessus ne le dit pas) : c'est ce que
+    // le feed du groupe affiche. Cf. migration 20260816_002.
+    prev.lastClaimedAmount = gain;
     prev.updatedAt = now;
     prev.deletedAt = null;
   } else {
@@ -13321,7 +13491,7 @@ function harvestPoints() {
       id: _pointsHarvestId(pid, sid),
       playerId: pid, seasonId: sid || null,
       claimedThrough: now, claimedKeys: keys,
-      claimedTotal: gain, lastClaimedAt: now,
+      claimedTotal: gain, lastClaimedAt: now, lastClaimedAmount: gain,
       createdAt: now, updatedAt: now, deletedAt: null
     });
   }
@@ -14127,6 +14297,10 @@ function renderHomePlayer() {
       <!-- 1quinquies. Anniversaires des coéquipières : voir qui fête, écrire un
            mot à l'avance. Le sien n'y figure jamais (surprise du jour J). -->
       ${renderBirthdaysSection()}
+
+      <!-- 1sexies. Le mur du groupe : ce que les autres ont fait de bien ces
+           dernières semaines. Rigoureusement la même vue que chez le coach. -->
+      ${renderActivityFeed()}
 
       <!-- 2. Challenges actifs (preview 2-3, lien Tout → onglet) -->
       ${myActiveChallenges.length > 0 ? `
@@ -25338,6 +25512,592 @@ function _ardStartWatch() {
       if (ardoiseSweep()) { try { render(); } catch (e) {} }
     } catch (e) {}
   }, 60000);
+}
+
+// ============================================================
+// LE FEED DU GROUPE (cf. migration 20260816_001)
+// ------------------------------------------------------------
+// Un mur d'activité POSITIVE sur l'accueil, joueuse ET coach : séance de prépa
+// validée, photo de pintade réussie, participation à un défi, record perso,
+// record équipe, anniversaire du jour, menu de l'Ardoise réglé. Rien de négatif
+// n'y entre — jamais de raté, de sanction, de séance manquée, de gage esquivé.
+// C'est une règle de produit, pas un réglage : le feed sert à donner envie de
+// participer, pas à exposer celles qui décrochent.
+//
+// DÉRIVÉ, PAS STOCKÉ — c'est LE choix structurant, cf. l'en-tête de la
+// migration. Aucun « hook » n'écrit d'événement au moment où il se produit :
+// tout est recalculé à la lecture depuis les sources qui font déjà foi. Sans
+// ça, trois mensonges permanents : une preuve de pintade invalidée après coup
+// resterait célébrée, une photo d'Ardoise refusée aussi, et un record perso
+// gravé en base ne suivrait pas l'édition rétroactive d'une tentative (v.121).
+// Bonus non négligeable : le feed est PLEIN dès le déploiement au lieu de
+// rester vide en attendant que la vie de l'équipe le remplisse.
+//
+// Seules les RÉACTIONS sont une donnée propre : elles ne se dérivent de rien.
+//
+// ACCÈS : joueuse + coach, vue strictement identique. Le stat'man en est
+// exclu — il partage un PIN générique et n'appartient pas au groupe.
+// ============================================================
+const FEED_RETENTION_DAYS = 60;   // au-delà, l'événement sort du feed (FILTRE, pas de purge)
+const FEED_PAGE_SIZE = 6;         // « 5-8 derniers events » de la spec
+const FEED_PAGE_STEP = 10;        // ce qu'ajoute un « Voir plus »
+const FEED_MAX_EVENTS = 150;      // borne dure de la dérivation (perf du rendu)
+const FEED_BIG_HARVEST = 200;     // « gros lot » : en-dessous, la récolte ne fait pas événement
+const FEED_DAY_MS = 86400000;
+const FEED_EMOJIS = [
+  { id: 'heart',  char: '❤️', label: 'Cœur' },
+  { id: 'fire',   char: '🔥', label: 'Feu' },
+  { id: 'muscle', char: '💪', label: 'Force' },
+  { id: 'clap',   char: '👏', label: 'Bravo' }
+];
+// Niveaux de prépa : on reprend les pastilles utilisées PARTOUT ailleurs dans la
+// feature (🟢 Min / 🟠 Med / 🔴 Ultra). Un jeu d'emojis différent pour la même
+// notion se lirait comme une autre information.
+const FEED_TRAINING_LEVELS = { min: '🟢 Min', med: '🟠 Med', ultra: '🔴 Ultra' };
+
+// Point d'extension pour une feature qui produirait un événement dont AUCUNE
+// source dérivable n'existe encore — typiquement « 🎁 gros lot récolté » de la
+// Banque de points (en cours de développement en parallèle). Une fonction
+// (scope, since) => [événements], poussée ici, est appelée comme les autres,
+// isolée dans son propre try. Rien à modifier dans ce fichier.
+window._pbFeedExtraSources = window._pbFeedExtraSources || [];
+
+// --- ACCÈS ------------------------------------------------------------------
+// Le stat'man ne voit RIEN du feed et n'y écrit rien. Garde par rôle EXPLICITE
+// (`role === 'player' || role === 'coach'`) et non par `!== 'stat'` : un rôle
+// ajouté demain sera exclu par défaut, ce qui est le bon sens de la garde.
+function feedIsVisible() {
+  const a = state.auth;
+  if (!a) return false;
+  return a.role === 'player' || a.role === 'coach';
+}
+// Qui réagit. `null` = personne ne peut écrire (stat'man, portail public).
+function _feedActor() {
+  const a = state.auth;
+  if (!a) return null;
+  if (a.role === 'player' && a.playerId) {
+    // Une identité joueuse qui n'existe pas dans l'effectif (mode « joueuse
+    // test » à venir, session périmée) ne doit produire AUCUNE écriture.
+    const p = (state.players || []).find(x => x && x.id === a.playerId);
+    return p ? { id: a.playerId, kind: 'player' } : null;
+  }
+  if (a.role === 'coach') {
+    const c = (typeof currentCoach === 'function') ? currentCoach() : null;
+    return { id: (c && c.id) || 'coach', kind: 'coach' };
+  }
+  return null;
+}
+
+// --- FENÊTRES : 60 JOURS ET SAISON ------------------------------------------
+function _feedWindowStart() { return Date.now() - FEED_RETENTION_DAYS * FEED_DAY_MS; }
+// Saison de l'événement, par sa DATE. On passe par seasonDateWindow(), qui PAVE
+// le calendrier : les bornes propres d'une saison (1er sept. → 30 juin)
+// laisseraient juillet et août hors de toute saison, et la prépa estivale —
+// dont les séances alimentent ce feed — tombe précisément là (cf. le trou
+// d'intersaison corrigé en v.123).
+function _feedInSeason(ts) {
+  if (!ts) return false;
+  try {
+    const season = (typeof getCurrentSeason === 'function') ? getCurrentSeason() : null;
+    if (!season || !season.startDate) return true;
+    const w = seasonDateWindow(season);
+    const iso = isoDate(new Date(ts));
+    return iso > w.after && iso <= w.to;
+  } catch (e) { return true; }
+}
+// Effectif visible : saison courante + filtre E1/E2 effectif (un coach borné à
+// son équipe ne voit que la sienne, une joueuse ne voit que la sienne). Une
+// seule ligne, et tout le cloisonnement est hérité.
+function _feedPlayerScope() {
+  const list = (typeof currentSeasonPlayers === 'function') ? currentSeasonPlayers() : (state.players || []);
+  const m = new Map();
+  (list || []).forEach(p => { if (p && p.id) m.set(p.id, p); });
+  return m;
+}
+function _feedActorFields(p) {
+  return {
+    actorId: p.id,
+    actorLabel: (p.num ? '#' + p.num + ' ' : '') + (p.name || 'Joueuse'),
+    actorPhoto: p.photo || ''
+  };
+}
+
+// --- SOURCE 1 : SÉANCES DE PRÉPA VALIDÉES ----------------------------------
+// Le kilométrage est VOLONTAIREMENT absent (règle produit) : le feed montre
+// qu'on a bossé, pas combien on court plus vite que la voisine.
+function _feedSrcTraining(scope, since) {
+  return (state.trainingCompletions || [])
+    .filter(c => c && !c.deletedAt && scope.has(c.playerId))
+    .map(c => {
+      const p = scope.get(c.playerId);
+      const ts = c.dateCompleted
+        || (c.datePlanned ? Date.parse(String(c.datePlanned).slice(0, 10) + 'T12:00:00') : 0);
+      const lvl = FEED_TRAINING_LEVELS[c.contractLevel] || FEED_TRAINING_LEVELS.min;
+      return Object.assign({
+        id: 'af:train:' + c.id,
+        type: 'training_validated',
+        ts: ts,
+        icon: '🏋️',
+        text: 'a validé sa séance de prépa',
+        meta: lvl,
+        photoUrl: c.squadPhotoUrl || c.postPhotoUrl || ''
+      }, _feedActorFields(p));
+    })
+    .filter(e => e.ts >= since && _feedInSeason(e.ts));
+}
+
+// --- SOURCE 2 : PREUVES DE PINTADE RÉUSSIES ---------------------------------
+// `invalidatedBy` exclut la preuve rejetée APRÈS COUP par le coach (v.119) :
+// c'est exactement ce qu'une ligne d'événement figée en base n'aurait pas su
+// faire.
+function _feedSrcPintade(scope, since) {
+  return (state.pintadeRequests || [])
+    .filter(q => q && !q.deletedAt && q.status === 'ok' && !q.invalidatedBy && scope.has(q.holderId))
+    .map(q => {
+      const p = scope.get(q.holderId);
+      const ts = q.resolvedAt || q.updatedAt || 0;
+      return Object.assign({
+        id: 'af:pintade:' + q.id,
+        type: 'pintade_proof_ok',
+        ts: ts,
+        icon: '🕊',
+        text: 'a prouvé qu\'elle avait la pintade',
+        meta: _feedHourLabel(ts),
+        photoUrl: q.photoUrl || ''
+      }, _feedActorFields(p));
+    })
+    .filter(e => e.ts >= since && _feedInSeason(e.ts));
+}
+function _feedHourLabel(ts) {
+  if (!ts) return '';
+  try {
+    const d = new Date(ts);
+    return String(d.getHours()).padStart(2, '0') + 'h' + String(d.getMinutes()).padStart(2, '0');
+  } catch (e) { return ''; }
+}
+
+// --- SOURCE 3 : DÉFIS — PARTICIPATION, RECORD PERSO, RECORD ÉQUIPE ----------
+// Trois types d'événements tirés du MÊME gisement : l'historique de tentatives
+// (`c.series`). Les défis en mode `single` n'y entrent pas : leur score est un
+// nombre sans horodatage, et un feed trié par date ne peut rien faire d'un
+// événement sans date (même limite assumée que les RSVP d'avant _rsvpStamp).
+// Les défis `autoCount` non plus : personne ne les « fait », ils se comptent.
+//
+// La PARTICIPATION est groupée par (défi, joueuse, JOUR) : dix séries d'affilée
+// un mardi soir, c'est une participation — pas dix lignes qui noient le mur.
+function _feedSrcChallenges(scope, since) {
+  const challenges = (typeof currentSeasonChallenges === 'function') ? currentSeasonChallenges() : (state.challenges || []);
+  const out = [];
+  (challenges || []).forEach(c => {
+    if (!c || c.autoCount) return;
+    if (!(c.mode === 'series' || c.mode === 'timed' || c.mode === 'countdown_score')) return;
+    const field = c.mode === 'timed' ? 'durationMs' : 'made';
+    const lower = !!c.lowerIsBetter;
+    const title = (c.title || 'un défi').trim();
+    const fmt = (v) => (c.mode === 'timed' && typeof _fmtChronoMs === 'function') ? _fmtChronoMs(v) : String(v);
+    // Toutes les tentatives du défi, toutes joueuses confondues, dans l'ordre
+    // chronologique : c'est cet ordre-là qui décide qui a « battu le record ».
+    const all = [];
+    Object.keys(c.series || {}).forEach(pid => {
+      if (!scope.has(pid)) return;
+      ((c.series[pid] || []) || []).forEach(s => {
+        if (!s || s.deletedAt) return;
+        const v = Number(s[field]);
+        if (!Number.isFinite(v) || v <= 0) return;
+        all.push({ pid, id: s.id, ts: s.createdAt || 0, value: v });
+      });
+    });
+    all.sort((a, b) => (a.ts || 0) - (b.ts || 0) || String(a.id).localeCompare(String(b.id)));
+
+    const bestBy = {};      // meilleure valeur de chaque joueuse, au fil de l'eau
+    let teamBest = null;    // meilleure valeur de l'équipe, au fil de l'eau
+    const days = {};        // participation : une entrée par (joueuse, jour)
+    all.forEach(a => {
+      const p = scope.get(a.pid);
+      const better = (ref) => ref == null ? false : (lower ? a.value < ref : a.value > ref);
+      // RECORD PERSO — il faut un précédent : la toute première tentative d'une
+      // joueuse n'est pas un record, c'est un début.
+      if (better(bestBy[a.pid])) {
+        out.push(Object.assign({
+          id: 'af:pr:' + c.id + ':' + a.id,
+          type: 'personal_record',
+          ts: a.ts,
+          icon: '🏅',
+          text: 'a battu son record sur « ' + title + ' »',
+          meta: fmt(bestBy[a.pid]) + ' → ' + fmt(a.value),
+          photoUrl: ''
+        }, _feedActorFields(p)));
+      }
+      // RECORD ÉQUIPE — même règle : il faut une marque à battre.
+      if (better(teamBest)) {
+        out.push(Object.assign({
+          id: 'af:tr:' + c.id + ':' + a.id,
+          type: 'team_record',
+          ts: a.ts,
+          icon: '🏆',
+          text: 'signe un nouveau record ÉQUIPE sur « ' + title + ' »',
+          meta: fmt(teamBest) + ' → ' + fmt(a.value),
+          photoUrl: ''
+        }, _feedActorFields(p)));
+      }
+      if (bestBy[a.pid] == null || better(bestBy[a.pid])) bestBy[a.pid] = a.value;
+      if (teamBest == null || better(teamBest)) teamBest = a.value;
+
+      const day = a.ts ? isoDate(new Date(a.ts)) : '';
+      if (!day) return;
+      const k = a.pid + '|' + day;
+      if (!days[k]) days[k] = { pid: a.pid, day, ts: a.ts, n: 0 };
+      days[k].n++;
+      days[k].ts = Math.max(days[k].ts, a.ts);   // la ligne est datée de la DERNIÈRE tentative
+    });
+    Object.values(days).forEach(d => {
+      const p = scope.get(d.pid);
+      out.push(Object.assign({
+        id: 'af:chall:' + c.id + ':' + d.pid + ':' + d.day,
+        type: 'challenge_participated',
+        ts: d.ts,
+        icon: '🎯',
+        text: 'a fait le défi « ' + title + ' »',
+        meta: d.n > 1 ? d.n + ' tentatives' : '1 tentative',
+        photoUrl: ''
+      }, _feedActorFields(p)));
+    });
+  });
+  return out.filter(e => e.ts >= since && _feedInSeason(e.ts));
+}
+
+// --- SOURCE 4 : MENUS DE L'ARDOISE RÉGLÉS ------------------------------------
+// Une photo REFUSÉE renvoie la dette à 'in_progress' : elle sort donc du feed
+// toute seule, sans rien à défaire.
+function _feedSrcArdoise(scope, since) {
+  const doneStatuses = (typeof ARDOISE_DONE_STATUSES !== 'undefined')
+    ? ARDOISE_DONE_STATUSES : ['done_validated', 'done_at_training'];
+  return (state.ardoiseAssignments || [])
+    .filter(a => a && !a.deletedAt && doneStatuses.includes(a.status) && scope.has(a.playerId))
+    .map(a => {
+      const p = scope.get(a.playerId);
+      const menu = (a.menuId && typeof ardoiseMenuById === 'function') ? ardoiseMenuById(a.menuId) : null;
+      const lvl = (menu && typeof ardoiseLevelMeta === 'function') ? ardoiseLevelMeta(menu.level) : null;
+      const ts = a.validatedAt || a.updatedAt || 0;
+      return Object.assign({
+        id: 'af:ardoise:' + a.id,
+        type: 'ardoise_done',
+        ts: ts,
+        icon: '🍽',
+        text: 'a fini son menu' + (menu ? ' ' + ((lvl && lvl.icon) || '') + ' ' + menu.name : ''),
+        meta: a.status === 'done_at_training' ? 'à l\'entraînement' : 'preuve validée',
+        // La photo n'existe que sur le chemin « à la maison ».
+        photoUrl: a.status === 'done_validated' ? (a.proofPhotoUrl || '') : ''
+      }, _feedActorFields(p));
+    })
+    .filter(e => e.ts >= since && _feedInSeason(e.ts));
+}
+
+// --- SOURCE 5 : ANNIVERSAIRE DU JOUR ----------------------------------------
+// Réutilise getUpcomingBirthdays() de la v.94 (pure, testable) avec daysAhead=0.
+// Le coach y a sa place : c'est la vie du groupe, pas le suivi de l'effectif.
+// Rien à voir avec les MOTS d'anniversaire, qui restent une surprise gérée par
+// leur propre écran — ici on annonce seulement la date.
+function _feedSrcBirthdays(scope, since) {
+  if (typeof getUpcomingBirthdays !== 'function' || typeof _clubPeopleWithDob !== 'function') return [];
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const ts = today.getTime();
+  if (ts < since) return [];
+  return getUpcomingBirthdays(_clubPeopleWithDob(), 0)
+    .filter(b => b.daysUntil === 0 && (b.kind === 'coach' || scope.has(b.id)))
+    .map(b => {
+      const p = b.kind === 'player' ? scope.get(b.id) : null;
+      return {
+        id: 'af:bday:' + b.id + ':' + b.nextBirthdayYear,
+        type: 'birthday_today',
+        ts: ts,
+        actorId: b.id,
+        actorLabel: p ? ((p.num ? '#' + p.num + ' ' : '') + (p.name || '')) : (b.name || ''),
+        actorPhoto: (p && p.photo) || '',
+        icon: '🎂',
+        text: 'fête son anniversaire aujourd\'hui',
+        meta: b.turningAge + ' ans',
+        photoUrl: ''
+      };
+    });
+}
+
+// --- SOURCE 6 : GROS LOT RÉCOLTÉ À LA BANQUE --------------------------------
+// Cf. la banque de points (v.126) et la colonne `last_claimed_amount`
+// (migration 20260816_002). Seule la DERNIÈRE récolte de chaque joueuse est
+// dérivable : le repère est UNE ligne par (joueuse, saison), pas un journal.
+// Une grosse récolte de mardi disparaît donc du mur si elle en refait une petite
+// jeudi — c'est écrit dans l'en-tête de la migration, et c'est le bon prix à
+// payer pour ne pas ajouter une table de journal à un mur qui s'efface à 60 j.
+//
+// Seuil : les petites récoltes quotidiennes n'ont rien à faire sur le mur, sans
+// quoi il ne parlerait plus que de ça.
+function _feedSrcPoints(scope, since) {
+  return (state.pointsHarvests || [])
+    .filter(h => h && !h.deletedAt && scope.has(h.playerId)
+      && Number(h.lastClaimedAmount) >= FEED_BIG_HARVEST && h.lastClaimedAt)
+    .map(h => {
+      const p = scope.get(h.playerId);
+      const amount = Math.round(Number(h.lastClaimedAmount));
+      return Object.assign({
+        // L'horodatage est DANS l'id : une nouvelle récolte est un nouvel
+        // événement (et les réactions restent sur l'ancien, qui sortira du mur).
+        id: 'af:points:' + h.playerId + ':' + h.lastClaimedAt,
+        type: 'points_claimed_big',
+        ts: h.lastClaimedAt,
+        icon: '🎁',
+        text: 'a récolté ' + amount + ' pts d\'un coup',
+        meta: 'banque vidée',
+        photoUrl: ''
+      }, _feedActorFields(p));
+    })
+    .filter(e => e.ts >= since && _feedInSeason(e.ts));
+}
+
+// --- LA PORTE UNIQUE --------------------------------------------------------
+// Chaque source est isolée dans son propre try : une source qui casse (donnée
+// exotique, feature pas encore migrée) ne doit pas emporter le mur entier —
+// c'est exactement le mode de panne corrigé sur notifFeed() en v.80.
+function pbFeedEvents(opts) {
+  const o = opts || {};
+  const since = Number.isFinite(o.since) ? o.since : _feedWindowStart();
+  const scope = o.scope || _feedPlayerScope();
+  const out = [];
+  const run = (fn) => {
+    try {
+      (fn(scope, since) || []).forEach(e => {
+        if (!e || !e.id || !e.ts) return;         // un événement sans date n'a pas de place dans un feed
+        if (e.ts < since) return;
+        out.push(e);
+      });
+    } catch (err) { console.warn('[feed] source:', err && err.message); }
+  };
+  run(_feedSrcTraining);
+  run(_feedSrcPintade);
+  run(_feedSrcChallenges);
+  run(_feedSrcArdoise);
+  run(_feedSrcBirthdays);
+  run(_feedSrcPoints);
+  (window._pbFeedExtraSources || []).forEach(fn => { if (typeof fn === 'function') run(fn); });
+  // Dédoublonnage par id : deux sources qui produiraient le même identifiant
+  // (une extension mal réglée) ne doivent pas doubler la ligne.
+  const seen = new Set();
+  const uniq = out.filter(e => (seen.has(e.id) ? false : (seen.add(e.id), true)));
+  uniq.sort((a, b) => (b.ts - a.ts) || String(a.id).localeCompare(String(b.id)));
+  return uniq.slice(0, FEED_MAX_EVENTS);
+}
+
+// --- RÉACTIONS ---------------------------------------------------------------
+// Id DÉTERMINISTE : retirer puis remettre un ❤️ réécrit LA MÊME ligne. C'est ce
+// qui autorise le soft-delete (obligatoire : une ligne « x… » hard-deletée est
+// repoussée par n'importe quel client au flush suivant) sans jamais violer la
+// contrainte d'unicité (event_id, actor_id, emoji).
+function feedReactionId(eventId, actorId, emoji) {
+  return 'xafr:' + eventId + ':' + actorId + ':' + emoji;
+}
+function feedReactionsOf(eventId) {
+  return (state.feedReactions || []).filter(r => r && !r.deletedAt && r.eventId === eventId);
+}
+// Compte par emoji + ce que l'utilisateur courant a déjà posé : { heart: {n, mine}, ... }
+function feedReactionTally(eventId) {
+  const me = _feedActor();
+  const tally = {};
+  FEED_EMOJIS.forEach(e => { tally[e.id] = { n: 0, mine: false, who: [] }; });
+  feedReactionsOf(eventId).forEach(r => {
+    const t = tally[r.emoji];
+    if (!t) return;
+    t.n++;
+    if (me && r.actorId === me.id) t.mine = true;
+    const p = (state.players || []).find(x => x && x.id === r.actorId);
+    t.who.push(p ? (p.name || 'Joueuse') : (r.actorKind === 'coach' ? 'Coach' : ''));
+  });
+  return tally;
+}
+function toggleFeedReaction(eventId, emoji, eventTs) {
+  const me = _feedActor();
+  if (!me || !feedIsVisible()) return;                       // stat'man : aucune écriture
+  if (!FEED_EMOJIS.some(e => e.id === emoji)) return;
+  const id = feedReactionId(eventId, me.id, emoji);
+  const now = Date.now();
+  state.feedReactions = state.feedReactions || [];
+  let row = state.feedReactions.find(r => r && r.id === id);
+  if (!row) {
+    row = {
+      id, eventId, actorId: me.id, actorKind: me.kind, emoji,
+      eventAt: Number(eventTs) || now,
+      seasonId: (typeof getActiveSeasonId === 'function') ? getActiveSeasonId() : null,
+      createdAt: now, updatedAt: now, deletedAt: null
+    };
+    state.feedReactions.push(row);
+  } else {
+    row.deletedAt = row.deletedAt ? null : now;
+    // L'horodatage de l'événement peut manquer sur une ligne écrite par une
+    // version antérieure : on le complète au passage (il sert au balayage 60 j).
+    if (!row.eventAt && Number(eventTs)) row.eventAt = Number(eventTs);
+    row.updatedAt = now;
+  }
+  persist();
+  try { if (window.PbSync && PbSync.flushNow) PbSync.flushNow(state).catch(() => {}); } catch (e) {}
+  render();
+}
+
+// --- BALAYAGE DES RÉACTIONS SORTIES DE LA FENÊTRE ---------------------------
+// Les ÉVÉNEMENTS n'ont rien à purger (ils sont dérivés et filtrés à 60 jours).
+// Restent leurs réactions, devenues inatteignables : on les soft-delete. JAMAIS
+// de hard delete — une ligne d'id « x… » supprimée en dur est repoussée par
+// n'importe quel client au flush suivant, et la purge tournerait en boucle.
+// Une fois par jour et par identité : ce balayage n'a aucune urgence.
+function feedPurgeOldReactions(force) {
+  try {
+    if (!feedIsVisible()) return 0;
+    const key = (typeof themeIdentityKey === 'function') ? themeIdentityKey() : 'default';
+    const map = load(K.feedPurged, {}) || {};
+    const now = Date.now();
+    if (!force && (now - (map[key] || 0)) < FEED_DAY_MS) return 0;
+    const cutoff = now - FEED_RETENTION_DAYS * FEED_DAY_MS;
+    let n = 0;
+    (state.feedReactions || []).forEach(r => {
+      if (!r || r.deletedAt || !r.eventAt) return;
+      if (r.eventAt >= cutoff) return;
+      r.deletedAt = now; r.updatedAt = now; n++;
+    });
+    map[key] = now;
+    save(K.feedPurged, map);
+    if (n) {
+      persist();
+      try { if (window.PbSync && PbSync.flushNow) PbSync.flushNow(state).catch(() => {}); } catch (e) {}
+    }
+    return n;
+  } catch (e) { return 0; }
+}
+
+// --- FILIGRANE « DÉJÀ VU » ---------------------------------------------------
+// Même posture que pb8_notif_seen : un filigrane LOCAL par identité, aucune
+// table. Le compteur « N nouvelles » se lit contre un INSTANTANÉ pris une fois
+// par session — sinon le premier rendu remettrait le compteur à zéro avant même
+// que la joueuse ait eu le temps de le lire.
+function getFeedSeenAt() {
+  try { return (load(K.feedSeen, {}) || {})[themeIdentityKey()] || 0; } catch (e) { return 0; }
+}
+function setFeedSeenAt(ts) {
+  try {
+    const m = load(K.feedSeen, {}) || {};
+    m[themeIdentityKey()] = ts || Date.now();
+    save(K.feedSeen, m);
+  } catch (e) {}
+}
+function feedSeenSnapshot() {
+  if (window._pbFeedSeenAt == null) window._pbFeedSeenAt = getFeedSeenAt();
+  return window._pbFeedSeenAt;
+}
+
+// ------------------------------------------------------------
+// RENDU
+// ------------------------------------------------------------
+function _feedRelTime(ts) {
+  const diff = Date.now() - (ts || 0);
+  if (diff < 60000) return 'à l\'instant';
+  const min = Math.floor(diff / 60000);
+  if (min < 60) return 'il y a ' + min + ' min';
+  const h = Math.floor(min / 60);
+  if (h < 24) return 'il y a ' + h + ' h';
+  const d = Math.floor(h / 24);
+  if (d === 1) return 'hier';
+  if (d < 7) return 'il y a ' + d + ' jours';
+  const w = Math.floor(d / 7);
+  if (w < 5) return 'il y a ' + w + ' sem.';
+  const mo = Math.floor(d / 30);
+  return 'il y a ' + mo + ' mois';
+}
+function _feedAvatar(ev) {
+  if (ev.actorPhoto) {
+    return `<img class="feed-avatar" src="${esc(ev.actorPhoto)}" alt="" loading="lazy" decoding="async">`;
+  }
+  const initial = esc(String(ev.actorLabel || '?').replace(/^#\d+\s*/, '').charAt(0).toUpperCase() || '?');
+  return `<div class="feed-avatar feed-avatar-fallback">${initial}</div>`;
+}
+function _feedReactionBar(ev) {
+  const tally = feedReactionTally(ev.id);
+  const canReact = !!_feedActor();
+  return `
+    <div class="feed-reactions">
+      ${FEED_EMOJIS.map(e => {
+        const t = tally[e.id] || { n: 0, mine: false, who: [] };
+        const who = t.who.filter(Boolean).slice(0, 6).join(', ');
+        return `<button class="feed-react ${t.mine ? 'is-mine' : ''}${t.n ? '' : ' is-empty'}"
+          ${canReact ? '' : 'disabled'}
+          aria-pressed="${t.mine ? 'true' : 'false'}"
+          aria-label="${esc(e.label)}${t.n ? ' · ' + t.n : ''}"
+          title="${esc(who || e.label)}"
+          onclick="toggleFeedReaction('${esc(ev.id)}','${e.id}',${Number(ev.ts) || 0})"
+        ><span class="feed-react-emoji">${e.char}</span>${t.n ? `<span class="feed-react-n">${t.n}</span>` : ''}</button>`;
+      }).join('')}
+    </div>`;
+}
+function _feedItemHtml(ev) {
+  return `
+    <article class="feed-item">
+      <div class="feed-item-head">
+        ${_feedAvatar(ev)}
+        <div class="feed-item-main">
+          <div class="feed-item-line">
+            <span class="feed-item-icon">${ev.icon || '•'}</span>
+            <span class="feed-item-who">${esc(ev.actorLabel || '')}</span>
+            <span class="feed-item-text">${esc(ev.text || '')}</span>
+          </div>
+          <div class="feed-item-meta">${_feedRelTime(ev.ts)}${ev.meta ? ' · ' + esc(ev.meta) : ''}</div>
+        </div>
+      </div>
+      ${ev.photoUrl ? `
+        <button class="feed-photo-btn" onclick="viewImage('${esc(ev.photoUrl)}')" aria-label="Agrandir la photo">
+          <img class="feed-photo" src="${esc(ev.photoUrl)}" alt="" loading="lazy" decoding="async">
+        </button>` : ''}
+      ${_feedReactionBar(ev)}
+    </article>`;
+}
+function feedShowMore() {
+  state._feedLimit = (state._feedLimit || FEED_PAGE_SIZE) + FEED_PAGE_STEP;
+  render();
+}
+// Section d'accueil, IDENTIQUE pour la joueuse et le coach (spec). Muette pour
+// le stat'man. Un mur VIDE s'affiche quand même, avec son explication : c'est le
+// seul point d'entrée de la feature, et le faire disparaître au premier jour
+// creux la rendrait invisible pour toujours (leçon des v.109/v.116).
+function renderActivityFeed() {
+  if (!feedIsVisible()) return '';
+  let events = [];
+  try { events = pbFeedEvents(); } catch (e) { console.warn('[feed]', e && e.message); return ''; }
+  const seen = feedSeenSnapshot();
+  const fresh = events.filter(e => e.ts > seen).length;
+  // Le filigrane avance jusqu'au plus récent événement DÉJÀ produit, pas jusqu'à
+  // « maintenant » : un événement qui arrivera dans dix minutes doit encore
+  // compter comme neuf au prochain démarrage.
+  if (events.length) {
+    const newest = events[0].ts;
+    if (newest > getFeedSeenAt()) setTimeout(() => { try { setFeedSeenAt(newest); } catch (e) {} }, 0);
+  }
+  const limit = state._feedLimit || FEED_PAGE_SIZE;
+  const shown = events.slice(0, limit);
+  return `
+    <div class="section-header">
+      <div>
+        <div class="eyebrow">${fresh ? fresh + ' nouvelle' + (fresh > 1 ? 's' : '') + ' activité' + (fresh > 1 ? 's' : '') : 'Ces dernières semaines'}</div>
+        <h2 class="display-md mt-2">📰 Vie du groupe</h2>
+      </div>
+    </div>
+    <div class="feed-wrap">
+      ${!events.length ? `
+        <div class="feed-empty">
+          <div class="feed-empty-icon">📰</div>
+          <div class="feed-empty-title">Le mur est encore vide</div>
+          <div class="feed-empty-sub">Séances de prépa validées, défis relevés, records battus, menus de l'Ardoise réglés : tout ça atterrit ici.</div>
+        </div>
+      ` : shown.map(_feedItemHtml).join('')}
+      ${events.length > shown.length ? `
+        <button class="btn btn-secondary btn-block feed-more" onclick="feedShowMore()">
+          Voir plus · ${events.length - shown.length} de plus
+        </button>` : ''}
+    </div>`;
 }
 
 // ============================================================
@@ -45267,6 +46027,12 @@ function _initPlayersSync() {
         // PHASE 3 : migration one-shot des ateliers/rotations legacy (ancien
         // format global plan.workshop_rotations, PR #36) → rattachés au 1er exo.
         try { _migrateLegacyWorkshopRotations(); } catch(e) { console.warn('[migration] workshop rotations:', e.message); }
+        // FEED DU GROUPE : balayage des RÉACTIONS dont l'événement est sorti de
+        // la fenêtre de 60 jours. Les événements, eux, n'ont rien à purger — ils
+        // sont dérivés. APRÈS fetchAll : purger avant d'avoir lu le serveur
+        // reviendrait à soft-deleter sur la foi d'un localStorage périmé.
+        // Débrayé une fois par jour et par identité (cf. feedPurgeOldReactions).
+        try { feedPurgeOldReactions(); } catch (e) { console.warn('[feed] purge:', e && e.message); }
         persist();
         render();
         // CHANTIER B : à la 1re sync complète, si le coach a des entraînements
@@ -46975,7 +47741,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-15.126';
+const APP_VERSION = '2026-08-16.127';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
