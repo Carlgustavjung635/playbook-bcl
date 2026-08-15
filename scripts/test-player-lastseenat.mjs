@@ -93,10 +93,12 @@ console.log('SCÉNARIO 5 — _lastSeenBadge : formatage (non-régression)');
   const { api } = makeEnv();
   const b = api._lastSeenBadge;
   const now = Date.now();
+  // Le label porte l'heure à la seconde (voir test-player-lastseen-exact-time.mjs
+  // pour les formats exacts) ; ici on ne vérifie que le couple couleur / forme.
   t('null → « jamais vue » rouge', () => { const r = b(null); assert.strictEqual(r.label, 'jamais vue'); assert.ok(/red/.test(r.color)); });
-  t('< 24h → vert « vue aujourd\'hui »', () => { const r = b(now - 2 * 3600000); assert.ok(/green/.test(r.color)); assert.strictEqual(r.label, "vue aujourd'hui"); });
-  t('2 jours → orange « il y a 2j »', () => { const r = b(now - 2 * 24 * 3600000); assert.ok(/orange/.test(r.color)); assert.strictEqual(r.label, 'vue il y a 2j'); });
-  t('10 jours → rouge « il y a 1 sem »', () => { const r = b(now - 10 * 24 * 3600000); assert.ok(/red/.test(r.color)); assert.ok(/sem/.test(r.label)); });
+  t('< 24h → vert + heure à la seconde', () => { const r = b(now - 2 * 3600000); assert.ok(/green/.test(r.color)); assert.ok(/\d{2}:\d{2}:\d{2}$/.test(r.label), r.label); });
+  t('2 jours → orange + jour nommé (ou « hier ») + heure', () => { const r = b(now - 2 * 24 * 3600000); assert.ok(/orange/.test(r.color)); assert.ok(/^[a-zé]+ \d{2}:\d{2}:\d{2}$/.test(r.label), r.label); });
+  t('10 jours → rouge + date courte « DD/MM à HH:mm:ss »', () => { const r = b(now - 10 * 24 * 3600000); assert.ok(/red/.test(r.color)); assert.ok(/^\d{2}\/\d{2} à \d{2}:\d{2}:\d{2}$/.test(r.label), r.label); });
 }
 
 console.log('SCÉNARIO 6 — câblage (statique)');

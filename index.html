@@ -26887,7 +26887,7 @@ function openPlayerSeasonPanel(playerId) {
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <div class="modal-body">
-      <div style="font-size:10px;font-family:'JetBrains Mono';color:${ls.color};margin-bottom:12px">${ls.dot} ${ls.label}</div>
+      <div style="font-size:10px;font-family:'JetBrains Mono';color:${ls.color};margin-bottom:12px"${ls.exact ? ` title="Dernière connexion : ${ls.exact}"` : ''}>${ls.dot} ${ls.exact ? 'Vue ' : ''}${ls.label}</div>
 
       ${link && !readOnly && isMultiSquad() ? `
         <div class="eyebrow-muted mb-2">Équipe</div>
@@ -46358,21 +46358,29 @@ function _ensureLastSeenForegroundTouch() {
 
 // Badge "dernière connexion" pour l'effectif coach.
 // Vert < 24h · orange < 7j · rouge >= 7j ou jamais (spec).
+// Le label porte l'heure PRÉCISE (HH:MM:SS) : « vue il y a 5j » ne disait pas à
+// quelle heure la joueuse était passée. Le repère de date se resserre avec
+// l'ancienneté (heure seule aujourd'hui → jour + heure dans la semaine → date
+// courte au-delà) pour tenir dans la ligne d'effectif, déjà chargée de badges.
+// `exact` (date COMPLÈTE avec l'année) reste le tooltip.
 function _lastSeenBadge(ms) {
   if (!ms) return { label: 'jamais vue', color: 'var(--red)', dot: '●', exact: '' };
   const hours = (Date.now() - ms) / 3600000;
-  const days = Math.floor(hours / 24);
   const color = hours < 24 ? 'var(--green)' : (hours < 24 * 7 ? 'var(--orange)' : 'var(--red)');
-  let label;
-  if (days <= 0) label = "vue aujourd'hui";
-  else if (days === 1) label = 'vue hier';
-  else if (days < 7) label = 'vue il y a ' + days + 'j';
-  else if (days < 30) label = 'vue il y a ' + Math.floor(days / 7) + ' sem';
-  else label = 'vue il y a ' + Math.floor(days / 30) + ' mois';
-  // Date + heure exactes (FR, DD/MM/YYYY à HH:mm) pour le tooltip (survol / long press).
   const d = new Date(ms);
   const z = n => String(n).padStart(2, '0');
-  const exact = z(d.getDate()) + '/' + z(d.getMonth() + 1) + '/' + d.getFullYear() + ' à ' + z(d.getHours()) + ':' + z(d.getMinutes());
+  const hms = z(d.getHours()) + ':' + z(d.getMinutes()) + ':' + z(d.getSeconds());
+  // Écart en jours de CALENDRIER (minuit à minuit), pas en heures écoulées : une
+  // connexion d'hier 23h50 relue à 00h10 doit dire « hier », pas « aujourd'hui ».
+  const midnight = t => { const x = new Date(t); x.setHours(0, 0, 0, 0); return x.getTime(); };
+  const days = Math.round((midnight(Date.now()) - midnight(ms)) / 86400000);
+  const JOURS = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
+  let label;
+  if (days <= 0) label = hms;
+  else if (days === 1) label = 'hier ' + hms;
+  else if (days < 7) label = JOURS[d.getDay()] + ' ' + hms;
+  else label = z(d.getDate()) + '/' + z(d.getMonth() + 1) + ' à ' + hms;
+  const exact = z(d.getDate()) + '/' + z(d.getMonth() + 1) + '/' + d.getFullYear() + ' à ' + hms;
   return { label, color, dot: '●', exact };
 }
 
@@ -48164,7 +48172,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-16.131';
+const APP_VERSION = '2026-08-16.132';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
