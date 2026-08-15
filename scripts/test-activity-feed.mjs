@@ -185,15 +185,24 @@ function seedFullFeed(role, pid) {
       proofPhotoUrl: 'https://cdn/ardoise.jpg', seasonId: 's26' },
     { id: 'ard2', playerId: 'pA', menuId: 'm1', status: 'expired_penalized', updatedAt: ago(2), seasonId: 's26' } // négatif → JAMAIS
   ];
+  // Chronologie choisie pour produire UN record perso et UN record équipe, sur
+  // deux joueuses différentes : pB pose une marque d'équipe hors d'atteinte (90)
+  // avant tout le monde, pA se dépasse SOUS cette marque (record perso pur), pC
+  // finit par la battre (record équipe — sa ligne de record perso est alors
+  // absorbée, cf. le test du faux doublon).
   S.challenges = [{
     id: 'c1', title: 'Burpees', mode: 'series', scope: 'individual', lowerIsBetter: false,
     seasonId: 's26', scores: {},
     series: {
+      pB: [{ id: 'b1', made: 90, createdAt: ago(6) }],
       pA: [
         { id: 'a1', made: 42, createdAt: ago(5) },
-        { id: 'a2', made: 48, createdAt: ago(4) }    // record perso + record équipe
+        { id: 'a2', made: 48, createdAt: ago(4) }    // record PERSO (48 < 90)
       ],
-      pB: [{ id: 'b1', made: 30, createdAt: ago(6) }]
+      pC: [
+        { id: 'c1a', made: 50, createdAt: ago(3) },
+        { id: 'c2a', made: 95, createdAt: ago(2) }   // record ÉQUIPE (95 > 90)
+      ]
     }
   }];
   S.players.find(p => p.id === 'pC').dateNaissance = '2004-08-15';   // c'est aujourd'hui
@@ -381,6 +390,27 @@ t('la PREMIÈRE tentative n\'est pas un record (perso ni équipe)', () => {
   eq(byType(evs, 'challenge_participated').length, 1, 'la participation, elle, compte');
 });
 
+t('battre le record ÉQUIPE ne produit pas AUSSI une ligne de record perso', () => {
+  // Sinon : deux lignes jumelles (même joueuse, même défi, même « 42 → 48 »),
+  // qui se lisent comme un doublon — le mode de panne du flux de notifs (v.80).
+  seedFullFeed('player', 'pA');
+  const evs = ctx.pbFeedEvents();
+  // pC bat la marque de l'équipe (95 > 90) ET la sienne (95 > 50) : une seule
+  // ligne doit en sortir, la plus forte.
+  eq(byType(evs, 'team_record').filter(e => e.actorId === 'pC').length, 1, 'le record équipe doit rester');
+  eq(byType(evs, 'personal_record').filter(e => e.actorId === 'pC').length, 0,
+     'la ligne jumelle de record perso doit disparaître');
+  // Un record PUREMENT perso (sous la marque de l'équipe) reste, lui : pA.
+  eq(byType(evs, 'personal_record').filter(e => e.actorId === 'pA').length, 1, 'un vrai record perso doit rester');
+});
+
+t('un anniversaire du jour est daté « aujourd\'hui », pas « il y a 23 h »', () => {
+  seedFullFeed('player', 'pA');
+  const b = byType(ctx.pbFeedEvents(), 'birthday_today')[0];
+  eq(b.when, "aujourd'hui");
+  ok(/aujourd&#39;hui/.test(ctx.renderActivityFeed()), 'le rendu doit reprendre la date explicite');
+});
+
 t('record ÉQUIPE : attribué à celle qui bat la marque, pas à la première', () => {
   seed('player', 'pA');
   S.challenges = [{ id: 'c9', title: 'Tirs', mode: 'series', lowerIsBetter: false, seasonId: 's26',
@@ -397,7 +427,9 @@ t('record ÉQUIPE : attribué à celle qui bat la marque, pas à la première', 
 t('chrono (lowerIsBetter) : le record, c\'est le PLUS PETIT temps', () => {
   seed('player', 'pA');
   S.challenges = [{ id: 'c8', title: 'Navette', mode: 'timed', lowerIsBetter: true, seasonId: 's26',
-    series: { pA: [
+    series: {
+      pB: [{ id: 'zb', durationMs: 9000, createdAt: ago(6) }],   // marque d'équipe hors d'atteinte
+      pA: [
       { id: 'z1', durationMs: 13000, createdAt: ago(5) },
       { id: 'z2', durationMs: 15000, createdAt: ago(4) },   // plus lent → rien
       { id: 'z3', durationMs: 12000, createdAt: ago(3) }    // plus rapide → record

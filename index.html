@@ -25715,9 +25715,16 @@ function _feedSrcChallenges(scope, since) {
     all.forEach(a => {
       const p = scope.get(a.pid);
       const better = (ref) => ref == null ? false : (lower ? a.value < ref : a.value > ref);
+      // Battre le record de l'ÉQUIPE, c'est presque toujours battre le sien au
+      // passage : les deux lignes seraient jumelles (même joueuse, même défi,
+      // même « 42 → 48 », à la seconde près) et se liraient comme un doublon —
+      // le mode de panne du flux de notifs corrigé en v.80. On ne garde alors
+      // que la plus forte des deux : le record d'équipe DIT déjà qu'elle s'est
+      // dépassée.
+      const isTeamRecord = better(teamBest);
       // RECORD PERSO — il faut un précédent : la toute première tentative d'une
       // joueuse n'est pas un record, c'est un début.
-      if (better(bestBy[a.pid])) {
+      if (better(bestBy[a.pid]) && !isTeamRecord) {
         out.push(Object.assign({
           id: 'af:pr:' + c.id + ':' + a.id,
           type: 'personal_record',
@@ -25729,7 +25736,7 @@ function _feedSrcChallenges(scope, since) {
         }, _feedActorFields(p)));
       }
       // RECORD ÉQUIPE — même règle : il faut une marque à battre.
-      if (better(teamBest)) {
+      if (isTeamRecord) {
         out.push(Object.assign({
           id: 'af:tr:' + c.id + ':' + a.id,
           type: 'team_record',
@@ -25816,6 +25823,9 @@ function _feedSrcBirthdays(scope, since) {
         actorPhoto: (p && p.photo) || '',
         icon: '🎂',
         text: 'fête son anniversaire aujourd\'hui',
+        // L'événement est daté du DÉBUT du jour (pour l'ordre du mur), mais
+        // « il y a 23 h » sous un « aujourd'hui » se lit comme une erreur.
+        when: "aujourd'hui",
         meta: b.turningAge + ' ans',
         photoUrl: ''
       };
@@ -26045,7 +26055,7 @@ function _feedItemHtml(ev) {
             <span class="feed-item-who">${esc(ev.actorLabel || '')}</span>
             <span class="feed-item-text">${esc(ev.text || '')}</span>
           </div>
-          <div class="feed-item-meta">${_feedRelTime(ev.ts)}${ev.meta ? ' · ' + esc(ev.meta) : ''}</div>
+          <div class="feed-item-meta">${esc(ev.when || _feedRelTime(ev.ts))}${ev.meta ? ' · ' + esc(ev.meta) : ''}</div>
         </div>
       </div>
       ${ev.photoUrl ? `
@@ -47741,7 +47751,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-16.127';
+const APP_VERSION = '2026-08-16.128';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
