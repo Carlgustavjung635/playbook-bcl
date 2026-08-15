@@ -5748,6 +5748,11 @@ function _dumpTrainingCompletionRow(c) {
     edited_at: c.editedAt ? new Date(c.editedAt).toISOString() : null,
     coach_note: c.coachNote || null,
     coach_note_at: c.coachNoteAt ? new Date(c.coachNoteAt).toISOString() : null,
+    // SAISIE COACH RÉTROACTIVE (migration 20260815_002). Le booléen porte le
+    // FAIT et le texte l'AUTEUR : `created_by` seul serait ambigu, tout
+    // l'historique joueuse l'ayant à NULL (cf. en-tête de la migration).
+    created_by: c.createdBy || null,
+    created_on_behalf_by_coach: !!c.createdByCoach,
     deleted_at: c.deletedAt ? new Date(c.deletedAt).toISOString() : null,
     updated_at: c.updatedAt ? new Date(c.updatedAt).toISOString() : (c.createdAt ? new Date(c.createdAt).toISOString() : null)
   };
@@ -5871,6 +5876,9 @@ function _trainingCompletionFromRow(r) {
     editedAt: r.edited_at ? Date.parse(r.edited_at) : null,
     coachNote: r.coach_note || '',
     coachNoteAt: r.coach_note_at ? Date.parse(r.coach_note_at) : null,
+    // SAISIE COACH RÉTROACTIVE (migration 20260815_002).
+    createdBy: r.created_by || null,
+    createdByCoach: r.created_on_behalf_by_coach === true,
     createdAt: r.created_at ? Date.parse(r.created_at) : null,
     updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
     deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
@@ -25010,7 +25018,8 @@ function renderPlayerProgression(playerId, programId) {
         <div class="stat-tile"><div class="stat-tile-label">Distance</div><div class="stat-tile-value">${Math.round(km * 10) / 10}</div><div class="stat-tile-sub">km cumulés</div></div>
         <div class="stat-tile"><div class="stat-tile-label">Squad</div><div class="stat-tile-value">${mine.filter(c => c.squadTeammateId).length}</div><div class="stat-tile-sub">séances à deux</div></div>
       </div>
-      <button class="btn btn-secondary btn-block" onclick="openTrainingCoachNoteForPlayer('${esc(playerId)}','${esc(programId)}')" style="font-size:12px">📣 Envoyer un mot d'encouragement</button>
+      <button class="btn btn-secondary btn-block" onclick="openTrainingCoachNoteForPlayer('${esc(playerId)}','${esc(programId)}')" style="font-size:12px;margin-bottom:6px">📣 Envoyer un mot d'encouragement</button>
+      <button class="btn btn-secondary btn-block" onclick="openAddCompletionModal('${esc(programId)}','${esc(playerId)}')" style="font-size:12px">➕ Ajouter une séance oubliée</button>
     </div>`;
 }
 
@@ -25057,7 +25066,7 @@ function renderCompletionsTimeline(comps, opts) {
           <div style="font-size:12px;color:var(--ink-2);overflow-wrap:break-word">${esc((s && s.name) || 'Séance')}${fmt ? ` <span class="td-fmt-tag">${esc(fmt.label)}</span>` : ''}</div>
           <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px">${esc(day)} · ${lvlIcon} ${esc(TRAINING_LEVEL_LABEL[c.contractLevel] || '')}${esc(lateBadge)}</div>
           <div style="font-size:11px;color:var(--ink-3);margin-top:3px;overflow-wrap:break-word">
-            ${mate ? '👯 ' + esc(mate.name) + ' ' : ''}${Number.isFinite(c.runningDistanceKm) && c.runningDistanceKm > 0 ? '🏃 ' + c.runningDistanceKm + ' km ' : (fmt ? '<span style="opacity:.7">🏃 pas de distance</span> ' : '')}${rowBd.improvement ? '<span style="color:var(--green,#15803d)">📈 record </span>' : ''}${c.postMessage ? '💬 ' : ''}${c.editedAt ? '✎ corrigée ' : ''}${c.coachNote ? '📣 ' : ''}${_coachNotePending(c) ? '<span style="color:var(--orange)">✍ mot non envoyé</span> ' : ''}
+            ${mate ? '👯 ' + esc(mate.name) + ' ' : ''}${Number.isFinite(c.runningDistanceKm) && c.runningDistanceKm > 0 ? '🏃 ' + c.runningDistanceKm + ' km ' : (fmt ? '<span style="opacity:.7">🏃 pas de distance</span> ' : '')}${rowBd.improvement ? '<span style="color:var(--green,#15803d)">📈 record </span>' : ''}${c.postMessage ? '💬 ' : ''}${c.createdByCoach ? '👋 ajoutée par le coach ' : ''}${c.editedAt ? '✎ corrigée ' : ''}${c.coachNote ? '📣 ' : ''}${_coachNotePending(c) ? '<span style="color:var(--orange)">✍ mot non envoyé</span> ' : ''}
           </div>
           ${thumbs.length ? `<div class="td-thumbs">
             ${thumbs.map(t => `<img class="td-thumb" src="${esc(t.url)}" loading="lazy" alt="">`).join('')}
@@ -25098,6 +25107,10 @@ function openTrainingCompletionDetail(id) {
   let editor = c.updatedBy || '';
   const ec = (state.coaches || []).find(x => x.id === c.updatedBy);
   if (ec) editor = ec.name || editor;
+  // Auteur de la SAISIE (distinct de l'auteur de la dernière correction).
+  let creator = c.createdBy || '';
+  const cc = (state.coaches || []).find(x => x.id === c.createdBy);
+  if (cc) creator = cc.name || creator;
   // Ligne libellé/valeur. <dl>/<dt>/<dd> plutôt que des <div> : c'est bien une
   // liste de définitions, et la classe .td-kv l'empile sous 23em (sinon la colonne
   // de valeur tombe à ~90px et chaque date passe sur trois lignes).
@@ -25116,6 +25129,10 @@ function openTrainingCompletionDetail(id) {
       <button class="modal-close" onclick="_tdBack('${esc(c.programId)}')">✕</button>
     </div>
     <div class="modal-body">
+      ${c.createdByCoach ? `
+        <div style="padding:9px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:11px;color:var(--ink-2);line-height:1.5;margin-bottom:12px">
+          👋 <b>Séance ajoutée par le coach</b> — elle ne l'avait pas validée elle-même${creator ? ' · ' + esc(creator) : ''}.
+        </div>` : ''}
       <div style="text-align:center;padding:12px;background:var(--bg-3);border-radius:10px;margin-bottom:14px">
         <div style="font-family:'Anton';font-size:34px;color:var(--orange);line-height:1">${c.pointsTotal || 0}</div>
         <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">points</div>
@@ -25137,7 +25154,7 @@ function openTrainingCompletionDetail(id) {
       </div>
 
       ${line('Jour prévu', esc(formatDate(c.datePlanned, 'long')))}
-      ${line('Validée le', c.dateCompleted ? esc(new Date(c.dateCompleted).toLocaleString('fr-FR')) : '—')}
+      ${line(c.createdByCoach ? 'Enregistrée le' : 'Validée le', c.dateCompleted ? esc(new Date(c.dateCompleted).toLocaleString('fr-FR')) + (c.createdByCoach ? ' <span style="color:var(--ink-3)">· par toi</span>' : '') : '—')}
       ${line('Contrat', esc(TRAINING_LEVEL_LABEL[c.contractLevel] || c.contractLevel))}
       ${line('Squad', mate ? '👯 #' + mate.num + ' ' + esc(mate.name) : (c.squadTeammateId ? 'Coéquipière inconnue' : ''))}
       ${line('Distance', (Number.isFinite(c.runningDistanceKm) && c.runningDistanceKm > 0) ? '🏃 ' + c.runningDistanceKm + ' km' : (fmt ? '<span style="color:var(--ink-3)">aucune distance saisie</span>' : ''))}
@@ -25384,6 +25401,283 @@ function saveCompletionEdit(id) {
   persist(); _trainingFlush();
   try { showToast('✓ Séance corrigée · ' + c.pointsTotal + ' pts'); } catch (e2) {}
   openTrainingCompletionDetail(id);
+}
+
+// --- Saisie coach rétroactive -----------------------------------------------
+// « Elle a fait la séance, elle a oublié de la valider. » Jusqu'ici la fenêtre
+// de 48 h fermée, la séance était perdue : le coach pouvait corriger ou
+// supprimer une validation, jamais en créer une.
+//
+// POURQUOI LE COACH N'EST PAS SOUMIS À LA FENÊTRE DE 48 H : cette fenêtre est
+// un garde-fou d'HONNÊTETÉ côté joueuse (on ne remplit pas sa prépa d'août le
+// 30 septembre). Elle n'a aucun sens face à un coach, qui est justement
+// l'arbitre censé trancher « oui, elle l'a faite ». La saisie est donc ouverte
+// sur tout le programme écoulé — et tracée (created_by / created_on_behalf_by_coach).
+//
+// LES DEUX RÈGLES QUI, ELLES, RESTENT VALABLES POUR LE COACH :
+//   • unicité (session, joueuse, jour) — miroir de l'index partiel en base :
+//     une saisie coach ne peut jamais doubler la validation de la joueuse ;
+//   • le total est FIGÉ à l'écriture, comme partout ailleurs dans ce module.
+function _trainingCanAddCompletion(playerId) {
+  return !!(_trainingIsCoach() && playerId && _playerVisibleToUser(playerId));
+}
+
+// Les jours OÙ IL RESTE QUELQUE CHOSE À SAISIR pour cette joueuse sur cette
+// séance : occurrences prévues du programme, jusqu'à aujourd'hui inclus, dont
+// elle n'a pas déjà une validation vivante. Plus récent en tête (un oubli se
+// rattrape presque toujours sur les jours proches).
+//
+// BORNE HAUTE = AUJOURD'HUI, jamais p.endDate : proposer les mercredis de
+// septembre en août laisserait enregistrer une séance qui n'a pas eu lieu.
+function _tcaOpenDates(p, session, playerId) {
+  if (!p || !session) return [];
+  const today = isoDate(new Date());
+  const to = (p.endDate && p.endDate < today) ? p.endDate : today;
+  return _dateRangeForProgram(p.startDate, to, [session.dayOfWeek])
+    .filter(d => !_trainingCompletionFor(session.id, playerId, d))
+    .sort((a, b) => b.localeCompare(a));
+}
+
+function openAddCompletionModal(programId, playerId) {
+  if (!_trainingCanAddCompletion(playerId)) { try { showToast('🔒 Cette joueuse n\'est pas dans ton effectif'); } catch (e) {} return; }
+  const p = activeTrainingPrograms().find(x => x.id === programId);
+  if (!p) return;
+  const sessions = _trainingSessionsOf(programId);
+  const first = sessions[0] || null;
+  const dates = first ? _tcaOpenDates(p, first, playerId) : [];
+  state._trainingAdd = {
+    programId, playerId,
+    sessionId: first ? first.id : '',
+    datePlanned: dates[0] || '',
+    level: 'med',
+    squadTeammateId: '',
+    postOn: false, postMessage: '',
+    distanceKm: '', notes: '',
+    // Même contrat que la modale de correction : le total suit le recalcul tant
+    // que le coach n'a pas saisi une valeur à la main.
+    points: 0, pointsTouched: false
+  };
+  renderAddCompletionModal();
+}
+function _tca() { return state._trainingAdd; }
+function _tcaSet(k, v) {
+  const a = _tca(); if (!a) return;
+  a[k] = v;
+  // Changer de séance change la liste des jours saisissables : garder l'ancien
+  // jour afficherait une date qui n'appartient pas à cette séance (et l'insert
+  // la refuserait). On repositionne sur le jour ouvert le plus récent.
+  if (k === 'sessionId') {
+    const p = activeTrainingPrograms().find(x => x.id === a.programId);
+    const s = (state.trainingSessions || []).find(x => x.id === v);
+    const dates = _tcaOpenDates(p, s, a.playerId);
+    a.datePlanned = dates[0] || '';
+  }
+  renderAddCompletionModal();
+}
+function _tcaPoints(v) { const a = _tca(); if (!a) return; a.points = Math.max(0, Math.round(Number(v) || 0)); a.pointsTouched = true; renderAddCompletionModal(); }
+function _tcaAuto() { const a = _tca(); if (!a) return; a.pointsTouched = false; renderAddCompletionModal(); }
+
+// Barème appliqué à la saisie. Squad compté dès qu'une coéquipière est désignée,
+// post dès qu'il y a un message : exactement les règles de _tceComputed, pour
+// que `_trainingBreakdown` (qui reconstruit la décomposition depuis le total
+// figé) retombe sur ses pieds au lieu de ranger le bonus en « ajustement ».
+//
+// Le coach n'uploade pas de photo à la place de la joueuse : squad et post
+// reposent donc sur sa parole, comme la correction. C'est un override assumé,
+// et il est tracé.
+function _tcaComputed() {
+  const a = _tca(); if (!a) return { base: 0, total: 0, distance: 0, improvement: 0 };
+  const p = activeTrainingPrograms().find(x => x.id === a.programId);
+  const km = Number(a.distanceKm);
+  const hasKm = Number.isFinite(km) && km > 0;
+  return _computePoints({
+    level: a.level,
+    hasSquad: !!a.squadTeammateId,
+    hasPost: !!(a.postOn && (a.postMessage || '').trim()),
+    hasDistance: hasKm,
+    // Aucun excludeId : la ligne n'existe pas encore, il n'y a rien à exclure.
+    hasImprovement: !!_trainingIsImprovement(a.sessionId, a.playerId, a.datePlanned, km),
+    config: p ? p.scoringConfig : {}
+  });
+}
+
+function renderAddCompletionModal() {
+  const a = _tca(); if (!a) return;
+  const p = activeTrainingPrograms().find(x => x.id === a.programId);
+  const pl = (state.players || []).find(x => x.id === a.playerId);
+  if (!p || !pl) { state._trainingAdd = null; closeModal(); return; }
+  const sessions = _trainingSessionsOf(a.programId);
+  const s = sessions.find(x => x.id === a.sessionId) || null;
+  const cfg = _trainingConfig(p);
+  const dates = s ? _tcaOpenDates(p, s, a.playerId) : [];
+  const auto = _tcaComputed();
+  const shown = a.pointsTouched ? a.points : auto.total;
+  const mates = _trainingPoolFor(p).filter(x => x.id !== a.playerId);
+  const prevKm = (s && a.datePlanned) ? _trainingPrevDistanceKm(s.id, a.playerId, a.datePlanned) : null;
+  // La séance impose-t-elle une distance ? Sert seulement à orienter le coach :
+  // le champ reste saisissable partout (une joueuse peut avoir couru en plus).
+  const fmt = s ? _trainingRunFormat(s) : null;
+  const ready = !!(s && a.datePlanned);
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">${esc('#' + pl.num + ' ' + pl.name)} · ${esc(p.name || 'Prépa')}</div>
+        <div class="modal-title">➕ Ajouter une séance</div>
+      </div>
+      <button class="modal-close" onclick="state._trainingAdd=null;_tdBack('${esc(a.programId)}')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:11px;color:var(--ink-2);line-height:1.5;margin-bottom:14px">
+        👋 Pour une séance <b>qu'elle a faite mais oublié de valider</b>. Les points comptent immédiatement au classement, et elle verra que c'est toi qui l'as enregistrée.
+      </div>
+
+      ${sessions.length ? `
+        <div class="eyebrow-muted" style="margin-bottom:6px">Séance</div>
+        <select onchange="_tcaSet('sessionId',this.value)" style="width:100%;margin-bottom:14px">
+          ${sessions.map(x => `<option value="${esc(x.id)}" ${a.sessionId === x.id ? 'selected' : ''}>${esc((TRAINING_DAY_LABELS[x.dayOfWeek] || '').slice(0, 3))} · ${esc(x.name || 'Séance')}</option>`).join('')}
+        </select>
+
+        <div class="eyebrow-muted" style="margin-bottom:6px">Jour concerné</div>
+        ${dates.length ? `
+          <select onchange="_tcaSet('datePlanned',this.value)" style="width:100%;margin-bottom:4px">
+            ${dates.map(d => `<option value="${esc(d)}" ${a.datePlanned === d ? 'selected' : ''}>${esc(formatDate(d, 'long'))}</option>`).join('')}
+          </select>
+          <div style="font-size:10px;color:var(--ink-3);margin-bottom:14px;line-height:1.6">
+            Seuls les jours ${esc((TRAINING_DAY_LABELS[s ? s.dayOfWeek : 0] || '').toLowerCase())} déjà passés et <b>pas encore validés</b> par elle apparaissent ici.${fmt ? ' Format prévu : ' + esc(fmt.label) + '.' : ''}
+          </div>`
+        : `<div class="empty" style="margin-bottom:14px"><div class="empty-icon">✅</div><div class="empty-title">Rien à rattraper</div><div class="empty-desc">Elle a validé toutes les occurrences passées de cette séance.</div></div>`}
+      ` : `<div class="empty"><div class="empty-icon">📭</div><div class="empty-title">Aucune séance</div><div class="empty-desc">Ce programme n'a pas encore de séance.</div></div>`}
+
+      ${ready ? `
+        <div class="eyebrow-muted" style="margin-bottom:6px">Contrat réalisé</div>
+        <div class="segmented" style="margin-bottom:14px">
+          ${[['min', '🟢 Min'], ['med', '🟠 Med'], ['ultra', '🔴 Ultra']].map(([l, lab]) =>
+            `<button class="segmented-btn ${a.level === l ? 'active' : ''}" onclick="_tcaSet('level','${l}')">${lab}</button>`).join('')}
+        </div>
+
+        <div class="eyebrow-muted" style="margin-bottom:6px">👯 Squad <span style="color:var(--ink-3);text-transform:none">(×${cfg.squad_multiplier})</span></div>
+        <select onchange="_tcaSet('squadTeammateId',this.value)" style="width:100%;margin-bottom:4px">
+          <option value="">— Seule —</option>
+          ${mates.map(m => `<option value="${esc(m.id)}" ${a.squadTeammateId === m.id ? 'selected' : ''}>#${m.num} ${esc(m.name)}</option>`).join('')}
+        </select>
+        <div style="font-size:10px;color:var(--ink-3);margin-bottom:14px">Tu ne peux pas ajouter de photo à sa place — le multiplicateur s'applique sur ta parole.</div>
+
+        <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--bg-3);border-radius:8px;cursor:pointer;margin-bottom:${a.postOn ? '6px' : '14px'}">
+          <input type="checkbox" ${a.postOn ? 'checked' : ''} onchange="_tcaSet('postOn',this.checked)" style="width:20px;height:20px;flex:none">
+          <span style="flex:1;font-size:13px">📸 Elle a fait un post <span style="color:var(--ink-3)">(+${cfg.post_bonus})</span></span>
+        </label>
+        ${a.postOn ? `
+          <textarea rows="2" placeholder="Ce qu'elle a écrit (obligatoire pour le bonus)…" onchange="_tcaSet('postMessage',this.value)" style="margin-bottom:14px">${esc(a.postMessage)}</textarea>` : ''}
+
+        <div class="fld">
+          <label class="fld-label">🏃 Distance (km) <span style="color:var(--ink-3);text-transform:none;font-weight:400">(+${cfg.distance_bonus})</span></label>
+          <input type="number" min="0" step="0.1" value="${esc(String(a.distanceKm))}" placeholder="5.2" onchange="_tcaSet('distanceKm',this.value)">
+          <div style="font-size:10px;color:var(--ink-3);margin-top:3px;line-height:1.6">
+            ${prevKm !== null
+              ? `Son repère sur cette séance : <b>${prevKm} km</b> → <b>+${cfg.improvement_bonus}</b> au-dessus.${auto.improvement ? ' <span style="color:var(--green,#15803d)">📈 dépassé</span>' : ''}`
+              : 'Aucune séance antérieure de ce type avec distance : pas de bonus progression possible.'}
+          </div>
+        </div>
+
+        <div class="fld">
+          <label class="fld-label">📝 Notes (coach — privées)</label>
+          <textarea rows="2" placeholder="Ex : m'a envoyé sa capture Strava le soir même." onchange="_tcaSet('notes',this.value)">${esc(a.notes)}</textarea>
+        </div>
+
+        <div class="eyebrow-muted" style="margin:14px 0 6px">Points attribués</div>
+        <div style="border:1px solid var(--border-soft);border-radius:10px;padding:11px;background:var(--bg-3)">
+          <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+            <input type="number" min="0" step="1" value="${shown}" onchange="_tcaPoints(this.value)" style="flex:1;min-width:0;font-family:'Anton';font-size:18px;text-align:center">
+            <div style="font-size:11px;color:var(--ink-3);flex:none">pts</div>
+          </div>
+          <div style="font-size:10px;color:var(--ink-3);line-height:1.5">
+            Barème actuel : ${auto.base}${a.squadTeammateId ? ' × ' + cfg.squad_multiplier : ''}${(a.postOn && (a.postMessage || '').trim()) ? ' + ' + cfg.post_bonus : ''}${auto.distance ? ' + ' + auto.distance + ' (distance)' : ''}${auto.improvement ? ' + ' + auto.improvement + ' (progression)' : ''} = <b>${auto.total}</b> pts.
+            ${a.pointsTouched
+              ? ` Valeur forcée. <a href="javascript:void(0)" onclick="_tcaAuto()" style="color:var(--orange)">↺ revenir à ${auto.total}</a>`
+              : ' Suit le recalcul automatique.'}
+          </div>
+        </div>` : ''}
+    </div>
+    <div class="modal-footer" style="display:flex;gap:6px">
+      <button class="btn btn-secondary" onclick="state._trainingAdd=null;_tdBack('${esc(a.programId)}')">Annuler</button>
+      <button class="btn btn-primary" style="flex:1" onclick="saveNewCompletion()" ${ready ? '' : 'disabled'}>✓ Enregistrer${ready ? ' · ' + shown + ' pts' : ''}</button>
+    </div>
+  `);
+}
+
+// Insert. Mêmes invariants que `confirmTrainingCompletion` : base_points ET
+// points_total FIGÉS ici, jamais rejoués à la lecture.
+//
+// CE QUE CET INSERT NE FAIT PAS, VOLONTAIREMENT : recalculer les validations
+// SUIVANTES de la joueuse. Insérée au milieu de son historique, cette séance
+// devient rétrospectivement le repère de progression des suivantes — mais leurs
+// totaux sont figés et le restent. C'est la même non-rétroactivité que partout
+// ailleurs (cf. _trainingBreakdown) : on ne réécrit jamais un score déjà annoncé.
+function saveNewCompletion() {
+  const a = _tca(); if (!a) return;
+  if (!_trainingCanAddCompletion(a.playerId)) { try { showToast('🔒 Cette joueuse n\'est pas dans ton effectif'); } catch (e) {} return; }
+  const p = activeTrainingPrograms().find(x => x.id === a.programId);
+  const s = (state.trainingSessions || []).find(x => x.id === a.sessionId && !x.deletedAt);
+  if (!p || !s || !a.datePlanned) return;
+  // Une case cochée sans sa trace : on demande plutôt que d'enregistrer en
+  // silence un total plus bas que celui affiché (même posture que côté joueuse).
+  if (a.postOn && !(a.postMessage || '').trim()) {
+    try { alert('Post : écris ce qu\'elle a posté.\n\nDécoche « elle a fait un post » si elle n\'en a pas fait.'); } catch (e) {}
+    return;
+  }
+  // Anti-doublon — miroir de l'index unique partiel en base. Le cas n'est pas
+  // théorique : la joueuse peut avoir validé depuis un autre appareil pendant
+  // que la modale était ouverte.
+  if (_trainingCompletionFor(s.id, a.playerId, a.datePlanned)) {
+    try { showToast('✓ Elle a déjà une validation ce jour-là'); } catch (e) {}
+    state._trainingAdd = null; _tdBack(a.programId); return;
+  }
+  const auto = _tcaComputed();
+  const km = Number(a.distanceKm);
+  const now = Date.now();
+  const coachId = (state.auth && state.auth.coachId) || 'coach';
+  const c = {
+    id: uid(), programId: a.programId, sessionId: s.id, playerId: a.playerId,
+    datePlanned: a.datePlanned,
+    // `dateCompleted` = l'instant de la SAISIE, pas de la séance. C'est déjà le
+    // contrat de la colonne (un rattrapage joueuse à J+1 la pose à J+1) et
+    // `datePlanned` porte, lui, le jour de la séance.
+    dateCompleted: now,
+    contractLevel: a.level,
+    basePoints: auto.base,
+    squadTeammateId: a.squadTeammateId || null,
+    squadPhotoUrl: null, postPhotoUrl: null,   // le coach n'uploade pas à sa place
+    postMessage: (a.postOn && (a.postMessage || '').trim()) || null,
+    runningDistanceKm: (Number.isFinite(km) && km > 0) ? km : null,
+    pointsTotal: a.pointsTouched ? Math.max(0, Math.round(Number(a.points) || 0)) : auto.total,
+    notes: (a.notes || '').trim(),
+    // Traçabilité. `editedAt` reste NULL : la ligne n'a pas été CORRIGÉE, elle a
+    // été créée — sans quoi la joueuse lirait « le coach a corrigé cette
+    // validation » sur une séance qu'elle n'a jamais validée.
+    createdBy: coachId, createdByCoach: true,
+    updatedBy: coachId, editedAt: null,
+    createdAt: now, updatedAt: now, deletedAt: null
+  };
+  state.trainingCompletions = state.trainingCompletions || [];
+  state.trainingCompletions.unshift(c);
+  state._trainingAdd = null;
+  persist(); _trainingFlush();
+  try { showToast('✓ Séance ajoutée · +' + c.pointsTotal + ' pts'); } catch (e) {}
+  try { _trainingNotifyPlayerAdded(p, c); } catch (e) {}
+  openTrainingCompletionDetail(c.id);
+}
+
+// Elle doit l'apprendre autrement qu'en fouillant son programme. Le pendant dans
+// notifFeed() existe (source « prepa-mes-seances », dont le libellé bascule sur
+// createdByCoach) : une notif push sans entrée de feed serait un cul-de-sac.
+function _trainingNotifyPlayerAdded(p, c) {
+  let day = c.datePlanned || '';
+  try { day = formatDate(c.datePlanned, 'short'); } catch (e) {}
+  notifyPush(_pushPlayerKeys([c.playerId]), {
+    title: '👋 Séance ajoutée par ton coach',
+    body: (p && p.name ? p.name + ' · ' : '') + day + ' · +' + (c.pointsTotal || 0) + ' pts',
+    url: '/', tag: 'training-added-' + c.id, type: 'training_added_by_coach'
+  });
 }
 
 // SOFT-delete (jamais un hard delete : tout client qui a encore la ligne en
@@ -26060,8 +26354,8 @@ function renderTrainingSession() {
     <div class="modal-body">
       ${_trainingPreviewBanner()}
       ${done ? `
-        <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--green,#15803d);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:${done.coachNote || done.editedAt ? '8px' : '14px'}">
-          ✓ <b>Séance validée</b> — ${esc(_completionSummary(done))}
+        <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--green,#15803d);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:${done.coachNote || done.editedAt || done.createdByCoach ? '8px' : '14px'}">
+          ${done.createdByCoach ? '👋 <b>Séance enregistrée par ton coach</b>' : '✓ <b>Séance validée</b>'} — ${esc(_completionSummary(done))}
           ${(() => {
             // Détail du calcul, après coup : elle doit pouvoir vérifier que ses
             // bonus course lui ont bien été comptés, sans passer par le coach.
@@ -26076,11 +26370,15 @@ function renderTrainingSession() {
             <div style="font-family:'Anton';font-size:11px;text-transform:uppercase;margin-bottom:4px">📣 Un mot du coach</div>
             <div style="white-space:pre-wrap;overflow-wrap:break-word">${esc(done.coachNote)}</div>
           </div>` : ''}
+        ${done.createdByCoach ? `
+          <div style="padding:8px 12px;background:var(--bg-3);border-left:3px solid var(--ink-3);border-radius:6px;font-size:11px;color:var(--ink-3);margin-bottom:8px;line-height:1.5">
+            👋 Tu ne l'avais pas validée : ton coach l'a ajoutée pour toi le ${esc(formatDate(isoDate(new Date(done.dateCompleted || done.createdAt || Date.now())), 'short'))}. Les points sont bien à toi. Une erreur ? Dis-le-lui.
+          </div>` : ''}
         ${done.editedAt ? `
           <div style="padding:8px 12px;background:var(--bg-3);border-left:3px solid var(--ink-3);border-radius:6px;font-size:11px;color:var(--ink-3);margin-bottom:8px">
             ✎ Le coach a corrigé cette validation le ${esc(formatDate(isoDate(new Date(done.editedAt)), 'short'))}.
           </div>` : ''}
-        ${done.coachNote || done.editedAt ? '<div style="height:6px"></div>' : ''}` : isPreview ? `
+        ${done.coachNote || done.editedAt || done.createdByCoach ? '<div style="height:6px"></div>' : ''}` : isPreview ? `
         <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:12px;color:var(--ink-2);margin-bottom:14px">
           🔭 <b>Aperçu</b> — le programme démarre le ${esc(formatDate(p.startDate, 'long'))}. Découvre la séance dès maintenant ; tu pourras la valider le jour venu.
         </div>` : !stillValid ? `
@@ -41393,9 +41691,17 @@ function notifFeed(opts) {
       .forEach(c => {
         const p = (state.trainingPrograms || []).find(x => x.id === c.programId && !x.deletedAt);
         if (!p) return;
-        add('player', { id: 'trmine-' + c.id, ts: c.dateCompleted || c.createdAt || 0, oneShot: true, icon: '💪',
-          title: 'Séance validée', detail: (p.name || 'Prépa') + ' · ' + _completionSummary(c),
-          action: "openTrainingDashboard('" + p.id + "')" });
+        // Une séance saisie PAR LE COACH n'est pas « ta séance validée » : elle
+        // apparaît sans qu'elle ait rien fait dans l'app. Le libellé doit le
+        // dire, sinon la ligne se lit comme un bug (et c'est le pendant de feed
+        // du push `training_added_by_coach` — pas de push sans entrée).
+        add('player', { id: 'trmine-' + c.id, ts: c.dateCompleted || c.createdAt || 0, oneShot: true,
+          icon: c.createdByCoach ? '👋' : '💪',
+          title: c.createdByCoach ? 'Séance ajoutée par ton coach' : 'Séance validée',
+          detail: (p.name || 'Prépa') + ' · ' + _completionSummary(c),
+          action: c.createdByCoach
+            ? ("openTrainingSession('" + c.programId + "','" + c.sessionId + "','" + (c.datePlanned || '') + "')")
+            : ("openTrainingDashboard('" + p.id + "')") });
       });
   });
   // Retours du coach sur SES séances : mot d'encouragement, et correction d'une
@@ -42493,7 +42799,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-15.121';
+const APP_VERSION = '2026-08-15.122';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
