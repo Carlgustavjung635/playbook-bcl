@@ -24599,23 +24599,50 @@ function renderArdoisePlayerCard() {
     </div>`;
 }
 // --- ACCUEIL COACH -----------------------------------------------------------
-// Muette tant qu'il n'y a ni preuve à valider ni dette en circulation : l'accueil
-// coach est déjà chargé, une carte de plus doit se mériter.
+// TOUJOURS visible pour un coach — contrairement à la carte joueuse, qui elle ne
+// se montre qu'en cas de dette.
+//
+// Elle a d'abord été muette tant qu'il n'y avait ni preuve ni dette en
+// circulation, au nom d'un accueil coach déjà chargé. C'était un cul-de-sac :
+// au sortir de la migration, la table est VIDE, donc la carte se taisait, donc
+// le coach n'avait aucun chemin depuis son accueil vers l'écran où il crée son
+// premier menu — et sans menu, aucune dette ne peut naître, donc la carte ne
+// serait JAMAIS apparue. Un état vide qui supprime le seul point d'entrée d'une
+// feature se referme sur lui-même (même leçon que le Ressenti, cf. v.113).
+//
+// L'état vide n'est donc pas un repli, c'est une amorce : il dit quoi faire et
+// ouvre l'onglet où le faire.
 function renderArdoiseCoachCard() {
   if (!_ardIsCoach()) return '';
   const pending = ardoisePendingProofs().length;
   const live = (state.ardoiseAssignments || [])
     .filter(x => x && !x.deletedAt && ARDOISE_LIVE_STATUSES.includes(x.status) && _ardInSeason(x)).length;
-  if (!pending && !live) return '';
+  const menus = ardoiseDrawPool().length;
+  // Sans menu tirable, le seul geste utile est d'en écrire un : la carte y mène
+  // directement plutôt que de déposer le coach sur un onglet « dettes » vide.
+  const tab = (!menus && !pending && !live) ? 'menus' : 'debts';
+  let sub, tone;
+  if (pending) {
+    tone = 'var(--orange)';
+    sub = '📸 ' + pending + ' preuve' + (pending > 1 ? 's' : '') + ' à valider · '
+      + live + ' ardoise' + (live > 1 ? 's' : '') + ' en circulation';
+  } else if (live) {
+    tone = 'var(--ink-3)';
+    sub = live + ' ardoise' + (live > 1 ? 's' : '') + ' en circulation';
+  } else if (!menus) {
+    tone = 'var(--ink-3)';
+    sub = '🍳 aucun menu · compose ta carte';
+  } else {
+    tone = 'var(--ink-3)';
+    sub = menus + ' menu' + (menus > 1 ? 's' : '') + ' à la carte · rien en circulation';
+  }
   return `
     <div style="margin:0 18px 14px">
-      <div onclick="openArdoiseCoach()" style="cursor:pointer;display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:var(--radius);background:${pending ? 'rgba(255,210,125,0.10)' : 'var(--surface)'};border:1.5px solid ${pending ? 'var(--orange)' : 'var(--border-soft)'}">
+      <div onclick="openArdoiseCoach('${tab}')" style="cursor:pointer;display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:var(--radius);background:${pending ? 'rgba(255,210,125,0.10)' : 'var(--surface)'};border:1.5px solid ${pending ? 'var(--orange)' : 'var(--border-soft)'}">
         <div style="font-size:26px;flex:0 0 auto">🍽</div>
         <div style="flex:1;min-width:0">
           <div style="font-family:'Anton';font-size:15px;text-transform:uppercase;letter-spacing:0.02em">L'Ardoise</div>
-          <div style="font-size:11px;color:${pending ? 'var(--orange)' : 'var(--ink-3)'};font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-            ${pending ? '📸 ' + pending + ' preuve' + (pending > 1 ? 's' : '') + ' à valider · ' : ''}${live} ardoise${live > 1 ? 's' : ''} en circulation
-          </div>
+          <div style="font-size:11px;color:${tone};font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(sub)}</div>
         </div>
         <div style="flex:0 0 auto;color:var(--orange);font-family:'Anton';font-size:18px">→</div>
       </div>
@@ -47751,7 +47778,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-16.128';
+const APP_VERSION = '2026-08-16.129';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.

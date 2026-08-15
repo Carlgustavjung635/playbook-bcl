@@ -624,9 +624,60 @@ t('la carte d\'accueil joueuse annonce le nombre de dettes', () => {
   ok(/tire ton menu/i.test(h), 'et le geste attendu');
 });
 
-t('la carte coach est muette quand rien ne circule', () => {
+// La joueuse ne voit la section QUE si elle a une dette OUVERTE. On balaie les
+// deux familles de statuts plutôt qu'un seul cas : c'est la frontière exacte
+// entre « visible » et « disparue », et c'est elle qui doit être tenue.
+t('la carte joueuse apparaît pour CHACUN des 3 statuts ouverts', () => {
+  for (const st of ['pending_draw', 'in_progress', 'done_home']) {
+    seed('coach'); const a = ctx.ardoiseAssign('pA', 1)[0] || ctx.ardoiseAssignmentsOf('pA')[0];
+    a.status = st;
+    S.auth = { role: 'player', playerId: 'pA' };
+    ok(ctx.renderArdoisePlayerCard() !== '', 'visible en ' + st);
+  }
+});
+
+t('la carte joueuse DISPARAÎT dès que toutes ses dettes sont fermées', () => {
+  for (const st of ['done_validated', 'done_at_training', 'cancelled']) {
+    seed('coach'); ctx.ardoiseAssign('pA', 1);
+    const a = ctx.ardoiseAssignmentsOf('pA')[0];
+    a.status = st;
+    S.auth = { role: 'player', playerId: 'pA' };
+    eq(ctx.renderArdoisePlayerCard(), '', 'muette en ' + st);
+  }
+});
+
+// L'ancienne version se taisait quand rien ne circulait — au sortir de la
+// migration, ça privait le coach du SEUL chemin vers la création de son premier
+// menu, donc de toute dette, donc de tout affichage. Elle est désormais toujours
+// là, et son état vide amorce le geste utile.
+t('la carte coach est TOUJOURS visible, même base vide', () => {
   seed('coach');
-  eq(ctx.renderArdoiseCoachCard(), '', 'l\'accueil coach est déjà chargé');
+  S.ardoiseMenus = []; S.ardoiseAssignments = [];
+  const h = ctx.renderArdoiseCoachCard();
+  ok(h !== '', 'la carte existe sur une base fraîchement migrée');
+  ok(/aucun menu/i.test(h), 'et elle dit quoi faire');
+  ok(/openArdoiseCoach\('menus'\)/.test(h), 'et ouvre l\'onglet où le faire');
+});
+
+t('la carte coach annonce la carte prête quand des menus existent sans dette', () => {
+  seed('coach');
+  const h = ctx.renderArdoiseCoachCard();
+  ok(/3 menus à la carte/i.test(h), 'le vivier est chiffré, au pluriel correct');
+  ok(/rien en circulation/i.test(h), 'et l\'absence de dette est dite');
+});
+
+t('la carte coach garde la priorité aux preuves à valider', () => {
+  seed('coach'); const a = ctx.ardoiseAssign('pA', 1)[0] || ctx.ardoiseAssignmentsOf('pA')[0];
+  a.status = 'done_home';
+  S.auth = { role: 'coach', coachId: 'admin' };
+  const h = ctx.renderArdoiseCoachCard();
+  ok(/1 preuve à valider/.test(h), 'la preuve passe devant');
+  ok(/openArdoiseCoach\('debts'\)/.test(h), 'et mène aux dettes, pas aux menus');
+});
+
+t('la carte coach reste muette pour une joueuse', () => {
+  seed('player', 'pA');
+  eq(ctx.renderArdoiseCoachCard(), '', 'aucune fuite de l\'écran coach');
 });
 
 t('la carte menu affiche la dose, les points et le temps restant', () => {
