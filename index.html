@@ -680,6 +680,17 @@
     color: #ffd27d; white-space: nowrap;
   }
   .ard-item-note { font-size: 11px; color: #b9b3a1; line-height: 1.4; margin-top: 2px; }
+  /* « ▶ Lancer » d'un exo qui pointe vers un drill. Palette CRAIE en dur, comme
+     tout ce qui vit sur l'ardoise : la carte est une surface opaque et fixe
+     (un vrai décor, pas un voile posé sur le thème), donc ses couleurs ne
+     suivent pas --ink/--bg — elles suivent le tableau noir. */
+  .ard-item-drill {
+    display: inline-flex; align-items: center; gap: 5px; margin-top: 5px;
+    min-height: 32px; padding: 0 11px; border-radius: 999px; cursor: pointer;
+    font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: 0.04em;
+    background: rgba(255,210,125,0.16); border: 1px solid #ffd27d; color: #ffd27d;
+  }
+  .ard-item-drill:active { background: rgba(255,210,125,0.30); }
   .ard-price {
     display: inline-block; font-family: 'JetBrains Mono', monospace; font-size: 12px;
     color: #23262a; background: #ffd27d; border-radius: 999px; padding: 3px 10px;
@@ -6130,8 +6141,17 @@ function _dumpCoachRow(c) {
   };
 }
 // --- DRILLS : sérialisation (module) ---------------------------------------
+// `last_used_at` (migration 20260816_003) arrive APRÈS la table. Entre les deux,
+// un dump qui la mentionnerait ferait échouer TOUT le lot d'upsert de la table —
+// et un lot en échec ne fait qu'un console.warn : la bibliothèque de drills
+// cesserait de se synchroniser EN SILENCE (mode de panne payé en v.115).
+// D'où la même DÉTECTION DE SCHÉMA que `_pointsHarvestAmountCol` : on ne pousse
+// la colonne qu'après avoir vu le serveur la renvoyer au moins une fois.
+let _drillLastUsedCol = false;
 function _dumpDrillRow(d) {
-  return {
+  const usedCol = _drillLastUsedCol
+    ? { last_used_at: d.lastUsedAt ? new Date(d.lastUsedAt).toISOString() : null } : {};
+  return Object.assign(usedCol, {
     id: d.id, name: d.name || '', created_by: d.createdBy || null,
     stimuli_json: (d.stimuli && typeof d.stimuli === 'object' && !Array.isArray(d.stimuli)) ? d.stimuli : {},
     length_ms: Number.isFinite(d.lengthMs) ? d.lengthMs : 7000,
@@ -6154,9 +6174,12 @@ function _dumpDrillRow(d) {
     is_preset: !!d.isPreset,
     deleted_at: d.deletedAt ? new Date(d.deletedAt).toISOString() : null,
     updated_at: d.updatedAt ? new Date(d.updatedAt).toISOString() : (d.createdAt ? new Date(d.createdAt).toISOString() : null)
-  };
+  });
 }
 function _drillFromRow(r) {
+  // Le serveur a renvoyé la colonne → la migration 20260816_003 est passée, on
+  // peut la pousser à notre tour (cf. l'en-tête du dump ci-dessus).
+  if (r && r.last_used_at !== undefined) _drillLastUsedCol = true;
   return {
     id: r.id, name: r.name || '', createdBy: r.created_by || null,
     stimuli: (r.stimuli_json && typeof r.stimuli_json === 'object' && !Array.isArray(r.stimuli_json)) ? r.stimuli_json : {},
@@ -6174,6 +6197,7 @@ function _drillFromRow(r) {
     advanceMode: r.advance_mode === 'manual' ? 'manual' : 'auto',
     intervalConfig: (r.interval_config && typeof r.interval_config === 'object' && !Array.isArray(r.interval_config)) ? r.interval_config : null,
     isPreset: !!r.is_preset,
+    lastUsedAt: r.last_used_at ? Date.parse(r.last_used_at) : null,
     createdAt: r.created_at ? Date.parse(r.created_at) : null,
     updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
     deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
@@ -6683,8 +6707,19 @@ function _ardStatusDb(s) {
   return ['pending_draw', 'in_progress', 'done_at_training', 'done_home',
           'done_validated', 'expired_penalized'].includes(s) ? s : 'pending_draw';
 }
+// `drill_id` (migration 20260816_003) arrive APRÈS la table : même détection de
+// schéma que pour `drills.last_used_at` ci-dessus — un dump qui mentionnerait
+// une colonne absente tuerait la sync de TOUTE la bibliothèque d'exos en
+// silence, et avec elle les menus de l'Ardoise et le picker de la prépa.
+//
+// La colonne porte une CLÉ ÉTRANGÈRE vers `drills` : un id fantôme ferait
+// échouer le lot entier. L'id est donc validé contre la bibliothèque au moment
+// où le coach l'écrit (`_ardSaveExo`, bloc classique où `state` est chez lui) —
+// ici on se contente de sérialiser ce qui a déjà été validé.
+let _exoDrillCol = false;
 function _dumpExoTemplateRow(e) {
-  return {
+  const drillCol = _exoDrillCol ? { drill_id: e.drillId || null } : {};
+  return Object.assign(drillCol, {
     id: e.id,
     name: (e.name || '').slice(0, 200),
     category: _ardCategoryDb(e.category),
@@ -6697,9 +6732,11 @@ function _dumpExoTemplateRow(e) {
     created_by: e.createdBy || null,
     deleted_at: e.deletedAt ? new Date(e.deletedAt).toISOString() : null,
     updated_at: e.updatedAt ? new Date(e.updatedAt).toISOString() : new Date().toISOString()
-  };
+  });
 }
 function _exoTemplateFromRow(r) {
+  // Le serveur a renvoyé la colonne → la migration 20260816_003 est passée.
+  if (r && r.drill_id !== undefined) _exoDrillCol = true;
   return {
     id: r.id,
     name: r.name || '',
@@ -6710,6 +6747,7 @@ function _exoTemplateFromRow(r) {
     defaultRestSec: Number.isFinite(r.default_rest_sec) ? r.default_rest_sec : 30,
     descriptionMd: r.description_md || '',
     illustrationUrl: r.illustration_url || '',
+    drillId: r.drill_id || null,
     createdBy: r.created_by || null,
     createdAt: r.created_at ? Date.parse(r.created_at) : null,
     updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null),
@@ -24005,6 +24043,30 @@ function exoTemplates() {
 function exoTemplateById(id) {
   return (state.exoTemplates || []).find(e => e && e.id === id && !e.deletedAt) || null;
 }
+// --- L'EXO POINTE VERS SON DRILL (migration 20260816_003) --------------------
+// Le drill se lit TOUJOURS en repartant de la fiche d'exo, jamais d'une copie :
+// c'est ce qui fait qu'associer un drill aujourd'hui éclaire les menus composés
+// il y a trois semaines. À l'inverse de la dose, qui est figée dans le menu
+// parce qu'elle appartient au menu.
+//
+// Retourne le DRILL, pas son id : un id qui ne résout rien (drill supprimé) doit
+// se comporter exactement comme une absence d'association — pas de bouton mort.
+function _exoDrillOf(exoId) {
+  if (!exoId) return null;
+  const e = exoTemplateById(exoId);
+  if (!e || !e.drillId) return null;
+  return (state.drills || []).find(d => d && d.id === e.drillId && !d.deletedAt) || null;
+}
+// Lance le drill associé à un exo, depuis n'importe quel écran qui l'affiche.
+// `back` dit où revenir : le runtime ferme tout et fait son propre render() en
+// sortie — sans ça la joueuse retomberait sur l'accueil au milieu de son menu.
+function launchExoDrill(exoId, back) {
+  const d = _exoDrillOf(exoId);
+  if (!d) { try { showToast('⚠ Drill introuvable'); } catch (e) {} return; }
+  _drillReturnSet(back);
+  try { _ardCloseOverlay(); } catch (e) {}
+  launchDrillByMode(d.id);
+}
 function ardoiseMenus() {
   return (state.ardoiseMenus || []).filter(m => m && !m.deletedAt)
     .sort((a, b) => ardoiseLevelMeta(a.level).weight - ardoiseLevelMeta(b.level).weight
@@ -24560,11 +24622,18 @@ function _ardMenuCardHtml(menu, assignment) {
       ${menu.estimatedDurationMin ? `<div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#b9b3a1;margin-top:4px">≈ ${menu.estimatedDurationMin} min</div>` : ''}
       ${(menu.descriptionMd || '').trim() ? `<div style="font-size:12px;color:#d8cfae;line-height:1.5;margin-top:7px">${esc(menu.descriptionMd)}</div>` : ''}
       <div class="ard-chalk-rule"></div>
-      ${items.length ? items.map(it => `
+      ${items.length ? items.map(it => {
+        // Le drill se lit sur la FICHE de l'exo, jamais sur la ligne de menu :
+        // la dose est figée à la composition (elle appartient au menu), le drill
+        // reste vivant (il appartient à la bibliothèque). Associer un drill à un
+        // exo doit donc éclairer les menus déjà écrits — sans en réécrire un.
+        const d = _exoDrillOf(it.exo_id);
+        return `
         <div class="ard-item">
-          <div class="ard-item-name">— ${esc(it.name || 'Exercice')}${it.note ? `<div class="ard-item-note">${esc(it.note)}</div>` : ''}</div>
+          <div class="ard-item-name">— ${esc(it.name || 'Exercice')}${it.note ? `<div class="ard-item-note">${esc(it.note)}</div>` : ''}${d
+            ? `<div><button type="button" class="ard-item-drill" onclick="launchExoDrill('${esc(it.exo_id)}','ardoise')">▶ Lancer · ${esc(_drillModeLabel(d))}</button></div>` : ''}</div>
           <div class="ard-item-dose">${esc(_ardDoseLabel(it))}</div>
-        </div>`).join('')
+        </div>`; }).join('')
         : '<div style="font-size:12px;color:#b9b3a1;font-style:italic">Menu vide — préviens le coach.</div>'}
       <div class="ard-chalk-rule"></div>
       <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
@@ -25117,13 +25186,13 @@ function _ardToggleMenu(id) {
   persist(); _ardFlush();
   openArdoiseCoach('menus');
 }
-// L'éditeur de menu travaille sur un BROUILLON (window._ardMenuDraft) : rien
+// L'éditeur de menu travaille sur un BROUILLON (window._ardMenuDraftBox) : rien
 // n'est écrit tant que « Enregistrer » n'est pas cliqué, et une composition
 // abandonnée ne laisse aucune trace en base.
 function openArdoiseMenuEditor(id) {
   if (!_ardIsCoach()) return;
   const src = id ? (state.ardoiseMenus || []).find(x => x.id === id && !x.deletedAt) : null;
-  window._ardMenuDraft = src
+  window._ardMenuDraftBox = src
     ? JSON.parse(JSON.stringify({
         id: src.id, name: src.name, level: src.level, descriptionMd: src.descriptionMd,
         themeEmoji: src.themeEmoji, estimatedDurationMin: src.estimatedDurationMin,
@@ -25133,7 +25202,13 @@ function openArdoiseMenuEditor(id) {
         estimatedDurationMin: null, items: [], pointsReward: 20, isActive: true };
   _ardRenderMenuEditor();
 }
-function _ardMenuDraft() { return window._ardMenuDraft || null; }
+// 🔴 LE SLOT NE PORTE PAS LE NOM DE L'ACCESSEUR. `function _ardMenuDraft()`
+// déclare une propriété globale ; écrire `window._ardMenuDraft = {…}` ÉCRASAIT
+// donc la fonction par le brouillon, et l'appel suivant levait « _ardMenuDraft
+// is not a function » : composer un menu était impossible depuis la v.124, sans
+// le moindre message à l'écran (l'éditeur ne s'ouvrait simplement pas).
+// D'où `_ardMenuDraftBox` : un slot qui ne peut plus entrer en collision.
+function _ardMenuDraft() { return window._ardMenuDraftBox || null; }
 function _ardRenderMenuEditor() {
   const d = _ardMenuDraft(); if (!d) return;
   const lib = exoTemplates();
@@ -25182,8 +25257,9 @@ function _ardRenderMenuEditor() {
           <div style="display:flex;align-items:center;gap:7px;padding:8px 10px;background:var(--bg-1);border:1px solid var(--border);border-radius:9px">
             <div style="flex:1;min-width:0">
               <div style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.name || 'Exercice')}</div>
-              <div style="font-size:10px;font-family:'JetBrains Mono';color:var(--ink-3);margin-top:2px">${esc(_ardDoseLabel(it))}</div>
+              <div style="font-size:10px;font-family:'JetBrains Mono';color:var(--ink-3);margin-top:2px">${esc(_ardDoseLabel(it))}${_exoDrillOf(it.exo_id) ? ' · 🎯' : ''}</div>
             </div>
+            ${_exoDrillOf(it.exo_id) ? `<button class="btn-icon" style="flex:0 0 auto" title="Lancer le drill lié" onclick="launchExoDrill('${esc(it.exo_id)}','ardoiseMenuEditor')">▶</button>` : ''}
             <button class="btn-icon" style="flex:0 0 auto" title="Monter" ${i === 0 ? 'disabled style="opacity:.3;flex:0 0 auto"' : ''} onclick="_ardMenuMove(${i},-1)">↑</button>
             <button class="btn-icon" style="flex:0 0 auto" title="Régler" onclick="openArdoiseItemDose(${i})">✎</button>
             <button class="btn-icon" style="flex:0 0 auto" title="Retirer" onclick="_ardMenuDelItem(${i})">🗑</button>
@@ -25325,7 +25401,7 @@ function _ardSaveMenu() {
       createdBy: _ardMeId(), createdAt: now, updatedAt: now, deletedAt: null
     });
   }
-  window._ardMenuDraft = null;
+  window._ardMenuDraftBox = null;
   persist(); _ardFlush();
   closeModal();
   setTimeout(() => { try { openArdoiseCoach('menus'); } catch (e) {} }, 60);
@@ -25341,7 +25417,7 @@ function _ardDeleteMenu(id) {
   if (!confirm('Supprimer ce menu ?' + (used ? '\n\n⚠ ' + used + ' ardoise(s) EN COURS le portent : elles resteront lisibles, mais il ne sera plus tiré.' : '\n\nIl sort définitivement du tirage.'))) return;
   const m = (state.ardoiseMenus || []).find(x => x.id === id);
   if (m) { const now = Date.now(); m.deletedAt = now; m.updatedAt = now; }
-  window._ardMenuDraft = null;
+  window._ardMenuDraftBox = null;
   persist(); _ardFlush();
   closeModal();
   setTimeout(() => { try { openArdoiseCoach('menus'); } catch (e) {} }, 60);
@@ -25364,20 +25440,29 @@ function _ardCoachExosTab() {
     ${list.length ? EXO_CATEGORIES.filter(c => byCat[c.id]).map(c => `
       <div class="eyebrow-muted" style="margin:12px 0 6px">${c.icon} ${esc(c.label)}</div>
       <div style="display:flex;flex-direction:column;gap:6px">
-        ${byCat[c.id].map(e => `
-          <button onclick="openExoEditor('${esc(e.id)}')" style="display:flex;align-items:center;gap:9px;padding:9px 11px;background:var(--bg-1);border:1px solid var(--border);border-radius:9px;cursor:pointer;text-align:left;color:var(--ink);width:100%">
+        ${byCat[c.id].map(e => {
+          const d = _exoDrillOf(e.id);
+          return `
+          <div style="display:flex;align-items:center;gap:5px">
+          <button onclick="openExoEditor('${esc(e.id)}')" style="display:flex;align-items:center;gap:9px;padding:9px 11px;background:var(--bg-1);border:1px solid var(--border);border-radius:9px;cursor:pointer;text-align:left;color:var(--ink);flex:1;min-width:0">
             <div style="flex:1;min-width:0">
               <div style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.name || 'Exercice')}</div>
-              <div style="font-size:10px;font-family:'JetBrains Mono';color:var(--ink-3);margin-top:2px">${esc(_ardDoseLabel({ sets: e.defaultSets, reps: e.defaultReps, duration_sec: e.defaultDurationSec, rest_sec: e.defaultRestSec }))}</div>
+              <div style="font-size:10px;font-family:'JetBrains Mono';color:var(--ink-3);margin-top:2px">${esc(_ardDoseLabel({ sets: e.defaultSets, reps: e.defaultReps, duration_sec: e.defaultDurationSec, rest_sec: e.defaultRestSec }))}${d ? ' · 🎯 ' + esc(_drillModeLabel(d)) : ''}</div>
             </div>
             <div style="flex:0 0 auto;color:var(--ink-3);font-size:15px">›</div>
-          </button>`).join('')}
+          </button>
+          ${d ? `<button class="btn btn-secondary" style="flex:0 0 auto;min-height:44px;padding:0 12px" title="Lancer ${esc(d.name || 'le drill')}" onclick="launchExoDrill('${esc(e.id)}','ardoiseExos')">▶</button>` : ''}
+          </div>`; }).join('')}
       </div>`).join('')
       : '<div style="font-size:12px;color:var(--ink-3);font-style:italic;padding:6px 2px">Bibliothèque vide. Le premier exo débloque la composition des menus.</div>'}`;
 }
 function openExoEditor(id) {
   if (!_ardIsCoach()) return;
   const e = id ? exoTemplateById(id) : null;
+  // Le drill choisi vit dans un BROUILLON, pas dans le <select> : le filtre par
+  // nom réécrit la liste des options, et une option filtrée hors de la liste
+  // perdrait la sélection en silence. Le brouillon, lui, survit au filtrage.
+  window._ardExoDrill = { id: (e && e.drillId) ? e.drillId : '', q: '' };
   const back = `closeModal();setTimeout(()=>openArdoiseCoach('exos'),50)`;
   openModal(`
     <div class="modal-header">
@@ -25411,6 +25496,7 @@ function openExoEditor(id) {
       <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin:0 0 12px;line-height:1.5">
         Ce sont des SUGGESTIONS : chaque menu fige sa propre dose. Modifier l'exo ne réécrit aucun menu déjà composé.
       </div>
+      ${_ardExoDrillPickerHtml(e ? e.id : null)}
       <div class="fld">
         <label class="fld-label">Description / consignes (markdown)</label>
         <textarea id="ard-e-desc" rows="4" maxlength="20000" style="width:100%;font-size:12px;line-height:1.5" placeholder="Position, points d'attention, variantes…">${esc(e ? e.descriptionMd : '')}</textarea>
@@ -25421,8 +25507,74 @@ function openExoEditor(id) {
       <button class="btn btn-primary" style="flex:1" onclick="_ardSaveExo(${e ? "'" + esc(e.id) + "'" : 'null'})">Enregistrer</button>
     </div>`);
 }
-function _ardSaveExo(id) {
+// --- L'EXO S'ASSOCIE UN DRILL (migration 20260816_003) -----------------------
+// Un exo écrit « Suicide 20 s » ; le drill, lui, le fait vraiment tourner. Les
+// relier une fois ici fait apparaître un bouton « ▶ Lancer » PARTOUT où l'exo
+// ressort — carte d'ardoise de la joueuse, bloc de séance de prépa — sans que
+// le coach ait à recoller le drill à chaque menu.
+function _ardExoDrillDraft() {
+  window._ardExoDrill = window._ardExoDrill || { id: '', q: '' };
+  return window._ardExoDrill;
+}
+function _ardExoDrillPickerHtml(exoId) {
+  const w = _ardExoDrillDraft();
+  const lib = activeDrills().filter(d => !d.isPreset);
+  return `
+    <div class="fld" style="margin-bottom:12px">
+      <label class="fld-label">🎯 Associer un drill (optionnel)</label>
+      ${lib.length > 6 ? `
+        <input id="ard-e-drill-q" value="${esc(w.q)}" maxlength="40" placeholder="🔍 Filtrer par nom…"
+          style="margin-bottom:6px" oninput="_ardExoDrillFilter(this.value)">` : ''}
+      <div id="ard-e-drill-wrap">${_ardExoDrillSelectHtml()}</div>
+      <button class="btn btn-ghost btn-block" style="margin-top:6px;font-size:12px" onclick="_ardExoNewDrill(${exoId ? "'" + esc(exoId) + "'" : 'null'})">＋ Créer un nouveau drill</button>
+      <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:5px;line-height:1.5">
+        Un drill lié affiche un bouton « ▶ Lancer » sur la carte d'ardoise et dans les blocs de prépa créés depuis cet exo.
+      </div>
+    </div>`;
+}
+// Seul le <select> est réécrit au filtrage : le champ de recherche vit AU-DESSUS
+// du conteneur, donc il garde son focus lettre après lettre.
+function _ardExoDrillSelectHtml() {
+  const w = _ardExoDrillDraft();
+  const lib = activeDrills().filter(d => !d.isPreset && _drillNameMatches(d.name, w.q));
+  // Le drill déjà associé reste TOUJOURS listé, même filtré ou supprimé : sans
+  // ça, ouvrir la fiche puis l'enregistrer effacerait l'association sans un mot.
+  const cur = w.id ? (state.drills || []).find(d => d && d.id === w.id) : null;
+  if (cur && !lib.some(d => d.id === cur.id)) lib.unshift(cur);
+  const groups = [['stimulus', '⚡ Réaction'], ['circuit', '🔄 Circuit'], ['interval', '⏳ Fractionné']];
+  const modeOf = d => (d.mode === 'circuit' || d.mode === 'interval') ? d.mode : 'stimulus';
+  return `
+    <select id="ard-e-drill" style="width:100%" onchange="_ardExoDrillSet(this.value)">
+      <option value=""${w.id ? '' : ' selected'}>— Aucun —</option>
+      ${groups.map(([m, label]) => {
+        const of = lib.filter(d => modeOf(d) === m);
+        if (!of.length) return '';
+        return `<optgroup label="${esc(label)}">${of.map(d => `
+          <option value="${esc(d.id)}"${w.id === d.id ? ' selected' : ''}>${esc(d.name || 'Sans nom')}${d.deletedAt ? ' (supprimé)' : ''}</option>`).join('')}</optgroup>`;
+      }).join('')}
+    </select>
+    ${lib.length ? '' : `<div style="font-size:11px;color:var(--ink-3);font-style:italic;margin-top:5px">${w.q ? 'Aucun drill à ce nom.' : 'Aucun drill dans la bibliothèque — crée le premier ci-dessous.'}</div>`}`;
+}
+function _ardExoDrillSet(v) { _ardExoDrillDraft().id = v || ''; }
+function _ardExoDrillFilter(v) {
+  _ardExoDrillDraft().q = String(v || '');
+  const el = document.getElementById('ard-e-drill-wrap');
+  if (el) el.innerHTML = _ardExoDrillSelectHtml();
+}
+// Raccourci vers l'éditeur de drill. On ENREGISTRE l'exo d'abord : partir créer
+// un drill ne doit pas coûter le texte qu'on vient de taper. Le retour se fait
+// par la croix de la bibliothèque (cf. `_drillLibClose`), pour revenir associer
+// le drill fraîchement créé sans rechercher sa fiche.
+function _ardExoNewDrill(exoId) {
   if (!_ardIsCoach()) return;
+  const savedId = _ardSaveExo(exoId || null, true);
+  if (!savedId) return;   // nom manquant : l'alerte a déjà parlé
+  window._ardExoAfterDrill = savedId;
+  closeModal();
+  setTimeout(() => { try { openDrillLibrary(); } catch (e) {} }, 60);
+}
+function _ardSaveExo(id, stay) {
+  if (!_ardIsCoach()) return null;
   const v = k => { const el = document.getElementById(k); return el ? String(el.value || '').trim() : ''; };
   const num = (k, min, max, dflt) => {
     const raw = v(k);
@@ -25431,11 +25583,19 @@ function _ardSaveExo(id) {
     return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : dflt;
   };
   const name = v('ard-e-name');
-  if (!name) { try { alert('Donne un nom à cet exercice.'); } catch (e) {} return; }
+  if (!name) { try { alert('Donne un nom à cet exercice.'); } catch (e) {} return null; }
+  // La colonne `drill_id` porte une CLÉ ÉTRANGÈRE : un id qui ne désigne aucune
+  // ligne ferait échouer le lot d'upsert ENTIER de `exo_templates` — donc sa
+  // synchro, en silence. On ne garde donc que ce qui existe vraiment. Un drill
+  // soft-supprimé compte : sa ligne est toujours là, et l'association survivra
+  // si le coach le restaure.
+  const pick = _ardExoDrillDraft().id;
+  const drillId = (pick && (state.drills || []).some(d => d && d.id === pick)) ? pick : null;
   const now = Date.now();
   const fields = {
     name: name.slice(0, 80),
     category: v('ard-e-cat') || 'autre',
+    drillId: drillId,
     defaultSets: num('ard-e-sets', 1, 50, null),
     defaultReps: num('ard-e-reps', 1, 999, null),
     defaultDurationSec: num('ard-e-dur', 1, 7200, null),
@@ -25445,14 +25605,22 @@ function _ardSaveExo(id) {
   };
   state.exoTemplates = state.exoTemplates || [];
   const cur = id ? state.exoTemplates.find(x => x.id === id) : null;
+  let savedId = id;
   if (cur) Object.assign(cur, fields);
-  else state.exoTemplates.push(Object.assign({
-    id: uid(), illustrationUrl: '', createdBy: _ardMeId(), createdAt: now, deletedAt: null
-  }, fields));
+  else {
+    const row = Object.assign({
+      id: uid(), illustrationUrl: '', createdBy: _ardMeId(), createdAt: now, deletedAt: null
+    }, fields);
+    state.exoTemplates.push(row);
+    savedId = row.id;
+  }
   persist(); _ardFlush();
+  // `stay` : on part créer un drill, la modale sera rouverte par l'appelant.
+  if (stay) { if (typeof showToast === 'function') showToast('✓ Exo enregistré — crée ton drill'); return savedId; }
   closeModal();
   setTimeout(() => { try { openArdoiseCoach('exos'); } catch (e) {} }, 60);
   if (typeof showToast === 'function') showToast('✓ Exercice enregistré');
+  return savedId;
 }
 function _ardDeleteExo(id) {
   if (!_ardIsCoach()) return;
@@ -29053,7 +29221,7 @@ function _twExoLibraryPicker() {
     <div style="display:flex;gap:6px;margin-top:6px">
       <select id="tw-exo-pick" style="flex:1;min-width:0">
         <option value="">— depuis la bibliothèque d'exos —</option>
-        ${lib.map(e => `<option value="${esc(e.id)}">${ardoiseCategoryMeta(e.category).icon} ${esc(e.name || 'Exercice')}</option>`).join('')}
+        ${lib.map(e => `<option value="${esc(e.id)}">${ardoiseCategoryMeta(e.category).icon} ${esc(e.name || 'Exercice')}${_exoDrillOf(e.id) ? ' 🎯' : ''}</option>`).join('')}
       </select>
       <button class="btn btn-secondary" style="flex:0 0 auto;font-size:12px" onclick="_twAddBlockFromExo()">＋</button>
     </div>`;
@@ -29062,6 +29230,12 @@ function _twExoLibraryPicker() {
 // suggestion que le coach retouche ensuite. Aucune référence n'est conservée
 // vers l'exo — modifier la fiche demain ne doit pas réécrire une séance déjà
 // écrite (même posture que la dose figée d'un menu).
+//
+// LE DRILL SUIT LA MÊME RÈGLE (migration 20260816_003) : le drill associé à
+// l'exo est RECOPIÉ dans les trois niveaux, pas référencé. Le coach le voit
+// donc dans le sélecteur du bloc et peut le changer niveau par niveau — c'est
+// tout l'intérêt d'avoir gardé `blocks[].drill_id` par niveau. Une séance déjà
+// publiée ne bouge plus si l'exo change d'avis.
 function _twAddBlockFromExo() {
   const w = _tw(); if (!w || !w.openDay) return;
   const sel = document.getElementById('tw-exo-pick');
@@ -29073,7 +29247,9 @@ function _twAddBlockFromExo() {
   b.instructions = (e.descriptionMd || '').slice(0, 2000);
   const dose = _ardDoseLabel({ sets: e.defaultSets, reps: e.defaultReps, duration_sec: e.defaultDurationSec, rest_sec: e.defaultRestSec });
   const txt = dose === '—' ? (e.name || '') : (e.name || 'Exercice') + ' — ' + dose;
-  TRAINING_LEVELS.forEach(l => { b.levels[l] = { text: txt, drill_id: null }; });
+  // Un drill supprimé ne se recopie pas : `_exoDrillOf` ne rend que du vivant.
+  const linked = (typeof _exoDrillOf === 'function') ? _exoDrillOf(e.id) : null;
+  TRAINING_LEVELS.forEach(l => { b.levels[l] = { text: txt, drill_id: linked ? linked.id : null }; });
   s.blocks.push(b);
   w.openBlock = b.id;
   renderTrainingWizard();
@@ -29139,8 +29315,14 @@ function _twBlockEditorHtml() {
 // Libellé d'un drill dans les <select> de liaison (le mode compte : il décide du
 // runtime lancé côté joueuse).
 function _twDrillLabel(d) {
-  const mode = d.mode === 'circuit' ? '🔄 Circuit' : d.mode === 'interval' ? '⏳ Fractionné' : '⚡ Réaction';
-  return mode + ' · ' + (d.name || 'Sans nom');
+  return _drillModeLabel(d) + ' · ' + (d.name || 'Sans nom');
+}
+// Le mode SEUL, icône comprise. Un drill « réaction » historique n'a aucun champ
+// mode : c'est le défaut, jamais une valeur écrite.
+function _drillModeLabel(d) {
+  return (d && d.mode === 'circuit') ? '🔄 Circuit'
+    : (d && d.mode === 'interval') ? '⏳ Fractionné'
+    : '⚡ Réaction';
 }
 
 // Étape 4 — récapitulatif + publication.
@@ -31305,17 +31487,47 @@ function launchTrainingDrill(drillId) {
   if (!d) { try { showToast('⚠ Drill introuvable'); } catch (e) {} return; }
   const v = state._trainingView;
   if (v) window._trainingResume = { ...v };
+  launchDrillByMode(d.id);
+}
+// LE dispatcher de mode. Il n'y en avait pas : chaque appelant branchait à la
+// main sur `d.mode`, et les drills « réaction » historiques n'ont aucun champ
+// mode — d'où les tests d'égalité explicites plutôt qu'une table. Un seul point
+// de passage, aussi, pour dater le lancement (« récemment utilisés »).
+function launchDrillByMode(drillId) {
+  const d = (state.drills || []).find(x => x.id === drillId && !x.deletedAt);
+  if (!d) { try { showToast('⚠ Drill introuvable'); } catch (e) {} return; }
   if (d.mode === 'interval') launchInterval(d.id);
   else if (d.mode === 'circuit') launchCircuit(d.id);
   else launchDrill(d.id);
 }
+// Où revenir quand le drill se referme, pour les écrans qui ne sont pas une
+// séance de prépa (l'Ardoise, la bibliothèque d'exos). Une CLÉ, pas une
+// fonction : la valeur traverse un attribut onclick en HTML.
+const DRILL_RETURN_TO = {
+  ardoise: () => openArdoiseScreen(),
+  ardoiseMenus: () => openArdoiseCoach('menus'),
+  ardoiseExos: () => openArdoiseCoach('exos'),
+  // Le brouillon de menu vit dans `window._ardMenuDraftBox` : il survit au drill,
+  // donc le coach revient exactement sur la composition qu'il était en train
+  // d'écrire — tester un drill ne lui coûte pas son menu en cours.
+  ardoiseMenuEditor: () => _ardRenderMenuEditor(),
+  drills: () => openDrillLibrary()
+};
+function _drillReturnSet(key) { window._drillReturnTo = (key && DRILL_RETURN_TO[key]) ? key : null; }
 // Rappelée par les stopX() des runtimes via render() : si une séance était
 // ouverte avant le drill, on la rouvre. Volontairement window._ (volatile).
 function _trainingMaybeResume() {
   const r = window._trainingResume;
-  if (!r) return;
-  window._trainingResume = null;
-  try { openTrainingSession(r.programId, r.sessionId, r.datePlanned); } catch (e) {}
+  if (r) {
+    window._trainingResume = null;
+    window._drillReturnTo = null;   // une séance prime sur tout autre retour
+    try { openTrainingSession(r.programId, r.sessionId, r.datePlanned); } catch (e) {}
+    return;
+  }
+  const key = window._drillReturnTo;
+  if (!key) return;
+  window._drillReturnTo = null;
+  try { DRILL_RETURN_TO[key](); } catch (e) {}
 }
 
 // --- Validation -------------------------------------------------------------
@@ -31721,6 +31933,44 @@ const DRILL_LEN_MIN = 500, DRILL_LEN_MAX = 15000, DRILL_DELAY_MIN = 0, DRILL_DEL
 function _drillIsCoach() { return !!(state.auth && state.auth.role === 'coach'); }
 function _drillFlush() { try { if (window.PbSync && PbSync.flushNow) PbSync.flushNow(state).catch(() => {}); } catch (e) {} }
 function activeDrills() { return (state.drills || []).filter(d => !d.deletedAt); }
+// « 🕐 Récemment utilisés » (migration 20260816_003). Daté AU LANCEMENT, et
+// CÔTÉ COACH UNIQUEMENT : la colonne est partagée par toute l'équipe, une
+// joueuse qui répète son fractionné trois soirs de suite réordonnerait la
+// bibliothèque du coach. Elle, elle a déjà sa séance et son ardoise pour
+// retrouver ses drills — elle n'a pas besoin de ce raccourci.
+//
+// `updatedAt` est bumpé avec : sans lui, le last-writer-wins d'un autre appareil
+// renverrait l'ancienne ligne et la date se perdrait au prochain fetch.
+function _drillNoteUsed(id) {
+  if (!_drillIsCoach()) return;
+  const d = (state.drills || []).find(x => x.id === id && !x.deletedAt);
+  if (!d) return;
+  const now = Date.now();
+  d.lastUsedAt = now; d.updatedAt = now;
+  persist(); _drillFlush();
+}
+// Les 5 derniers lancés. Les presets perso en sont exclus comme partout ailleurs
+// dans la bibliothèque : ce sont des modèles, pas des drills jouables.
+function recentDrills(n) {
+  return activeDrills()
+    .filter(d => !d.isPreset && d.lastUsedAt)
+    .sort((a, b) => (b.lastUsedAt || 0) - (a.lastUsedAt || 0))
+    .slice(0, n || 5);
+}
+// « à l'instant », « il y a 3 h », « il y a 12 j ». Au-delà de 60 jours on donne
+// la date : « il y a 87 j » ne dit plus rien à personne.
+function _drillAgoLabel(ts) {
+  const ms = Date.now() - (ts || 0);
+  if (!ts || ms < 0) return '';
+  const min = Math.floor(ms / 60000);
+  if (min < 2) return 'à l\'instant';
+  if (min < 60) return 'il y a ' + min + ' min';
+  const h = Math.floor(min / 60);
+  if (h < 24) return 'il y a ' + h + ' h';
+  const j = Math.floor(h / 24);
+  if (j < 61) return 'il y a ' + j + ' j';
+  try { return 'le ' + formatDate(isoDate(new Date(ts)), 'short'); } catch (e) { return ''; }
+}
 function activeDrillImages() { return (state.drillImages || []).filter(m => !m.deletedAt); }
 
 // Cœur testable : développe une spec de stimuli en un POOL de cues combinés.
@@ -32210,6 +32460,7 @@ function launchDrill(id, overrides) {
   const cfg = _drillLaunchConfig(d, overrides);
   const pool = _drillExpandPool(cfg.stimuli);
   if (!pool.length) { try { alert('Ce drill n\'a aucun stimulus jouable.'); } catch (e) {} return; }
+  _drillNoteUsed(d.id);   // daté seulement quand ça part VRAIMENT
   try { closeModal(); } catch (e) {}
   startDrillGame({ pool, name: d.name || 'Drill', lengthMs: cfg.lengthMs, delayMs: cfg.delayMs, audioBeep: cfg.audioBeep, durationMode: cfg.durationMode, durationValue: cfg.durationValue, lengthEndMs: cfg.lengthEndMs, lengthMinMs: cfg.lengthMinMs, lengthMaxMs: cfg.lengthMaxMs, anticipationClock: cfg.anticipationClock });
 }
@@ -32353,6 +32604,7 @@ function launchCircuit(id) {
   if (!_drillEnsureStandalone(() => launchCircuit(id))) return; // iOS : prévient si Safari onglet
   const stages = Array.isArray(d.stages) ? d.stages.filter(Boolean) : [];
   if (!stages.length) { try { alert('Ce circuit n\'a aucune étape.'); } catch (e) {} return; }
+  _drillNoteUsed(d.id);   // daté seulement quand ça part VRAIMENT
   try { closeModal(); } catch (e) {}
   let host = document.getElementById('drill-overlay');
   if (!host) { host = document.createElement('div'); host.id = 'drill-overlay'; document.body.appendChild(host); }
@@ -32742,6 +32994,7 @@ function launchInterval(drillId) {
   const config = (d.intervalConfig && typeof d.intervalConfig === 'object') ? d.intervalConfig : _intervalDefaultConfig();
   const phases = _intervalBuildTimeline(config);
   if (!phases.length) { try { alert('Ce fractionné n\'a aucune phase (vérifie les cycles).'); } catch (e) {} return; }
+  _drillNoteUsed(d.id);   // daté seulement quand ça part VRAIMENT
   try { closeModal(); } catch (e) {}
   let host = document.getElementById('drill-overlay');
   if (!host) { host = document.createElement('div'); host.id = 'drill-overlay'; document.body.appendChild(host); }
@@ -32886,28 +33139,138 @@ function stopInterval() {
 // ============================================================
 // DRILL — bibliothèque (liste)
 // ============================================================
+// La bibliothèque a grossi (réaction, circuit, fractionné) au point qu'on ne la
+// parcourait plus : trois entrées pour la traverser — les récents, les chips de
+// catégorie, la recherche par nom.
+//
+// Les catégories sont les MODES RÉELS du repo, pas une taxonomie inventée : un
+// drill est `stimulus` (défaut historique, sans champ mode), `circuit` ou
+// `interval`. Rien d'autre n'existe en base.
+const DRILL_LIB_CATS = [
+  { id: 'all',      icon: '📚', label: 'Tous' },
+  { id: 'stimulus', icon: '⚡', label: 'Réaction' },
+  { id: 'circuit',  icon: '🔄', label: 'Circuit' },
+  { id: 'interval', icon: '⏳', label: 'Interval' }
+];
+function _drillLibState() {
+  window._drillLib = window._drillLib || { q: '', cat: 'all' };
+  return window._drillLib;
+}
+function _drillLibMode(d) { return (d && (d.mode === 'circuit' || d.mode === 'interval')) ? d.mode : 'stimulus'; }
+// Les presets perso (is_preset) sont des modèles → listés dans le picker Niveau 1, pas ici.
+function drillLibraryList() { return activeDrills().filter(d => !d.isPreset); }
+// Accents et casse ignorés : « Réaction » se tape « reaction » à une main sur un
+// clavier de téléphone.
+function _drillNorm(s) {
+  return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+}
+// Fuzzy = sous-séquence : « suic20 » trouve « Suicide 20 s ». On teste d'abord
+// l'inclusion franche, qui couvre 90 % des frappes et coûte un `includes`.
+function _drillNameMatches(name, q) {
+  const t = _drillNorm(q).replace(/\s+/g, '');
+  if (!t) return true;
+  const n = _drillNorm(name);
+  if (n.includes(t)) return true;
+  let i = 0;
+  for (let k = 0; k < n.length && i < t.length; k++) if (n[k] === t[i]) i++;
+  return i === t.length;
+}
+function drillLibraryFiltered() {
+  const st = _drillLibState();
+  return drillLibraryList()
+    .filter(d => st.cat === 'all' || _drillLibMode(d) === st.cat)
+    .filter(d => _drillNameMatches(d.name, st.q))
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+}
 function openDrillLibrary() {
   const isCoach = _drillIsCoach();
-  // Les presets perso (is_preset) sont des modèles → listés dans le picker Niveau 1, pas ici.
-  const drills = activeDrills().filter(d => !d.isPreset).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  _drillLibState();
+  // Détour par « + Créer un drill » depuis une fiche d'exo : la croix doit
+  // ramener À L'EXO, pas à l'accueil — sinon le coach doit retrouver sa fiche.
+  const backExo = window._ardExoAfterDrill || null;
   openModal(`
     <div class="modal-header">
-      <div class="modal-title">⚡ Drills de réaction</div>
-      <button class="modal-close" onclick="closeModal()">✕</button>
+      <div class="modal-title">⚡ Bibliothèque de drills</div>
+      <button class="modal-close" onclick="_drillLibClose()">✕</button>
     </div>
     <div class="modal-body">
+      ${backExo ? `<div style="padding:8px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:10px;font-size:11px;color:var(--ink-2);line-height:1.5">
+             ↩ Crée ton drill : en fermant cet écran tu reviens sur ta fiche d'exo pour l'associer.
+           </div>` : ''}
       ${isCoach
-        ? `<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:12px">
+        ? `<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:10px">
              <button class="btn btn-primary" style="font-size:12px" onclick="openDrillWizard()">+ Réaction</button>
              <button class="btn btn-primary" style="font-size:12px" onclick="openCircuitWizard()">+ Circuit</button>
              <button class="btn btn-primary" style="font-size:12px" onclick="openIntervalWizard()">+ Interval</button>
            </div>`
-        : `<div style="padding:8px 12px;background:var(--bg-3);border-radius:6px;margin-bottom:12px;font-size:11px;color:var(--ink-3);line-height:1.5">👁 Lance un drill. Tu peux <strong>ajuster les réglages avant de lancer</strong> (⚙) — sans les enregistrer.</div>`}
-      ${drills.length
-        ? drills.map(d => _drillCardHtml(d, isCoach)).join('')
-        : `<div style="padding:24px;text-align:center;color:var(--ink-3);font-size:13px;font-style:italic;border:1px dashed var(--border);border-radius:8px">Aucun drill${isCoach ? ' — crée le premier avec « + Nouveau drill »' : ' pour le moment'}.</div>`}
+        : `<div style="padding:8px 12px;background:var(--bg-3);border-radius:6px;margin-bottom:10px;font-size:11px;color:var(--ink-3);line-height:1.5">👁 Lance un drill. Tu peux <strong>ajuster les réglages avant de lancer</strong> (⚙) — sans les enregistrer.</div>`}
+      ${drillLibraryList().length > 4 ? `
+        <input id="drill-lib-q" value="${esc(_drillLibState().q)}" maxlength="40" placeholder="🔍 Chercher un drill par nom…"
+          style="margin-bottom:8px" oninput="_drillLibSearch(this.value)">` : ''}
+      <div id="drill-lib-body">${_drillLibBody()}</div>
     </div>
   `);
+}
+// Le champ de recherche vit HORS de ce conteneur : c'est lui seul qu'on réécrit
+// à chaque frappe, sinon l'input perdrait son focus lettre après lettre.
+function _drillLibBody() {
+  const isCoach = _drillIsCoach();
+  const st = _drillLibState();
+  const all = drillLibraryList();
+  const list = drillLibraryFiltered();
+  const recent = recentDrills(5);
+  // Les récents sont un RACCOURCI de navigation : dès qu'on filtre ou qu'on
+  // cherche, ils ne sont plus qu'un doublon bruyant au-dessus du résultat.
+  const showRecent = recent.length > 1 && st.cat === 'all' && !st.q && all.length > 4;
+  return `
+    ${showRecent ? `
+      <div class="eyebrow-muted" style="margin-bottom:6px">🕐 Récemment utilisés</div>
+      <div style="display:flex;flex-direction:column;gap:5px;margin-bottom:14px">
+        ${recent.map(d => `
+          <button onclick="launchDrillByMode('${esc(d.id)}')" style="display:flex;align-items:center;gap:9px;padding:9px 11px;background:var(--bg-1);border:1px solid var(--border);border-radius:9px;cursor:pointer;text-align:left;color:var(--ink);width:100%">
+            <span style="flex:0 0 auto;font-size:15px">${_drillLibMode(d) === 'circuit' ? '🔄' : _drillLibMode(d) === 'interval' ? '⏳' : '⚡'}</span>
+            <span style="flex:1;min-width:0">
+              <span style="display:block;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(d.name || 'Sans nom')}</span>
+              <span style="display:block;font-size:10px;font-family:'JetBrains Mono';color:var(--ink-3);margin-top:2px">${esc(_drillAgoLabel(d.lastUsedAt))}</span>
+            </span>
+            <span style="flex:0 0 auto;color:var(--orange);font-size:14px">▶</span>
+          </button>`).join('')}
+      </div>` : ''}
+    ${all.length > 4 ? `
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">
+        ${DRILL_LIB_CATS.map(c => {
+          const n = c.id === 'all' ? all.length : all.filter(d => _drillLibMode(d) === c.id).length;
+          if (!n && c.id !== 'all') return '';
+          return _drillChip(st.cat === c.id, `${c.icon} ${esc(c.label)} <span style="opacity:.6">${n}</span>`, `_drillLibCat('${c.id}')`);
+        }).join('')}
+      </div>` : ''}
+    ${list.length
+      ? list.map(d => _drillCardHtml(d, isCoach)).join('')
+      : all.length
+        ? `<div style="padding:20px;text-align:center;color:var(--ink-3);font-size:12px;font-style:italic;border:1px dashed var(--border);border-radius:8px">
+             Aucun drill ne correspond${st.q ? ' à « ' + esc(st.q) + ' »' : ''}.
+             <div style="margin-top:8px"><button class="btn btn-secondary" style="font-size:12px" onclick="_drillLibReset()">Tout afficher</button></div>
+           </div>`
+        : `<div style="padding:24px;text-align:center;color:var(--ink-3);font-size:13px;font-style:italic;border:1px dashed var(--border);border-radius:8px">Aucun drill${isCoach ? ' — crée le premier ci-dessus' : ' pour le moment'}.</div>`}`;
+}
+function _drillLibRefresh() {
+  const el = document.getElementById('drill-lib-body');
+  if (el) el.innerHTML = _drillLibBody(); else openDrillLibrary();
+}
+function _drillLibCat(id) { _drillLibState().cat = id || 'all'; _drillLibRefresh(); }
+function _drillLibSearch(v) { _drillLibState().q = String(v || ''); _drillLibRefresh(); }
+function _drillLibReset() {
+  window._drillLib = { q: '', cat: 'all' };
+  const q = document.getElementById('drill-lib-q'); if (q) q.value = '';
+  _drillLibRefresh();
+}
+// Fermeture : si on venait d'une fiche d'exo, on y retourne — c'est la moitié
+// utile du raccourci « ＋ Créer un nouveau drill ».
+function _drillLibClose() {
+  const exo = window._ardExoAfterDrill;
+  window._ardExoAfterDrill = null;
+  closeModal();
+  if (exo) setTimeout(() => { try { openExoEditor(exo); } catch (e) {} }, 60);
 }
 function _drillCardHtml(d, isCoach) {
   // Interval (fractionné) : carte dédiée (badge + résumé cycles + durée totale).
@@ -47801,7 +48164,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-16.130';
+const APP_VERSION = '2026-08-16.131';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
