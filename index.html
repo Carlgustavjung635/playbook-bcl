@@ -5884,6 +5884,10 @@ function _dumpSeriesRow(challengeId, pid, s) {
     attempts: Number.isFinite(s.attempts) ? s.attempts : null,
     duration_ms: Number.isFinite(s.durationMs) ? s.durationMs : null,
     entered_by: s.enteredBy || null,  // peer entry : qui a saisi (null = le joueur lui-même)
+    // Journal d'édition rétroactive (cf. migration 20260813_001). NULL = jamais éditée.
+    edited_by: s.editedBy || null,
+    edited_at: s.editedAt ? new Date(s.editedAt).toISOString() : null,
+    previous_score: Number.isFinite(s.previousScore) ? s.previousScore : null,
     deleted_at: s.deletedAt ? new Date(s.deletedAt).toISOString() : null
   };
 }
@@ -5894,6 +5898,9 @@ function _seriesFromRow(r) {
     attempts: Number.isFinite(r.attempts) ? r.attempts : null,
     durationMs: Number.isFinite(r.duration_ms) ? r.duration_ms : null,
     enteredBy: r.entered_by || null,
+    editedBy: r.edited_by || null,
+    editedAt: r.edited_at ? Date.parse(r.edited_at) : null,
+    previousScore: Number.isFinite(r.previous_score) ? r.previous_score : null,
     createdAt: r.created_at ? Date.parse(r.created_at) : null,
     deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
   };
@@ -34132,6 +34139,108 @@ function _deleteChallengeSeries(cid, pid, sid) {
   render();
 }
 
+// ============================================================
+// DÉFIS — ÉDITION RÉTROACTIVE d'une tentative (cf. migration 20260813_001)
+// ------------------------------------------------------------
+// Le chrono qui s'arrête ne fige plus le score : le dernier tir peut être
+// encore en l'air au buzzer, et on lance parfois le chrono comme simple
+// minuteur pour ne rentrer le total qu'à la fin. Toute tentative reste donc
+// modifiable après coup — par la joueuse comme par le coach — au même titre
+// qu'elle était déjà supprimable. Chaque édition laisse une trace
+// (editedBy / editedAt / previousScore) affichée dans l'historique.
+// ============================================================
+// La valeur « score » d'une tentative selon le mode : ms en chrono, réussis sinon.
+function _seriesValueField(c) { return (c && c.mode === 'timed') ? 'durationMs' : 'made'; }
+function _seriesValueOf(c, s) { const v = (s || {})[_seriesValueField(c)]; return Number.isFinite(v) ? v : 0; }
+// Écrit une nouvelle valeur sur une tentative existante + agrégat + audit + sync.
+function _editChallengeSeries(cid, pid, sid, nextValue) {
+  const c = state.challenges.find(x => x.id === cid); if (!c || c.autoCount) return false;
+  if (state.auth.role !== 'player' && state.auth.role !== 'coach') return false;
+  const s = _challengeSeriesOf(c, pid).find(x => x.id === sid); if (!s) return false;
+  const field = _seriesValueField(c);
+  let val = Math.round(Number(nextValue));
+  if (!Number.isFinite(val) || val < 0) return false;
+  if (field === 'made' && Number.isFinite(c.seriesSize) && c.seriesSize > 0 && c.mode === 'series') val = Math.min(val, c.seriesSize);
+  const before = _seriesValueOf(c, s);
+  if (val === before) return true; // rien à écrire : pas d'entrée d'audit pour un non-changement
+  const aggBefore = (c.scores || {})[pid] || 0;
+  s[field] = val;
+  s.previousScore = before;
+  s.editedBy = _currentActorId();
+  s.editedAt = Date.now();
+  c.scores = c.scores || {}; c.scores[pid] = _recomputeChallengeAggregate(c, pid);
+  persist(); if (window.PbSync && PbSync.flushNow) PbSync.flushNow(state).catch(() => {});
+  render();
+  try { _notifyCoachChallengeData(c, pid, c.scores[pid] - aggBefore); } catch (e) {}
+  return true;
+}
+// Trace « ✏ modifié » d'une tentative (affichée sous la ligne d'historique).
+function _seriesEditedHtml(c, s) {
+  if (!s || !s.editedAt) return '';
+  const who = s.editedBy ? _resolveActorName(s.editedBy) : '';
+  const prev = Number.isFinite(s.previousScore)
+    ? (c.mode === 'timed' ? _fmtChronoMs(s.previousScore) : String(s.previousScore))
+    : '';
+  const when = (() => { try { return new Date(s.editedAt).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }); } catch (e) { return ''; } })();
+  return `<div style="font-size:9px;color:var(--ink-4);font-family:'JetBrains Mono';margin-top:2px">✏ modifié${who ? ' par ' + esc(who) : ''}${when ? ' le ' + when : ''}${prev ? ' · avant : ' + esc(prev) : ''}</div>`;
+}
+// Retour à l'écran de saisie du mode après une édition.
+function _reopenChallengeEntry(cid, pid) {
+  const c = state.challenges.find(x => x.id === cid); if (!c) return closeModal();
+  if (c.mode === 'countdown_score' && window._cdChrono) return renderCountdownEntry();
+  if (c.mode === 'countdown_score') return openChallengeCountdownEntry(cid, pid);
+  if (c.mode === 'timed') return openChallengeTimedEntry(cid, pid);
+  return openChallengeSeriesEntry(cid, pid);
+}
+// Modale d'édition : −/+ rapides + saisie manuelle. En chrono la valeur se
+// saisit en SECONDES (les ms restent le stockage).
+function openChallengeEntryEdit(cid, pid, sid) {
+  const c = state.challenges.find(x => x.id === cid); if (!c) return;
+  const s = _challengeSeriesOf(c, pid).find(x => x.id === sid); if (!s) return;
+  const isTimed = c.mode === 'timed';
+  const cur = _seriesValueOf(c, s);
+  const shown = isTimed ? (Math.round(cur / 10) / 100).toFixed(2) : String(cur);
+  const steps = isTimed ? [-1, -0.1, 0.1, 1] : [-5, -1, 1, 5];
+  const unit = isTimed ? 'secondes' : (c.metric || 'réussis');
+  const stepBtn = (d) => {
+    const lbl = (d > 0 ? '+' : '−') + String(Math.abs(d));
+    return `<button class="btn ${d > 0 ? 'btn-primary' : 'btn-secondary'}" style="flex:1;min-height:48px;font-size:16px;padding:0" onclick="_ceStep(${d},${isTimed ? 'true' : 'false'})">${lbl}</button>`;
+  };
+  openModal(`
+    <div class="modal-header"><div><div class="eyebrow">${esc(c.title)}</div><div class="modal-title">Éditer le score</div></div><button class="modal-close" onclick="_reopenChallengeEntry('${cid}','${pid}')">✕</button></div>
+    <div class="modal-body">
+      <div style="font-size:12px;color:var(--ink-2);line-height:1.5;margin-bottom:12px">Corrige la tentative — par exemple un dernier panier encore en l'air au buzzer, ou le total d'une séance où le chrono n'a servi que de minuteur.</div>
+      <div style="display:flex;align-items:center;gap:10px;padding:14px;background:var(--bg-2);border-radius:10px;margin-bottom:10px">
+        <input id="ce-val" type="number" inputmode="decimal" step="${isTimed ? '0.01' : '1'}" min="0" value="${shown}" style="flex:1;text-align:center;font-family:'Anton';font-size:34px;background:transparent;border:0;color:var(--ink)">
+        <span style="font-family:'JetBrains Mono';font-size:11px;color:var(--ink-3);text-transform:uppercase;white-space:nowrap">${esc(unit)}</span>
+      </div>
+      <div style="display:flex;gap:6px;margin-bottom:14px">${steps.map(stepBtn).join('')}</div>
+      <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-align:center;margin-bottom:14px">Valeur enregistrée : ${esc(isTimed ? _fmtChronoMs(cur) : String(cur))}</div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-secondary" style="flex:1" onclick="_reopenChallengeEntry('${cid}','${pid}')">Annuler</button>
+        <button class="btn btn-primary" style="flex:2" onclick="_ceSave('${cid}','${pid}','${sid}',${isTimed ? 'true' : 'false'})">✓ Enregistrer</button>
+      </div>
+      <div style="margin-top:12px;padding:10px;background:rgba(var(--accent-rgb),0.08);border-left:3px solid var(--orange);border-radius:6px;font-size:11px;color:var(--ink-2);line-height:1.5">Toute modification est tracée (qui, quand, valeur d'avant) et visible dans l'historique.</div>
+    </div>
+  `);
+  setTimeout(() => { const i = document.getElementById('ce-val'); if (i) { i.focus(); i.select(); } }, 100);
+}
+function _ceStep(d, isTimed) {
+  const el = document.getElementById('ce-val'); if (!el) return;
+  const cur = parseFloat(el.value); const base = Number.isFinite(cur) ? cur : 0;
+  const next = Math.max(0, base + d);
+  el.value = isTimed ? next.toFixed(2) : String(Math.round(next));
+}
+function _ceSave(cid, pid, sid, isTimed) {
+  const el = document.getElementById('ce-val'); if (!el) return;
+  const raw = parseFloat(el.value);
+  if (!Number.isFinite(raw) || raw < 0) { try { alert('Entre une valeur valide.'); } catch (e) {} return; }
+  const val = isTimed ? Math.round(raw * 1000) : Math.round(raw);
+  if (isTimed && val <= 0) { try { alert('Le temps doit être supérieur à 0.'); } catch (e) {} return; }
+  _editChallengeSeries(cid, pid, sid, val);
+  _reopenChallengeEntry(cid, pid);
+}
+
 // ---- Écran de saisie SÉRIES ----
 function openChallengeSeriesEntry(cid, pid) {
   const c = state.challenges.find(x => x.id === cid); if (!c) return;
@@ -34154,9 +34263,10 @@ function openChallengeSeriesEntry(cid, pid) {
         <span style="font-family:'Anton';font-size:20px;color:var(--ink-3);white-space:nowrap">/ ${size || '?'}</span>
         <button class="btn btn-primary" onclick="_submitChallengeSeries('${cid}','${pid}')">+ Série</button>
       </div>
-      ${list.length ? `<div class="eyebrow-muted" style="margin-bottom:6px">Historique</div>${list.slice().reverse().map((s, i) => `
-        <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--bg-3);border-radius:8px;margin-bottom:6px">
-          <span style="font-family:'JetBrains Mono';font-size:13px">Série ${list.length - i} · <strong>${s.made}${size ? (' / ' + size) : ''}</strong>${_seriesEnteredByHtml(s, pid)}</span>
+      ${list.length ? `<div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:6px"><span class="eyebrow-muted">Historique</span><span style="font-size:9px;color:var(--ink-4);font-family:'JetBrains Mono'">✏ = corriger le score</span></div>${list.slice().reverse().map((s, i) => `
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;padding:8px 10px;background:var(--bg-3);border-radius:8px;margin-bottom:6px">
+          <span style="font-family:'JetBrains Mono';font-size:13px;flex:1;min-width:0">Série ${list.length - i} · <strong>${s.made}${size ? (' / ' + size) : ''}</strong>${_seriesEnteredByHtml(s, pid)}${_seriesEditedHtml(c, s)}</span>
+          <button class="btn btn-icon" title="Éditer le score" onclick="openChallengeEntryEdit('${cid}','${pid}','${s.id}')">✏</button>
           <button class="btn btn-icon" title="Supprimer" onclick="_removeChallengeSeries('${cid}','${pid}','${s.id}')">🗑</button>
         </div>`).join('')}` : '<div style="font-size:12px;color:var(--ink-3);font-style:italic;text-align:center;padding:8px">Aucune série encore.</div>'}
       ${isMine ? `<div style="margin-top:12px;padding:10px;background:rgba(var(--accent-rgb),0.08);border-left:3px solid var(--orange);border-radius:6px;font-size:11px;color:var(--ink-2);line-height:1.5">💪 Sois honnête ! Ton score est public dans le classement.</div>` : ''}
@@ -34197,9 +34307,10 @@ function openChallengeTimedEntry(cid, pid) {
         <div class="eyebrow-muted">${esc(_aggregateLabel(c))}</div>
         <div style="font-family:'Anton';font-size:28px;color:var(--ink)">${esc(_fmtChronoMs(agg))}</div>
       </div>
-      ${list.length ? `<div class="eyebrow-muted" style="margin-bottom:6px;text-align:left">Runs</div>${list.slice().reverse().map((s, i) => `
-        <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--bg-3);border-radius:8px;margin-bottom:6px">
-          <span style="font-family:'JetBrains Mono';font-size:13px">Run ${list.length - i} · <strong>${_fmtChronoMs(s.durationMs)}</strong>${best != null && Number(s.durationMs) === best ? ' 🏆' : ''}${_seriesEnteredByHtml(s, pid)}</span>
+      ${list.length ? `<div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:6px;text-align:left"><span class="eyebrow-muted">Runs</span><span style="font-size:9px;color:var(--ink-4);font-family:'JetBrains Mono'">✏ = corriger le temps</span></div>${list.slice().reverse().map((s, i) => `
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;padding:8px 10px;background:var(--bg-3);border-radius:8px;margin-bottom:6px;text-align:left">
+          <span style="font-family:'JetBrains Mono';font-size:13px;flex:1;min-width:0">Run ${list.length - i} · <strong>${_fmtChronoMs(s.durationMs)}</strong>${best != null && Number(s.durationMs) === best ? ' 🏆' : ''}${_seriesEnteredByHtml(s, pid)}${_seriesEditedHtml(c, s)}</span>
+          <button class="btn btn-icon" title="Éditer le temps" onclick="openChallengeEntryEdit('${cid}','${pid}','${s.id}')">✏</button>
           <button class="btn btn-icon" title="Supprimer" onclick="_removeTimedRun('${cid}','${pid}','${s.id}')">🗑</button>
         </div>`).join('')}` : '<div style="font-size:12px;color:var(--ink-3);font-style:italic">Aucun run encore.</div>'}
     </div>
@@ -34281,7 +34392,12 @@ function renderCountdownEntry() {
       <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;margin-bottom:14px">${esc(c.metric || 'réussis')}</div>
       ${t.finished
         ? `<div style="padding:12px;background:var(--bg-2);border-radius:10px;margin-bottom:12px">
-             <div style="font-size:13px;color:var(--ink-2);margin-bottom:10px">Enregistrer <strong>${t.made}</strong> ${esc(c.metric || 'réussis')} pour ${esc(isMine ? 'toi' : (p ? p.name : ''))} ?</div>
+             <div style="font-size:11px;color:var(--ink-3);line-height:1.5;margin-bottom:10px">⏱ Chrono terminé — le compteur reste ouvert : ajoute le dernier panier parti avant le buzzer, ou saisis directement ton total.</div>
+             <div style="display:flex;gap:6px;align-items:center;margin-bottom:10px">
+               <input id="cd-total" type="number" inputmode="numeric" min="0" value="${t.made}" style="flex:1;text-align:center;font-family:'Anton';font-size:26px" onkeydown="if(event.key==='Enter')_cdSetTotal()">
+               <button class="btn btn-secondary" style="white-space:nowrap" onclick="_cdSetTotal()">Saisir le total</button>
+             </div>
+             <div style="font-size:13px;color:var(--ink-2);margin-bottom:10px">Enregistrer <strong id="cd-recap-made">${t.made}</strong> ${esc(c.metric || 'réussis')} pour ${esc(isMine ? 'toi' : (p ? p.name : ''))} ?</div>
              <div style="display:flex;gap:8px;justify-content:center">
                <button class="btn btn-secondary" onclick="_cdRestart()">↻ Recommencer</button>
                <button class="btn btn-primary" onclick="_cdSave()">✓ Enregistrer</button>
@@ -34293,18 +34409,32 @@ function renderCountdownEntry() {
         <div style="font-family:'Anton';font-size:24px;color:var(--ink)">${esc(_fmtChallengeScore(c, agg))}</div>
         ${tierBadge ? `<div style="margin-top:4px">${tierBadge}</div>` : ''}
       </div>
-      ${list.length ? `<div class="eyebrow-muted" style="margin-bottom:6px;text-align:left">Tentatives</div>${list.slice().reverse().map((s, i) => `
-        <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--bg-3);border-radius:8px;margin-bottom:6px">
-          <span style="font-family:'JetBrains Mono';font-size:13px">Essai ${list.length - i} · <strong>${s.made} ${esc(c.metric || '')}</strong>${_seriesEnteredByHtml(s, t.pid)}</span>
-          <button class="btn btn-icon" onclick="_deleteChallengeSeries('${t.cid}','${t.pid}','${s.id}');renderCountdownEntry()">🗑</button>
+      ${list.length ? `<div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:6px;text-align:left"><span class="eyebrow-muted">Tentatives</span><span style="font-size:9px;color:var(--ink-4);font-family:'JetBrains Mono'">✏ = corriger le score</span></div>${list.slice().reverse().map((s, i) => `
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;padding:8px 10px;background:var(--bg-3);border-radius:8px;margin-bottom:6px;text-align:left">
+          <span style="font-family:'JetBrains Mono';font-size:13px;flex:1;min-width:0">Essai ${list.length - i} · <strong>${s.made} ${esc(c.metric || '')}</strong>${_seriesEnteredByHtml(s, t.pid)}${_seriesEditedHtml(c, s)}</span>
+          <button class="btn btn-icon" title="Éditer le score" onclick="openChallengeEntryEdit('${t.cid}','${t.pid}','${s.id}')">✏</button>
+          <button class="btn btn-icon" title="Supprimer" onclick="_deleteChallengeSeries('${t.cid}','${t.pid}','${s.id}');renderCountdownEntry()">🗑</button>
         </div>`).join('')}` : ''}
     </div>
   `);
 }
+// Le compteur reste ouvert APRÈS le buzzer, tant que la tentative n'est pas
+// enregistrée : le dernier tir peut être encore en l'air quand le chrono tombe.
 function _cdCount(d) {
-  const t = window._cdChrono; if (!t || t.finished) return;
+  const t = window._cdChrono; if (!t) return;
   t.made = Math.max(0, t.made + d);
   const el = document.getElementById('cd-made'); if (el) el.textContent = t.made;
+  const recap = document.getElementById('cd-recap-made'); if (recap) recap.textContent = t.made;
+}
+// Saisie directe du total (chrono utilisé comme simple minuteur : on compte de
+// tête pendant, on rentre le score à la fin).
+function _cdSetTotal() {
+  const t = window._cdChrono; if (!t) return;
+  const el = document.getElementById('cd-total'); if (!el) return;
+  const v = parseInt(el.value, 10);
+  if (!Number.isFinite(v) || v < 0) { try { alert('Entre un nombre valide.'); } catch (e) {} return; }
+  t.made = v;
+  renderCountdownEntry();
 }
 function _cdStart() {
   const t = window._cdChrono; if (!t || t.running || t.finished) return;
@@ -42363,7 +42493,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-12.120';
+const APP_VERSION = '2026-08-15.121';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
