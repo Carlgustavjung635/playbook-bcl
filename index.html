@@ -4237,6 +4237,23 @@ window.PbStore = {
     }).eq('id', playerId);
     if (error) throw error;
   },
+  // Statut médical de la fiche joueuse (migration 20260806_001). MÊME POSTURE
+  // que updateNotifPermission : UPDATE ciblé de DEUX colonnes, jamais via
+  // upsertPlayer qui pousse la ligne ENTIÈRE — un appareil dont la copie date
+  // écraserait sinon le nom ou la photo modifiés ailleurs entre-temps (mode de
+  // panne v.104, que le canal `players` ne traverse pas et n'aurait donc pas
+  // évité tout seul).
+  //
+  // p.injury absent = « apte » : on envoie NULL, pas rien. C'est ce que pose
+  // markAsHealed(), et une guérison doit voyager comme une déclaration.
+  async updateInjury(p) {
+    if (!p || !p.id) return;
+    const { error } = await sb.from('players').update({
+      injury: p.injury || null,
+      injury_history: Array.isArray(p.injuryHistory) ? p.injuryHistory : []
+    }).eq('id', p.id);
+    if (error) throw error;
+  },
   subscribePlayers(onChange) {
     if (Pb.playersChannel) { sb.removeChannel(Pb.playersChannel); Pb.playersChannel = null; }
     const ch = sb.channel('players-sync')
@@ -4255,7 +4272,17 @@ window.PbStore = {
   async fetchPlayers() {
     // last_seen_at peut ne pas encore exister en base (migration 20260601_001) :
     // on tente le select enrichi, fallback legacy si la colonne manque.
-    let res = await sb.from('players').select('id,name,num,photo,feedback,last_seen_at,postes,taille_cm,date_naissance,notif_permission,notif_permission_at').order('num');
+    //
+    // injury / injury_history (migration 20260806_001) ouvrent la chaîne. Tant
+    // qu'elle n'est pas appliquée ce premier select échoue, on retombe sur le
+    // palier suivant et le statut médical reste local — soit exactement le
+    // comportement d'avant v.134, jamais pire.
+    let res = await sb.from('players').select('id,name,num,photo,feedback,last_seen_at,postes,taille_cm,date_naissance,notif_permission,notif_permission_at,injury,injury_history').order('num');
+    if (res.error) {
+      // Fallback si injury/injury_history (migration 20260806_001) pas encore
+      // appliquée → le statut médical reste local, comme avant v.134.
+      res = await sb.from('players').select('id,name,num,photo,feedback,last_seen_at,postes,taille_cm,date_naissance,notif_permission,notif_permission_at').order('num');
+    }
     if (res.error) {
       // Fallback si notif_permission (migration 20260807_001) pas encore
       // appliquée → l'état des notifs reste local, le coach ne le voit pas.
@@ -42441,6 +42468,110 @@ function openInjuryModal(pid) {
   `);
 }
 
+// ============================================================
+// LE STATUT MÉDICAL QUITTE L'APPAREIL (migration 20260806_001)
+// ------------------------------------------------------------
+// Jusqu'en v.133, `p.injury` n'avait AUCUNE colonne en base, n'était ni dans
+// upsertPlayer ni dans fetchPlayers, et saveInjury() s'arrêtait à persist().
+// Une indisponibilité déclarée depuis la fiche joueuse restait donc dans le
+// localStorage de CET appareil, pour toujours. Ce n'était pas une écriture
+// échouée — aucune écriture n'était tentée : il n'y avait pas de chemin.
+//
+// Conséquence vécue : la coach déclarait une joueuse « ✕ Indispo » sur son
+// iPhone, et sa feuille de présence divergeait de celle de l'iPad et du web,
+// qui la comptaient présente. resolveEffectivePresence() interroge les DEUX
+// gisements d'indisponibilité (période 🏖️ ET statut médical) : tant que l'un
+// des deux ne voyageait pas, deux appareils ne pouvaient pas s'accorder.
+//
+// FILE D'ATTENTE PERSISTANTE — la leçon de l'incident est moins la colonne
+// manquante que le SILENCE. Un push qui échoue (hors ligne, migration pas
+// encore passée, blip réseau) ne doit plus disparaître avec l'onglet : la
+// charge utile est écrite en localStorage AVANT l'envoi, retirée seulement sur
+// succès confirmé par le serveur, et rejouée au boot, au retour en ligne et au
+// retour au premier plan. Ce qui reste en attente est AFFICHÉ (cf. _syncBadge).
+const PENDING_INJURY_KEY = 'pb8_pending_injury';
+function _pendingInjuries() {
+  try { return JSON.parse(localStorage.getItem(PENDING_INJURY_KEY) || '{}') || {}; }
+  catch (e) { return {}; }
+}
+function _pendingInjuriesWrite(map) {
+  try { localStorage.setItem(PENDING_INJURY_KEY, JSON.stringify(map)); } catch (e) {}
+  try { _syncBadgeRender(); } catch (e) {}
+}
+function _pendingInjuryDrop(pid) {
+  const m = _pendingInjuries();
+  if (m[pid]) { delete m[pid]; _pendingInjuriesWrite(m); }
+}
+// Nombre d'écritures médicales encore en attente de confirmation serveur.
+function pendingWriteCount() { return Object.keys(_pendingInjuries()).length; }
+
+// Pousse le statut médical d'une joueuse. Réessaie 3 fois en backoff
+// exponentiel (1s, 3s, 9s) avant de laisser la main à la file persistante.
+function _pushInjury(p, _attempt) {
+  if (!p || !p.id) return;
+  const n = _attempt || 0;
+  if (n === 0) {
+    const m = _pendingInjuries();
+    m[p.id] = { injury: p.injury || null, injuryHistory: p.injuryHistory || [], at: Date.now(), name: p.name || '' };
+    _pendingInjuriesWrite(m);
+  }
+  if (!window.PbStore || !PbStore.updateInjury) return;
+  PbStore.updateInjury(p)
+    .then(() => { _pendingInjuryDrop(p.id); })
+    .catch(e => {
+      if (n < 3) { setTimeout(() => _pushInjury(p, n + 1), 1000 * Math.pow(3, n)); return; }
+      console.warn('[sync] updateInjury:', e && e.message);
+      try { _syncBadgeRender(); } catch (e2) {}
+    });
+}
+// Rejoue tout ce qui n'a jamais été confirmé. Idempotent : un UPDATE ciblé
+// rejoué à l'identique ne coûte rien.
+function replayPendingInjuries() {
+  const m = _pendingInjuries();
+  Object.keys(m).forEach(pid => {
+    const p = (state.players || []).find(x => x.id === pid);
+    // La joueuse n'est plus dans le state (supprimée ailleurs) : la charge
+    // utile n'a plus de destinataire, on la retire plutôt que de boucler.
+    if (!p) { _pendingInjuryDrop(pid); return; }
+    _pushInjury(p, 1);
+  });
+}
+
+// ------------------------------------------------------------
+// BANDEAU « données non synchronisées »
+// ------------------------------------------------------------
+// Le fantôme local n'est dangereux que tant qu'il est INVISIBLE : la coach
+// croyait sa saisie enregistrée partout. Tant qu'une écriture n'a pas été
+// confirmée par le serveur, on le dit — et on offre le geste qui répare.
+// Rendu hors du cycle render() : c'est un état d'infrastructure, il ne doit
+// dépendre d'aucun écran ni disparaître au changement d'onglet.
+function _syncBadgeRender() {
+  const n = pendingWriteCount();
+  let el = document.getElementById('sync-pending-badge');
+  if (!n) { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'sync-pending-badge';
+    el.style.cssText = 'position:fixed;left:12px;right:12px;bottom:calc(var(--nav-h,64px) + 12px);z-index:9998;'
+      + 'background:var(--bg-2);border:1px solid var(--orange);border-radius:10px;padding:10px 12px;'
+      + 'display:flex;align-items:center;gap:10px;box-shadow:0 6px 20px rgba(0,0,0,0.28)';
+    document.body.appendChild(el);
+  }
+  el.innerHTML = `
+    <div style="flex:1;min-width:0">
+      <div style="font-size:12px;color:var(--orange);font-weight:600">⚠️ ${n} donnée${n > 1 ? 's' : ''} non synchronisée${n > 1 ? 's' : ''}</div>
+      <div style="font-size:10px;color:var(--ink-3);line-height:1.4">Saisie enregistrée sur CET appareil seulement. Les autres ne la voient pas encore.</div>
+    </div>
+    <button class="btn btn-secondary" style="font-size:11px;white-space:nowrap" onclick="syncForceNow()">🔄 Forcer sync</button>`;
+}
+// Geste de réparation manuel : rejoue la file médicale ET force un flush PbSync.
+function syncForceNow() {
+  try { replayPendingInjuries(); } catch (e) {}
+  try { if (window.PbSync && PbSync.flushNow) PbSync.flushNow(state).catch(() => {}); } catch (e) {}
+  try { if (typeof showToast === 'function') showToast('🔄 Synchronisation relancée'); } catch (e) {}
+  setTimeout(() => { try { _syncBadgeRender(); } catch (e) {} }, 2500);
+}
+
 function saveInjury(pid) {
   const p = state.players.find(x => x.id === pid);
   if (!p) return;
@@ -42453,6 +42584,7 @@ function saveInjury(pid) {
     restrictions: document.getElementById('inj-restrictions').value.trim(),
   };
   persist();
+  _pushInjury(p);
   closeModal();
   setTimeout(() => editPlayer(pid), 50);
 }
@@ -42469,6 +42601,9 @@ function markAsHealed(pid) {
   });
   delete p.injury;
   persist();
+  // Une guérison EFFACE le statut : cet effacement doit voyager comme une
+  // déclaration, sinon l'autre appareil garde une joueuse indispo à vie.
+  _pushInjury(p);
   closeModal();
   setTimeout(() => editPlayer(pid), 50);
 }
@@ -46435,7 +46570,12 @@ function _initPlayersSync() {
           notifPermission: (rp.notif_permission !== undefined) ? (rp.notif_permission || null) : (lp.notifPermission || null),
           notifPermissionAt: (rp.notif_permission_at !== undefined)
             ? (rp.notif_permission_at ? Date.parse(rp.notif_permission_at) : null)
-            : (lp.notifPermissionAt || null) };
+            : (lp.notifPermissionAt || null),
+          // Statut médical (migration 20260806_001). Colonne absente → rp.injury
+          // undefined → on garde le local : un build déployé avant la migration
+          // ne doit pas effacer ce que l'appareil savait déjà.
+          injury: (rp.injury !== undefined) ? (rp.injury || null) : (lp.injury || null),
+          injuryHistory: Array.isArray(rp.injury_history) ? rp.injury_history : (lp.injuryHistory || []) };
       });
       const remoteIds = new Set(remote.map(r => r.id));
       const localOnly = state.players.filter(p => !remoteIds.has(p.id));
@@ -48195,7 +48335,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-16.133';
+const APP_VERSION = '2026-08-16.134';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
@@ -48387,6 +48527,15 @@ setTimeout(() => { try { checkForUpdate({ force: true }); } catch (e) {} }, 4000
 setInterval(() => {
   try { if (!document.hidden) checkForUpdate(); } catch (e) {}
 }, 300000);
+// FILE MÉDICALE EN ATTENTE — rejouée au boot, à chaque battement, au retour en
+// ligne et au retour au premier plan. Une écriture qui n'a pas pu partir ne
+// doit jamais dépendre d'un geste de l'utilisateur pour repartir : c'est
+// précisément ce qui a transformé une indispo en fantôme local.
+setTimeout(() => { try { replayPendingInjuries(); _syncBadgeRender(); } catch (e) {} }, 4500);
+setInterval(() => {
+  try { if (!document.hidden) replayPendingInjuries(); } catch (e) {}
+}, 300000);
+window.addEventListener('online', () => { try { replayPendingInjuries(); } catch (e) {} });
 try { _ambientStart(); } catch (e) {} // alertes ambiantes de déroulé (coach)
 try { _trainingRemindStart(); } catch (e) {} // rappel prépa quotidien (cf. la limite documentée sur _trainingRemindCheck)
 document.addEventListener('visibilitychange', () => {
@@ -48394,6 +48543,7 @@ document.addEventListener('visibilitychange', () => {
     // `foreground` autorise le rechargement automatique : c'est le seul moment
     // où l'on est sûr que personne n'est en train de saisir quelque chose.
     try { checkForUpdate({ foreground: true }); } catch (e) {}
+    try { replayPendingInjuries(); _syncBadgeRender(); } catch (e) {}
     try { _ambientCheck(); } catch (e) {} // rattrape une transition franchie en arrière-plan
     // Retour au 1er plan après l'heure du rappel → rattrape le rappel du jour.
     try { _trainingRemindCheck(); } catch (e) {}
