@@ -8558,6 +8558,33 @@ function seasonIdForConvocInstance(c, instanceDate) {
   return getSeasonIdForDate(d) || (c && c.seasonId) || state.currentSeasonId || null;
 }
 
+// Effectif d'une INSTANCE de convocation — porte UNIQUE de tout décompte de
+// présence / absence, affiché comme comptabilisé. La clôture (_applyConvocClosure)
+// passe par ici elle aussi : c'est la seule garantie que la fiche n'annonce pas
+// « 5 absentes » là où la clôture en crédite un autre nombre.
+//
+// Chaque vue recalculait son effectif dans son coin, et deux pièges y sont
+// tombés — la CLÔTURE les avait corrigés, les VUES ne les ont jamais reçus :
+//   1. MULTI-EFFECTIF — sans `team`, getSeasonPlayers rend TOUT le club (son
+//      défaut est 'all') : sur un entraînement E1, les joueuses E2 en
+//      indisponibilité étaient comptées absentes et gonflaient le compteur.
+//      La vue MATCH, elle, scopait déjà sur l'équipe (getMatchRoster) — d'où
+//      le symptôme « le compteur du match est juste, pas celui de l'entraînement ».
+//   2. SAISON — l'effectif suit la saison de la DATE de l'instance, jamais la
+//      saison de la convoc : sur une série récurrente qui franchit le 1er
+//      septembre, les instances d'après créditaient déjà la nouvelle saison
+//      tout en affichant l'effectif de l'ancienne.
+// 'both' → tout l'effectif (une convoc commune aux deux équipes).
+function convocInstanceRoster(c, instanceDate) {
+  if (!c) return [];
+  const _instDate = instanceDate || c.date || null;
+  const _seasonId = seasonIdForConvocInstance(c, _instDate);
+  const _team = c.teamTag === 'both' ? 'all' : (c.teamTag === 'e2' ? 'e2' : 'e1');
+  return (_seasonsLoaded() && _seasonId)
+    ? getSeasonPlayers(_seasonId, { team: _team })
+    : (state.players || []);
+}
+
 // ============================================================
 // COMPTEURS AUTO DÉRIVÉS DES SOURCES (filtre période + recompute migration)
 // ------------------------------------------------------------
@@ -13174,8 +13201,12 @@ function heroCard(ev) {
   // SAISON : compte les absentes parmi l'effectif courant. Passe par le
   // résolveur, sinon la carte d'accueil et le détail affichent deux chiffres
   // différents pour le même événement — c'est exactement le bug qu'on paie ici.
+  // v.133 — Effectif via la porte unique et non `currentSeasonPlayers()` : celui-ci
+  // suit la PILLULE de la topbar (effectiveTeamFilter), pas l'équipe de l'événement
+  // — pillule sur « toutes », et le hero d'un entraînement E1 comptait les absentes
+  // de E2. C'est le « deux chiffres pour le même événement » annoncé ci-dessus.
   const _parentConv = state.convocations.find(x => x.id === parentId) || null;
-  const absent = currentSeasonPlayers()
+  const absent = convocInstanceRoster(_parentConv, instanceDate)
     .filter(p => _convocResp(_parentConv, instanceDate, p.id).status === 'absent').length;
   // v.111 — Même règle que le détail (openEventInstance) : sur un ENTRAÎNEMENT,
   // la joueuse ne voit pas « ⚠ N absentes ». Sans ça, le chiffre qu'on vient de
@@ -27495,12 +27526,9 @@ function convocCard(c, isPast, isCoach) {
   // eventInstanceRow + openEventInstance), mais on ne laisse pas une mine
   // amorcée derrière soi — la date d'une convoc non récurrente, c'est c.date.
   const dateStr = c.date;
-  // SAISON : on calcule présents/absents parmi l'effectif de la saison de
-  // la convoc (ou saison courante en fallback).
-  const _seasonId = c.seasonId || state.currentSeasonId;
-  const _seasonPool = _seasonsLoaded() && _seasonId
-    ? getSeasonPlayers(_seasonId)
-    : (state.players || []);
+  // SAISON + MULTI-EFFECTIF : porte unique (cf. convocInstanceRoster).
+  const _seasonId = seasonIdForConvocInstance(c, dateStr);
+  const _seasonPool = convocInstanceRoster(c, dateStr);
   const present = _seasonPool.filter(p => _convocResp(c, dateStr, p.id).status === 'present');
   const absent = _seasonPool.filter(p => _convocResp(c, dateStr, p.id).status === 'absent');
   const days = daysUntil(c.date);
@@ -27886,10 +27914,8 @@ function _applyConvocClosure(c, instanceDate) {
   // MULTI-EFFECTIF : scopé sur l'équipe de la convoc ('both' → tout l'effectif).
   const _instDate = instanceDate || c.date || null;
   const _seasonId = seasonIdForConvocInstance(c, _instDate);
-  const _convTeam = c.teamTag === 'both' ? 'all' : (c.teamTag === 'e2' ? 'e2' : 'e1');
-  const _seasonPool = _seasonsLoaded() && _seasonId
-    ? getSeasonPlayers(_seasonId, { team: _convTeam })
-    : (state.players || []);
+  // Effectif via la porte unique : ce que la fiche affiche EST ce qu'on crédite.
+  const _seasonPool = convocInstanceRoster(c, _instDate);
   const targetType = c.type === 'match' ? 'attendance_match' : 'attendance_training';
   // Défi auto de la SAISON de la convoc (pas un singleton global) → fini le cumul
   // cross-saison. Créé à la volée si la saison n'a pas encore son défi.
@@ -38044,11 +38070,9 @@ function openEventInstance(parentId, dateStr) {
   const isRecurrent = !!c.recurrence;
   const isCancelled = (c.cancelledInstances || []).includes(dateStr);
   const responses = instance.responses || {};
-  // SAISON : effectif scopé à la saison de la convoc
-  const _seasonId = c.seasonId || state.currentSeasonId;
-  const _seasonPool = _seasonsLoaded() && _seasonId
-    ? getSeasonPlayers(_seasonId)
-    : (state.players || []);
+  // SAISON + MULTI-EFFECTIF : porte unique, identique à ce que compte la clôture.
+  const _seasonId = seasonIdForConvocInstance(c, dateStr);
+  const _seasonPool = convocInstanceRoster(c, dateStr);
   const present = _seasonPool.filter(p => _convocResp(c, dateStr, p.id).status === 'present');
   const absent = _seasonPool.filter(p => _convocResp(c, dateStr, p.id).status === 'absent');
   const ovKey = '__inst_' + parentId + '_' + dateStr;
@@ -38310,11 +38334,10 @@ function openCallSheet(parentId, dateStr) {
   if (!c) return;
   const instance = makeConvocInstance(c, dateStr);
   const responses = instance.responses || {};
-  // SAISON : effectif scopé à la saison de la convoc
-  const _seasonId = c.seasonId || state.currentSeasonId;
-  const _seasonPool = _seasonsLoaded() && _seasonId
-    ? getSeasonPlayers(_seasonId)
-    : (state.players || []);
+  // SAISON + MULTI-EFFECTIF : porte unique (cf. convocInstanceRoster). La feuille
+  // d'appel doit lister exactement les joueuses attendues sur CETTE équipe.
+  const _seasonId = seasonIdForConvocInstance(c, dateStr);
+  const _seasonPool = convocInstanceRoster(c, dateStr);
   const present = _seasonPool.filter(p => _convocResp(c, dateStr, p.id).status === 'present');
   const absent = _seasonPool.filter(p => _convocResp(c, dateStr, p.id).status === 'absent');
   const sheet = getCallSheet(c, c.recurrence ? dateStr : null);
@@ -48172,7 +48195,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-16.132';
+const APP_VERSION = '2026-08-16.133';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.

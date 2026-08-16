@@ -71,6 +71,13 @@ function makeEnv(role, type) {
     isoDate: () => '2026-08-09',
     currentSeasonPlayers: () => PLAYERS,
     getSeasonPlayers: () => PLAYERS,
+    // v.133 — l'effectif d'une instance passe par une porte unique
+    // (convocInstanceRoster) partagée avec la clôture. Ce test-ci porte sur le
+    // MASQUAGE des compteurs côté joueuse, pas sur le scope de l'effectif : on
+    // stube donc comme les autres accès à l'effectif ci-dessus. Le scope équipe
+    // /saison est couvert par test-training-absent-count.mjs.
+    convocInstanceRoster: () => PLAYERS,
+    seasonIdForConvocInstance: () => 's1',
     _seasonsLoaded: () => true,
     _convocResp: (c, dateStr, pid) => ({
       status: ABSENT_IDS.has(pid) ? 'absent' : 'present',
