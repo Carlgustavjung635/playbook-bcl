@@ -24550,7 +24550,12 @@ function ardoiseDrawProgram(seed, opts) {
   items.forEach((it, i) => { it.order = i; });
   return {
     title: ARDOISE_JACKPOT_NAMES[Math.floor(rnd() * ARDOISE_JACKPOT_NAMES.length)],
-    items: items
+    items: items,
+    // La MISE fait partie du programme, au même titre que les exos. Sans elle,
+    // l'écran du jackpot — le seul qui lise un programme AVANT que la dette ne
+    // soit écrite (progOverride) — annonçait « +0 points » alors que
+    // `_ardCommitSpin` figeait bien le vrai barème dans la dette.
+    pointsReward: _ardPoints(r)
   };
 }
 // Le tirage d'UNE dette : graine = son id (donc rejouable à l'identique), et
@@ -25253,8 +25258,16 @@ function _ardRenderMachine() {
         <div class="ard-casino-title">${done ? esc((box.program && box.program.title) || 'Jackpot') : 'Machine à ardoise'}</div>
 
         <div class="ard-reels">
-          ${ARDOISE_REELS.map((c, i) => _ardReelHtml(c, i, box, hit)).join('')}
+          ${ARDOISE_REELS.map((c, i) => ({ c, i }))
+            // LE SUSPENSE D'ABORD, LE RÉSULTAT ENSUITE. Les cinq rouleaux
+            // tournent — c'est la promesse de la machine. Mais à la RÉVÉLATION,
+            // un rouleau grisé « pas ce coup-ci » n'est plus une information :
+            // c'est du bruit au milieu du programme. On ne garde que ce qui est
+            // tombé, et la mention part en pied de machine, discrète.
+            .filter(({ c }) => !done || (hit[c.id] || []).length)
+            .map(({ c, i }) => _ardReelHtml(c, i, box, hit)).join('')}
         </div>
+        ${done ? _ardMissedReelsHtml(hit) : ''}
 
         ${done ? _ardMachineDoneHtml(box) : `
           <div class="ard-casino-foot">
@@ -25268,6 +25281,15 @@ function _ardRenderMachine() {
         ${box.preview ? `<button class="ard-casino-close" onclick="_ardClosePreview()">✕ Fermer</button>` : ''}
       </div>
     </div>`;
+}
+// Les rouleaux qui ne sont pas tombés, en une ligne de bas de page. Rien si
+// tout est tombé — et rien non plus pour un rouleau VIDE (aucun exo dans cette
+// catégorie) : il n'a jamais eu sa chance, l'annoncer serait mentir.
+function _ardMissedReelsHtml(hit) {
+  const missed = ARDOISE_REELS.filter(c => !(hit[c.id] || []).length && ardoiseReelPool(c.id, null).length);
+  if (!missed.length) return '';
+  return `<div class="ard-casino-hint" style="opacity:0.6;font-size:11px;margin-top:2px">${missed
+    .map(c => c.icon + ' ' + esc(c.label)).join(' · ')} : pas ce coup-ci — la prochaine fois</div>`;
 }
 function _ardReelHtml(cat, i, box, hit) {
   const picked = (hit[cat.id] || []);
@@ -25555,17 +25577,30 @@ function _ardTicketHtml(progOverride, assignment) {
           <div class="ard-item-badge" title="${esc(c.label)}">${c.icon}</div>
           <div class="ard-item-name">${esc(it.name || 'Exercice')}${it.note ? `<div class="ard-item-note">${esc(it.note)}</div>` : ''}${d
             ? `<div><button type="button" class="ard-item-drill" onclick="launchExoDrill('${esc(it.exo_id)}','ardoise')">▶ Lancer · ${esc(_drillModeLabel(d))}</button></div>` : ''}</div>
-          <div class="ard-item-dose">${esc(_ardDoseLabel(it))}</div>
+          ${_ardTitleCarriesDose(it.name) ? '' : `<div class="ard-item-dose">${esc(_ardDoseLabel(it))}</div>`}
         </div>`; }).join('')
         : '<div style="font-size:12px;color:var(--casino-dim);font-style:italic">Programme vide — préviens le coach.</div>'}
       <div class="ard-ticket-rule"></div>
       <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
-        <span class="ard-price">+${Number(prog.pointsReward) || 0} points</span>
+        <span class="ard-price">+${_ardPoints({ pointsReward: (prog.pointsReward != null ? prog.pointsReward : (a ? a.pointsReward : null)) })} points</span>
         ${a && a.deadlineAt ? `<span class="ard-ticket-clock" style="color:${overdue ? 'var(--casino-alert)' : 'var(--casino-dim)'}">${overdue
             ? '⏱ en retard de ' + esc(_ardFmtLeft(Date.now() - a.deadlineAt))
             : '⏱ ' + esc(_ardFmtLeft(a.deadlineAt - Date.now())) + ' restant' + (a.deadlineAt - Date.now() >= 2 * ARDOISE_DAY ? 's' : '')}</span>` : ''}
       </div>
     </div>`;
+}
+// LE TITRE PORTE-T-IL DÉJÀ LA DOSE ? La bibliothèque historique du coach a été
+// saisie à la main, dose comprise dans le nom (« 6 séries de 30 rep de gainage
+// commando »). La colonne de droite répétait alors la même information à côté
+// (« 6 × 30 · repos 30 s »). On ne réécrit PAS les exos — la donnée du coach lui
+// appartient — on se contente de ne pas l'afficher deux fois.
+//
+// Volontairement conservateur : un nombre COLLÉ à une unité de dose. « Suicide
+// 5-10-5 » ou « Shoot 3 points » n'en font pas partie ; « 30s », « 3x12 »,
+// « 4 séries », « 2 min » oui.
+const _ARD_DOSE_IN_TITLE_RE = /\d+\s*(?:x|×)\s*\d+|\d+\s*(?:s[ée]ries?|r[ée]p[eé]?titions?|r[ée]ps?|sets?|min(?:utes?)?|sec(?:ondes?)?|s)\b/i;
+function _ardTitleCarriesDose(name) {
+  return _ARD_DOSE_IN_TITLE_RE.test(String(name || ''));
 }
 // « 3 × 12 · repos 30 s », « 45 s », « 4 × 40 s ». Ce qui est absent n'est pas
 // affiché : un exo sans séries ne doit pas annoncer « 1 × ».
@@ -49269,7 +49304,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-16.140';
+const APP_VERSION = '2026-08-17.141';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
