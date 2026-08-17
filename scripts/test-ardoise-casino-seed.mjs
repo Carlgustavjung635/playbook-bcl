@@ -3,8 +3,11 @@
 // fonctions pures du casino et on les fait tourner.
 import fs from 'fs';
 import vm from 'vm';
+import { fileURLToPath } from 'url';
 
-const ROOT = new URL('..', import.meta.url).pathname.replace(/^/([A-Za-z]:)/, '$1');
+// Le harnais se lance depuis n'importe où : la racine se déduit du fichier.
+// `fileURLToPath` et pas `.pathname`, qui rend « /C:/… » sous Windows.
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const src = fs.readFileSync(ROOT + '/index.html', 'utf8');
 const sql = fs.readFileSync(ROOT + '/supabase/migrations/20260816_005_ardoise_seed_exos.sql', 'utf8');
 
