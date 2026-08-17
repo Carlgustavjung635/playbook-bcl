@@ -6830,8 +6830,55 @@ function _ardoiseMenuFromRow(r) {
     deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null
   };
 }
-function _dumpArdoiseAssignmentRow(a) {
+// --- LE CASINO (migration 20260816_004) : détection de schéma ---------------
+// `items`, `mode`, `points_reward` et `title` arrivent APRÈS la table. Règle
+// déjà payée deux fois dans ce projet (v.115, v.131) : on ne pousse une colonne
+// qu'APRÈS l'avoir vue revenir du serveur — sinon le lot d'upsert entier échoue
+// et la table cesse de se synchroniser en SILENCE (un simple console.warn).
+//
+// 🔴 LA DÉTECTION NE PEUT PAS SE FAIRE SUR `ardoise_assignments` : en prod la
+// table est VIDE, donc aucune ligne ne revient jamais, donc le drapeau ne
+// passerait jamais à true et le programme tiré ne serait jamais poussé — la
+// joueuse tirerait dans le vide, à chaque fois, sans un mot.
+// On le lit donc sur `ardoise_rules`, dont la ligne 'default' est SEEDÉE par la
+// migration et revient donc toujours : les deux jeux de colonnes arrivent par
+// la même migration, voir l'une prouve l'autre. La lecture d'une assignation
+// confirme si l'occasion se présente, mais elle n'est pas la source.
+//
+// Le drapeau est exposé sur `window` : le bloc <script> classique en a besoin
+// pour REFUSER un tirage qu'il ne pourrait pas écrire (cf. _ardCommitDraw).
+// Un booléen, jamais une fonction du même nom — cf. la collision de la v.124.
+let _ardCasinoCols = false;
+function _ardMarkCasinoCols() {
+  _ardCasinoCols = true;
+  try { window._ardCasinoCols = true; } catch (e) {}
+}
+// Une ligne de programme dans une dette. Même contrat que `_ardMenuItem` (dont
+// elle prend la suite), plus `category` : c'est elle qui permet de réafficher le
+// programme rouleau par rouleau même si l'exo a changé de catégorie ou disparu.
+function _ardProgramItem(it, i) {
+  const o = (it && typeof it === 'object') ? it : {};
   return {
+    exo_id: o.exo_id || o.exoId || null,
+    name: String(o.name || '').slice(0, 200),
+    category: _ardCategoryDb(o.category),
+    sets: _ardClampIntOrNull(o.sets, 1, 50),
+    reps: _ardClampIntOrNull(o.reps, 1, 999),
+    duration_sec: _ardClampIntOrNull(o.duration_sec != null ? o.duration_sec : o.durationSec, 1, 7200),
+    rest_sec: _ardClampInt(o.rest_sec != null ? o.rest_sec : o.restSec, 0, 3600, 30),
+    note: String(o.note || '').slice(0, 500),
+    order: Number.isFinite(Number(o.order)) ? Number(o.order) : i
+  };
+}
+function _ardModeDb(m) { return m === 'manual' ? 'manual' : 'casino'; }
+function _dumpArdoiseAssignmentRow(a) {
+  const casino = _ardCasinoCols ? {
+    items: Array.isArray(a.items) ? a.items.map(_ardProgramItem) : [],
+    mode: _ardModeDb(a.mode),
+    points_reward: _ardClampInt(a.pointsReward, 0, 1000, 20),
+    title: (typeof a.title === 'string' && a.title.trim()) ? a.title.slice(0, 200) : null
+  } : {};
+  return Object.assign(casino, {
     id: a.id,
     player_id: a.playerId || null,
     menu_id: a.menuId || null,
@@ -6849,13 +6896,21 @@ function _dumpArdoiseAssignmentRow(a) {
     season_id: a.seasonId || null,
     deleted_at: a.deletedAt ? new Date(a.deletedAt).toISOString() : null,
     updated_at: a.updatedAt ? new Date(a.updatedAt).toISOString() : new Date().toISOString()
-  };
+  });
 }
 function _ardoiseAssignmentFromRow(r) {
+  // Confirmation opportuniste : si une assignation revient avec `items`, la
+  // migration est passée. Ce n'est PAS la source de vérité (table souvent vide),
+  // cf. le commentaire de _ardMarkCasinoCols.
+  if (r && r.items !== undefined) _ardMarkCasinoCols();
   return {
     id: r.id,
     playerId: r.player_id || null,
     menuId: r.menu_id || null,
+    items: Array.isArray(r.items) ? r.items.map(_ardProgramItem) : [],
+    mode: _ardModeDb(r.mode),
+    pointsReward: Number.isFinite(r.points_reward) ? r.points_reward : 20,
+    title: r.title || '',
     drawnAt: r.drawn_at ? Date.parse(r.drawn_at) : null,
     deadlineAt: r.deadline_at ? Date.parse(r.deadline_at) : null,
     status: _ardStatusDb(r.status),
@@ -7009,7 +7064,16 @@ function _pointsHarvestFromRow(r) {
   };
 }
 function _dumpArdoiseRulesRow(r) {
-  return {
+  // Cf. _ardMarkCasinoCols : ces cinq colonnes arrivent avec la 20260816_004,
+  // et c'est CETTE ligne-ci (seedée, donc toujours renvoyée) qui sert de sonde.
+  const casino = _ardCasinoCols ? {
+    assignment_mode: _ardModeDb(r.assignmentMode),
+    exos_per_spin: _ardClampInt(r.exosPerSpin, 1, 5, 4),
+    cardio_always: r.cardioAlways !== false,
+    random_seed_isolation: r.randomSeedIsolation !== false,
+    points_reward: _ardClampInt(r.pointsReward, 0, 1000, 20)
+  } : {};
+  return Object.assign(casino, {
     id: 'default',
     deadline_days: _ardClampInt(r.deadlineDays, 1, 90, 7),
     max_debts: _ardClampInt(r.maxDebts, 1, 50, 10),
@@ -7022,9 +7086,13 @@ function _dumpArdoiseRulesRow(r) {
     rules_text_md: (typeof r.rulesTextMd === 'string' && r.rulesTextMd.trim()) ? r.rulesTextMd.slice(0, 20000) : null,
     updated_by: r.updatedBy || null,
     updated_at: r.updatedAt ? new Date(r.updatedAt).toISOString() : new Date().toISOString()
-  };
+  });
 }
 function _ardoiseRulesFromRow(r) {
+  // LA SONDE. La ligne 'default' est seedée par 20260815_001, donc elle revient
+  // toujours : si elle porte `assignment_mode`, la 20260816_004 est passée — et
+  // avec elle les colonnes de `ardoise_assignments`, du même fichier.
+  if (r && r.assignment_mode !== undefined) _ardMarkCasinoCols();
   return {
     id: 'default',
     deadlineDays: _ardClampInt(r.deadline_days, 1, 90, 7),
@@ -7032,6 +7100,11 @@ function _ardoiseRulesFromRow(r) {
     autoPenaltyOnExpire: r.auto_penalty_on_expire !== false,
     autoDrawOnPenalty: r.auto_draw_on_penalty !== false,
     requirePhotoAtHome: r.require_photo_at_home !== false,
+    assignmentMode: _ardModeDb(r.assignment_mode),
+    exosPerSpin: _ardClampInt(r.exos_per_spin, 1, 5, 4),
+    cardioAlways: r.cardio_always !== false,
+    randomSeedIsolation: r.random_seed_isolation !== false,
+    pointsReward: _ardClampInt(r.points_reward, 0, 1000, 20),
     rulesTextMd: (typeof r.rules_text_md === 'string') ? r.rules_text_md : '',
     updatedBy: r.updated_by || null,
     updatedAt: r.updated_at ? Date.parse(r.updated_at) : 0
@@ -23986,27 +24059,56 @@ const ARDOISE_RULES_DEFAULT = {
   autoPenaltyOnExpire: true,
   autoDrawOnPenalty: true,
   requirePhotoAtHome: true,
+  // --- LA MACHINE (migration 20260816_004) ---
+  assignmentMode: 'casino',
+  exosPerSpin: 4,
+  cardioAlways: true,
+  randomSeedIsolation: true,
+  pointsReward: 20,
   rulesTextMd: '',
   updatedBy: null,
   updatedAt: 0
 };
-// Les niveaux de menu, en langage de carte. `weight` n'est PAS une probabilité :
-// le tirage est uniforme sur les menus actifs (un coach qui veut plus de « feu »
-// en crée plus). C'est l'ordre d'affichage, du plus léger au plus lourd.
-const ARDOISE_LEVELS = [
-  { id: 'starter', icon: '⭐', label: 'Mise en bouche', weight: 1 },
-  { id: 'plat',    icon: '🥘', label: 'Le plat',        weight: 2 },
-  { id: 'dessert', icon: '🔥', label: 'Ça pique',       weight: 3 },
-  { id: 'feu',     icon: '🌋', label: 'Menu du chef',   weight: 4 }
-];
-const EXO_CATEGORIES = [
-  { id: 'cardio',   icon: '🫀', label: 'Cardio' },
-  { id: 'gainage',  icon: '🧱', label: 'Gainage' },
+// ----------------------------------------------------------------------------
+// LES CINQ ROULEAUX — un par catégorie corporelle, dans l'ordre où la machine
+// les affiche et les arrête (haut → bas). L'ordre compte deux fois : c'est
+// l'ordre d'arrêt à l'écran ET l'ordre des lignes du programme, pour que le
+// ticket se lise exactement comme la machine l'a servi.
+//
+// `combine` et `autre` n'ont PAS de rouleau : un exo rangé là ne sort jamais.
+// Ce n'est pas un oubli — ce sont des fourre-tout, et un tirage doit pouvoir
+// annoncer quelle zone du corps il fait travailler. L'écran de réglages le dit
+// au coach plutôt que de le laisser deviner devant des exos qui ne tombent
+// jamais.
+// ----------------------------------------------------------------------------
+const ARDOISE_REELS = [
+  { id: 'bras',     icon: '💪', label: 'Bras' },
   { id: 'jambes',   icon: '🦵', label: 'Jambes' },
+  { id: 'gainage',  icon: '🧠', label: 'Gainage' },
+  { id: 'mobilite', icon: '🧘', label: 'Mobilité' },
+  { id: 'cardio',   icon: '🔥', label: 'Cardio' }
+];
+const ARDOISE_REEL_IDS = ARDOISE_REELS.map(r => r.id);
+// La taxonomie de la BIBLIOTHÈQUE (partagée avec la prépa). Les cinq premières
+// portent les mêmes icônes que les rouleaux, exprès : la biblio et la machine
+// doivent parler la même langue, sinon le coach range un exo « 🫀 » et le voit
+// ressortir en « 🔥 » sans comprendre que c'est le même tiroir.
+const EXO_CATEGORIES = [
   { id: 'bras',     icon: '💪', label: 'Bras / haut du corps' },
-  { id: 'mobilite', icon: '🤸', label: 'Mobilité / souplesse' },
-  { id: 'combine',  icon: '🔀', label: 'Combiné' },
-  { id: 'autre',    icon: '📦', label: 'Autre' }
+  { id: 'jambes',   icon: '🦵', label: 'Jambes' },
+  { id: 'gainage',  icon: '🧠', label: 'Gainage' },
+  { id: 'mobilite', icon: '🧘', label: 'Mobilité / souplesse' },
+  { id: 'cardio',   icon: '🔥', label: 'Cardio' },
+  { id: 'combine',  icon: '🔀', label: 'Combiné (hors tirage)' },
+  { id: 'autre',    icon: '📦', label: 'Autre (hors tirage)' }
+];
+// Les noms de programme, tirés au sort avec les exos. Purement décoratifs : rien
+// ne s'y calcule, et deux programmes peuvent porter le même nom sans dommage.
+const ARDOISE_JACKPOT_NAMES = [
+  '💎 Carré d\'As', '🍒 Triple Cerise', '🔔 Cloche d\'Or', '⚡ Coup de Foudre',
+  '🎲 Double Six', '👑 La Maison Gagne', '🃏 Le Joker', '🔥 Full Feu',
+  '🌟 Étoile Filante', '🪙 Le Gros Lot', '🎯 Dans le Mille', '🚀 Décollage',
+  '🧨 Mèche Courte', '🏆 Tapis Vert', '🥶 Sueur Froide', '🌪 Cyclone'
 ];
 // Statuts qui « comptent » comme une dette encore due. `done_home` en fait
 // partie : la joueuse a joué son rôle, mais tant que le coach n'a pas validé, la
@@ -24014,34 +24116,40 @@ const EXO_CATEGORIES = [
 const ARDOISE_LIVE_STATUSES = ['pending_draw', 'in_progress', 'done_home'];
 const ARDOISE_DONE_STATUSES = ['done_validated', 'done_at_training'];
 
-const ARDOISE_RULES_TEXT_DEFAULT = `# 🍽 L'Ardoise
+const ARDOISE_RULES_TEXT_DEFAULT = `# 🎰 L'Ardoise
 
-Tu as une dette ? Elle est **sur l'ardoise**. Le chef te sert un menu, tu le consommes.
+Tu as une dette ? La machine décide. Cinq rouleaux, **quatre exos**, aucun choix.
 
-## Le service
+## Les rouleaux
+💪 Bras · 🦵 Jambes · 🧠 Gainage · 🧘 Mobilité · 🔥 Cardio
+
+Le **cardio tombe à tous les coups**. Les trois autres se tirent au sort.
+
+## La partie
 1. Le coach t'ardoise (1 dette, ou plusieurs d'un coup)
-2. Tu **tires ton menu au sort** — pas de choix à la carte
-3. Tu as **7 jours** pour le consommer, à partir du tirage
-4. Menu terminé = **points positifs** pour toi
+2. Tu **lances la machine** — elle s'ouvre toute seule à l'ouverture de l'app
+3. Le tirage est **définitif** : pas de re-spin, pas de « j'ai fermé l'app »
+4. Tu as **7 jours** pour faire le programme, à partir du tirage
+5. Programme terminé = **points positifs** pour toi
 
-## Deux façons de régler l'addition
+## Deux façons de payer
 - **✅ À l'entraînement** — tu le fais devant le coach, il valide sur place
 - **📸 À la maison** — tu envoies une photo, le coach valide après coup
 
-## Un seul menu à la fois
-Tant que ton menu en cours n'est pas réglé, les dettes suivantes **attendent en
-cuisine**. Tu ne peux pas tirer deux menus en même temps.
+## Une seule machine à la fois
+Tant que ton programme en cours n'est pas réglé, les dettes suivantes
+**attendent leur tour**. Pas de double spin.
 
-## L'addition qui monte
-Menu **pas consommé dans les 7 jours** ? Il expire, et le chef t'en ressert un
-autre **immédiatement** — tiré au sort, 7 nouveaux jours. Ça ne s'arrête pas
-tout seul : la seule sortie, c'est de le faire.
+## La mise qui monte
+Programme **pas fait dans les 7 jours** ? Il saute, et la machine **relance
+toute seule** — nouveau tirage, 7 nouveaux jours. Ça ne s'arrête pas tout
+seul : la seule sortie, c'est de le faire.
 
 ## Le plafond
-Maximum **10 ardoises** en même temps. Au-delà, ça ne monte plus — mais rien ne
-descend non plus tant que tu n'as pas mangé.
+Maximum **10 ardoises** en même temps. Au-delà ça ne monte plus — mais rien ne
+descend tant que tu n'as pas joué.
 
-🍽 **Bon appétit.**`;
+🎰 **La maison ne perd jamais.**`;
 
 function ardoiseRules() {
   return Object.assign({}, ARDOISE_RULES_DEFAULT, state.ardoiseRules || {});
@@ -24051,6 +24159,31 @@ function ardoiseRulesText() {
   return t || ARDOISE_RULES_TEXT_DEFAULT;
 }
 function ardoiseRulesTextIsCustom() { return !!(ardoiseRules().rulesTextMd || '').trim(); }
+// Le barème du moment, borné comme en base (le CHECK est à 0..1000).
+function _ardPoints(r) {
+  const n = Math.round(Number((r || ardoiseRules()).pointsReward));
+  return Number.isFinite(n) ? Math.min(1000, Math.max(0, n)) : 20;
+}
+// LA MIGRATION 20260816_004 EST-ELLE PASSÉE ? Le drapeau est posé par le bloc
+// <script type="module"> quand le serveur a renvoyé les nouvelles colonnes (cf.
+// _ardMarkCasinoCols). Tant qu'il est faux, `items` n'est PAS poussé — donc un
+// programme écrit maintenant serait perdu au prochain fetch, et la joueuse
+// retrouverait une dette au programme vide sans comprendre pourquoi.
+//
+// On préfère refuser bruyamment. C'est la fenêtre entre le déploiement du front
+// et l'application de la migration : quelques minutes, et un message clair vaut
+// mieux qu'une dette silencieusement vidée.
+function ardoiseSchemaReady() { return !!window._ardCasinoCols; }
+function _ardSchemaBlock() {
+  if (ardoiseSchemaReady()) return false;
+  try {
+    alert('🎰 La machine n\'est pas encore branchée côté serveur.\n\n'
+      + 'La migration « 20260816_004_ardoise_casino » n\'a pas été appliquée : '
+      + 'un tirage écrit maintenant serait perdu. Préviens le coach — rien n\'est cassé, '
+      + 'ton ardoise t\'attend.');
+  } catch (e) {}
+  return true;
+}
 
 function _ardFlush() { try { if (window.PbSync && PbSync.flushNow) PbSync.flushNow(state).catch(() => {}); } catch (e) {} }
 function _ardIsCoach() { return !!(state.auth && state.auth.role === 'coach'); }
@@ -24084,8 +24217,8 @@ function _ardFmtLeft(ms) {
   if (hours >= 1) return hours + ' h';
   return Math.max(1, Math.ceil(abs / 60000)) + ' min';
 }
-function ardoiseLevelMeta(id) {
-  return ARDOISE_LEVELS.find(l => l.id === id) || ARDOISE_LEVELS[1];
+function ardoiseReelMeta(id) {
+  return ARDOISE_REELS.find(c => c.id === id) || { id: id || 'autre', icon: '📦', label: 'Autre' };
 }
 function ardoiseCategoryMeta(id) {
   return EXO_CATEGORIES.find(c => c.id === id) || EXO_CATEGORIES[EXO_CATEGORIES.length - 1];
@@ -24125,21 +24258,181 @@ function launchExoDrill(exoId, back) {
   try { _ardCloseOverlay(); } catch (e) {}
   launchDrillByMode(d.id);
 }
-function ardoiseMenus() {
-  return (state.ardoiseMenus || []).filter(m => m && !m.deletedAt)
-    .sort((a, b) => ardoiseLevelMeta(a.level).weight - ardoiseLevelMeta(b.level).weight
-      || (a.name || '').localeCompare(b.name || ''));
-}
-// Le vivier du tirage. Un menu désactivé (`isActive: false`) en sort SANS
-// disparaître des dettes qui le portent déjà — c'est toute la raison d'être du
-// drapeau plutôt qu'une suppression.
-function ardoiseDrawPool() {
-  return ardoiseMenus().filter(m => m.isActive && (m.items || []).length > 0);
-}
-// LU PAR ID, y compris hors du vivier : une dette tirée il y a quinze jours doit
-// rester lisible même si le coach a depuis désactivé — ou supprimé — son menu.
+// LEGACY (v.124 → v.132). Les « menus » du restaurant n'ont plus ni CRUD ni
+// tirage : le programme vit désormais dans la dette (`items`). Cette lecture
+// survit pour une seule raison — une dette tirée AVANT la refonte ne porte qu'un
+// `menu_id`, et son historique doit rester lisible. Ne pas filtrer `deletedAt`
+// est délibéré, comme avant : un menu supprimé doit continuer de nommer les
+// dettes qu'il a servies. Cf. migration 20260816_004.
 function ardoiseMenuById(id) {
   return (state.ardoiseMenus || []).find(m => m && m.id === id) || null;
+}
+
+// ============================================================
+// LA MACHINE À SOUS (cf. migration 20260816_004)
+// ------------------------------------------------------------
+// Cinq rouleaux, quatre exos. Le tirage est une FONCTION PURE de
+// (graine, bibliothèque, exclusions) — jamais Math.random().
+//
+// Ce n'est pas un caprice d'implémentation, c'est ce qui rend vraies les deux
+// promesses du produit :
+//   • « tirage définitif » — tuer l'app pendant l'animation ne relance pas les
+//     dés : au retour, la même graine (l'id de la dette) redonne le même
+//     programme, au même exo près. Rien n'a besoin d'être écrit à l'avance pour
+//     verrouiller le résultat ;
+//   • pénalité idempotente — onze appareils qui matérialisent la même expiration
+//     calculent le même programme sur la même clé primaire (l'id de la dette de
+//     pénalité est lui-même dérivé du parent, cf. _ardPenaltyIdFor).
+// ============================================================
+// PRNG mulberry32, amorcé par le hachage FNV-1a déjà utilisé pour les pénalités.
+// Petit, sans état global, et surtout REPRODUCTIBLE d'un appareil à l'autre —
+// ce que Math.random() ne sera jamais.
+function _ardRng(seed) {
+  let h = (_ardHash(seed) || 1) >>> 0;
+  return function () {
+    h = (h + 0x6D2B79F5) >>> 0;
+    let t = h;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+// Fisher-Yates sur une COPIE, alimenté par le PRNG seedé.
+function _ardShuffle(arr, rnd) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    const t = a[i]; a[i] = a[j]; a[j] = t;
+  }
+  return a;
+}
+// Le vivier d'UN rouleau. Trié par id : deux appareils doivent parcourir la
+// bibliothèque dans le même ordre, sinon la même graine donne deux programmes.
+//
+// L'exclusion (anti-répétition) est LEVÉE si elle viderait le rouleau : mieux
+// vaut resservir un exo que présenter une machine à quatre rouleaux.
+function ardoiseReelPool(catId, exclude) {
+  const all = (state.exoTemplates || [])
+    .filter(e => e && !e.deletedAt && e.category === catId)
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  if (!exclude || !exclude.size) return all;
+  const kept = all.filter(e => !exclude.has(e.id));
+  return kept.length ? kept : all;
+}
+// Combien d'exos par rouleau — l'ingrédient du diagnostic de l'écran coach.
+function ardoiseReelCounts() {
+  const out = {};
+  ARDOISE_REEL_IDS.forEach(id => { out[id] = ardoiseReelPool(id, null).length; });
+  return out;
+}
+// La machine peut-elle tourner ? Il suffit d'UN rouleau garni : mieux vaut un
+// programme d'un seul exo qu'une dette qu'on ne peut pas tirer (elle bloquerait
+// toutes les suivantes, cf. « une seule machine à la fois »).
+function ardoiseLibraryReady() {
+  return ARDOISE_REEL_IDS.some(id => ardoiseReelPool(id, null).length > 0);
+}
+// Les exos du DERNIER programme de la joueuse — l'ensemble que
+// `randomSeedIsolation` écarte du tirage suivant. `skipId` évite qu'une dette
+// s'exclue elle-même quand on recalcule son propre tirage.
+function _ardLastProgramExos(playerId, skipId) {
+  const prev = ardoiseAssignmentsOf(playerId)
+    .filter(a => a.id !== skipId && (a.items || []).length)
+    .sort((a, b) => (b.drawnAt || b.assignedAt || 0) - (a.drawnAt || a.assignedAt || 0))[0];
+  return new Set(prev ? (prev.items || []).map(i => i.exo_id).filter(Boolean) : []);
+}
+// LE TIRAGE. Retourne { title, items } ou null si la bibliothèque est vide.
+//
+// Choix des catégories :
+//   1. cardio d'abord s'il est garni et que la règle le demande (le cardio est
+//      ce qui se perd le plus vite — un rattrapage sans cardio serait un coup de
+//      chance, pas une sanction) ;
+//   2. les autres au sort parmi les rouleaux garnis ;
+//   3. s'il n'y a pas assez de rouleaux garnis pour 4 exos, on REPASSE sur les
+//      mêmes en piochant un exo différent. Un programme doit compter quatre
+//      lignes même quand la bibliothèque n'en propose que trois familles.
+function ardoiseDrawProgram(seed, opts) {
+  const o = opts || {};
+  const r = ardoiseRules();
+  const n = Math.max(1, Math.min(5, Math.round(Number(r.exosPerSpin) || 4)));
+  const rnd = _ardRng(seed);
+  const exclude = (r.randomSeedIsolation && o.exclude && o.exclude.size) ? o.exclude : null;
+
+  const pools = {};
+  ARDOISE_REEL_IDS.forEach(id => {
+    const p = ardoiseReelPool(id, exclude);
+    if (p.length) pools[id] = p;
+  });
+  const garnished = ARDOISE_REEL_IDS.filter(id => pools[id]);
+  if (!garnished.length) return null;
+
+  const picks = [];
+  if (r.cardioAlways && pools.cardio) picks.push('cardio');
+  const others = _ardShuffle(garnished.filter(id => id !== 'cardio' || !picks.length), rnd);
+  others.forEach(id => { if (picks.length < n && picks.indexOf(id) === -1) picks.push(id); });
+  // Deuxième (puis troisième…) tour : on redouble les rouleaux garnis plutôt que
+  // de rendre un programme court. Garde-fou dur sur le nombre de tours.
+  for (let guard = 0; picks.length < n && guard < 8; guard++) {
+    const round = _ardShuffle(garnished, rnd);
+    for (const id of round) { if (picks.length >= n) break; picks.push(id); }
+  }
+
+  const used = new Set();
+  const items = picks.map(cat => {
+    const pool = pools[cat];
+    const fresh = pool.filter(e => !used.has(e.id));
+    const from = fresh.length ? fresh : pool;      // rouleau épuisé → on resert
+    const e = from[Math.floor(rnd() * from.length)];
+    used.add(e.id);
+    return {
+      exo_id: e.id,
+      name: e.name || 'Exercice',
+      category: cat,
+      sets: e.defaultSets || null,
+      reps: e.defaultReps || null,
+      duration_sec: e.defaultDurationSec || null,
+      rest_sec: e.defaultRestSec != null ? e.defaultRestSec : 30,
+      note: '',
+      order: 0
+    };
+  });
+  // Remis dans l'ordre des rouleaux : le ticket se lit comme la machine s'arrête.
+  items.sort((a, b) => ARDOISE_REEL_IDS.indexOf(a.category) - ARDOISE_REEL_IDS.indexOf(b.category));
+  items.forEach((it, i) => { it.order = i; });
+  return {
+    title: ARDOISE_JACKPOT_NAMES[Math.floor(rnd() * ARDOISE_JACKPOT_NAMES.length)],
+    items: items
+  };
+}
+// Le tirage d'UNE dette : graine = son id (donc rejouable à l'identique), et
+// exclusion = les exos de son programme précédent. Toujours passer par ici —
+// c'est cette fonction qui garantit que la joueuse, le coach et la pénalité
+// automatique voient tous les trois le même résultat.
+function ardoiseProgramFor(a) {
+  if (!a) return null;
+  return ardoiseDrawProgram('ard:' + a.id, { exclude: _ardLastProgramExos(a.playerId, a.id) });
+}
+// LE PROGRAMME D'UNE DETTE, quelle que soit son époque. `items` d'abord (le
+// modèle actuel), le menu legacy ensuite. Un seul lecteur pour tous les écrans :
+// c'est ce qui empêche la carte de la joueuse et la fiche du coach de diverger.
+function ardoiseProgramOf(a) {
+  if (!a) return null;
+  const items = Array.isArray(a.items) ? a.items.filter(Boolean) : [];
+  if (items.length) {
+    return {
+      title: (a.title || '').trim() || '🎰 Programme',
+      items: items.slice().sort((x, y) => (x.order || 0) - (y.order || 0)),
+      pointsReward: Number(a.pointsReward) || 0,
+      legacy: false
+    };
+  }
+  const m = a.menuId ? ardoiseMenuById(a.menuId) : null;
+  if (!m) return null;
+  return {
+    title: m.name || 'Menu',
+    items: (m.items || []).slice().sort((x, y) => (x.order || 0) - (y.order || 0)),
+    pointsReward: Number(m.pointsReward) || 0,
+    legacy: true
+  };
 }
 
 // --- LES DETTES : DÉRIVATION -------------------------------------------------
@@ -24222,20 +24515,19 @@ function _ardHash(s) {
 function _ardPenaltyIdFor(parentId) {
   return 'xard' + String(parentId || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 28) + 'p';
 }
-// Le menu de la pénalité : tiré par HACHAGE de son propre id sur le vivier
-// trié. Deux appareils synchronisés ont le même vivier, donc le même menu. Si
-// les viviers divergent une seconde (un menu tout juste créé chez l'un), le LWW
-// sur updatedAt tranche — et surtout, les deux écrivent sur LA MÊME clé, donc
-// jamais deux dettes.
-function _ardPickMenuDeterministic(seed) {
-  const pool = ardoiseDrawPool().slice().sort((a, b) => String(a.id).localeCompare(String(b.id)));
-  if (!pool.length) return null;
-  return pool[_ardHash(seed) % pool.length];
-}
-function _ardPickMenuRandom() {
-  const pool = ardoiseDrawPool();
-  if (!pool.length) return null;
-  return pool[Math.floor(Math.random() * pool.length)];
+// Le programme de la pénalité : tiré par la MÊME machine que celui de la
+// joueuse, avec pour graine l'id (dérivé) de la dette de remplacement. Deux
+// appareils synchronisés ont la même bibliothèque, donc le même programme. Si
+// les bibliothèques divergent une seconde (un exo tout juste créé chez l'un), le
+// LWW sur updatedAt tranche — et surtout, les deux écrivent sur LA MÊME clé
+// primaire, donc jamais deux dettes.
+//
+// L'exclusion anti-répétition part du PARENT et pas du « dernier programme de la
+// joueuse » : le parent est dans le même lot de lignes chez tout le monde, donc
+// l'exclusion est déterministe elle aussi.
+function _ardPenaltyProgram(penaltyId, parent) {
+  const exclude = new Set(((parent && parent.items) || []).map(i => i.exo_id).filter(Boolean));
+  return ardoiseDrawProgram('ard:' + penaltyId, { exclude });
 }
 // Balayage des échéances dépassées. Idempotent, appelable par n'importe quel
 // appareil, autant de fois qu'on veut.
@@ -24280,25 +24572,29 @@ function ardoiseSweep(opts) {
       //    (Le remplacement est 1-pour-1, donc en pratique il ne fait jamais
       //    monter le compteur — le garde-fou couvre les cas d'import.)
       if (ardoiseDebtCount(a.playerId) >= r.maxDebts) return;
-      // 3) La dette de remplacement. Tout est calculé : id, dates, menu.
+      // 3) La dette de remplacement. Tout est calculé : id, dates, programme.
       const pid = _ardPenaltyIdFor(a.id);
       if ((state.ardoiseAssignments || []).some(x => x && x.id === pid)) return; // déjà là
-      const menu = r.autoDrawOnPenalty ? _ardPickMenuDeterministic(pid) : null;
+      const prog = r.autoDrawOnPenalty ? _ardPenaltyProgram(pid, a) : null;
       const drawnAt = a.deadlineAt;                       // pas `now` : déterministe
       const next = {
         id: pid,
         playerId: a.playerId,
-        menuId: menu ? menu.id : null,
-        drawnAt: menu ? drawnAt : null,
-        deadlineAt: menu ? (drawnAt + r.deadlineDays * ARDOISE_DAY) : null,
-        status: menu ? 'in_progress' : 'pending_draw',
+        menuId: null,
+        items: prog ? prog.items : [],
+        mode: 'casino',
+        title: prog ? prog.title : '',
+        pointsReward: _ardPoints(r),
+        drawnAt: prog ? drawnAt : null,
+        deadlineAt: prog ? (drawnAt + r.deadlineDays * ARDOISE_DAY) : null,
+        status: prog ? 'in_progress' : 'pending_draw',
         proofPhotoUrl: '',
         assignedBy: 'system',
         assignedAt: drawnAt,
         validatedBy: null, validatedAt: null,
         pointsAwarded: 0,
         parentId: a.id,
-        notes: 'Ardoise non consommée dans les délais — le chef en a resservi une.',
+        notes: 'Ardoise non réglée dans les délais — la machine a relancé toute seule.',
         seasonId: a.seasonId || null,
         createdAt: drawnAt, updatedAt: now, deletedAt: null
       };
@@ -24331,13 +24627,13 @@ function _ardNotifyPenalty(a) {
     keys.sort((x, y) => (map[x] || 0) - (map[y] || 0)).slice(0, keys.length - 300).forEach(k => delete map[k]);
   }
   save(K.ardoisePushed, map);
-  const menu = a.menuId ? ardoiseMenuById(a.menuId) : null;
+  const prog = ardoiseProgramOf(a);
   try {
     notifyPush(['player:' + a.playerId], {
-      title: '🍽 Ton ardoise est repartie',
-      body: menu
-        ? 'Menu non consommé dans les délais. Le chef t\'a resservi « ' + (menu.name || 'un menu') + ' » — nouveau délai lancé.'
-        : 'Menu non consommé dans les délais. Une nouvelle ardoise t\'attend en cuisine.',
+      title: '🎰 La machine a relancé',
+      body: prog
+        ? 'Programme non fait dans les délais. Nouveau tirage : « ' + (prog.title || 'programme') + ' » — nouveau délai lancé.'
+        : 'Programme non fait dans les délais. Une nouvelle ardoise t\'attend — lance la machine.',
       url: '/', tag: 'ardoise-penalty-' + a.id, type: 'ardoise_penalty'
     });
   } catch (e) {}
@@ -24345,11 +24641,34 @@ function _ardNotifyPenalty(a) {
 
 // --- ACTIONS COACH -----------------------------------------------------------
 // Assigner N dettes d'un coup. Elles S'EMPILENT sur les dettes existantes
-// (2 + 2 = 4) et partent toutes en `pending_draw` : c'est la joueuse qui tire.
-function ardoiseAssign(playerId, count, notes) {
+// (2 + 2 = 4).
+//
+// DEUX MODES, et le mode se fige DANS la dette :
+//   'casino'  → `pending_draw`, programme vide. C'est la joueuse qui lance la
+//               machine, et le spin s'impose à elle à l'ouverture de l'app.
+//   'manual'  → le coach a choisi les exos (opts.items). La dette naît
+//               `in_progress`, chrono lancé, aucun spin : faire tourner une
+//               machine dont le résultat est déjà écrit serait un mensonge
+//               d'interface, et la joueuse le sentirait au premier coup d'œil.
+//
+// En manuel, les N dettes du lot partagent le MÊME programme : le coach a choisi
+// un travail, pas N travaux — et le lot n'est qu'une façon de dire « ça vaut
+// trois ardoises ».
+function ardoiseAssign(playerId, count, notes, opts) {
   if (!_ardIsCoach()) return 0;
   const p = (state.players || []).find(x => x.id === playerId);
   if (!p) return 0;
+  const o = opts || {};
+  const manual = o.mode === 'manual';
+  const items = manual ? (o.items || []).filter(Boolean) : [];
+  if (manual && !items.length) {
+    if (typeof showToast === 'function') showToast('⚠ Choisis au moins un exo');
+    return 0;
+  }
+  // En manuel on ÉCRIT le programme tout de suite : si la colonne n'existe pas
+  // encore, il partirait à la poubelle au premier fetch. En casino, rien n'est
+  // écrit ici — le contrôle se fera au moment du spin.
+  if (manual && _ardSchemaBlock()) return 0;
   const r = ardoiseRules();
   const n = Math.max(1, Math.min(r.maxDebts, Math.round(Number(count) || 1)));
   const already = ardoiseDebtCount(playerId);
@@ -24361,11 +24680,21 @@ function ardoiseAssign(playerId, count, notes) {
   }
   const now = Date.now();
   const sid = (typeof getActiveSeasonId === 'function') ? getActiveSeasonId() : null;
+  const title = manual ? ((o.title || '').trim() || '📋 Programme du coach') : '';
   state.ardoiseAssignments = state.ardoiseAssignments || [];
   for (let i = 0; i < toAdd; i++) {
     state.ardoiseAssignments.push({
-      id: uid(), playerId, menuId: null, drawnAt: null, deadlineAt: null,
-      status: 'pending_draw', proofPhotoUrl: '',
+      id: uid(), playerId, menuId: null,
+      // Copie par dette (et non référence partagée) : deux dettes du même lot
+      // doivent pouvoir diverger plus tard sans se réécrire l'une l'autre.
+      items: manual ? JSON.parse(JSON.stringify(items)) : [],
+      mode: manual ? 'manual' : 'casino',
+      title: title,
+      pointsReward: _ardPoints(r),
+      drawnAt: manual ? now : null,
+      deadlineAt: manual ? (now + r.deadlineDays * ARDOISE_DAY) : null,
+      status: manual ? 'in_progress' : 'pending_draw',
+      proofPhotoUrl: '',
       assignedBy: _ardMeId(), assignedAt: now + i,   // +i : garde le tri stable
       validatedBy: null, validatedAt: null, pointsAwarded: 0,
       parentId: null, notes: (notes || '').slice(0, 2000), seasonId: sid,
@@ -24375,17 +24704,19 @@ function ardoiseAssign(playerId, count, notes) {
   persist(); _ardFlush();
   try {
     notifyPush(['player:' + playerId], {
-      title: '🍽 Tu es sur l\'ardoise',
-      body: toAdd > 1
-        ? toAdd + ' ardoises à régler. Ouvre l\'app pour tirer ton premier menu.'
-        : 'Une ardoise à régler. Ouvre l\'app pour tirer ton menu.',
+      title: manual ? '📋 Programme imposé' : '🎰 Tu es sur l\'ardoise',
+      body: manual
+        ? (toAdd > 1 ? toAdd + ' ardoises' : 'Une ardoise') + ' — le coach a choisi ton programme. Ouvre l\'app.'
+        : (toAdd > 1
+            ? toAdd + ' ardoises à régler. Ouvre l\'app : la machine t\'attend.'
+            : 'Une ardoise à régler. Ouvre l\'app : la machine t\'attend.'),
       url: '/', tag: 'ardoise-assign-' + playerId + '-' + now, type: 'ardoise_assign'
     });
   } catch (e) {}
   if (typeof showToast === 'function') {
     showToast(toAdd < n
-      ? '🍽 ' + toAdd + ' ardoise(s) ajoutée(s) — plafond atteint'
-      : '🍽 ' + toAdd + ' ardoise(s) pour ' + (p.name || 'la joueuse'));
+      ? '🎰 ' + toAdd + ' ardoise(s) ajoutée(s) — plafond atteint'
+      : '🎰 ' + toAdd + ' ardoise(s) pour ' + (p.name || 'la joueuse'));
   }
   return toAdd;
 }
@@ -24403,23 +24734,27 @@ function ardoiseCancel(assignmentId) {
   return true;
 }
 // Valider une dette. `atTraining` = le coach l'a vue faire ; sinon c'est la
-// validation d'une preuve photo. Dans les deux cas les points sont FIGÉS ici,
-// depuis le barème du menu AU MOMENT de la validation.
+// validation d'une preuve photo. Dans les deux cas les points sont FIGÉS ici.
+//
+// La source du barème est la dette elle-même (`pointsReward`, copié à sa
+// naissance) et non les réglages du jour : changer le barème ce matin ne doit
+// pas retarifer une ardoise tirée la semaine dernière. Le repli sur le menu
+// legacy sert les dettes d'avant la refonte, qui n'ont pas la colonne.
 function ardoiseValidate(assignmentId, atTraining) {
   if (!_ardIsCoach()) return false;
   const a = ardoiseAssignmentById(assignmentId);
   if (!a) return false;
   if (ARDOISE_DONE_STATUSES.includes(a.status)) return false;   // déjà soldée
-  const menu = a.menuId ? ardoiseMenuById(a.menuId) : null;
+  const prog = ardoiseProgramOf(a);
   const now = Date.now();
   a.status = atTraining ? 'done_at_training' : 'done_validated';
-  a.pointsAwarded = menu ? (Number(menu.pointsReward) || 0) : 0;
+  a.pointsAwarded = (prog && prog.legacy) ? (prog.pointsReward || 0) : _ardPoints({ pointsReward: a.pointsReward });
   a.validatedBy = _ardMeId(); a.validatedAt = now; a.updatedAt = now;
   persist(); _ardFlush();
   try {
     notifyPush(['player:' + a.playerId], {
-      title: '🍽 Ardoise réglée',
-      body: (menu ? '« ' + (menu.name || 'Ton menu') + ' » validé' : 'Ton menu est validé')
+      title: '🎰 Ardoise réglée',
+      body: (prog ? '« ' + (prog.title || 'Ton programme') +' » validé' : 'Ton programme est validé')
         + (a.pointsAwarded ? ' · +' + a.pointsAwarded + ' points' : '') + '. Bien joué.',
       url: '/', tag: 'ardoise-ok-' + a.id, type: 'ardoise_validated'
     });
@@ -24444,9 +24779,9 @@ function ardoiseRejectProof(assignmentId, reason) {
   persist(); _ardFlush();
   try {
     notifyPush(['player:' + a.playerId], {
-      title: '🍽 Preuve refusée',
+      title: '🎰 Preuve refusée',
       body: ((reason || '').trim() ? String(reason).trim().slice(0, 120) : 'Le coach n\'a pas validé ta photo.')
-        + ' Ton menu est toujours à consommer.',
+        + ' Ton programme est toujours à faire.',
       url: '/', tag: 'ardoise-reject-' + a.id, type: 'ardoise_rejected'
     });
   } catch (e) {}
@@ -24470,82 +24805,329 @@ function ardoiseExtend(assignmentId, days) {
   return true;
 }
 
-// --- ACTIONS JOUEUSE : LE TIRAGE AU SORT -------------------------------------
-// Le tirage est le moment de jeu de la feature : il a droit à un plein écran,
-// hors #root (donc insensible aux re-renders), sur le modèle du tirage de gage.
-function ardoiseCanDraw(a) {
+// ============================================================
+// LA MACHINE À SOUS — L'ÉCRAN (cf. migration 20260816_004)
+// ------------------------------------------------------------
+// Plein écran hors #root, donc insensible aux re-renders : même armature que le
+// tirage de gage et que l'ancien tirage de menu.
+//
+// TROIS RÔLES POUR UN SEUL ÉCRAN, et un seul chemin de code :
+//   • la joueuse, dette en `pending_draw` → spin IMPOSÉ (aucune croix), écriture
+//     à la fin, pas de re-spin ;
+//   • le coach, bouton « Tester le tirage » → même machine, même moteur, ZÉRO
+//     écriture, et un « Re-tester » qui n'existe que là ;
+//   • plus tard, n'importe quel écran qui voudrait rejouer une révélation.
+// Un seul chemin, parce que deux chemins finiraient par diverger — et c'est
+// précisément l'écran où une divergence se verrait le moins (le coach testerait
+// une machine qui n'est plus celle de la joueuse).
+//
+// RIEN N'EST ÉCRIT AVANT LA FIN DE L'ANIMATION, et pourtant le tirage est
+// DÉFINITIF : le programme est recalculé à l'identique depuis l'id de la dette
+// (cf. ardoiseProgramFor). Tuer l'app pendant les rouleaux ne rejoue donc pas les
+// dés — c'est le déterminisme qui verrouille, pas une écriture anticipée.
+// ============================================================
+const ARDOISE_SPIN_LEAD = 850;      // avant le premier arrêt
+const ARDOISE_SPIN_GAP  = 620;      // entre deux arrêts de rouleaux
+function ardoiseCanSpin(a) {
   if (!a || a.status !== 'pending_draw') return false;
-  if (a.playerId !== _ardMyPlayerId()) return false;         // elle seule tire SA dette
+  if (a.mode === 'manual') return false;                      // programme déjà écrit
+  if (a.playerId !== _ardMyPlayerId()) return false;          // elle seule joue SA dette
   const cur = ardoiseCurrentDebt(a.playerId);
-  return !!cur && cur.id === a.id;                            // un seul menu à la fois
+  return !!cur && cur.id === a.id;                            // une seule machine à la fois
 }
-function openArdoiseDraw(assignmentId) {
-  const a = ardoiseAssignmentById(assignmentId);
-  if (!a || !ardoiseCanDraw(a)) return;
-  if (!ardoiseDrawPool().length) {
-    try { alert('🍽 La carte est vide : le coach n\'a pas encore composé de menu. Reviens plus tard.'); } catch (e) {}
+// Compat : l'ancien nom reste appelé par des écrans plus anciens.
+function ardoiseCanDraw(a) { return ardoiseCanSpin(a); }
+
+function _ardReduced() {
+  try { return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); }
+  catch (e) { return false; }
+}
+// --- LE SON : court, généré, MUET PAR DÉFAUT --------------------------------
+// Aucun asset : l'app est un fichier unique servi hors ligne, un .mp3 en CDN ne
+// serait pas là quand il faut. Web Audio, trois oscillateurs, rien de plus.
+// Muet par défaut parce qu'une machine à sous qui se déclenche toute seule à
+// l'ouverture de l'app, dans un vestiaire ou en cours, est une trahison.
+function ardoiseSoundOn() { try { return load(K.ardoiseSound, false) === true; } catch (e) { return false; } }
+function toggleArdoiseSound() {
+  const next = !ardoiseSoundOn();
+  save(K.ardoiseSound, next);
+  if (next) _ardTick();                 // confirme à l'oreille, et débloque iOS
+  const el = document.getElementById('ard-mute');
+  if (el) el.textContent = next ? '🔊' : '🔇';
+}
+function _ardAc() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return null;
+    if (!window._ardAudio) window._ardAudio = new Ctx();
+    const ac = window._ardAudio;
+    if (ac.state === 'suspended') ac.resume();
+    return ac;
+  } catch (e) { return null; }
+}
+// Le « clac » d'un rouleau qui se cale : bruit court, filtré, ~60 ms.
+function _ardTick() {
+  if (!ardoiseSoundOn()) return;
+  const ac = _ardAc(); if (!ac) return;
+  try {
+    const t0 = ac.currentTime;
+    const o = ac.createOscillator(); o.type = 'square'; o.frequency.setValueAtTime(880, t0);
+    o.frequency.exponentialRampToValueAtTime(220, t0 + 0.06);
+    const g = ac.createGain();
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(0.16, t0 + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.07);
+    o.connect(g); g.connect(ac.destination); o.start(t0); o.stop(t0 + 0.08);
+  } catch (e) {}
+}
+// Le jackpot : trois notes montantes, ~0,5 s. Volontairement bref — c'est une
+// sanction qui se paie, pas une victoire qu'on célèbre trente secondes.
+function _ardJackpotSound() {
+  if (!ardoiseSoundOn()) return;
+  const ac = _ardAc(); if (!ac) return;
+  try {
+    [523.25, 659.25, 987.77].forEach((f, i) => {
+      const t0 = ac.currentTime + i * 0.11;
+      const o = ac.createOscillator(); o.type = 'triangle'; o.frequency.value = f;
+      const g = ac.createGain();
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(0.2, t0 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.22);
+      o.connect(g); g.connect(ac.destination); o.start(t0); o.stop(t0 + 0.24);
+    });
+  } catch (e) {}
+}
+// Confettis : on réutilise ceux de l'anniversaire (DOM pur, aucune librairie,
+// et déjà muets sous prefers-reduced-motion). Un deuxième moteur de confettis
+// dans le même fichier serait un doublon à maintenir pour rien.
+function _ardConfetti() { try { _bdayConfetti(); } catch (e) {} }
+
+// --- OUVERTURE / FERMETURE ---------------------------------------------------
+// `preview` : le coach teste. Rien ne s'écrit, la croix existe, « Re-tester »
+// apparaît. Pour la joueuse, l'écran est BLOQUANT — pas de croix, pas d'échap :
+// la dette est là, la machine se joue.
+function openArdoiseMachine(assignmentId, preview) {
+  const a = preview ? null : ardoiseAssignmentById(assignmentId);
+  if (!preview && (!a || !ardoiseCanSpin(a))) return;
+  if (!ardoiseLibraryReady()) {
+    try {
+      alert(preview
+        ? '🎰 Bibliothèque vide : ajoute des exos dans l\'onglet 🏋 Biblio avant de tester la machine.'
+        : '🎰 La machine est vide — le coach n\'a pas encore rentré d\'exercices. Reviens plus tard, ton ardoise t\'attend.');
+    } catch (e) {}
     return;
   }
   closeModal();
+  window._ardSpinBox = {
+    aid: preview ? null : a.id,
+    preview: !!preview,
+    // Le preview change de graine à chaque essai (c'est tout l'intérêt) ; la
+    // dette, elle, garde la sienne pour toujours.
+    seed: preview ? ('preview:' + Date.now() + ':' + Math.random()) : ('ard:' + a.id),
+    program: null, phase: 'idle', stopped: 0
+  };
   window._ardOverlayOpen = true;
   let host = document.getElementById('ardoise-overlay');
   if (!host) { host = document.createElement('div'); host.id = 'ardoise-overlay'; document.body.appendChild(host); }
   document.body.style.overflow = 'hidden';
-  _ardCountdown(a.id, 3);
+  _ardRenderMachine();
+}
+// Le coach reteste : nouvelle graine, même machine. Réservé au preview — la
+// joueuse n'a pas ce bouton, et ce garde-fou est là pour que ça reste vrai même
+// si quelqu'un appelle la fonction depuis la console.
+function ardoiseRespin() {
+  const box = window._ardSpinBox;
+  if (!box || !box.preview) return;
+  box.seed = 'preview:' + Date.now() + ':' + Math.random();
+  box.program = null; box.phase = 'idle'; box.stopped = 0;
+  _ardRenderMachine();
 }
 function _ardCloseOverlay() {
   if (window._ardTo) { clearTimeout(window._ardTo); window._ardTo = null; }
+  (window._ardSpinTimers || []).forEach(t => { try { clearTimeout(t); clearInterval(t); } catch (e) {} });
+  window._ardSpinTimers = [];
   const host = document.getElementById('ardoise-overlay');
   if (host) host.innerHTML = '';
   document.body.style.overflow = '';
   window._ardOverlayOpen = false;
+  window._ardSpinBox = null;
 }
-function _ardCountdown(aid, n) {
+// --- LE RENDU DE LA MACHINE --------------------------------------------------
+// Cinq rouleaux HORIZONTAUX empilés, pas cinq colonnes : sur 375 px, cinq
+// colonnes ne laissent que 70 px par nom d'exercice — on y lirait « Fract… ».
+// Chaque rouleau prend donc toute la largeur : pastille de catégorie à gauche,
+// fenêtre qui défile à droite. La machine reste lisible sans un seul palier.
+function _ardRenderMachine() {
   const host = document.getElementById('ardoise-overlay'); if (!host) return;
-  if (n > 0) {
-    host.innerHTML = `
-      <div class="ard-screen">
-        <div class="ard-eyebrow">🍽 L'Ardoise · service en cours</div>
-        <div class="ard-cloche">🛎</div>
-        <div class="ard-count">${n}</div>
-        <div style="font-size:12px;color:#b9b3a1">Le chef choisit ton menu…</div>
-      </div>`;
-    window._ardTo = setTimeout(() => _ardCountdown(aid, n - 1), 780);
+  const box = window._ardSpinBox; if (!box) return;
+  const done = box.phase === 'done';
+  const spinning = box.phase === 'spinning';
+  const hit = {};
+  if (box.program) (box.program.items || []).forEach(it => { (hit[it.category] = hit[it.category] || []).push(it); });
+  host.innerHTML = `
+    <div class="ard-casino">
+      <div class="ard-casino-lights" aria-hidden="true"></div>
+      <div class="ard-casino-inner">
+        <div class="ard-casino-head">
+          <div class="ard-casino-eyebrow">🎰 L'Ardoise${box.preview ? ' · test du coach' : ''}</div>
+          <button type="button" id="ard-mute" class="ard-casino-mute" title="Son"
+            onclick="toggleArdoiseSound()">${ardoiseSoundOn() ? '🔊' : '🔇'}</button>
+        </div>
+        <div class="ard-casino-title">${done ? esc((box.program && box.program.title) || 'Jackpot') : 'Machine à ardoise'}</div>
+
+        <div class="ard-reels">
+          ${ARDOISE_REELS.map((c, i) => _ardReelHtml(c, i, box, hit)).join('')}
+        </div>
+
+        ${done ? _ardMachineDoneHtml(box) : `
+          <div class="ard-casino-foot">
+            ${spinning
+              ? `<div class="ard-casino-hint">Les rouleaux tournent…</div>`
+              : `<button class="ard-lever" onclick="_ardStartSpin()">🎰 TIRER</button>
+                 <div class="ard-casino-hint">${box.preview
+                    ? 'Test : rien ne sera écrit, tu pourras retirer autant que tu veux.'
+                    : 'Un seul tirage. Il est définitif — même si tu fermes l\'app.'}</div>`}
+          </div>`}
+        ${box.preview ? `<button class="ard-casino-close" onclick="_ardClosePreview()">✕ Fermer</button>` : ''}
+      </div>
+    </div>`;
+}
+function _ardReelHtml(cat, i, box, hit) {
+  const picked = (hit[cat.id] || []);
+  const settled = box.phase === 'done' || box.stopped > i;
+  const pool = ardoiseReelPool(cat.id, null);
+  let face, cls;
+  if (!settled) {
+    cls = box.phase === 'spinning' ? 'is-spinning' : '';
+    face = pool.length ? esc(pool[0].name || 'Exercice') : '—';
+  } else if (picked.length) {
+    cls = 'is-hit';
+    face = picked.map(it => esc(it.name || 'Exercice')).join(' + ');
   } else {
-    _ardSpin(aid, 9);
+    cls = 'is-miss';
+    face = pool.length ? 'pas ce coup-ci' : 'rouleau vide';
+  }
+  return `
+    <div class="ard-reel ${cls}" id="ard-reel-${cat.id}">
+      <div class="ard-reel-badge">${cat.icon}</div>
+      <div class="ard-reel-win"><span class="ard-reel-face" id="ard-face-${cat.id}">${face}</span></div>
+      <div class="ard-reel-mark">${settled ? (picked.length ? '✓' : '·') : ''}</div>
+    </div>`;
+}
+// Le bloc final : le ticket, puis les gestes. « ▶ Commencer » ne s'affiche que
+// si au moins un exo du programme pointe vers un drill — un bouton qui ouvre le
+// vide est pire que pas de bouton.
+function _ardMachineDoneHtml(box) {
+  const a = box.aid ? ardoiseAssignmentById(box.aid) : null;
+  const prog = box.program;
+  const firstDrill = (prog && (prog.items || []).find(it => _exoDrillOf(it.exo_id))) || null;
+  const left = a ? Math.max(0, ardoiseDebtCount(a.playerId) - 1) : 0;
+  return `
+    <div class="ard-reveal-wrap">${_ardTicketHtml(prog, a)}</div>
+    <div class="ard-casino-foot" style="gap:9px">
+      ${box.preview ? `
+        <button class="btn btn-primary btn-block" onclick="ardoiseRespin()">🔄 Re-tester</button>
+        <button class="btn btn-secondary btn-block" onclick="_ardClosePreview()">Fermer</button>
+        <div class="ard-casino-hint">Aucune dette n'a été créée.</div>`
+        : `
+        ${firstDrill
+          ? `<button class="btn btn-primary btn-block" style="font-size:15px;padding:13px" onclick="launchExoDrill('${esc(firstDrill.exo_id)}','ardoise')">▶ Commencer</button>
+             <button class="btn btn-secondary btn-block" onclick="_ardCloseOverlay();setTimeout(()=>openArdoiseScreen(),60)">Voir mon programme</button>`
+          : `<button class="btn btn-primary btn-block" style="font-size:15px;padding:13px" onclick="_ardCloseOverlay();setTimeout(()=>openArdoiseScreen(),60)">▶ Commencer</button>`}
+        <div class="ard-casino-hint">${left > 0
+          ? left + ' autre' + (left > 1 ? 's' : '') + ' ardoise' + (left > 1 ? 's' : '') + ' en attente'
+          : 'Dernière ardoise · règle-la et tu es libre'}</div>`}
+    </div>`;
+}
+function _ardClosePreview() {
+  const box = window._ardSpinBox;
+  const wasPreview = !!(box && box.preview);
+  _ardCloseOverlay();
+  if (wasPreview) setTimeout(() => { try { openArdoiseCoach('config'); } catch (e) {} }, 60);
+}
+// --- LE SPIN -----------------------------------------------------------------
+// Le programme est calculé AVANT l'animation : elle ne fait que le révéler. Sans
+// ça, un rouleau qui s'arrête pendant que le vivier change (le coach ajoute un
+// exo) pourrait afficher autre chose que ce qui sera écrit.
+function _ardStartSpin() {
+  const box = window._ardSpinBox; if (!box || box.phase !== 'idle') return;
+  const a = box.aid ? ardoiseAssignmentById(box.aid) : null;
+  if (!box.preview) {
+    if (!a || !ardoiseCanSpin(a)) { _ardCloseOverlay(); render(); return; }
+    // Le contrôle de schéma est ici, au dernier moment utile : refuser un tirage
+    // qu'on ne pourrait pas écrire vaut mieux qu'une dette vidée en silence.
+    if (_ardSchemaBlock()) return;
+  }
+  const prog = box.preview
+    ? ardoiseDrawProgram(box.seed, { exclude: null })
+    : ardoiseProgramFor(a);
+  if (!prog || !prog.items.length) {
+    try { alert('🎰 La machine est vide — préviens le coach.'); } catch (e) {}
+    return;
+  }
+  box.program = prog; box.phase = 'spinning'; box.stopped = 0;
+  _ardTick();                                   // débloque iOS pendant le geste
+  _ardRenderMachine();
+  const reduced = _ardReduced();
+  window._ardSpinTimers = window._ardSpinTimers || [];
+  // Défilement des noms dans chaque fenêtre. Sous prefers-reduced-motion il n'y
+  // a AUCUN défilement : les rouleaux se révèlent simplement l'un après l'autre.
+  if (!reduced) {
+    ARDOISE_REELS.forEach((c, i) => {
+      const pool = ardoiseReelPool(c.id, null);
+      if (pool.length < 2) return;
+      let k = 0;
+      const iv = setInterval(() => {
+        const el = document.getElementById('ard-face-' + c.id);
+        if (!el) { clearInterval(iv); return; }
+        k = (k + 1) % pool.length;
+        el.textContent = pool[k].name || 'Exercice';
+      }, 70 + i * 9);
+      window._ardSpinTimers.push(iv);
+      window._ardSpinTimers.push(setTimeout(() => clearInterval(iv), ARDOISE_SPIN_LEAD + i * ARDOISE_SPIN_GAP));
+    });
+  }
+  // Arrêts séquentiels, haut → bas.
+  ARDOISE_REELS.forEach((c, i) => {
+    const at = reduced ? (200 + i * 220) : (ARDOISE_SPIN_LEAD + i * ARDOISE_SPIN_GAP);
+    window._ardSpinTimers.push(setTimeout(() => _ardStopReel(i), at));
+  });
+}
+function _ardStopReel(i) {
+  const box = window._ardSpinBox; if (!box || box.phase !== 'spinning') return;
+  box.stopped = i + 1;
+  _ardTick();
+  // Seul le rouleau concerné est réécrit : re-rendre toute la machine
+  // relancerait les fenêtres encore en train de défiler.
+  const cat = ARDOISE_REELS[i];
+  const hit = {};
+  (box.program.items || []).forEach(it => { (hit[it.category] = hit[it.category] || []).push(it); });
+  const host = document.getElementById('ard-reel-' + cat.id);
+  if (host) host.outerHTML = _ardReelHtml(cat, i, box, hit);
+  if (box.stopped >= ARDOISE_REELS.length) {
+    window._ardSpinTimers.push(setTimeout(() => _ardFinishSpin(), 420));
   }
 }
-// Roulette : des noms de menus au hasard défilent, puis ralentissent. Le menu
-// RÉELLEMENT tiré n'est figé qu'à la fin (_ardCommitDraw) — jusque-là, rien
-// n'est écrit : une fermeture forcée pendant l'animation laisse la dette
-// intacte, en attente de tirage.
-function _ardSpin(aid, ticks) {
-  const host = document.getElementById('ardoise-overlay'); if (!host) return;
-  const pool = ardoiseDrawPool();
-  if (!pool.length) { _ardCloseOverlay(); return; }
-  if (ticks > 0) {
-    const s = pool[Math.floor(Math.random() * pool.length)];
-    const m = ardoiseLevelMeta(s.level);
-    host.innerHTML = `
-      <div class="ard-screen">
-        <div class="ard-eyebrow">🎰 Tirage du menu…</div>
-        <div class="ard-spin">${m.icon} ${esc(s.name || 'Menu')}</div>
-      </div>`;
-    window._ardTo = setTimeout(() => _ardSpin(aid, ticks - 1), 90 + (9 - ticks) * 24);
-  } else {
-    _ardCommitDraw(aid);
-  }
+// LA FIN : c'est ici — et seulement ici — que la dette est écrite.
+function _ardFinishSpin() {
+  const box = window._ardSpinBox; if (!box) return;
+  box.phase = 'done';
+  if (!box.preview) _ardCommitSpin(box);
+  _ardRenderMachine();
+  _ardConfetti();
+  _ardJackpotSound();
 }
-// L'écriture du tirage. Elle a lieu ICI, une seule fois, sur l'appareil de la
-// joueuse — le seul à passer par ce chemin.
-function _ardCommitDraw(aid) {
-  const a = ardoiseAssignmentById(aid);
-  if (!a || a.status !== 'pending_draw') { _ardCloseOverlay(); render(); return; }
-  const menu = _ardPickMenuRandom();
-  if (!menu) { _ardCloseOverlay(); return; }
+// L'écriture du tirage, une seule fois, sur l'appareil de la joueuse — le seul à
+// passer par ce chemin.
+function _ardCommitSpin(box) {
+  const a = ardoiseAssignmentById(box.aid);
+  if (!a || a.status !== 'pending_draw') return;
   const r = ardoiseRules();
   const now = Date.now();
-  a.menuId = menu.id;
+  a.items = box.program.items;
+  a.title = box.program.title;
+  a.mode = 'casino';
+  a.pointsReward = _ardPoints(r);
   a.drawnAt = now;
   // Échéance FIGÉE au tirage : si le coach change le délai demain, cette dette
   // garde le contrat qu'elle avait quand elle a été tirée.
@@ -24555,30 +25137,26 @@ function _ardCommitDraw(aid) {
   persist(); _ardFlush();
   try {
     notifyPush([_pushCoachKey()], {
-      title: '🍽 Menu tiré',
-      body: _ardPlayerLabel(a.playerId) + ' a tiré « ' + (menu.name || 'un menu') + ' » · jusqu\'au ' + _ardFmtDate(a.deadlineAt),
+      title: '🎰 Tirage effectué',
+      body: _ardPlayerLabel(a.playerId) + ' a tiré « ' + (a.title || 'un programme') + ' » ('
+        + (a.items || []).length + ' exos) · jusqu\'au ' + _ardFmtDate(a.deadlineAt),
       url: '/', tag: 'ardoise-drawn-' + a.id, type: 'ardoise_drawn'
     });
   } catch (e) {}
-  _ardRevealResult(a.id);
 }
-function _ardRevealResult(aid) {
-  const host = document.getElementById('ardoise-overlay'); if (!host) return;
-  const a = ardoiseAssignmentById(aid);
-  const menu = a && a.menuId ? ardoiseMenuById(a.menuId) : null;
-  if (!a || !menu) { _ardCloseOverlay(); render(); return; }
-  const left = ardoiseDebtCount(a.playerId) - 1;
-  host.innerHTML = `
-    <div class="ard-screen">
-      <div class="ard-eyebrow">🍽 Ton menu est servi</div>
-      <div class="ard-reveal-wrap">${_ardMenuCardHtml(menu, a)}</div>
-      <div style="width:100%;max-width:380px;display:flex;flex-direction:column;gap:9px;margin-top:4px">
-        <button class="btn btn-primary btn-block" style="font-size:15px;padding:13px" onclick="_ardCloseOverlay();setTimeout(()=>openArdoiseScreen(),60)">À table 🍴</button>
-        <div style="font-size:11px;color:#b9b3a1;font-family:'JetBrains Mono';text-align:center;text-transform:uppercase;letter-spacing:0.04em;line-height:1.5">
-          ${left > 0 ? left + ' autre' + (left > 1 ? 's' : '') + ' ardoise' + (left > 1 ? 's' : '') + ' en cuisine' : 'Dernière ardoise · finis-la et tu es libre'}
-        </div>
-      </div>
-    </div>`;
+// --- LE SPIN IMPOSÉ AU BOOT --------------------------------------------------
+// Même posture que la pintade et le tirage de gage : une dette casino en attente
+// ouvre la machine SANS demander la permission. Elle cède le passage aux popups
+// déjà ouvertes (diffusion, gage) — la file d'attente du boot les enchaîne.
+function maybeShowArdoiseCasino() {
+  if (!state.auth || state.auth.role !== 'player' || !state.auth.playerId) return;
+  if (window._ardOverlayOpen || window._gageOverlayOpen || window._broadcastPopupOpen) return;
+  if (window._pintadeOverlayOpen) return;
+  if (typeof _pbModalOpen === 'function' && _pbModalOpen()) return;
+  const cur = ardoiseCurrentDebt(state.auth.playerId);
+  if (!cur || !ardoiseCanSpin(cur)) return;
+  if (!ardoiseLibraryReady() || !ardoiseSchemaReady()) return;   // rien à imposer si on ne peut pas écrire
+  openArdoiseMachine(cur.id, false);
 }
 
 // --- ACTIONS JOUEUSE : LA PREUVE PHOTO ---------------------------------------
@@ -24664,39 +25242,46 @@ function ardoiseDeclareAtTraining(assignmentId) {
 // ============================================================
 // L'ARDOISE — RENDU
 // ============================================================
-// La carte « menu ». Fond ardoise, typo craie, liste à tirets, prix en pastille.
-// Utilisée à l'identique dans le reveal, l'écran joueuse et l'écran coach : un
-// seul rendu, donc aucune divergence possible entre les trois vues.
-function _ardMenuCardHtml(menu, assignment) {
-  if (!menu) return '';
-  const m = ardoiseLevelMeta(menu.level);
-  const items = (menu.items || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0));
+// LE TICKET. Velours, or, une ligne par exo avec sa pastille de rouleau, la
+// dose à droite, la mise en bas. Rendu UNIQUE, utilisé par le jackpot, l'écran
+// joueuse et la fiche coach : c'est ce qui empêche les trois vues de diverger.
+//
+// Il prend une DETTE, pas un programme, parce qu'il affiche aussi l'échéance —
+// et il repasse par ardoiseProgramOf() pour lire indifféremment un programme
+// tiré (items) ou un menu legacy d'avant la refonte. `progOverride` sert le seul
+// cas où la dette n'existe pas encore : le test du coach.
+function _ardTicketHtml(progOverride, assignment) {
   const a = assignment || null;
+  const prog = progOverride || (a ? ardoiseProgramOf(a) : null);
+  if (!prog) return '';
+  const items = prog.items || [];
   const overdue = ardoiseIsOverdue(a);
+  const manual = !!(a && a.mode === 'manual');
   return `
-    <div class="ard-slate">
-      <div class="ard-chalk-eyebrow">${esc(menu.themeEmoji || '🍽')} ${esc(m.icon + ' ' + m.label)}</div>
-      <div class="ard-chalk-title" style="margin-top:5px">${esc(menu.name || 'Menu du jour')}</div>
-      ${menu.estimatedDurationMin ? `<div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#b9b3a1;margin-top:4px">≈ ${menu.estimatedDurationMin} min</div>` : ''}
-      ${(menu.descriptionMd || '').trim() ? `<div style="font-size:12px;color:#d8cfae;line-height:1.5;margin-top:7px">${esc(menu.descriptionMd)}</div>` : ''}
-      <div class="ard-chalk-rule"></div>
+    <div class="ard-ticket">
+      <div class="ard-ticket-eyebrow">${manual ? '📋 Programme du coach' : (prog.legacy ? '🍽 Menu (ancienne carte)' : '🎰 Jackpot')}</div>
+      <div class="ard-ticket-title">${esc(prog.title || 'Programme')}</div>
+      <div class="ard-ticket-rule"></div>
       ${items.length ? items.map(it => {
-        // Le drill se lit sur la FICHE de l'exo, jamais sur la ligne de menu :
-        // la dose est figée à la composition (elle appartient au menu), le drill
-        // reste vivant (il appartient à la bibliothèque). Associer un drill à un
-        // exo doit donc éclairer les menus déjà écrits — sans en réécrire un.
+        // Le drill se lit sur la FICHE de l'exo, jamais sur la ligne du
+        // programme : la dose est figée au tirage (elle appartient au contrat),
+        // le drill reste vivant (il appartient à la bibliothèque). Associer un
+        // drill aujourd'hui éclaire donc les programmes tirés la semaine
+        // dernière — sans en réécrire un seul.
         const d = _exoDrillOf(it.exo_id);
+        const c = ardoiseReelMeta(it.category);
         return `
         <div class="ard-item">
-          <div class="ard-item-name">— ${esc(it.name || 'Exercice')}${it.note ? `<div class="ard-item-note">${esc(it.note)}</div>` : ''}${d
+          <div class="ard-item-badge" title="${esc(c.label)}">${c.icon}</div>
+          <div class="ard-item-name">${esc(it.name || 'Exercice')}${it.note ? `<div class="ard-item-note">${esc(it.note)}</div>` : ''}${d
             ? `<div><button type="button" class="ard-item-drill" onclick="launchExoDrill('${esc(it.exo_id)}','ardoise')">▶ Lancer · ${esc(_drillModeLabel(d))}</button></div>` : ''}</div>
           <div class="ard-item-dose">${esc(_ardDoseLabel(it))}</div>
         </div>`; }).join('')
-        : '<div style="font-size:12px;color:#b9b3a1;font-style:italic">Menu vide — préviens le coach.</div>'}
-      <div class="ard-chalk-rule"></div>
+        : '<div style="font-size:12px;color:var(--casino-dim);font-style:italic">Programme vide — préviens le coach.</div>'}
+      <div class="ard-ticket-rule"></div>
       <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
-        <span class="ard-price">+${Number(menu.pointsReward) || 0} points</span>
-        ${a && a.deadlineAt ? `<span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:${overdue ? '#ff8a8a' : '#d8cfae'}">${overdue
+        <span class="ard-price">+${Number(prog.pointsReward) || 0} points</span>
+        ${a && a.deadlineAt ? `<span class="ard-ticket-clock" style="color:${overdue ? 'var(--casino-alert)' : 'var(--casino-dim)'}">${overdue
             ? '⏱ en retard de ' + esc(_ardFmtLeft(Date.now() - a.deadlineAt))
             : '⏱ ' + esc(_ardFmtLeft(a.deadlineAt - Date.now())) + ' restant' + (a.deadlineAt - Date.now() >= 2 * ARDOISE_DAY ? 's' : '')}</span>` : ''}
       </div>
@@ -24727,21 +25312,21 @@ function renderArdoisePlayerCard() {
   const n = ardoiseDebtCount(a.playerId);
   if (!n) return '';
   const cur = ardoiseCurrentDebt(a.playerId);
-  const menu = cur && cur.menuId ? ardoiseMenuById(cur.menuId) : null;
+  const prog = cur ? ardoiseProgramOf(cur) : null;
   const overdue = ardoiseIsOverdue(cur);
   let sub;
   if (!cur) sub = n + ' ardoise' + (n > 1 ? 's' : '') + ' à régler';
-  else if (cur.status === 'pending_draw') sub = '🎰 tire ton menu au sort';
+  else if (cur.status === 'pending_draw') sub = '🎰 lance la machine';
   else if (cur.status === 'done_home') sub = '⏳ preuve envoyée · le coach valide';
   else if (overdue) sub = '⚠ en retard de ' + _ardFmtLeft(Date.now() - cur.deadlineAt);
-  else sub = (menu ? (menu.name + ' · ') : '') + _ardFmtLeft((cur.deadlineAt || 0) - Date.now()) + ' pour le faire';
+  else sub = (prog ? (prog.title + ' · ') : '') + _ardFmtLeft((cur.deadlineAt || 0) - Date.now()) + ' pour le faire';
   const border = overdue ? 'var(--red,#ef4444)' : (cur && cur.status === 'pending_draw') ? 'var(--orange)' : 'var(--border-soft)';
   return `
     <div style="margin:0 18px 14px">
       <div onclick="openArdoiseScreen()" style="cursor:pointer;display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:var(--radius);background:linear-gradient(135deg,rgba(var(--accent-rgb),0.10),var(--surface));border:1.5px solid ${border}">
-        <div style="font-size:26px;flex:0 0 auto">🍽</div>
+        <div style="font-size:26px;flex:0 0 auto">🎰</div>
         <div style="flex:1;min-width:0">
-          <div style="font-family:'Anton';font-size:15px;text-transform:uppercase;letter-spacing:0.02em">L'Ardoise · ${n} à consommer</div>
+          <div style="font-family:'Anton';font-size:15px;text-transform:uppercase;letter-spacing:0.02em">L'Ardoise · ${n} à régler</div>
           <div style="font-size:11px;color:${overdue ? 'var(--red,#ef4444)' : 'var(--ink-3)'};font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(sub)}</div>
         </div>
         <div style="flex:0 0 auto;color:var(--orange);font-family:'Anton';font-size:18px">→</div>
@@ -24755,8 +25340,8 @@ function renderArdoisePlayerCard() {
 // Elle a d'abord été muette tant qu'il n'y avait ni preuve ni dette en
 // circulation, au nom d'un accueil coach déjà chargé. C'était un cul-de-sac :
 // au sortir de la migration, la table est VIDE, donc la carte se taisait, donc
-// le coach n'avait aucun chemin depuis son accueil vers l'écran où il crée son
-// premier menu — et sans menu, aucune dette ne peut naître, donc la carte ne
+// le coach n'avait aucun chemin depuis son accueil vers l'écran où il remplit sa
+// bibliothèque — et sans exo, aucune machine ne peut tourner, donc la carte ne
 // serait JAMAIS apparue. Un état vide qui supprime le seul point d'entrée d'une
 // feature se referme sur lui-même (même leçon que le Ressenti, cf. v.113).
 //
@@ -24767,10 +25352,11 @@ function renderArdoiseCoachCard() {
   const pending = ardoisePendingProofs().length;
   const live = (state.ardoiseAssignments || [])
     .filter(x => x && !x.deletedAt && ARDOISE_LIVE_STATUSES.includes(x.status) && _ardInSeason(x)).length;
-  const menus = ardoiseDrawPool().length;
-  // Sans menu tirable, le seul geste utile est d'en écrire un : la carte y mène
+  const counts = ardoiseReelCounts();
+  const garnished = ARDOISE_REEL_IDS.filter(id => counts[id] > 0).length;
+  // Sans exo tirable, le seul geste utile est d'en écrire un : la carte y mène
   // directement plutôt que de déposer le coach sur un onglet « dettes » vide.
-  const tab = (!menus && !pending && !live) ? 'menus' : 'debts';
+  const tab = (!garnished && !pending && !live) ? 'exos' : 'debts';
   let sub, tone;
   if (pending) {
     tone = 'var(--orange)';
@@ -24779,17 +25365,20 @@ function renderArdoiseCoachCard() {
   } else if (live) {
     tone = 'var(--ink-3)';
     sub = live + ' ardoise' + (live > 1 ? 's' : '') + ' en circulation';
-  } else if (!menus) {
+  } else if (!garnished) {
     tone = 'var(--ink-3)';
-    sub = '🍳 aucun menu · compose ta carte';
+    sub = '🏋 bibliothèque vide · remplis les rouleaux';
+  } else if (garnished < ARDOISE_REEL_IDS.length) {
+    tone = 'var(--orange)';
+    sub = garnished + '/' + ARDOISE_REEL_IDS.length + ' rouleaux garnis · rien en circulation';
   } else {
     tone = 'var(--ink-3)';
-    sub = menus + ' menu' + (menus > 1 ? 's' : '') + ' à la carte · rien en circulation';
+    sub = '5 rouleaux garnis · rien en circulation';
   }
   return `
     <div style="margin:0 18px 14px">
       <div onclick="openArdoiseCoach('${tab}')" style="cursor:pointer;display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:var(--radius);background:${pending ? 'rgba(255,210,125,0.10)' : 'var(--surface)'};border:1.5px solid ${pending ? 'var(--orange)' : 'var(--border-soft)'}">
-        <div style="font-size:26px;flex:0 0 auto">🍽</div>
+        <div style="font-size:26px;flex:0 0 auto">🎰</div>
         <div style="flex:1;min-width:0">
           <div style="font-family:'Anton';font-size:15px;text-transform:uppercase;letter-spacing:0.02em">L'Ardoise</div>
           <div style="font-size:11px;color:${tone};font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(sub)}</div>
@@ -24814,7 +25403,7 @@ function _ardRulesAccordion() {
       <button onclick="toggleArdoiseRules()" aria-expanded="${open}"
         style="width:100%;display:flex;align-items:center;gap:10px;padding:12px;background:var(--bg-1);border:0;cursor:pointer;text-align:left;color:var(--ink)">
         <span style="font-size:18px;flex:0 0 auto">📜</span>
-        <span style="flex:1;min-width:0;font-family:'Anton';font-size:13px;text-transform:uppercase;letter-spacing:0.02em">Les règles du service</span>
+        <span style="flex:1;min-width:0;font-family:'Anton';font-size:13px;text-transform:uppercase;letter-spacing:0.02em">Les règles de la maison</span>
         <span style="flex:0 0 auto;color:var(--orange);font-family:'Anton';font-size:14px">${open ? '▾' : '▸'}</span>
       </button>
       ${open ? `<div class="md-content" style="padding:4px 12px 14px;font-size:12px;border-top:1px solid var(--border-soft)">${mdToHtml(ardoiseRulesText())}</div>` : ''}
@@ -24833,8 +25422,8 @@ function openArdoiseScreen() {
   openModal(`
     <div class="modal-header">
       <div>
-        <div class="eyebrow">${live.length ? live.length + ' à consommer' : 'Ardoise vierge'}</div>
-        <div class="modal-title">🍽 Mon Ardoise</div>
+        <div class="eyebrow">${live.length ? live.length + ' à régler' : 'Ardoise vierge'}</div>
+        <div class="modal-title">🎰 Mon Ardoise</div>
       </div>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
@@ -24857,7 +25446,7 @@ function openArdoiseScreen() {
 
       ${!live.length ? `
         <div style="padding:14px;border-radius:10px;background:var(--bg-3);font-size:13px;color:var(--ink-2);line-height:1.55;text-align:center">
-          🍽 Rien sur ton ardoise. La maison te remercie.
+          🎰 Rien sur ton ardoise. La maison te laisse tranquille.
         </div>` : _ardCurrentBlockHtml(cur, live)}
 
       ${hist.length ? `
@@ -24870,21 +25459,26 @@ function _ardCurrentBlockHtml(cur, live) {
   if (!cur) return '';
   const r = ardoiseRules();
   const queue = live.filter(a => a.id !== cur.id).length;
-  const menu = cur.menuId ? ardoiseMenuById(cur.menuId) : null;
+  const hasProg = !!ardoiseProgramOf(cur);
   let body = '';
   if (cur.status === 'pending_draw') {
+    const ready = ardoiseLibraryReady();
     body = `
       <div style="padding:16px;border-radius:14px;border:2px dashed var(--orange);background:linear-gradient(135deg,rgba(var(--accent-rgb),0.10),var(--surface));text-align:center">
-        <div style="font-size:38px;line-height:1">🛎</div>
-        <div style="font-family:'Anton';font-size:17px;text-transform:uppercase;margin-top:6px">Le chef t'attend</div>
+        <div style="font-size:38px;line-height:1">🎰</div>
+        <div style="font-family:'Anton';font-size:17px;text-transform:uppercase;margin-top:6px">La machine t'attend</div>
         <div style="font-size:12px;color:var(--ink-2);line-height:1.5;margin:7px 0 13px">
-          Tire ton menu au sort. Tu auras <strong>${r.deadlineDays} jours</strong> pour le consommer.
+          ${ready
+            ? `Cinq rouleaux, <strong>${Math.max(1, Math.min(5, r.exosPerSpin || 4))} exos</strong>. Le tirage est <strong>définitif</strong>, et tu auras <strong>${r.deadlineDays} jours</strong> pour le faire.`
+            : `La bibliothèque du coach est vide : aucun exo à tirer pour l'instant. Ton ardoise attend, rien n'est perdu.`}
         </div>
-        <button class="btn btn-primary btn-block" style="font-size:15px;padding:13px" onclick="openArdoiseDraw('${esc(cur.id)}')">🎰 Tirer mon menu</button>
+        ${ready
+          ? `<button class="btn btn-primary btn-block" style="font-size:15px;padding:13px" onclick="openArdoiseMachine('${esc(cur.id)}',false)">🎰 Lancer la machine</button>`
+          : ''}
       </div>`;
   } else if (cur.status === 'done_home') {
     body = `
-      ${menu ? _ardMenuCardHtml(menu, null) : ''}
+      ${hasProg ? _ardTicketHtml(null, Object.assign({}, cur, { deadlineAt: null })) : ''}
       <div style="margin-top:11px;padding:12px;border-radius:10px;background:rgba(255,210,125,0.12);border:1.5px solid var(--orange);font-size:12px;line-height:1.5">
         ⏳ <strong>Preuve envoyée.</strong> Le coach doit la valider — tu n'as plus rien à faire, et le chrono ne tourne plus contre toi.
       </div>
@@ -24892,10 +25486,10 @@ function _ardCurrentBlockHtml(cur, live) {
   } else {
     const overdue = ardoiseIsOverdue(cur);
     body = `
-      ${menu ? _ardMenuCardHtml(menu, cur) : '<div style="font-size:12px;color:var(--ink-3);font-style:italic">Menu introuvable — préviens le coach.</div>'}
+      ${hasProg ? _ardTicketHtml(null, cur) : '<div style="font-size:12px;color:var(--ink-3);font-style:italic">Programme introuvable — préviens le coach.</div>'}
       ${overdue ? `
         <div style="margin-top:11px;padding:12px;border-radius:10px;background:rgba(239,68,68,0.10);border:1.5px solid var(--red,#ef4444);font-size:12px;line-height:1.5">
-          ⚠ <strong>Délai dépassé.</strong> Cette ardoise va être remplacée par une autre, tirée au sort. Fais-la quand même : ça n'annule rien, mais ça t'évite le tour suivant.
+          ⚠ <strong>Délai dépassé.</strong> La machine va relancer toute seule. Fais quand même celle-ci : ça n'annule rien, mais ça t'évite le tour suivant.
         </div>` : ''}
       <div style="display:flex;flex-direction:column;gap:9px;margin-top:12px">
         <button class="btn btn-secondary btn-block" onclick="ardoiseDeclareAtTraining('${esc(cur.id)}')">✅ Fait à l'entraînement (le coach valide)</button>
@@ -24910,22 +25504,22 @@ function _ardCurrentBlockHtml(cur, live) {
   }
   return body + (queue ? `
     <div style="margin-top:12px;padding:10px 12px;border-radius:10px;background:var(--bg-3);font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.03em;line-height:1.5">
-      🍳 ${queue} ardoise${queue > 1 ? 's' : ''} en cuisine · elle${queue > 1 ? 's' : ''} attend${queue > 1 ? 'ent' : ''} que celle-ci soit réglée
+      🎰 ${queue} ardoise${queue > 1 ? 's' : ''} en attente · elle${queue > 1 ? 's' : ''} tourner${queue > 1 ? 'ont' : 'a'} quand celle-ci sera réglée
     </div>` : '');
 }
 function _ardHistoryRow(a) {
-  const menu = a.menuId ? ardoiseMenuById(a.menuId) : null;
+  const prog = ardoiseProgramOf(a);
   const meta = {
     done_validated:    { icon: '✅', color: '#22c55e', label: 'Validée (photo)' },
     done_at_training:  { icon: '✅', color: '#22c55e', label: 'Validée à l\'entraînement' },
-    expired_penalized: { icon: '💀', color: 'var(--red,#ef4444)', label: 'Expirée · remplacée' }
+    expired_penalized: { icon: '💀', color: 'var(--red,#ef4444)', label: 'Expirée · relancée' }
   }[a.status] || { icon: '·', color: 'var(--ink-3)', label: a.status };
   const when = a.validatedAt || a.deadlineAt || a.assignedAt;
   return `
     <div style="display:flex;gap:9px;align-items:flex-start;padding:9px 11px;background:var(--bg-1);border:1px solid var(--border);border-radius:9px">
       <div style="flex:0 0 auto;font-size:16px">${meta.icon}</div>
       <div style="flex:1;min-width:0">
-        <div style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(menu ? (menu.name || 'Menu') : 'Menu non tiré')}</div>
+        <div style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(prog ? (prog.title || 'Programme') : 'Jamais tirée')}</div>
         <div style="font-size:10px;font-family:'JetBrains Mono';color:${meta.color};margin-top:2px;text-transform:uppercase">${esc(meta.label)}${when ? ' · ' + _ardFmtDate(when) : ''}</div>
       </div>
       ${a.pointsAwarded ? `<div style="flex:0 0 auto;font-family:'JetBrains Mono';font-size:11px;color:#22c55e">+${a.pointsAwarded}</div>` : ''}
@@ -24933,32 +25527,38 @@ function _ardHistoryRow(a) {
 }
 
 // ============================================================
-// L'ARDOISE — ÉCRAN COACH (4 onglets)
+// L'ARDOISE — ÉCRAN COACH (3 onglets)
 // ------------------------------------------------------------
-// Ardoises · Menus · Bibliothèque · Réglages. Tout le CRUD est coach-only CÔTÉ
-// FRONT (RLS = anon sandbox équipe, comme partout dans ce projet).
+// Ardoises · Bibliothèque · Réglages. Tout le CRUD est coach-only CÔTÉ FRONT
+// (RLS = anon sandbox équipe, comme partout dans ce projet).
+//
+// L'onglet « 📖 Menus » a DISPARU avec la refonte casino : il n'y a plus de
+// recettes à composer, la machine tire directement dans la bibliothèque. Un
+// coach qui arrive sur l'ancien lien (`openArdoiseCoach('menus')`) est renvoyé
+// sur la biblio plutôt que sur un onglet mort — c'est là que se fait désormais
+// le travail qu'il venait faire.
 //
 // L'onglet courant vit dans `state._ardTab` (mémoire, non persisté) et le
 // changement d'onglet est un simple re-render de la modale : pas de manipulation
 // de hauteur, rien à désynchroniser.
 // ============================================================
 const ARDOISE_TABS = [
-  { id: 'debts',  label: '🍽 Ardoises' },
-  { id: 'menus',  label: '📖 Menus' },
+  { id: 'debts',  label: '🎰 Ardoises' },
   { id: 'exos',   label: '🏋 Biblio' },
   { id: 'config', label: '⚙️ Réglages' }
 ];
 function ardoiseTab(t) { state._ardTab = t; openArdoiseCoach(); }
 function openArdoiseCoach(tab) {
   if (!_ardIsCoach()) return;
-  if (tab) state._ardTab = tab;
-  const cur = state._ardTab || 'debts';
+  if (tab) state._ardTab = (tab === 'menus') ? 'exos' : tab;
+  let cur = state._ardTab || 'debts';
+  if (!ARDOISE_TABS.some(t => t.id === cur)) cur = 'debts';
   const pending = ardoisePendingProofs().length;
   openModal(`
     <div class="modal-header">
       <div>
-        <div class="eyebrow">Menu du chef</div>
-        <div class="modal-title">🍽 L'Ardoise</div>
+        <div class="eyebrow">La machine</div>
+        <div class="modal-title">🎰 L'Ardoise</div>
       </div>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
@@ -24971,7 +25571,6 @@ function openArdoiseCoach(tab) {
           </button>`).join('')}
       </div>
       ${cur === 'debts' ? _ardCoachDebtsTab()
-        : cur === 'menus' ? _ardCoachMenusTab()
         : cur === 'exos' ? _ardCoachExosTab()
         : _ardCoachConfigTab()}
     </div>`);
@@ -25014,7 +25613,7 @@ function _ardCoachDebtsTab() {
       </div>` : ''}`;
 }
 function _ardProofRow(a) {
-  const menu = a.menuId ? ardoiseMenuById(a.menuId) : null;
+  const prog = ardoiseProgramOf(a);
   return `
     <div style="padding:10px;background:var(--bg-1);border:1.5px solid var(--orange);border-radius:10px">
       <div style="display:flex;gap:10px;align-items:flex-start">
@@ -25023,7 +25622,7 @@ function _ardProofRow(a) {
           : `<div style="width:58px;height:58px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;font-size:24px;border-radius:8px;background:var(--bg-3)">📸</div>`}
         <div style="flex:1;min-width:0">
           <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(_ardPlayerLabel(a.playerId))}</div>
-          <div style="font-size:11px;color:var(--ink-3);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(menu ? (menu.name || 'Menu') : 'Menu inconnu')}${menu ? ' · +' + (menu.pointsReward || 0) + ' pts' : ''}</div>
+          <div style="font-size:11px;color:var(--ink-3);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(prog ? (prog.title || 'Programme') : 'Programme inconnu')}${prog ? ' · ' + (prog.items || []).length + ' exos · +' + (prog.pointsReward || 0) + ' pts' : ''}</div>
           <div style="font-size:10px;font-family:'JetBrains Mono';color:var(--ink-3);margin-top:2px">Envoyée ${_ardFmtDateTime(a.updatedAt)}</div>
         </div>
       </div>
@@ -25053,7 +25652,7 @@ function openArdoiseReject(aid) {
     <div class="modal-body">
       <div style="font-size:12px;color:var(--ink-2);line-height:1.5;margin-bottom:12px">
         La photo de <strong>${esc(_ardPlayerLabel(a.playerId))}</strong> ne convient pas.
-        Son menu <strong>repart en cours</strong> avec son échéance d'origine — ce n'est pas une sanction
+        Son programme <strong>repart en cours</strong> avec son échéance d'origine — ce n'est pas une sanction
         supplémentaire. Si elle mérite du temps, prolonge après coup.
       </div>
       <div class="fld">
@@ -25074,13 +25673,13 @@ function _ardSubmitReject(aid) {
 }
 function _ardCoachPlayerRow(r) {
   const cur = ardoiseCurrentDebt(r.p.id);
-  const menu = cur && cur.menuId ? ardoiseMenuById(cur.menuId) : null;
+  const prog = cur ? ardoiseProgramOf(cur) : null;
   const overdue = ardoiseIsOverdue(cur);
   const st = !cur ? ''
-    : cur.status === 'pending_draw' ? '🎰 tirage à faire'
+    : cur.status === 'pending_draw' ? '🎰 machine à lancer'
     : cur.status === 'done_home' ? '⏳ preuve à valider'
     : overdue ? '⚠ en retard de ' + _ardFmtLeft(Date.now() - cur.deadlineAt)
-    : (menu ? menu.name + ' · ' : '') + _ardFmtLeft((cur.deadlineAt || 0) - Date.now()) + ' restant';
+    : (prog ? prog.title + ' · ' : '') + _ardFmtLeft((cur.deadlineAt || 0) - Date.now()) + ' restant';
   return `
     <div onclick="openArdoisePlayerSheet('${esc(r.p.id)}')" style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--bg-1);border:1px solid ${overdue ? 'var(--red,#ef4444)' : 'var(--border)'};border-radius:10px">
       <div style="flex:0 0 auto;width:34px;height:34px;border-radius:50%;background:var(--bg-3);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:14px;color:var(--orange)">${r.live.length}</div>
@@ -25103,7 +25702,7 @@ function openArdoisePlayerSheet(pid) {
     <div class="modal-header">
       <div>
         <div class="eyebrow-muted">#${p.num} ${esc(p.name)}</div>
-        <div class="modal-title" style="font-size:15px">🍽 Son ardoise</div>
+        <div class="modal-title" style="font-size:15px">🎰 Son ardoise</div>
       </div>
       <button class="modal-close" onclick="${back}">✕</button>
     </div>
@@ -25120,9 +25719,9 @@ function openArdoisePlayerSheet(pid) {
     </div>`);
 }
 function _ardCoachDebtCard(a, i) {
-  const menu = a.menuId ? ardoiseMenuById(a.menuId) : null;
+  const prog = ardoiseProgramOf(a);
   const overdue = ardoiseIsOverdue(a);
-  const label = a.status === 'pending_draw' ? '🎰 pas encore tirée'
+  const label = a.status === 'pending_draw' ? '🎰 machine pas encore lancée'
     : a.status === 'done_home' ? '⏳ preuve envoyée, à valider'
     : overdue ? '⚠ en retard de ' + _ardFmtLeft(Date.now() - a.deadlineAt)
     : '⏱ jusqu\'au ' + _ardFmtDateTime(a.deadlineAt);
@@ -25130,7 +25729,8 @@ function _ardCoachDebtCard(a, i) {
     <div style="padding:11px;border:1px solid ${overdue ? 'var(--red,#ef4444)' : 'var(--border)'};border-radius:10px;margin-bottom:9px">
       <div style="display:flex;align-items:center;gap:8px">
         <div style="flex:1;min-width:0">
-          <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${i + 1}. ${esc(menu ? (menu.name || 'Menu') : 'Menu non tiré')}</div>
+          <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${i + 1}. ${esc(prog ? (prog.title || 'Programme') : 'Pas encore tirée')}</div>
+          ${prog ? `<div style="font-size:10px;font-family:'JetBrains Mono';color:var(--ink-3);margin-top:2px">${(prog.items || []).map(it => ardoiseReelMeta(it.category).icon).join(' ')} ${(prog.items || []).length} exos${a.mode === 'manual' ? ' · 📋 manuel' : ''}</div>` : ''}
           <div style="font-size:10px;font-family:'JetBrains Mono';color:${overdue ? 'var(--red,#ef4444)' : 'var(--ink-3)'};margin-top:2px;text-transform:uppercase">${esc(label)}</div>
         </div>
         ${a.parentId ? '<div style="flex:0 0 auto;font-size:15px" title="Dette de pénalité">🔁</div>' : ''}
@@ -25151,334 +25751,221 @@ function _ardConfirmCancel(aid, pid) {
   closeModal();
   setTimeout(() => { try { openArdoisePlayerSheet(pid); } catch (e) {} }, 60);
 }
-// Ardoiser : une joueuse, un nombre de dettes, une note. Le tirage n'est PAS
-// proposé ici — c'est la joueuse qui tire, c'est tout l'intérêt.
+// Ardoiser : une joueuse, un nombre de dettes, un MODE, une note.
+//
+// LE MODE EST LE VRAI SUJET DE CET ÉCRAN :
+//   🎰 casino  — le coach ne choisit rien, la machine tirera chez la joueuse.
+//               C'est le défaut, et c'est tout l'intérêt de la feature.
+//   📋 manuel  — le coach impose un programme précis (retour de blessure,
+//               travail ciblé). Aucun spin : la dette arrive directement en
+//               cours, chrono lancé.
+//
+// Le brouillon vit dans `window._ardAssignBox` — un SLOT, jamais le nom d'une
+// fonction (cf. la collision de la v.124, qui a mué l'éditeur de menu en objet
+// pendant sept versions sans un message d'erreur).
 function openArdoiseAssign(preselectPid) {
   if (!_ardIsCoach()) return;
+  const r = ardoiseRules();
+  window._ardAssignBox = {
+    pid: preselectPid || '',
+    count: 1,
+    mode: (r.assignmentMode === 'manual') ? 'manual' : 'casino',
+    items: [], title: '', note: ''
+  };
+  _ardRenderAssign();
+}
+function _ardAssignDraft() { return window._ardAssignBox || null; }
+// `rerender` : seuls les champs qui changent l'AFFICHAGE relancent le rendu —
+// re-rendre à chaque frappe ferait perdre le focus de l'input lettre à lettre.
+function _ardAssignField(k, v, rerender) {
+  const d = _ardAssignDraft(); if (!d) return;
+  d[k] = (k === 'count') ? Math.max(1, Math.min(50, Math.round(Number(v) || 1))) : v;
+  if (rerender) _ardRenderAssign();
+}
+function _ardAssignAddExo() {
+  const d = _ardAssignDraft(); if (!d) return;
+  const sel = document.getElementById('ard-a-pick');
+  const e = sel && sel.value ? exoTemplateById(sel.value) : null;
+  if (!e) return;
+  // Nom, catégorie et dose sont COPIÉS : un exo supprimé de la bibliothèque ne
+  // doit pas vider un programme déjà assigné (même contrat que le tirage).
+  d.items.push({
+    exo_id: e.id, name: e.name || 'Exercice', category: e.category || 'autre',
+    sets: e.defaultSets || null, reps: e.defaultReps || null,
+    duration_sec: e.defaultDurationSec || null,
+    rest_sec: e.defaultRestSec != null ? e.defaultRestSec : 30,
+    note: '', order: d.items.length
+  });
+  _ardRenderAssign();
+}
+function _ardAssignDelExo(i) {
+  const d = _ardAssignDraft(); if (!d) return;
+  d.items.splice(i, 1);
+  d.items.forEach((it, k) => { it.order = k; });
+  _ardRenderAssign();
+}
+function _ardRenderAssign() {
+  const d = _ardAssignDraft(); if (!d) return;
   const players = (typeof getSeasonPlayers === 'function')
     ? getSeasonPlayers((typeof getActiveSeasonId === 'function') ? getActiveSeasonId() : null, { team: 'all' })
     : (state.players || []);
   const r = ardoiseRules();
-  const pool = ardoiseDrawPool().length;
+  const counts = ardoiseReelCounts();
+  const garnished = ARDOISE_REEL_IDS.filter(id => counts[id] > 0).length;
+  const lib = exoTemplates();
+  const manual = d.mode === 'manual';
+  const back = `closeModal();setTimeout(()=>openArdoiseCoach('debts'),50)`;
   openModal(`
     <div class="modal-header">
-      <div class="modal-title">🍽 Ardoiser une joueuse</div>
-      <button class="modal-close" onclick="closeModal();setTimeout(()=>openArdoiseCoach('debts'),50)">✕</button>
+      <div class="modal-title">🎰 Ardoiser une joueuse</div>
+      <button class="modal-close" onclick="${back}">✕</button>
     </div>
     <div class="modal-body">
-      ${!pool ? `<div style="padding:11px;border-radius:9px;background:rgba(239,68,68,0.10);border:1.5px solid var(--red,#ef4444);font-size:12px;line-height:1.5;margin-bottom:12px">
-        ⚠ <strong>Aucun menu actif.</strong> La joueuse ne pourra pas tirer. Compose au moins un menu dans l'onglet 📖 Menus.
+      ${!garnished ? `<div style="padding:11px;border-radius:9px;background:rgba(239,68,68,0.10);border:1.5px solid var(--red,#ef4444);font-size:12px;line-height:1.5;margin-bottom:12px">
+        ⚠ <strong>Bibliothèque vide.</strong> La machine n'a rien à tirer. Ajoute des exos dans l'onglet 🏋 Biblio.
       </div>` : ''}
       <div class="fld" style="margin-bottom:12px">
         <label class="fld-label">Joueuse</label>
-        <select id="ard-a-player" style="width:100%">
-          ${players.map(p => `<option value="${esc(p.id)}"${preselectPid === p.id ? ' selected' : ''}>#${p.num} ${esc(p.name)}${ardoiseDebtCount(p.id) ? ' — ' + ardoiseDebtCount(p.id) + ' en cours' : ''}</option>`).join('')}
+        <select id="ard-a-player" style="width:100%" onchange="_ardAssignField('pid',this.value)">
+          ${players.map(p => `<option value="${esc(p.id)}"${d.pid === p.id ? ' selected' : ''}>#${p.num} ${esc(p.name)}${ardoiseDebtCount(p.id) ? ' — ' + ardoiseDebtCount(p.id) + ' en cours' : ''}</option>`).join('')}
         </select>
       </div>
+
+      <div class="fld" style="margin-bottom:12px">
+        <label class="fld-label">Comment elle reçoit son programme</label>
+        <div style="display:flex;gap:6px">
+          ${[['casino', '🎰', 'Tirage casino', 'la machine décide'],
+             ['manual', '📋', 'Assignation manuelle', 'tu choisis les exos']].map(o => `
+            <button type="button" onclick="_ardAssignField('mode','${o[0]}',true)"
+              style="flex:1;min-width:0;padding:10px 8px;border-radius:10px;cursor:pointer;text-align:center;border:1.5px solid ${d.mode === o[0] ? 'var(--orange)' : 'var(--border)'};background:${d.mode === o[0] ? 'rgba(var(--accent-rgb),0.12)' : 'var(--bg-1)'};color:var(--ink)">
+              <div style="font-size:19px;line-height:1.2">${o[1]}</div>
+              <div style="font-size:11px;font-weight:600;margin-top:3px">${esc(o[2])}</div>
+              <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;line-height:1.35">${esc(o[3])}</div>
+            </button>`).join('')}
+        </div>
+      </div>
+
+      ${manual ? `
+        <div class="fld" style="margin-bottom:10px">
+          <label class="fld-label">Nom du programme (optionnel)</label>
+          <input id="ard-a-title" value="${esc(d.title)}" maxlength="80" placeholder="Ex : Retour de cheville"
+            oninput="_ardAssignField('title',this.value)">
+        </div>
+        <div class="eyebrow-muted" style="margin-bottom:6px">Les exos (${d.items.length})</div>
+        ${d.items.length ? `<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px">
+          ${d.items.map((it, i) => `
+            <div style="display:flex;align-items:center;gap:7px;padding:8px 10px;background:var(--bg-1);border:1px solid var(--border);border-radius:9px">
+              <div style="flex:0 0 auto;font-size:15px">${ardoiseCategoryMeta(it.category).icon}</div>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.name || 'Exercice')}</div>
+                <div style="font-size:10px;font-family:'JetBrains Mono';color:var(--ink-3);margin-top:2px">${esc(_ardDoseLabel(it))}</div>
+              </div>
+              <button class="btn-icon" style="flex:0 0 auto" title="Retirer" onclick="_ardAssignDelExo(${i})">🗑</button>
+            </div>`).join('')}
+        </div>` : '<div style="font-size:12px;color:var(--ink-3);font-style:italic;padding:4px 2px 8px">Aucun exo choisi — la dette ne peut pas partir.</div>'}
+        ${lib.length ? `
+          <select id="ard-a-pick" style="width:100%;margin-bottom:6px">
+            <option value="">— choisir un exercice —</option>
+            ${lib.map(e => `<option value="${esc(e.id)}">${ardoiseCategoryMeta(e.category).icon} ${esc(e.name || 'Exercice')}</option>`).join('')}
+          </select>
+          <button class="btn btn-secondary btn-block" style="font-size:12px;margin-bottom:12px" onclick="_ardAssignAddExo()">＋ Ajouter</button>`
+          : `<div style="font-size:12px;color:var(--ink-3);line-height:1.5;margin-bottom:12px">
+               Bibliothèque vide. Crée d'abord des exercices dans l'onglet 🏋 Biblio.
+             </div>`}`
+        : `<div style="padding:11px;border-radius:9px;background:var(--bg-3);font-size:11px;color:var(--ink-3);line-height:1.5;margin-bottom:12px">
+             🎰 Elle tirera elle-même : la machine s'ouvrira à sa prochaine ouverture de l'app,
+             et le résultat sera <strong>définitif</strong>. ${garnished}/5 rouleaux garnis
+             · ${Math.max(1, Math.min(5, r.exosPerSpin || 4))} exos par tirage.
+           </div>`}
+
       <div class="fld" style="margin-bottom:12px">
         <label class="fld-label">Combien d'ardoises</label>
-        <select id="ard-a-count" style="width:100%">
-          ${[1, 2, 3, 4, 5].map(n => `<option value="${n}">${n} ardoise${n > 1 ? 's' : ''}</option>`).join('')}
+        <select id="ard-a-count" style="width:100%" onchange="_ardAssignField('count',this.value)">
+          ${[1, 2, 3, 4, 5].map(n => `<option value="${n}"${d.count === n ? ' selected' : ''}>${n} ardoise${n > 1 ? 's' : ''}</option>`).join('')}
         </select>
         <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px;line-height:1.45">
-          Elles s'AJOUTENT à ce qu'elle a déjà (2 + 2 = 4). Plafond : ${r.maxDebts}.
+          Elles s'AJOUTENT à ce qu'elle a déjà (2 + 2 = 4). Plafond : ${r.maxDebts}.${manual ? ' En manuel, elles portent TOUTES le même programme.' : ''}
         </div>
       </div>
       <div class="fld">
         <label class="fld-label">Note (optionnelle, visible par elle)</label>
-        <input id="ard-a-note" maxlength="200" placeholder="Ex : 2 retards cette semaine">
+        <input id="ard-a-note" value="${esc(d.note)}" maxlength="200" placeholder="Ex : 2 retards cette semaine"
+          oninput="_ardAssignField('note',this.value)">
       </div>
     </div>
     <div class="modal-footer" style="display:flex;gap:8px">
-      <button class="btn btn-ghost" style="flex:1" onclick="closeModal();setTimeout(()=>openArdoiseCoach('debts'),50)">Annuler</button>
-      <button class="btn btn-primary" style="flex:1" onclick="_ardSubmitAssign()">🍽 Ardoiser</button>
+      <button class="btn btn-ghost" style="flex:1" onclick="${back}">Annuler</button>
+      <button class="btn btn-primary" style="flex:1" onclick="_ardSubmitAssign()">🎰 Ardoiser</button>
     </div>`);
 }
 function _ardSubmitAssign() {
-  const v = id => { const el = document.getElementById(id); return el ? el.value : ''; };
-  const pid = v('ard-a-player');
+  const d = _ardAssignDraft(); if (!d) return;
+  // Le <select> de la joueuse n'a pas forcément déclenché son onchange (valeur
+  // par défaut jamais touchée) : on relit le DOM au moment de valider.
+  const el = document.getElementById('ard-a-player');
+  const pid = d.pid || (el ? el.value : '');
   if (!pid) return;
-  ardoiseAssign(pid, Number(v('ard-a-count')) || 1, v('ard-a-note'));
+  const n = ardoiseAssign(pid, d.count, d.note,
+    d.mode === 'manual' ? { mode: 'manual', items: d.items, title: d.title } : { mode: 'casino' });
+  if (!n) return;                     // l'échec a déjà parlé (plafond, exos manquants)
+  window._ardAssignBox = null;
   closeModal(); render();
   setTimeout(() => { try { openArdoiseCoach('debts'); } catch (e) {} }, 60);
 }
 
-// --- ONGLET « MENUS » --------------------------------------------------------
-function _ardCoachMenusTab() {
-  const menus = ardoiseMenus();
-  const active = menus.filter(m => m.isActive && (m.items || []).length).length;
+// --- L'ONGLET « MENUS » A ÉTÉ SUPPRIMÉ (refonte casino, 20260816_004) ---------
+// Composer des recettes à l'avance n'a plus de sens : la machine tire
+// directement dans la bibliothèque ci-dessous. Tout le CRUD des menus a donc
+// disparu — éditeur, doses par menu, activation/désactivation, suppression.
+//
+// Ce qui SURVIT, et pourquoi : `ardoiseMenuById()` (lecture seule) et l'entité
+// PbSync `ardoiseMenus`. Une dette tirée avant la refonte ne porte qu'un
+// `menu_id` ; sans cette lecture, son historique deviendrait une ligne vide.
+// C'est tout ce qui reste du restaurant.
+
+// --- LE DIAGNOSTIC DES ROULEAUX ---------------------------------------------
+// La question que le coach ne pense JAMAIS à se poser : « combien de programmes
+// différents ma bibliothèque peut-elle produire ? ». Avec deux exos par
+// catégorie, la machine ressert deux fois la même chose en trois dettes, et la
+// joueuse conclut — à raison — que le tirage est truqué.
+//
+// La jauge répond avant qu'on demande : un rouleau vide est un problème, un
+// rouleau à un seul exo aussi. Le nombre de combinaisons est affiché en clair
+// parce que c'est LUI qui fait comprendre l'enjeu ; il est calculé sur les
+// catégories réellement tirables et sur la taille du programme.
+function _ardReelGaugeHtml() {
+  const counts = ardoiseReelCounts();
+  const r = ardoiseRules();
+  const n = Math.max(1, Math.min(5, r.exosPerSpin || 4));
+  const garnished = ARDOISE_REEL_IDS.filter(id => counts[id] > 0);
+  // Combinaisons ≈ produit des n rouleaux les plus fournis (approximation
+  // volontairement optimiste : on ne cherche pas l'exactitude, on cherche à dire
+  // « 3 » quand c'est 3).
+  const combos = garnished.map(id => counts[id]).sort((a, b) => b - a).slice(0, n)
+    .reduce((p, x) => p * x, garnished.length ? 1 : 0);
+  const orphans = (state.exoTemplates || [])
+    .filter(e => e && !e.deletedAt && ARDOISE_REEL_IDS.indexOf(e.category) === -1).length;
+  const weak = garnished.length < ARDOISE_REEL_IDS.length || combos < 20;
   return `
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-      <div class="eyebrow-muted">La carte (${menus.length})</div>
-      <button class="btn btn-primary" style="min-height:34px;padding:0 11px;font-size:12px" onclick="openArdoiseMenuEditor()">+ Menu</button>
-    </div>
-    <div style="font-size:11px;color:var(--ink-3);line-height:1.5;margin-bottom:12px">
-      ${active} menu${active > 1 ? 's' : ''} dans le tirage au sort.
-      Un menu <strong>désactivé</strong> sort du tirage sans disparaître des ardoises qui le portent déjà.
-      Un menu <strong>vide</strong> n'est jamais tiré.
-    </div>
-    ${menus.length ? `<div style="display:flex;flex-direction:column;gap:8px">${menus.map(_ardMenuRow).join('')}</div>`
-      : '<div style="font-size:12px;color:var(--ink-3);font-style:italic;padding:6px 2px">Carte vide. Compose un premier menu pour que le tirage fonctionne.</div>'}`;
-}
-function _ardMenuRow(m) {
-  const meta = ardoiseLevelMeta(m.level);
-  const n = (m.items || []).length;
-  const drawable = m.isActive && n > 0;
-  return `
-    <div style="display:flex;align-items:center;gap:9px;padding:10px 11px;background:var(--bg-1);border:1px solid ${drawable ? 'var(--border)' : 'var(--border-soft)'};border-radius:10px;opacity:${drawable ? '1' : '0.55'}">
-      <div style="flex:0 0 auto;font-size:20px">${meta.icon}</div>
-      <button onclick="openArdoiseMenuEditor('${esc(m.id)}')" style="flex:1;min-width:0;text-align:left;background:none;border:0;cursor:pointer;padding:0;color:var(--ink)">
-        <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.name || 'Menu sans nom')}</div>
-        <div style="font-size:10px;font-family:'JetBrains Mono';color:var(--ink-3);margin-top:2px;text-transform:uppercase">
-          ${n} exo${n > 1 ? 's' : ''} · +${m.pointsReward || 0} pts${m.estimatedDurationMin ? ' · ≈' + m.estimatedDurationMin + ' min' : ''}${drawable ? '' : (n ? ' · désactivé' : ' · vide')}
-        </div>
-      </button>
-      <button class="btn btn-icon" style="flex:0 0 auto" title="${m.isActive ? 'Retirer du tirage' : 'Remettre au tirage'}" onclick="_ardToggleMenu('${esc(m.id)}')">${m.isActive ? '👁' : '🚫'}</button>
+    <div style="padding:11px;border-radius:10px;margin-bottom:12px;border:1.5px solid ${weak ? 'var(--orange)' : 'var(--border)'};background:${weak ? 'rgba(255,210,125,0.08)' : 'var(--bg-1)'}">
+      <div class="eyebrow-muted" style="margin-bottom:8px">🎰 Les rouleaux</div>
+      <div style="display:flex;flex-direction:column;gap:5px">
+        ${ARDOISE_REELS.map(c => {
+          const k = counts[c.id] || 0;
+          const tone = k === 0 ? 'var(--red,#ef4444)' : k < 3 ? 'var(--orange)' : 'var(--ink-3)';
+          return `
+          <div style="display:flex;align-items:center;gap:8px">
+            <div style="flex:0 0 auto;font-size:15px">${c.icon}</div>
+            <div style="flex:1;min-width:0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.label)}</div>
+            <div style="flex:0 0 auto;font-family:'JetBrains Mono';font-size:11px;color:${tone}">${k === 0 ? 'vide' : k + ' exo' + (k > 1 ? 's' : '')}</div>
+          </div>`; }).join('')}
+      </div>
+      <div style="font-size:10px;font-family:'JetBrains Mono';color:var(--ink-3);margin-top:9px;line-height:1.5">
+        ≈ <strong style="color:${combos < 20 ? 'var(--orange)' : 'var(--ink-2)'}">${combos}</strong> programme(s) différent(s) possible(s).
+        ${combos < 20 ? ' Ajoute des exos : en dessous d\'une vingtaine, les tirages se répètent vite et le jeu perd tout son sel.' : ''}
+        ${orphans ? '<br>📦 ' + orphans + ' exo(s) en « combiné » ou « autre » : ils ne sont JAMAIS tirés.' : ''}
+      </div>
     </div>`;
-}
-function _ardToggleMenu(id) {
-  if (!_ardIsCoach()) return;
-  const m = (state.ardoiseMenus || []).find(x => x.id === id && !x.deletedAt);
-  if (!m) return;
-  m.isActive = !m.isActive; m.updatedAt = Date.now();
-  persist(); _ardFlush();
-  openArdoiseCoach('menus');
-}
-// L'éditeur de menu travaille sur un BROUILLON (window._ardMenuDraftBox) : rien
-// n'est écrit tant que « Enregistrer » n'est pas cliqué, et une composition
-// abandonnée ne laisse aucune trace en base.
-function openArdoiseMenuEditor(id) {
-  if (!_ardIsCoach()) return;
-  const src = id ? (state.ardoiseMenus || []).find(x => x.id === id && !x.deletedAt) : null;
-  window._ardMenuDraftBox = src
-    ? JSON.parse(JSON.stringify({
-        id: src.id, name: src.name, level: src.level, descriptionMd: src.descriptionMd,
-        themeEmoji: src.themeEmoji, estimatedDurationMin: src.estimatedDurationMin,
-        items: src.items || [], pointsReward: src.pointsReward, isActive: src.isActive !== false
-      }))
-    : { id: null, name: '', level: 'plat', descriptionMd: '', themeEmoji: '🍽',
-        estimatedDurationMin: null, items: [], pointsReward: 20, isActive: true };
-  _ardRenderMenuEditor();
-}
-// 🔴 LE SLOT NE PORTE PAS LE NOM DE L'ACCESSEUR. `function _ardMenuDraft()`
-// déclare une propriété globale ; écrire `window._ardMenuDraft = {…}` ÉCRASAIT
-// donc la fonction par le brouillon, et l'appel suivant levait « _ardMenuDraft
-// is not a function » : composer un menu était impossible depuis la v.124, sans
-// le moindre message à l'écran (l'éditeur ne s'ouvrait simplement pas).
-// D'où `_ardMenuDraftBox` : un slot qui ne peut plus entrer en collision.
-function _ardMenuDraft() { return window._ardMenuDraftBox || null; }
-function _ardRenderMenuEditor() {
-  const d = _ardMenuDraft(); if (!d) return;
-  const lib = exoTemplates();
-  openModal(`
-    <div class="modal-header">
-      <div class="modal-title">${d.id ? '✎ Modifier le menu' : '+ Nouveau menu'}</div>
-      <button class="modal-close" onclick="closeModal();setTimeout(()=>openArdoiseCoach('menus'),50)">✕</button>
-    </div>
-    <div class="modal-body">
-      <div class="fld" style="margin-bottom:10px">
-        <label class="fld-label">Nom du menu</label>
-        <input id="ard-m-name" value="${esc(d.name || '')}" maxlength="80" placeholder="Ex : Le Gainage Royal" oninput="_ardMenuField('name',this.value)">
-      </div>
-      <div class="fld" style="margin-bottom:10px">
-        <label class="fld-label">Niveau</label>
-        <div style="display:flex;gap:5px;flex-wrap:wrap">
-          ${ARDOISE_LEVELS.map(l => `
-            <button type="button" onclick="_ardMenuField('level','${l.id}',true)"
-              style="flex:1;min-width:74px;padding:8px 6px;border-radius:9px;cursor:pointer;font-size:11px;border:1.5px solid ${d.level === l.id ? 'var(--orange)' : 'var(--border)'};background:${d.level === l.id ? 'rgba(var(--accent-rgb),0.12)' : 'var(--bg-1)'};color:var(--ink)">
-              <div style="font-size:17px">${l.icon}</div>${esc(l.label)}
-            </button>`).join('')}
-        </div>
-      </div>
-      <div style="display:flex;gap:8px;margin-bottom:10px">
-        <div class="fld" style="flex:1;margin-bottom:0">
-          <label class="fld-label">Points</label>
-          <input id="ard-m-pts" type="number" min="0" max="1000" inputmode="numeric" value="${Number(d.pointsReward) || 0}" oninput="_ardMenuField('pointsReward',this.value)">
-        </div>
-        <div class="fld" style="flex:1;margin-bottom:0">
-          <label class="fld-label">Durée ≈ (min)</label>
-          <input id="ard-m-dur" type="number" min="1" max="600" inputmode="numeric" value="${d.estimatedDurationMin || ''}" placeholder="—" oninput="_ardMenuField('estimatedDurationMin',this.value)">
-        </div>
-        <div class="fld" style="flex:0 0 76px;margin-bottom:0">
-          <label class="fld-label">Emoji</label>
-          <input id="ard-m-emoji" value="${esc(d.themeEmoji || '🍽')}" maxlength="4" oninput="_ardMenuField('themeEmoji',this.value)">
-        </div>
-      </div>
-      <div class="fld" style="margin-bottom:14px">
-        <label class="fld-label">Ambiance (optionnel)</label>
-        <input id="ard-m-desc" value="${esc(d.descriptionMd || '')}" maxlength="200" placeholder="Ex : servi tiède, sans repos entre les plats" oninput="_ardMenuField('descriptionMd',this.value)">
-      </div>
-
-      <div class="eyebrow-muted" style="margin-bottom:6px">Composition (${(d.items || []).length})</div>
-      ${(d.items || []).length ? `<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px">
-        ${d.items.map((it, i) => `
-          <div style="display:flex;align-items:center;gap:7px;padding:8px 10px;background:var(--bg-1);border:1px solid var(--border);border-radius:9px">
-            <div style="flex:1;min-width:0">
-              <div style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.name || 'Exercice')}</div>
-              <div style="font-size:10px;font-family:'JetBrains Mono';color:var(--ink-3);margin-top:2px">${esc(_ardDoseLabel(it))}${_exoDrillOf(it.exo_id) ? ' · 🎯' : ''}</div>
-            </div>
-            ${_exoDrillOf(it.exo_id) ? `<button class="btn-icon" style="flex:0 0 auto" title="Lancer le drill lié" onclick="launchExoDrill('${esc(it.exo_id)}','ardoiseMenuEditor')">▶</button>` : ''}
-            <button class="btn-icon" style="flex:0 0 auto" title="Monter" ${i === 0 ? 'disabled style="opacity:.3;flex:0 0 auto"' : ''} onclick="_ardMenuMove(${i},-1)">↑</button>
-            <button class="btn-icon" style="flex:0 0 auto" title="Régler" onclick="openArdoiseItemDose(${i})">✎</button>
-            <button class="btn-icon" style="flex:0 0 auto" title="Retirer" onclick="_ardMenuDelItem(${i})">🗑</button>
-          </div>`).join('')}
-      </div>` : '<div style="font-size:12px;color:var(--ink-3);font-style:italic;padding:4px 2px 8px">Menu vide — il ne sera jamais tiré au sort.</div>'}
-
-      <div class="eyebrow-muted" style="margin:12px 0 6px">Ajouter depuis la bibliothèque</div>
-      ${lib.length ? `
-        <select id="ard-m-pick" style="width:100%;margin-bottom:6px">
-          <option value="">— choisir un exercice —</option>
-          ${lib.map(e => `<option value="${esc(e.id)}">${ardoiseCategoryMeta(e.category).icon} ${esc(e.name || 'Exercice')}</option>`).join('')}
-        </select>
-        <button class="btn btn-secondary btn-block" style="font-size:12px" onclick="_ardMenuAddPicked()">＋ Ajouter au menu</button>`
-        : `<div style="font-size:12px;color:var(--ink-3);line-height:1.5">
-             Bibliothèque vide. Crée d'abord des exercices dans l'onglet 🏋 Biblio — ils serviront aussi à la prépa.
-           </div>`}
-    </div>
-    <div class="modal-footer" style="display:flex;gap:8px">
-      ${d.id ? `<button class="btn btn-ghost" style="flex:0 0 auto;color:var(--red,#ef4444)" onclick="_ardDeleteMenu('${esc(d.id)}')">🗑</button>` : ''}
-      <button class="btn btn-primary" style="flex:1" onclick="_ardSaveMenu()">Enregistrer</button>
-    </div>`);
-}
-// `rerender` : seuls les champs qui changent l'AFFICHAGE relancent le rendu. Un
-// re-render sur chaque frappe ferait perdre le focus de l'input à chaque lettre.
-function _ardMenuField(k, v, rerender) {
-  const d = _ardMenuDraft(); if (!d) return;
-  if (k === 'pointsReward') d[k] = Math.max(0, Math.min(1000, Math.round(Number(v) || 0)));
-  else if (k === 'estimatedDurationMin') d[k] = v === '' ? null : Math.max(1, Math.min(600, Math.round(Number(v) || 0)));
-  else d[k] = v;
-  if (rerender) _ardRenderMenuEditor();
-}
-function _ardMenuAddPicked() {
-  const d = _ardMenuDraft(); if (!d) return;
-  const sel = document.getElementById('ard-m-pick');
-  const e = sel && sel.value ? exoTemplateById(sel.value) : null;
-  if (!e) return;
-  d.items = d.items || [];
-  // Le nom est COPIÉ, pas seulement référencé : un exo supprimé de la
-  // bibliothèque ne doit pas vider un menu déjà tiré au sort.
-  d.items.push({
-    exo_id: e.id, name: e.name || 'Exercice',
-    sets: e.defaultSets || null, reps: e.defaultReps || null,
-    duration_sec: e.defaultDurationSec || null, rest_sec: e.defaultRestSec != null ? e.defaultRestSec : 30,
-    note: '', order: d.items.length
-  });
-  _ardRenderMenuEditor();
-}
-function _ardMenuDelItem(i) {
-  const d = _ardMenuDraft(); if (!d) return;
-  d.items.splice(i, 1);
-  d.items.forEach((it, k) => it.order = k);
-  _ardRenderMenuEditor();
-}
-function _ardMenuMove(i, dir) {
-  const d = _ardMenuDraft(); if (!d) return;
-  const j = i + dir;
-  if (j < 0 || j >= d.items.length) return;
-  const tmp = d.items[i]; d.items[i] = d.items[j]; d.items[j] = tmp;
-  d.items.forEach((it, k) => it.order = k);
-  _ardRenderMenuEditor();
-}
-// La dose d'UN exo DANS CE MENU. C'est ici qu'on s'écarte des valeurs par défaut
-// de la bibliothèque — et le menu garde sa dose même si la fiche évolue ensuite.
-function openArdoiseItemDose(i) {
-  const d = _ardMenuDraft(); if (!d) return;
-  const it = d.items[i]; if (!it) return;
-  openModal(`
-    <div class="modal-header">
-      <div>
-        <div class="eyebrow-muted">Dans ce menu</div>
-        <div class="modal-title" style="font-size:15px">${esc(it.name || 'Exercice')}</div>
-      </div>
-      <button class="modal-close" onclick="_ardRenderMenuEditor()">✕</button>
-    </div>
-    <div class="modal-body">
-      <div style="display:flex;gap:8px;margin-bottom:10px">
-        <div class="fld" style="flex:1;margin-bottom:0"><label class="fld-label">Séries</label>
-          <input id="ard-i-sets" type="number" min="1" max="50" inputmode="numeric" value="${it.sets || ''}" placeholder="—"></div>
-        <div class="fld" style="flex:1;margin-bottom:0"><label class="fld-label">Reps</label>
-          <input id="ard-i-reps" type="number" min="1" max="999" inputmode="numeric" value="${it.reps || ''}" placeholder="—"></div>
-      </div>
-      <div style="display:flex;gap:8px;margin-bottom:10px">
-        <div class="fld" style="flex:1;margin-bottom:0"><label class="fld-label">Durée (s)</label>
-          <input id="ard-i-dur" type="number" min="1" max="7200" inputmode="numeric" value="${it.duration_sec || ''}" placeholder="—"></div>
-        <div class="fld" style="flex:1;margin-bottom:0"><label class="fld-label">Repos (s)</label>
-          <input id="ard-i-rest" type="number" min="0" max="3600" inputmode="numeric" value="${it.rest_sec != null ? it.rest_sec : 30}"></div>
-      </div>
-      <div class="fld">
-        <label class="fld-label">Consigne courte (optionnel)</label>
-        <input id="ard-i-note" value="${esc(it.note || '')}" maxlength="140" placeholder="Ex : dos plat, sans poser les genoux">
-      </div>
-      <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:8px;line-height:1.5">
-        Laisse vide ce qui ne s'applique pas : « 3 × 12 », « 45 s » et « 4 × 40 s » s'écrivent tous ici.
-      </div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-primary btn-block" onclick="_ardSaveItemDose(${i})">OK</button>
-    </div>`);
-}
-function _ardSaveItemDose(i) {
-  const d = _ardMenuDraft(); if (!d) return;
-  const it = d.items[i]; if (!it) { _ardRenderMenuEditor(); return; }
-  const num = (id, min, max, dflt) => {
-    const el = document.getElementById(id);
-    const raw = el ? String(el.value || '').trim() : '';
-    if (raw === '') return dflt;
-    const n = Math.round(Number(raw));
-    return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : dflt;
-  };
-  it.sets = num('ard-i-sets', 1, 50, null);
-  it.reps = num('ard-i-reps', 1, 999, null);
-  it.duration_sec = num('ard-i-dur', 1, 7200, null);
-  it.rest_sec = num('ard-i-rest', 0, 3600, 30);
-  const nEl = document.getElementById('ard-i-note');
-  it.note = nEl ? String(nEl.value || '').slice(0, 140) : '';
-  _ardRenderMenuEditor();
-}
-function _ardSaveMenu() {
-  if (!_ardIsCoach()) return;
-  const d = _ardMenuDraft(); if (!d) return;
-  const nameEl = document.getElementById('ard-m-name');
-  if (nameEl) d.name = nameEl.value;
-  if (!(d.name || '').trim()) { try { alert('Donne un nom à ce menu.'); } catch (e) {} return; }
-  const now = Date.now();
-  state.ardoiseMenus = state.ardoiseMenus || [];
-  const items = (d.items || []).map((it, i) => Object.assign({}, it, { order: i }));
-  if (d.id) {
-    const m = state.ardoiseMenus.find(x => x.id === d.id);
-    if (m) Object.assign(m, {
-      name: d.name.trim(), level: d.level, descriptionMd: d.descriptionMd || '',
-      themeEmoji: d.themeEmoji || '🍽', estimatedDurationMin: d.estimatedDurationMin,
-      items, pointsReward: d.pointsReward, isActive: d.isActive !== false, updatedAt: now
-    });
-  } else {
-    state.ardoiseMenus.push({
-      id: uid(), name: d.name.trim(), level: d.level, descriptionMd: d.descriptionMd || '',
-      themeEmoji: d.themeEmoji || '🍽', estimatedDurationMin: d.estimatedDurationMin,
-      items, pointsReward: d.pointsReward, isActive: true,
-      createdBy: _ardMeId(), createdAt: now, updatedAt: now, deletedAt: null
-    });
-  }
-  window._ardMenuDraftBox = null;
-  persist(); _ardFlush();
-  closeModal();
-  setTimeout(() => { try { openArdoiseCoach('menus'); } catch (e) {} }, 60);
-  if (typeof showToast === 'function') showToast('✓ Menu enregistré');
-}
-// SOFT-delete, toujours : un hard delete d'une ligne d'id « x… » serait repoussé
-// par n'importe quel client au flush suivant. Le menu reste lisible sur les
-// dettes qui le portent (ardoiseMenuById ne filtre pas deletedAt, exprès).
-function _ardDeleteMenu(id) {
-  if (!_ardIsCoach()) return;
-  const used = (state.ardoiseAssignments || []).filter(a => a && !a.deletedAt && a.menuId === id
-    && ARDOISE_LIVE_STATUSES.includes(a.status)).length;
-  if (!confirm('Supprimer ce menu ?' + (used ? '\n\n⚠ ' + used + ' ardoise(s) EN COURS le portent : elles resteront lisibles, mais il ne sera plus tiré.' : '\n\nIl sort définitivement du tirage.'))) return;
-  const m = (state.ardoiseMenus || []).find(x => x.id === id);
-  if (m) { const now = Date.now(); m.deletedAt = now; m.updatedAt = now; }
-  window._ardMenuDraftBox = null;
-  persist(); _ardFlush();
-  closeModal();
-  setTimeout(() => { try { openArdoiseCoach('menus'); } catch (e) {} }, 60);
 }
 
 // --- ONGLET « BIBLIOTHÈQUE D'EXOS » (partagée avec la prépa) -----------------
@@ -25492,9 +25979,11 @@ function _ardCoachExosTab() {
       <button class="btn btn-primary" style="min-height:34px;padding:0 11px;font-size:12px" onclick="openExoEditor()">+ Exo</button>
     </div>
     <div style="font-size:11px;color:var(--ink-3);line-height:1.5;margin-bottom:12px">
-      🔗 <strong>Bibliothèque partagée.</strong> Ces exercices servent aux menus de l'Ardoise
-      <em>et</em> aux blocs de la prépa physique — un exo écrit une fois sert aux deux.
+      🔗 <strong>Bibliothèque partagée.</strong> Ces exercices alimentent les rouleaux de la machine
+      <em>et</em> les blocs de la prépa physique — un exo écrit une fois sert aux deux.
+      Les cinq premières catégories sont les <strong>rouleaux</strong> ; 🔀 combiné et 📦 autre ne sont jamais tirés.
     </div>
+    ${_ardReelGaugeHtml()}
     ${list.length ? EXO_CATEGORIES.filter(c => byCat[c.id]).map(c => `
       <div class="eyebrow-muted" style="margin:12px 0 6px">${c.icon} ${esc(c.label)}</div>
       <div style="display:flex;flex-direction:column;gap:6px">
@@ -25512,7 +26001,7 @@ function _ardCoachExosTab() {
           ${d ? `<button class="btn btn-secondary" style="flex:0 0 auto;min-height:44px;padding:0 12px" title="Lancer ${esc(d.name || 'le drill')}" onclick="launchExoDrill('${esc(e.id)}','ardoiseExos')">▶</button>` : ''}
           </div>`; }).join('')}
       </div>`).join('')
-      : '<div style="font-size:12px;color:var(--ink-3);font-style:italic;padding:6px 2px">Bibliothèque vide. Le premier exo débloque la composition des menus.</div>'}`;
+      : '<div style="font-size:12px;color:var(--ink-3);font-style:italic;padding:6px 2px">Bibliothèque vide. Le premier exo met un rouleau en route.</div>'}`;
 }
 function openExoEditor(id) {
   if (!_ardIsCoach()) return;
@@ -25552,7 +26041,7 @@ function openExoEditor(id) {
           <input id="ard-e-rest" type="number" min="0" max="3600" inputmode="numeric" value="${e && e.defaultRestSec != null ? e.defaultRestSec : 30}"></div>
       </div>
       <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin:0 0 12px;line-height:1.5">
-        Ce sont des SUGGESTIONS : chaque menu fige sa propre dose. Modifier l'exo ne réécrit aucun menu déjà composé.
+        Ce sont des SUGGESTIONS : chaque tirage fige sa propre dose. Modifier l'exo ne réécrit aucun programme déjà tiré.
       </div>
       ${_ardExoDrillPickerHtml(e ? e.id : null)}
       <div class="fld">
@@ -25568,8 +26057,8 @@ function openExoEditor(id) {
 // --- L'EXO S'ASSOCIE UN DRILL (migration 20260816_003) -----------------------
 // Un exo écrit « Suicide 20 s » ; le drill, lui, le fait vraiment tourner. Les
 // relier une fois ici fait apparaître un bouton « ▶ Lancer » PARTOUT où l'exo
-// ressort — carte d'ardoise de la joueuse, bloc de séance de prépa — sans que
-// le coach ait à recoller le drill à chaque menu.
+// ressort — ticket de la joueuse, bloc de séance de prépa — sans que le coach
+// ait à recoller le drill à chaque tirage.
 function _ardExoDrillDraft() {
   window._ardExoDrill = window._ardExoDrill || { id: '', q: '' };
   return window._ardExoDrill;
@@ -25586,7 +26075,7 @@ function _ardExoDrillPickerHtml(exoId) {
       <div id="ard-e-drill-wrap">${_ardExoDrillSelectHtml()}</div>
       <button class="btn btn-ghost btn-block" style="margin-top:6px;font-size:12px" onclick="_ardExoNewDrill(${exoId ? "'" + esc(exoId) + "'" : 'null'})">＋ Créer un nouveau drill</button>
       <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:5px;line-height:1.5">
-        Un drill lié affiche un bouton « ▶ Lancer » sur la carte d'ardoise et dans les blocs de prépa créés depuis cet exo.
+        Un drill lié affiche un bouton « ▶ Lancer » sur le ticket d'ardoise et dans les blocs de prépa créés depuis cet exo.
       </div>
     </div>`;
 }
@@ -25682,12 +26171,16 @@ function _ardSaveExo(id, stay) {
 }
 function _ardDeleteExo(id) {
   if (!_ardIsCoach()) return;
-  // Les menus qui l'utilisent ont COPIÉ son nom et sa dose : ils survivent
-  // intacts. On le dit, sinon le coach n'ose pas nettoyer sa bibliothèque.
-  const used = (state.ardoiseMenus || []).filter(m => m && !m.deletedAt
-    && (m.items || []).some(it => it.exo_id === id)).length;
+  // Les programmes qui le portent ont COPIÉ son nom, sa catégorie et sa dose :
+  // ils survivent intacts. On le dit, sinon le coach n'ose pas nettoyer sa
+  // bibliothèque — et une biblio qu'on n'ose pas nettoyer, on ne l'enrichit
+  // pas non plus.
+  const used = (state.ardoiseAssignments || []).filter(a => a && !a.deletedAt
+    && ARDOISE_LIVE_STATUSES.includes(a.status)
+    && (a.items || []).some(it => it.exo_id === id)).length;
   if (!confirm('Supprimer cet exercice de la bibliothèque ?'
-    + (used ? '\n\n' + used + ' menu(s) l\'utilisent : ils gardent leur ligne (nom et dose y sont recopiés) et ne seront pas touchés.' : ''))) return;
+    + '\n\nIl sort du rouleau ' + ardoiseCategoryMeta(exoTemplateById(id) ? exoTemplateById(id).category : 'autre').label + '.'
+    + (used ? '\n\n' + used + ' ardoise(s) EN COURS le portent : elles gardent leur ligne (nom et dose y sont recopiés) et ne seront pas touchées.' : ''))) return;
   const e = (state.exoTemplates || []).find(x => x.id === id);
   if (e) { const now = Date.now(); e.deletedAt = now; e.updatedAt = now; }
   persist(); _ardFlush();
@@ -25725,26 +26218,64 @@ function _ardCoachConfigTab() {
       </div>
     </div>
 
-    <div class="eyebrow-muted" style="margin:16px 0 8px">Réglages</div>
-    ${num('ard-r-days', 'Délai pour consommer (jours)', 'À partir du TIRAGE, pas de l\'assignation. Figé sur chaque ardoise déjà tirée : le changer n\'affecte que les suivantes.', r.deadlineDays, 1, 90)}
+    <div class="eyebrow-muted" style="margin:16px 0 8px">🎰 La machine</div>
+    ${_ardReelGaugeHtml()}
+    <button class="btn btn-secondary btn-block" style="margin-bottom:14px" onclick="openArdoiseMachine(null,true)">🎰 Tester le tirage</button>
+    <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin:-10px 0 14px;line-height:1.45">
+      Ouvre la machine pour de vrai, autant de fois que tu veux. AUCUNE dette n'est créée.
+    </div>
+
+    <div class="fld" style="margin-bottom:12px">
+      <label style="font-size:12px">Mode proposé par défaut</label>
+      <div style="display:flex;gap:6px;margin-top:4px">
+        ${[['casino', '🎰 Tirage casino'], ['manual', '📋 Assignation manuelle']].map(o => `
+          <button type="button" onclick="_ardSetAssignMode('${o[0]}')"
+            style="flex:1;min-width:0;padding:9px 6px;border-radius:9px;cursor:pointer;font-size:11px;border:1.5px solid ${r.assignmentMode === o[0] ? 'var(--orange)' : 'var(--border)'};background:${r.assignmentMode === o[0] ? 'rgba(var(--accent-rgb),0.12)' : 'var(--bg-1)'};color:var(--ink)">
+            ${o[1]}
+          </button>`).join('')}
+      </div>
+      <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:4px;line-height:1.45">
+        Seulement la case pré-cochée quand tu ardoises : tu peux toujours changer dette par dette.
+      </div>
+    </div>
+
+    ${num('ard-r-days', 'Délai pour faire le programme (jours)', 'À partir du TIRAGE, pas de l\'assignation. Figé sur chaque ardoise déjà tirée : le changer n\'affecte que les suivantes.', r.deadlineDays, 1, 90)}
+    ${num('ard-r-pts', 'Points par ardoise réglée', 'Copié dans chaque dette à sa naissance. Le changer ne retarife ni les dettes en cours, ni l\'historique.', _ardPoints(r), 0, 1000)}
     ${num('ard-r-max', 'Plafond d\'ardoises', 'Au-delà, une expiration ne régénère plus rien. Sans plafond, la sanction devient une spirale dont on ne sort pas.', r.maxDebts, 1, 50)}
-    ${sw('ard-r-auto', '🔁 Pénalité automatique', 'Ardoise non consommée dans les délais → elle expire ET une nouvelle la remplace.', r.autoPenaltyOnExpire)}
-    ${sw('ard-r-draw', '🎰 Pénalité tirée automatiquement', 'La dette de remplacement arrive DÉJÀ tirée, chrono lancé. Décoché, elle attend que la joueuse ouvre l\'app — ce qui rend la sanction esquivable.', r.autoDrawOnPenalty)}
+    ${sw('ard-r-cardio', '🔥 Cardio à tous les coups', 'Le rouleau cardio est toujours servi, les 3 autres exos se tirent parmi les 4 catégories restantes. Décoché, les 4 exos se tirent au hasard — et un programme peut sortir sans cardio.', r.cardioAlways)}
+    ${sw('ard-r-iso', '🔀 Pas deux fois le même programme', 'Écarte du tirage les exos du programme PRÉCÉDENT de la joueuse, tant qu\'il reste autre chose dans le rouleau. Indispensable avec une bibliothèque courte.', r.randomSeedIsolation)}
+    ${sw('ard-r-auto', '🔁 Pénalité automatique', 'Programme pas fait dans les délais → l\'ardoise expire ET une nouvelle la remplace.', r.autoPenaltyOnExpire)}
+    ${sw('ard-r-draw', '🎰 Pénalité tirée automatiquement', 'La dette de remplacement arrive DÉJÀ tirée, chrono lancé. Décochée, elle attend que la joueuse ouvre l\'app — ce qui rend la sanction esquivable.', r.autoDrawOnPenalty)}
     ${sw('ard-r-photo', '📸 Preuve photo à la maison', 'Décoché, il ne reste que la validation de visu par le coach.', r.requirePhotoAtHome)}
+
+    <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin:10px 0 0;line-height:1.5">
+      Le nombre d'exos par tirage (${Math.max(1, Math.min(5, r.exosPerSpin || 4))}) n'est pas réglable ici : c'est une règle du jeu, pas un paramètre.
+    </div>
 
     <div style="display:flex;gap:8px;margin-top:14px">
       <button class="btn btn-ghost" style="flex:0 0 auto" onclick="_ardResetRules()">↺ Défauts</button>
       <button class="btn btn-primary" style="flex:1" onclick="_ardSaveRules()">Enregistrer</button>
     </div>`;
 }
-function _ardSaveRules() {
+// Le mode par défaut est un bouton, pas une case : il ÉCRIT tout de suite (avec
+// les autres champs du formulaire tels qu'ils sont à l'écran) puis re-rend, pour
+// que la sélection visible soit toujours la sélection enregistrée.
+function _ardSetAssignMode(m) {
+  if (!_ardIsCoach()) return;
+  window._ardModePick = (m === 'manual') ? 'manual' : 'casino';
+  _ardSaveRules(true);
+}
+// `silent` : appelé par le sélecteur de mode, qui re-rend lui-même et n'a pas à
+// afficher un toast pour un clic sur un bouton radio.
+function _ardSaveRules(silent) {
   if (!_ardIsCoach()) return;
   const v = id => { const el = document.getElementById(id); return el ? el.value : null; };
-  const b = id => { const el = document.getElementById(id); return !!(el && el.checked); };
+  const b = (id, dflt) => { const el = document.getElementById(id); return el ? !!el.checked : !!dflt; };
   const clamp = (x, min, max, dflt) => {
     const n = Math.round(Number(x));
     return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : dflt;
   };
+  const prev = ardoiseRules();
   // Texte identique au défaut → on stocke '' plutôt qu'une copie. Le coach qui
   // n'a rien changé continue ainsi de suivre les évolutions du jeu, au lieu de
   // figer la version du jour à son insu.
@@ -25754,21 +26285,30 @@ function _ardSaveRules() {
     id: 'default',
     deadlineDays: clamp(v('ard-r-days'), 1, 90, 7),
     maxDebts: clamp(v('ard-r-max'), 1, 50, 10),
-    autoPenaltyOnExpire: b('ard-r-auto'),
-    autoDrawOnPenalty: b('ard-r-draw'),
-    requirePhotoAtHome: b('ard-r-photo'),
+    autoPenaltyOnExpire: b('ard-r-auto', prev.autoPenaltyOnExpire),
+    autoDrawOnPenalty: b('ard-r-draw', prev.autoDrawOnPenalty),
+    requirePhotoAtHome: b('ard-r-photo', prev.requirePhotoAtHome),
+    // --- LA MACHINE ---
+    // `exosPerSpin` n'a AUCUN champ à l'écran (c'est une règle du jeu, pas un
+    // réglage) : on reconduit la valeur courante plutôt que de la perdre.
+    assignmentMode: window._ardModePick || prev.assignmentMode || 'casino',
+    exosPerSpin: clamp(prev.exosPerSpin, 1, 5, 4),
+    cardioAlways: b('ard-r-cardio', prev.cardioAlways),
+    randomSeedIsolation: b('ard-r-iso', prev.randomSeedIsolation),
+    pointsReward: clamp(v('ard-r-pts'), 0, 1000, 20),
     rulesTextMd: txt,
     updatedBy: _ardMeId(),
     updatedAt: Date.now()
   };
+  window._ardModePick = null;
   persist(); _ardFlush();
   render();
   openArdoiseCoach('config');
-  if (typeof showToast === 'function') showToast('✓ Réglages enregistrés');
+  if (!silent && typeof showToast === 'function') showToast('✓ Réglages enregistrés');
 }
 function _ardResetRules() {
   if (!_ardIsCoach()) return;
-  if (!confirm('Revenir aux réglages par défaut ?\n\n7 jours · plafond 10 · pénalité auto tirée au sort · preuve photo activée.\n\nLe TEXTE des règles repasse lui aussi à la version de l\'app.')) return;
+  if (!confirm('Revenir aux réglages par défaut ?\n\n7 jours · plafond 10 · 20 points · cardio à tous les coups · pénalité auto tirée · preuve photo activée.\n\nLe TEXTE des règles repasse lui aussi à la version de l\'app.')) return;
   state.ardoiseRules = Object.assign({}, ARDOISE_RULES_DEFAULT, { updatedBy: _ardMeId(), updatedAt: Date.now() });
   persist(); _ardFlush();
   render();
@@ -46703,6 +47243,18 @@ function _initPlayersSync() {
             setTimeout(() => {
               try { if (ardoiseSweep()) render(); } catch (e) {}
               try { _ardStartWatch(); } catch (e) {}
+              // LE TIRAGE IMPOSE : apres le balayage seulement — c'est lui qui
+              // materialise les dettes de remplacement, et l'une d'elles peut
+              // naitre `pending_draw` a l'instant meme. La machine cede le
+              // passage aux popups deja ouvertes (pintade, gage, diffusion) :
+              // on la represente donc quelques fois, comme l'anniversaire, au
+              // lieu de perdre le creneau.
+              let n = 0;
+              const gate = () => {
+                try { maybeShowArdoiseCasino(); } catch (e) {}
+                if (++n <= 6 && !window._ardOverlayOpen) setTimeout(gate, 3000);
+              };
+              gate();
             }, 1800);
           }
         } catch (e) { console.warn('[ardoise] boot:', e.message); }
@@ -46745,6 +47297,11 @@ function _initPlayersSync() {
           // bloquant sans attendre un reload (réassertion realtime).
           if (entityKey === 'gageDraws' && state.auth && state.auth.role === 'player') {
             setTimeout(() => { try { maybeShowGageReveal(); } catch(e) {} }, 250);
+          }
+          // GATE ARDOISE : meme posture — une dette ouverte en direct par le
+          // coach doit lancer la machine sans attendre un reload.
+          if (entityKey === 'ardoiseAssignments' && state.auth && state.auth.role === 'player') {
+            setTimeout(() => { try { maybeShowArdoiseCasino(); } catch(e) {} }, 300);
           }
         });
         // Filet de sécurité : si l'utilisateur ferme l'onglet avant la fin
@@ -48335,7 +48892,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-16.134';
+const APP_VERSION = '2026-08-16.135';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
