@@ -738,8 +738,114 @@
     opacity: 0 !important; pointer-events: none;
   }
 
+  /* ========== LA MACHINE À SOUS (v.136) ==========
+     La v.135 a livré tout le markup du casino SANS UNE LIGNE DE CSS. Le
+     symptôme, côté coach comme côté joueuse : « le bouton TIRER ne réagit
+     pas ». Il réagissait très bien — il n'était simplement pas à l'écran.
+     Sans `position: fixed`, `#ardoise-overlay` se posait en FLUX NORMAL tout
+     en bas du <body>, pendant qu'`openArdoiseMachine()` met
+     `body { overflow: hidden }` : la machine était rendue, complète et
+     fonctionnelle, sous la ligne de flottaison et impossible à atteindre au
+     scroll. Un handler qui ne répond pas et un élément qu'on ne peut pas
+     cliquer donnent exactement la même impression.
+
+     Fond sombre ASSUMÉ, comme .ard-screen : ce n'est pas un voile posé sur
+     l'app, c'est une surface qui porte son propre contenu. Les couleurs de
+     texte sont donc écrites en dur et JAMAIS var(--ink) — c'est très
+     précisément le bug de contraste de la v.125 qu'on ne rejoue pas ici. */
+  .ard-casino {
+    position: fixed; left: 0; right: 0; top: 0;
+    height: 100dvh;                    /* jamais 100vh : la barre d'URL de Safari mobile */
+    z-index: 10003;                    /* au-dessus de .ard-screen (10002) */
+    background: radial-gradient(circle at 50% 20%, rgba(255,210,125,0.20), transparent 62%), #12131a;
+    display: flex; align-items: center; justify-content: center;
+    padding: calc(env(safe-area-inset-top) + 16px) 16px calc(env(safe-area-inset-bottom) + 16px);
+    overflow-y: auto; animation: gageIn 0.22s ease-out;
+  }
+  /* Les guirlandes du fronton. Purement décoratives, en position absolue au-
+     dessus du contenu : sans `pointer-events: none` elles voleraient chaque
+     clic de la machine — le deuxième piège du même écran. */
+  .ard-casino-lights {
+    position: absolute; left: 0; right: 0; top: 0; height: 5px; pointer-events: none;
+    background: repeating-linear-gradient(90deg, #ffd27d 0 10px, transparent 10px 20px);
+    opacity: 0.55; animation: ardLights 1.1s linear infinite;
+  }
+  @keyframes ardLights { to { background-position: 20px 0; } }
+  .ard-casino-inner {
+    position: relative; z-index: 1; width: 100%; max-width: 460px;
+    display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center;
+  }
+  .ard-casino-head { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .ard-casino-eyebrow {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: 0.14em;
+    text-transform: uppercase; color: #ffd27d; text-align: left;
+  }
+  .ard-casino-mute {
+    flex: 0 0 auto; width: 40px; height: 40px; border-radius: 50%; cursor: pointer;
+    border: 1.5px solid rgba(255,210,125,0.35); background: rgba(255,255,255,0.06);
+    font-size: 17px; line-height: 1; display: flex; align-items: center; justify-content: center;
+  }
+  .ard-casino-mute:active { background: rgba(255,210,125,0.22); }
+  .ard-casino-title {
+    font-family: 'Anton', sans-serif; font-size: clamp(23px, 7vw, 32px); line-height: 1.1;
+    color: #f4f1e8; text-shadow: 0 0 34px rgba(255,210,125,0.40);
+  }
+  /* Cinq rouleaux HORIZONTAUX empilés — sur 375 px, cinq colonnes ne
+     laisseraient que 70 px par nom d'exercice (cf. commentaire de _ardRenderMachine). */
+  .ard-reels { width: 100%; display: flex; flex-direction: column; gap: 7px; }
+  .ard-reel {
+    display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+    border-radius: 12px; border: 1.5px solid rgba(255,255,255,0.10);
+    background: rgba(255,255,255,0.05); transition: border-color 0.18s, background 0.18s;
+  }
+  .ard-reel-badge { flex: 0 0 auto; font-size: 19px; line-height: 1; }
+  .ard-reel-win { flex: 1; min-width: 0; height: 24px; display: flex; align-items: center; overflow: hidden; }
+  .ard-reel-face {
+    display: block; width: 100%; font-size: 14px; line-height: 1.25; color: #f4f1e8;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left;
+  }
+  .ard-reel-mark { flex: 0 0 auto; width: 16px; font-size: 14px; color: #ffd27d; }
+  .ard-reel.is-spinning { border-color: rgba(255,210,125,0.30); }
+  .ard-reel.is-spinning .ard-reel-face { opacity: 0.55; filter: blur(0.6px); animation: ardReelRoll 0.14s linear infinite; }
+  @keyframes ardReelRoll { 0% { transform: translateY(-2px); } 50% { transform: translateY(2px); } 100% { transform: translateY(-2px); } }
+  .ard-reel.is-hit { border-color: #ffd27d; background: rgba(255,210,125,0.13); }
+  .ard-reel.is-hit .ard-reel-face { color: #ffd27d; white-space: normal; }
+  .ard-reel.is-miss { opacity: 0.45; }
+  .ard-casino-foot { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  /* Le levier. 56 px de haut : c'est LE geste de l'écran, il se cliquera au
+     pouce, dans un vestiaire, sans viser. */
+  .ard-lever {
+    width: 100%; min-height: 56px; padding: 15px 18px; cursor: pointer;
+    border: 0; border-radius: 14px;
+    background: linear-gradient(180deg, #ffd991, #f0a93c);
+    color: #2a1d05; font-family: 'Anton', sans-serif; font-size: 19px; letter-spacing: 0.04em;
+    box-shadow: 0 6px 22px rgba(255,180,80,0.32);
+  }
+  .ard-lever:active { transform: translateY(2px); box-shadow: 0 2px 10px rgba(255,180,80,0.28); }
+  .ard-casino-hint { font-size: 11px; line-height: 1.45; color: #b9b3a1; font-family: 'JetBrains Mono', monospace; }
+  .ard-casino-close {
+    margin-top: 2px; padding: 9px 16px; cursor: pointer; border-radius: 10px;
+    border: 1.5px solid rgba(255,255,255,0.16); background: transparent;
+    color: #b9b3a1; font-size: 12px; font-family: 'JetBrains Mono', monospace;
+  }
+  /* Le ticket : ce que la machine a servi, sous forme de reçu. */
+  .ard-ticket {
+    width: 100%; padding: 14px; border-radius: 14px; text-align: left;
+    background: #1b1d24; border: 1.5px dashed rgba(255,210,125,0.45);
+  }
+  .ard-ticket-eyebrow {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.14em;
+    text-transform: uppercase; color: #ffd27d; margin-bottom: 3px;
+  }
+  .ard-ticket-title { font-family: 'Anton', sans-serif; font-size: 19px; line-height: 1.15; color: #f4f1e8; }
+  .ard-ticket-rule { height: 1px; margin: 10px 0; background: repeating-linear-gradient(90deg, rgba(255,255,255,0.22) 0 5px, transparent 5px 10px); }
+  .ard-ticket-clock { margin-top: 9px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #b9b3a1; }
+  .ard-item-badge { flex: 0 0 auto; font-size: 15px; line-height: 1.3; }
+
   @media (prefers-reduced-motion: reduce) {
     .ard-cloche, .ard-count, .ard-spin, .ard-reveal-wrap { animation: none !important; }
+    .ard-casino, .ard-casino-lights, .ard-reel.is-spinning .ard-reel-face { animation: none !important; }
+    .ard-reel.is-spinning .ard-reel-face { filter: none; }
   }
 
   /* ========== ANNIVERSAIRE : ANIMATION DU JOUR J ========== */
@@ -24842,12 +24948,27 @@ function _ardReduced() {
   try { return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); }
   catch (e) { return false; }
 }
-// --- LE SON : court, généré, MUET PAR DÉFAUT --------------------------------
+// --- LE SON : court, généré, ALLUMÉ PAR DÉFAUT (v.136) ----------------------
 // Aucun asset : l'app est un fichier unique servi hors ligne, un .mp3 en CDN ne
-// serait pas là quand il faut. Web Audio, trois oscillateurs, rien de plus.
-// Muet par défaut parce qu'une machine à sous qui se déclenche toute seule à
-// l'ouverture de l'app, dans un vestiaire ou en cours, est une trahison.
-function ardoiseSoundOn() { try { return load(K.ardoiseSound, false) === true; } catch (e) { return false; } }
+// serait pas là quand il faut. Web Audio, trois oscillateurs, rien de plus, et
+// un contexte audio unique gardé sur `window._ardAudio` (cf. _ardAc).
+//
+// La v.135 était muette par défaut, par crainte d'une fanfare en plein cours.
+// La crainte était mal placée : le son ne peut sortir QUE pendant un tirage,
+// c'est-à-dire après un geste délibéré sur le levier — jamais à l'ouverture de
+// l'app. Une machine à sous muette, elle, n'est plus qu'une liste qui s'affiche.
+// Donc allumée par défaut, avec deux garde-fous :
+//   • `prefers-reduced-motion` éteint le DÉFAUT — qui coupe les animations de
+//     son système coupe aussi les fanfares ;
+//   • un choix EXPLICITE (le bouton 🔊/🔇) fait toujours foi, dans les deux
+//     sens. D'où le tri à trois branches : true, false, et « jamais répondu ».
+function ardoiseSoundOn() {
+  try {
+    const v = load(K.ardoiseSound, null);
+    if (v === true || v === false) return v;
+    return !(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  } catch (e) { return false; }
+}
 function toggleArdoiseSound() {
   const next = !ardoiseSoundOn();
   save(K.ardoiseSound, next);
@@ -48892,7 +49013,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-16.136';
+const APP_VERSION = '2026-08-16.137';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
