@@ -47370,6 +47370,10 @@ function _initPlayersSync() {
         // cleanupOrphanMatchConvocs). Avant ce point, la création de convoc est
         // volontairement inhibée pour ne pas fabriquer de doublon.
         window._pbFirstSyncDone = true;
+        // Le boot vient de tout pull : il compte comme un resync, sinon le
+        // cooldown de resyncData partirait de zéro et le premier battement
+        // referait gratuitement le travail qu'on vient de terminer.
+        try { _lastDataResync = Date.now(); } catch (e) {}
         try { if (typeof cleanupOrphanMatchConvocs === 'function') cleanupOrphanMatchConvocs(); }
         catch (e) { console.warn('[cleanup] convocs post-sync:', e && e.message); }
         // SAISON : après la 1re sync, on a state.seasons / seasonPlayers /
@@ -49106,6 +49110,7 @@ async function refreshFromCloud() {
   if (window.Pb && Pb.online === false) return false;
   try {
     if (window.PbSync && PbSync.fetchAll) await PbSync.fetchAll(state);
+    _lastDataResync = Date.now(); // le battement de fond n'a plus rien à refaire
     try { ensureCurrentSeasonId(); } catch (e) {}
     persist();
     render();
@@ -49115,6 +49120,59 @@ async function refreshFromCloud() {
     if (typeof showToast === 'function') showToast('✓ Données à jour');
     return true;
   } catch (e) { console.warn('[refresh] pull-to-refresh:', e && e.message); return false; }
+}
+
+// ============================================================
+// RESYNC DE FOND — le maillon manquant du cross-device
+// ------------------------------------------------------------
+// `PbSync.fetchAll` n'était appelé QUE deux fois dans toute l'app : au boot, et
+// par le geste pull-to-refresh — lequel est réservé au mode standalone (cf. la
+// garde `_isStandalonePWA` dans initPullToRefresh). Passé le boot, le SEUL canal
+// par lequel un appareil apprenait l'écriture d'un AUTRE appareil était donc le
+// websocket Realtime.
+//
+// Or iOS suspend une PWA passée en arrière-plan : le websocket meurt, et
+// Realtime ne rejoue RIEN de ce qui a été manqué pendant la coupure (il n'a pas
+// de curseur, seulement un flux). Au retour au premier plan, l'app repartait de
+// son état local périmé et ne re-pullait jamais.
+//
+// Vécu en prod (2026-08-17) : une indisponibilité saisie sur l'iPhone (Célia,
+// grossesse) était bien poussée en base — 0,5 s après la saisie, vérifié — mais
+// l'iPad, resté ouvert, comptait la joueuse PRÉSENTE indéfiniment. D'où la
+// lecture trompeuse « les indispos héritées ne marchent qu'en local » : rien
+// n'était local, c'est la LECTURE des autres appareils qui était figée. La
+// donnée n'est pas en cause, le rafraîchissement l'est — et ça vaut pour TOUTE
+// entité, l'indispo n'a fait que le rendre visible (une écriture rare, faite sur
+// un appareil, lue sur un autre).
+//
+// Le remède est exactement celui déjà retenu pour checkForUpdate plus bas :
+// re-pull au RETOUR AU PREMIER PLAN, au RETOUR EN LIGNE, et sur un battement
+// tant que l'écran est allumé. Un rendu ne surprend personne à ces moments-là :
+// c'est déjà ce que fait chaque événement Realtime reçu.
+//
+// COOLDOWN : boot, PTR et battement peuvent tomber coup sur coup — inutile de
+// refetcher la base trois fois en dix secondes.
+let _lastDataResync = 0;
+const DATA_RESYNC_COOLDOWN = 25000;
+async function resyncData(reason) {
+  if (window.Pb && Pb.online === false) return false;
+  if (!window.PbSync || !PbSync.fetchAll) return false;
+  if (Date.now() - _lastDataResync < DATA_RESYNC_COOLDOWN) return false;
+  _lastDataResync = Date.now();
+  try {
+    await PbSync.fetchAll(state);
+    try { ensureCurrentSeasonId(); } catch (e) {}
+    persist();
+    render();
+    return true;
+  } catch (e) {
+    // Un échec n'apprend RIEN du serveur : on relâche le cooldown pour que le
+    // battement suivant réessaie tout de suite, au lieu d'attendre 25 s après
+    // une tentative qui n'a rien ramené.
+    _lastDataResync = 0;
+    console.warn('[resync] ' + (reason || '') + ':', e && e.message);
+    return false;
+  }
 }
 
 // ============================================================
@@ -49128,7 +49186,7 @@ async function refreshFromCloud() {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-16.138';
+const APP_VERSION = '2026-08-16.139';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
@@ -49329,6 +49387,15 @@ setInterval(() => {
   try { if (!document.hidden) replayPendingInjuries(); } catch (e) {}
 }, 300000);
 window.addEventListener('online', () => { try { replayPendingInjuries(); } catch (e) {} });
+// RESYNC DE FOND (cf. resyncData) : battement tant que l'écran est allumé, et
+// rattrapage au retour en ligne. Sans ça, un appareil qui a manqué un événement
+// Realtime — websocket tué par la mise en veille — ne le rattrapait JAMAIS.
+// Pas de resync juste après le boot : le boot EST le premier pull (il stamp
+// lui-même `_lastDataResync`), en rajouter un refetcherait la base pour rien.
+setInterval(() => {
+  try { if (!document.hidden) resyncData('heartbeat'); } catch (e) {}
+}, 300000);
+window.addEventListener('online', () => { try { resyncData('online'); } catch (e) {} });
 try { _ambientStart(); } catch (e) {} // alertes ambiantes de déroulé (coach)
 try { _trainingRemindStart(); } catch (e) {} // rappel prépa quotidien (cf. la limite documentée sur _trainingRemindCheck)
 document.addEventListener('visibilitychange', () => {
@@ -49336,6 +49403,11 @@ document.addEventListener('visibilitychange', () => {
     // `foreground` autorise le rechargement automatique : c'est le seul moment
     // où l'on est sûr que personne n'est en train de saisir quelque chose.
     try { checkForUpdate({ foreground: true }); } catch (e) {}
+    // RE-PULL DES DONNÉES — c'était LE maillon manquant du cross-device : on
+    // revient d'un arrière-plan pendant lequel le websocket Realtime a pu être
+    // tué (iOS suspend la PWA), donc pendant lequel toute écriture d'un autre
+    // appareil a été manquée SANS RATTRAPAGE POSSIBLE. Cf. resyncData.
+    try { resyncData('foreground'); } catch (e) {}
     try { replayPendingInjuries(); _syncBadgeRender(); } catch (e) {}
     try { _ambientCheck(); } catch (e) {} // rattrape une transition franchie en arrière-plan
     // Retour au 1er plan après l'heure du rappel → rattrape le rappel du jour.
