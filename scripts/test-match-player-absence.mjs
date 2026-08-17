@@ -31,7 +31,7 @@ function extractFn(name) {
 // v.97 : _convocResp délègue à resolveEffectivePresence, qui interroge les DEUX
 // gisements d'indisponibilité (période saisie + statut médical de la fiche).
 const src = ['_unavailMeta', '_unavailOn', '_medicalUnavailOn', '_unavailEffectiveOn', 'resolveEffectivePresence',
-  '_convocResp', '_rsvpStamp', '_rsvpPresent', '_effectiveConvocStatus', '_matchConvoc', 'matchSaveAbsence', 'matchRestorePresence']
+  '_convocRespRaw', '_convocResp', '_rsvpStamp', '_rsvpPresent', '_effectiveConvocStatus', '_matchConvoc', 'matchSaveAbsence', 'matchRestorePresence']
   .map(extractFn).join('\n\n');
 function build(state, formValues = { 'ab-reason': 'Blessure', 'ab-msg': 'désolée' }) {
   const log = { notified: [], persisted: 0, closed: 0, rendered: 0 };

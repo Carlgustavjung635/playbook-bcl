@@ -53,6 +53,7 @@ function extractApply(key) {
 
 const api = new Function(`
   const _lastConvocResponses = {};
+  const _lastConvocResponsesByDate = {};
   ${extractFn('_mergeInstanceOverrides')}
   const applyConvocs = ${extractApply('convocations')};
   return { _mergeInstanceOverrides, applyConvocs };

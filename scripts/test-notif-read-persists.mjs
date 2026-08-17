@@ -43,6 +43,7 @@ function extractApply(key) {
 }
 const applyResponses = new Function(`
   const _lastConvocResponses = {};
+  const _lastConvocResponsesByDate = {};
   return ${extractApply('convocationResponses')};
 `)();
 

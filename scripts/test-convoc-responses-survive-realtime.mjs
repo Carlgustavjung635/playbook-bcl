@@ -58,6 +58,7 @@ function extractApply(key) {
 // exactement comme dans le bloc module.
 const factory = new Function(`
   const _lastConvocResponses = {};
+  const _lastConvocResponsesByDate = {};
   ${extractFn('_mergeInstanceOverrides')}
   const applyConvocs = ${extractApply('convocations')};
   const applyResponses = ${extractApply('convocationResponses')};

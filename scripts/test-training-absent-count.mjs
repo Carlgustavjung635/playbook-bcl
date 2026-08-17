@@ -66,7 +66,7 @@ const FNS = [
   'seasonIdForConvocInstance',
   'convocInstanceRoster',            // ← la porte unique introduite par le fix
   'isoDate', '_unavailOn', '_medicalUnavailOn', '_unavailEffectiveOn', '_unavailMeta',
-  'resolveEffectivePresence', '_convocResp',
+  'resolveEffectivePresence', '_convocRespRaw', '_convocResp',
   'getMatchRoster',
 ];
 

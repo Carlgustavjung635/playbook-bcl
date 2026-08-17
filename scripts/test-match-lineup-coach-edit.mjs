@@ -28,7 +28,7 @@ function extractFn(name) {
 // v.97 : _convocResp délègue à resolveEffectivePresence, qui interroge les DEUX
 // gisements d'indisponibilité (période saisie + statut médical de la fiche).
 const src = ['_unavailMeta', '_unavailOn', '_medicalUnavailOn', '_unavailEffectiveOn', 'resolveEffectivePresence',
-  '_convocResp', 'getMatchRoster', 'getMatchComposition', 'ensureMatchRoster', 'toggleRosterPlayer']
+  '_convocRespRaw', '_convocResp', 'getMatchRoster', 'getMatchComposition', 'ensureMatchRoster', 'toggleRosterPlayer']
   .map(extractFn).join('\n\n');
 const players = [{ id: 'a', num: 4, name: 'Lea' }, { id: 'b', num: 7, name: 'Mia' }, { id: 'c', num: 9, name: 'Zoe' }];
 function build(state) {

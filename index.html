@@ -4508,6 +4508,10 @@ function _stableJson(o) {
 // canaux indépendants, et un événement realtime ne rejoue QUE son entité. Sans
 // ce relais, une convocation nouvelle pour le client repart avec des RSVP vides.
 const _lastConvocResponses = {};
+// Même relais, mais SCOPÉ PAR DATE : { convocId: { instanceDate: { playerId: … } } }.
+// C'est lui qui porte la vérité (la table est clé sur la date) ; `_lastConvocResponses`
+// n'en est que le repli à plat pour les lecteurs historiques.
+const _lastConvocResponsesByDate = {};
 
 // Fusionne les overrides d'instance LOCAUX et DISTANTS d'une convocation
 // récurrente. `instance_overrides` est un jsonb monolithique : le dump renvoie
@@ -4941,6 +4945,10 @@ const ENTITIES = [
         // D'où le repli sur le dernier état connu des réponses, qui survit à la
         // rotation des ids de convocation.
         responses: (byId[r.id] || {}).responses || _lastConvocResponses[r.id] || {},
+        // Même repli que ci-dessus, pour le gisement scopé par date : sans lui,
+        // un événement realtime sur `convocations` seul repartait sans dates et
+        // les lectures retombaient sur le repli à plat.
+        responsesByDate: (byId[r.id] || {}).responsesByDate || _lastConvocResponsesByDate[r.id] || {},
         seasonId: r.season_id || (byId[r.id] || {}).seasonId || null,
         // #2 : clôture persistée. Colonne absente (rétrocompat avant migration) →
         // r.closed undefined → on conserve le flag local existant.
@@ -4954,21 +4962,34 @@ const ENTITIES = [
     pk: ['convocation_id', 'player_id', 'instance_date'], realtime: true, auth: 'anon',
     dump: (state) => {
       const out = {};
+      const put = (cid, pid, idate, resp) => {
+        if (!resp || !idate) return;
+        out[`${cid}|${pid}|${idate}`] = {
+          convocation_id: cid, player_id: pid, instance_date: idate,
+          status: resp.status || null, reason: resp.reason || null,
+          late_minutes: resp.lateMinutes != null ? Number(resp.lateMinutes) : null
+        };
+      };
       (state.convocations || []).forEach(c => {
+        // TOUTES les dates connues du serveur d'abord. Sans ça, un flush ne
+        // réémettait que la date repliée dans `c.responses` et les réponses des
+        // autres dates de la même convocation cessaient d'être réassertées.
+        Object.entries(c.responsesByDate || {}).forEach(([idate, byPid]) => {
+          Object.entries(byPid || {}).forEach(([pid, resp]) => put(c.id, pid, idate, resp));
+        });
+        // Puis les écritures locales, qui doivent gagner sur l'instantané
+        // serveur pour une même clé. Une réponse sans `instanceDate` vaut pour
+        // la date propre de la convocation — jamais pour toute la série.
         Object.entries(c.responses || {}).forEach(([pid, resp]) => {
           if (!resp) return;
-          const idate = resp.instanceDate || c.date;
-          out[`${c.id}|${pid}|${idate}`] = {
-            convocation_id: c.id, player_id: pid, instance_date: idate,
-            status: resp.status || null, reason: resp.reason || null,
-            late_minutes: resp.lateMinutes != null ? Number(resp.lateMinutes) : null
-          };
+          put(c.id, pid, resp.instanceDate || c.date, resp);
         });
       });
       return out;
     },
     apply: (state, rows) => {
       const byConv = {};
+      const byConvDate = {};
       const _prevOf = (cid, pid) => {
         const c = (state.convocations || []).find(x => x.id === cid);
         return (c && c.responses && c.responses[pid])
@@ -5000,16 +5021,39 @@ const ENTITIES = [
         const same = prev && prev.status === status && (prev.reason || null) === (reason || null)
           && (prev.lateMinutes == null ? null : prev.lateMinutes) === lateMinutes;
         const at = (same && prev.at) ? prev.at : (r.updated_at ? Date.parse(r.updated_at) : null);
-        byConv[r.convocation_id] = byConv[r.convocation_id] || {};
-        byConv[r.convocation_id][r.player_id] = {
+        // Indexé par DATE puis par joueuse. La table est clé sur
+        // (convocation, joueuse, instance_date) : replier tout de suite sur la
+        // seule joueuse faisait s'écraser entre elles les réponses de dates
+        // différentes d'une même convocation — la dernière ligne lue gagnait,
+        // arbitrairement — et laissait ensuite `_convocResp` la resservir sur
+        // n'importe quelle date.
+        byConvDate[r.convocation_id] = byConvDate[r.convocation_id] || {};
+        byConvDate[r.convocation_id][r.instance_date] = byConvDate[r.convocation_id][r.instance_date] || {};
+        byConvDate[r.convocation_id][r.instance_date][r.player_id] = {
           status, reason, lateMinutes, instanceDate: r.instance_date, at
         };
+      });
+      // Repli à plat CONSERVÉ pour les lecteurs historiques (`c.responses[pid]`),
+      // mais rendu déterministe : la date propre de la convocation gagne. Tous
+      // les éléments portent leur `instanceDate`, donc les lectures scopées
+      // (cf. _convocRespRaw) savent écarter ce qui ne concerne pas leur date.
+      Object.keys(byConvDate).forEach(cid => {
+        const dmap = byConvDate[cid];
+        const flat = {};
+        Object.keys(dmap).sort().forEach(dt => Object.assign(flat, dmap[dt]));
+        const c = (state.convocations || []).find(x => x.id === cid);
+        if (c && dmap[c.date]) Object.assign(flat, dmap[c.date]);
+        byConv[cid] = flat;
       });
       // Relais pour l'apply de `convocations` : un événement realtime ne rejoue
       // QUE son entité, donc une convocation nouvelle pour ce client repartirait
       // sans RSVP. On mémorise l'état complet, indexé par convocation.
       Object.keys(byConv).forEach(cid => { _lastConvocResponses[cid] = byConv[cid]; });
-      (state.convocations || []).forEach(c => { if (byConv[c.id]) c.responses = byConv[c.id]; });
+      Object.keys(byConvDate).forEach(cid => { _lastConvocResponsesByDate[cid] = byConvDate[cid]; });
+      (state.convocations || []).forEach(c => {
+        if (byConvDate[c.id]) c.responsesByDate = byConvDate[c.id];
+        if (byConv[c.id]) c.responses = byConv[c.id];
+      });
     }
   },
   {
@@ -27484,16 +27528,50 @@ function resolveEffectivePresence(playerId, dateISO, existingResponse) {
   return { status: 'present', reason: '', motif: '', message: '', auto: false, unavail: null, source: 'default' };
 }
 
+// La réponse BRUTE stockée pour CETTE date, ou null. Rien d'autre.
+//
+// RÈGLE CANONIQUE : une réponse appartient à UNE date d'instance, et une seule.
+// On ne doit JAMAIS rendre pour la date D une réponse enregistrée pour une autre
+// date. C'est ce qui manquait, et ça cassait l'héritage des indisponibilités.
+//
+// L'ancien code lisait `c.responses[pid]` — le gisement de la table
+// `convocation_responses` — SANS regarder à quelle date cette réponse avait été
+// donnée. Or cette table est clé sur (convocation, joueuse, DATE), tandis que
+// `c.responses` est replié par joueuse seulement : une réponse posée le 19 août
+// ressortait donc telle quelle le 26, le 2 septembre, et sur toute occurrence
+// d'une série récurrente n'ayant pas son propre override. Et comme une réponse
+// explicite prime sur le dérivé (cf. resolveEffectivePresence), elle ÉTEIGNAIT
+// l'indisponibilité sur toutes ces dates. D'où le vécu : « l'héritage marchait
+// jusqu'à ce qu'une joueuse réponde manuellement une fois ».
+//
+// Trois gisements, du plus précis au plus général — tous filtrés sur la date :
+//   1. c.instanceOverrides[D].responses  → l'occurrence D d'une série ;
+//   2. c.responsesByDate[D]              → table convocation_responses, par date ;
+//   3. c.responses[pid]                  → repli à plat, RETENU UNIQUEMENT si la
+//      réponse porte bien la date D (les écritures locales sans `instanceDate`
+//      valent pour la date propre de la convocation, cf. le dump).
+function _convocRespRaw(c, d, pid) {
+  if (!c || !pid || !d) return null;
+  const ov = (c.instanceOverrides || {})[d];
+  if (ov && ov.responses && ov.responses[pid]) return ov.responses[pid];
+  const byDate = (c.responsesByDate || {})[d];
+  if (byDate && byDate[pid]) return byDate[pid];
+  const flat = (c.responses || {})[pid];
+  if (flat) {
+    const rd = flat.instanceDate || c.date || null;
+    // Aucune date connue — ni sur la réponse, ni sur la convocation : il n'y a
+    // alors qu'une instance possible, la réponse vaut pour elle. Refuser ici
+    // reviendrait à JETER un RSVP au lieu de le scoper, ce qui serait pire que
+    // le bug qu'on corrige.
+    if (!rd || rd === d) return flat;
+  }
+  return null;
+}
+
 function _convocResp(c, dateISO, pid) {
   if (!c || !pid) return resolveEffectivePresence(pid, dateISO, null);
   const d = dateISO || c.date;
-  let resp = null;
-  if (c.recurrence && d && c.instanceOverrides && c.instanceOverrides[d] && c.instanceOverrides[d].responses) {
-    resp = c.instanceOverrides[d].responses[pid];
-  } else {
-    resp = (c.responses || {})[pid];
-  }
-  return resolveEffectivePresence(pid, d, resp);
+  return resolveEffectivePresence(pid, d, _convocRespRaw(c, d, pid));
 }
 
 // Doit rester aligné avec la contrainte CHECK de 20260729_002 ET avec la liste
@@ -39589,7 +39667,12 @@ function saveInstanceAbsence(parentId, dateStr, playerId) {
   const prev = _effectiveConvocStatus(c, dateStr, playerId);
   if (c.recurrence) {
     c.instanceOverrides = c.instanceOverrides || {};
-    c.instanceOverrides[dateStr] = c.instanceOverrides[dateStr] || { responses: {...(c.responses||{})} };
+    // L'override d'une occurrence part VIDE. Il était initialisé avec une copie
+    // de `c.responses` — le gisement à plat de toute la série — ce qui GELAIT
+    // sur cette date-là les réponses données sur d'autres dates, et les rendait
+    // définitives : une joueuse indisponible héritait d'un « présente » venu
+    // d'ailleurs, gravé sur une date où elle n'avait rien répondu.
+    c.instanceOverrides[dateStr] = c.instanceOverrides[dateStr] || { responses: {} };
     c.instanceOverrides[dateStr].responses = c.instanceOverrides[dateStr].responses || {};
     c.instanceOverrides[dateStr].responses[playerId] = _rsvpStamp({
       status: 'absent',
@@ -49186,7 +49269,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-16.139';
+const APP_VERSION = '2026-08-16.140';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
