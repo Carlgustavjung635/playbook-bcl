@@ -22694,6 +22694,17 @@ async function submitPintadeProof(event) {
       }
     } else {
       _pintadeRenderOverlay('failed');
+      // Une preuve ARRIVÉE MAIS HORS DÉLAI doit remonter au coach : c'est le
+      // seul cas où le raté est acté alors que la porteuse a bel et bien fait le
+      // geste. Sans ce push, la photo dormait dans le feed et personne n'allait
+      // la chercher — le coach ne pouvait pas arbitrer ce qu'il ne voyait pas.
+      try {
+        notifyPush([_pushCoachKey()], {
+          title: '🕊 Preuve hors délai',
+          body: _pintadePlayerLabel(req.holderId) + ' a envoyé la photo, mais après le chrono. À toi de trancher.',
+          url: '/', tag: 'pintade-late-' + req.id, type: 'pintade_late'
+        });
+      } catch (e) {}
     }
   } catch (e) {
     console.error('[pintade] upload preuve', e && e.message ? e.message : e);
@@ -49435,7 +49446,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.142';
+const APP_VERSION = '2026-08-19.143';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
