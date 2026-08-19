@@ -1667,9 +1667,9 @@ t('aller-retour base : les trois colonnes d\'invalidation survivent', () => {
 //   • une plage « à l'endroit » (sieste 13 → 15) marche aussi ;
 //   • start === end désactive la mécanique, sans drapeau supplémentaire ;
 //   • les heures s'entendent en Europe/Paris, PAS dans le fuseau de l'appareil ;
-//   • et surtout : l'échéance de connexion ne peut pas expirer pendant le repos
-//     — sinon interdire les demandes de nuit ne servirait à rien, il suffirait
-//     d'en lancer une à 22 h 55 pour la faire rater en dormant.
+//   • et surtout (v.144) : l'échéance de connexion N'EST PAS reportée à la fin
+//     du repos. La v.120 la repoussait à 7 h ; le coach a tranché l'inverse —
+//     2 h annoncées = 2 h réelles, même quand elles finissent à 00 h 55.
 // =============================================================================
 function reglesRepos(start, end, extra) {
   S.pintadeRules = Object.assign({}, ctx.PINTADE_RULES_DEFAULT,
@@ -1740,7 +1740,7 @@ t('hors repos, tout redevient normal', () => {
 });
 
 // --- LE TROU DE LA FRONTIÈRE -------------------------------------------------
-t('une demande juste AVANT le repos ne peut pas expirer pendant la nuit', () => {
+t('une demande juste AVANT le repos garde ses 2 h — AUCUN report', () => {
   seed('player', 'pB');
   startGarde('pA', 30, 'player', 'pB');
   reglesRepos(23, 7, { connectWindowHours: 2 });
@@ -1748,12 +1748,10 @@ t('une demande juste AVANT le repos ne peut pas expirer pendant la nuit', () => 
   demande();
   const q = lastReq();
   const h = ctx._pintadeParisHour(q.connectDeadlineAt);
-  ok(!ctx.pintadeIsRestAt(q.connectDeadlineAt),
-    'échéance en plein repos (' + h + 'h) → elle rate en dormant, comme avant la v.107');
-  ok(h === 7, 'échéance reportée à ' + h + 'h au lieu de la fin du repos');
-  // …et elle ne rate PAS tant que le repos dure.
-  aParis(3);
-  ok(ctx._pintadeStatus(q) === 'pending', 'ratée en pleine nuit : ' + ctx._pintadeStatus(q));
+  ok(ctx.pintadeIsRestAt(q.connectDeadlineAt),
+    'le cas teste ne couvre plus la frontiere (echeance a ' + h + 'h)');
+  ok(q.connectDeadlineAt === q.requestedAt + 2 * H,
+    'echeance reportee a ' + h + 'h au lieu des 2 h annoncees');
 });
 t('…mais une demande en pleine journée garde sa fenêtre normale', () => {
   seed('player', 'pB');

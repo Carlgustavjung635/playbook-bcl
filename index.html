@@ -22431,28 +22431,19 @@ function pintadeRequestBlockedReason() {
 }
 function pintadeCanRequest() { return pintadeRequestBlockedReason() === null; }
 
-// L'ÉCHÉANCE DE CONNEXION NE DOIT PAS EXPIRER PENDANT QU'ELLE DORT.
+// LE CHRONO 1 EST UNE DURÉE FIXE — 2 h, point.
 //
-// Interdire les demandes pendant le repos ne suffit pas : à 22 h 50, avec une
-// fenêtre de 2 h, l'échéance tombe à 00 h 50 — en pleine nuit. Elle dort, elle
-// ne voit rien, elle récolte un « pas vue ». C'est exactement le mode de panne
-// que la v.107 avait corrigé, revenu par la frontière du couvre-feu, et il
-// aurait rendu faux le texte des règles qu'on affiche aux joueuses.
+// La v.120 reportait l'échéance à la fin du repos quand elle tombait la nuit :
+// une demande à 22 h 55 n'expirait plus à 00 h 55 mais à 07 h. Le coach a
+// tranché l'inverse — ON NE REPORTE RIEN. La fenêtre annoncée dans le push
+// (« ouvre l'app dans les 2 h ») est la fenêtre réelle, quelle que soit l'heure.
 //
-// Si l'échéance calculée tombe dans le repos, on la reporte à la fin du repos.
-// On ne DÉDUIT pas les heures dormies de la fenêtre (ce serait l'option B, plus
-// subtile mais illisible pour les joueuses) : on garantit simplement qu'elle a
-// les yeux ouverts quand le compte à rebours se termine.
+// Ce qui reste de la v.120 et n'a rien à voir : on n'ENVOIE pas de demande
+// pendant le repos (cf. `pintadeRequestBlockedReason`). Le chrono 2 (30 s à
+// l'ouverture) n'est pas reporté non plus — c'est la mécanique du jeu.
 function _pintadeConnectDeadline(from, rules) {
   const r = rules || pintadeRules();
-  const base = from + (r.connectWindowHours || 2) * PINTADE_H;
-  if (!pintadeIsRestEnabledFor(r) || !pintadeIsRestAt(base)) return base;
-  return pintadeRestEndsAt(base) || base;
-}
-// Même lecture que `pintadeRestEnabled`, mais sur un jeu de règles fourni :
-// `requestPintadeProof` travaille sur les règles FIGÉES de la demande.
-function pintadeIsRestEnabledFor(r) {
-  return _pintadeHour(r.restStartHour, 23) !== _pintadeHour(r.restEndHour, 7);
+  return from + (r.connectWindowHours || 2) * PINTADE_H;
 }
 
 // --- ÉCRITURES ---------------------------------------------------------------
@@ -49446,7 +49437,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.143';
+const APP_VERSION = '2026-08-19.144';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
