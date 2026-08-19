@@ -4343,6 +4343,16 @@ window.PbStore = {
     }).eq('id', playerId);
     if (error) throw error;
   },
+  // Photo de profil (colonne `photo`, dataURL). MÊME POSTURE que
+  // updateNotifPermission : UPDATE ciblé d'UNE colonne, jamais via upsertPlayer
+  // qui pousse la ligne ENTIÈRE — l'appareil de la joueuse écraserait sinon le
+  // nom, le numéro, les postes ou le feedback que le coach a modifiés
+  // entre-temps (mode de panne v.104, que le canal `players` ne traverse pas).
+  async updatePhoto(playerId, photo) {
+    if (!playerId) return;
+    const { error } = await sb.from('players').update({ photo: photo || null }).eq('id', playerId);
+    if (error) throw error;
+  },
   // Statut médical de la fiche joueuse (migration 20260806_001). MÊME POSTURE
   // que updateNotifPermission : UPDATE ciblé de DEUX colonnes, jamais via
   // upsertPlayer qui pousse la ligne ENTIÈRE — un appareil dont la copie date
@@ -22543,6 +22553,66 @@ function _pintadePersistStale() {
   return touched;
 }
 
+// FILE D'ATTENTE HORS LIGNE DE LA PREUVE ------------------------------------
+// Une photo prise sans réseau était jusqu'ici simplement perdue : un alert, un
+// return, et rien nulle part. On la garde en dataURL et on la renvoie au premier
+// signe de réseau. Le renvoi ne rattrape AUCUN délai : le statut est calculé
+// avec l'horodatage de la PRISE DE VUE, jamais avec celui de l'envoi.
+const _PINTADE_PENDING_KEY = 'pb8_pintade_pending_proof';
+async function _pintadeQueueProof(reqId, file) {
+  try {
+    const blob = (typeof compressImageBlob === 'function') ? await compressImageBlob(file, 1400, 0.82) : file;
+    const dataUrl = await new Promise((res, rej) => {
+      const fr = new FileReader();
+      fr.onload = () => res(fr.result);
+      fr.onerror = () => rej(fr.error || new Error('lecture impossible'));
+      fr.readAsDataURL(blob);
+    });
+    localStorage.setItem(_PINTADE_PENDING_KEY, JSON.stringify({ reqId, dataUrl, at: Date.now() }));
+  } catch (e) {
+    console.warn('[pintade] mise en file de la preuve :', e && e.message);
+  }
+}
+async function _pintadeRetryPendingProof() {
+  if (!window.sb || window._pintadePendingBusy) return;
+  let pend = null;
+  try { pend = JSON.parse(localStorage.getItem(_PINTADE_PENDING_KEY) || 'null'); } catch (e) {}
+  if (!pend || !pend.reqId || !pend.dataUrl) return;
+  // Passé 48 h, une preuve en file ne veut plus rien dire.
+  if (Date.now() - (pend.at || 0) > 48 * 3600 * 1000) { try { localStorage.removeItem(_PINTADE_PENDING_KEY); } catch (e) {} return; }
+  const req = (state.pintadeRequests || []).find(q => q.id === pend.reqId);
+  if (!req) return;                          // demande pas encore resynchronisée : on retentera
+  if (req.photoUrl) { try { localStorage.removeItem(_PINTADE_PENDING_KEY); } catch (e) {} return; }
+  window._pintadePendingBusy = true;
+  try {
+    const blob = await (await fetch(pend.dataUrl)).blob();
+    const fname = 'proof-' + req.id + '-' + (pend.at || Date.now()) + '.jpg';
+    const { error: upErr } = await sb.storage.from('pintade-proofs')
+      .upload(fname, blob, { contentType: 'image/jpeg', cacheControl: '31536000', upsert: true });
+    if (upErr) throw upErr;
+    const { data: pub } = sb.storage.from('pintade-proofs').getPublicUrl(fname);
+    const url = (pub && pub.publicUrl) || '';
+    if (!url) throw new Error('URL publique indisponible');
+    req.photoUrl = url;
+    if (req.status === 'awaiting_photo') {
+      if ((pend.at || 0) <= (req.photoDeadlineAt || 0)) { req.status = 'ok'; req.resolvedAt = pend.at; }
+      else { req.status = 'failed_timeout'; req.resolvedAt = req.photoDeadlineAt || pend.at; }
+    }
+    req.updatedAt = Date.now();
+    persist(); _pintadeFlush();
+    try { localStorage.removeItem(_PINTADE_PENDING_KEY); } catch (e) {}
+    try { _pintadeRenderOverlay(); } catch (e) {}
+  } catch (e) {
+    console.warn('[pintade] renvoi de la preuve en file :', e && e.message);
+  } finally {
+    window._pintadePendingBusy = false;
+  }
+}
+try {
+  window.addEventListener('online', () => { _pintadeRetryPendingProof(); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) _pintadeRetryPendingProof(); });
+} catch (e) {}
+
 // La porteuse a pris la photo dans les temps.
 async function submitPintadeProof(event) {
   const req = pintadeActiveRequest();
@@ -22553,13 +22623,33 @@ async function submitPintadeProof(event) {
   const file = input && (input.files || [])[0];
   try { if (input) input.value = ''; } catch (e) {}
   if (!file) return;
-  if (!req) { _pintadeRenderOverlay(); return; }
+  if (!req) {
+    try { alert('⚠ Aucune demande en cours : ta photo n\'a pas pu être rattachée. Préviens le coach.'); } catch (e) {}
+    _pintadeRenderOverlay(); return;
+  }
   // Le chrono de la PHOTO a filé pendant que l'appareil photo était ouvert : on
-  // ne triche pas rétroactivement. La demande est déjà comptée ratée par
-  // `_pintadeStatus`, qui n'attend aucune écriture pour le savoir.
-  if (_pintadeStatus(req) !== 'awaiting_photo') { _pintadeRenderOverlay(); return; }
+  // ne triche pas rétroactivement, la demande est déjà comptée ratée par
+  // `_pintadeStatus`. Mais on NE JETTE PLUS LA PHOTO : elle existe, la porteuse
+  // l'a prise, elle a sa place dans le feed et le coach doit pouvoir en juger.
+  // C'est mot pour mot la règle déjà appliquée APRÈS l'upload (cf. plus bas) —
+  // elle manquait AVANT, et cette garde retournait en SILENCE : l'app se
+  // refermait sans un mot et la porteuse repartait convaincue d'avoir envoyé sa
+  // preuve. Enregistrer n'est pas rattraper : le statut reste celui du chrono.
+  const st0 = _pintadeStatus(req);
+  const late = (st0 === 'failed_timeout' || st0 === 'failed_not_seen');
+  if (st0 !== 'awaiting_photo' && !late) {
+    try { alert('Cette demande est déjà close : ta photo n\'a pas été enregistrée.'); } catch (e) {}
+    _pintadeRenderOverlay(); return;
+  }
+  if (late) {
+    try { alert('⏱ Le délai est dépassé, le raté est acté — mais ta photo part quand même au coach.'); } catch (e) {}
+  }
   if (!window.sb) {
-    try { alert('Hors ligne : impossible d\'envoyer la preuve. Reconnecte-toi vite !'); } catch (e) {}
+    // Hors ligne : la photo n'est plus PERDUE. Elle dort en localStorage et
+    // repart au premier signe de réseau. Ce qui est sauvé c'est la PREUVE, pas
+    // le délai — le chrono, lui, continue de tourner.
+    await _pintadeQueueProof(req.id, file);
+    try { alert('📶 Hors ligne : ta photo est gardée et sera envoyée dès le retour du réseau. Attention, le chrono continue !'); } catch (e) {}
     return;
   }
   window._pintadeUploading = true;
@@ -44859,6 +44949,40 @@ function editMyPhoto() {
   `);
 }
 
+// Envoi de la photo de profil par la JOUEUSE, avec file d'attente hors ligne.
+// Une écriture qui échoue doit se VOIR : sans indicateur, la joueuse repart
+// convaincue d'avoir changé sa photo — c'est exactement ce qui s'est produit.
+const _PB_PENDING_PHOTO_KEY = 'pb8_pending_my_photo';
+function _pbPushMyPhoto(p, photo) {
+  if (!p || !p.id) return;
+  if (!window.PbStore || !window.sb) {                 // hors ligne : on garde, on renverra
+    try { localStorage.setItem(_PB_PENDING_PHOTO_KEY, JSON.stringify({ playerId: p.id, photo: photo || null, at: Date.now() })); } catch (e) {}
+    try { alert('📶 Hors ligne : ta photo est gardée et partira dès le retour du réseau.'); } catch (e) {}
+    return;
+  }
+  PbStore.updatePhoto(p.id, photo).catch(e => {
+    console.warn('[sync] updatePhoto:', e && e.message);
+    try { localStorage.setItem(_PB_PENDING_PHOTO_KEY, JSON.stringify({ playerId: p.id, photo: photo || null, at: Date.now() })); } catch (e2) {}
+    try { alert('⚠ Ta photo est enregistrée sur ce téléphone mais n\'a pas pu être envoyée. Elle repartira toute seule au prochain lancement.'); } catch (e2) {}
+  });
+}
+// Renvoi silencieux : au retour du réseau et à chaque retour au premier plan.
+function _pbRetryPendingPhoto() {
+  if (!window.PbStore || !window.sb || window._pbPhotoRetryBusy) return;
+  let pend = null;
+  try { pend = JSON.parse(localStorage.getItem(_PB_PENDING_PHOTO_KEY) || 'null'); } catch (e) {}
+  if (!pend || !pend.playerId) return;
+  window._pbPhotoRetryBusy = true;
+  PbStore.updatePhoto(pend.playerId, pend.photo || null)
+    .then(() => { try { localStorage.removeItem(_PB_PENDING_PHOTO_KEY); } catch (e) {} })
+    .catch(e => console.warn('[sync] renvoi photo en file:', e && e.message))
+    .finally(() => { window._pbPhotoRetryBusy = false; });
+}
+try {
+  window.addEventListener('online', _pbRetryPendingPhoto);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) _pbRetryPendingPhoto(); });
+} catch (e) {}
+
 async function changeMyPhoto(event) {
   const file = event.target.files[0];
   if (!file) return;
@@ -44868,6 +44992,12 @@ async function changeMyPhoto(event) {
     const compressed = await compressImage(file, 400, 0.8);
     p.photo = compressed;
     persist();
+    // La photo doit PARTIR. `persist()` n'écrit que localStorage : sans cette
+    // ligne, la joueuse voyait sa nouvelle photo sur SON téléphone et nulle part
+    // ailleurs, puis la perdait au premier fetch qui rapatriait l'ancienne. Le
+    // chemin COACH (changePlayerPhoto) poussait, lui, depuis toujours — coach et
+    // joueuse divergent, c'est la joueuse qui avait dérivé.
+    _pbPushMyPhoto(p, compressed);
     closeModal();
     setTimeout(() => editMyPhoto(), 50);
   } catch (e) {
@@ -44881,6 +45011,7 @@ function removeMyPhoto() {
   if (!confirm('Retirer ta photo ?')) return;
   delete p.photo;
   persist();
+  _pbPushMyPhoto(p, null);              // le retrait doit voyager comme la pose
   closeModal();
   setTimeout(() => editMyPhoto(), 50);
 }
@@ -49304,7 +49435,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-17.141';
+const APP_VERSION = '2026-08-19.142';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
