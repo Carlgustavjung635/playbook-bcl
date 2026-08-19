@@ -49437,7 +49437,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.144';
+const APP_VERSION = '2026-08-19.145';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
@@ -49454,6 +49454,49 @@ let _updateDismissedVersion = null;
 // boucle transformerait l'app en machine à clignoter. Après cet essai, on
 // retombe sur le bandeau manuel.
 let _autoReloadTried = false;
+// v.145 — LE RECHARGEMENT DEVIENT SILENCIEUX ET GENERAL.
+// Avant, il n'etait tente qu'au RETOUR AU PREMIER PLAN : une PWA deja ouverte,
+// ou rouverte sans que l'onglet ait ete suspendu, ne repassait par aucun de ces
+// moments et gardait son vieux build — c'est exactement ce qui privait les
+// joueuses des correctifs deja deployes. Desormais TOUTE detection (boot,
+// battement 5 min, retour au premier plan, pull-to-refresh) recharge, a une
+// seule condition : ne rien detruire au passage.
+let _idleReloadTimer = null;
+// Ce qui interdit le rechargement, c'est ce qu'il DETRUIRAIT — pas le fait que
+// l'ecran soit allume. Une saisie en cours, un envoi de photo, des rouleaux qui
+// tournent, une seance live : la, on attend. Le reste du temps, l'etat vit dans
+// localStorage et en base, un reload ne coute rien.
+function _pbBusyForReload() {
+  try {
+    if (_hasOpenModal()) return 'modale ouverte';
+    if (window._ardOverlayOpen) return 'machine ardoise';
+    if (window._gageOverlayOpen) return 'tirage de gage';
+    if (window._pintadeOverlayOpen) return 'pintade';
+    if (window._broadcastPopupOpen) return 'diffusion';
+    if (window._ardUploading || window._pintadeUploading) return 'envoi de photo';
+    if (window._liveSession) return 'seance live';
+    if (window._drillGame) return 'drill en cours';
+    const ae = document.activeElement;
+    if (ae && (ae.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName || ''))) return 'saisie en cours';
+  } catch (e) {}
+  return '';
+}
+// Occupee : on repasse toutes les 30 s jusqu'a ce que l'ecran soit calme. Le
+// bandeau reste affiche pendant ce temps — si elle le tape, tant mieux, elle
+// n'aura pas attendu.
+function _armIdleReload(remote) {
+  if (_idleReloadTimer || _autoReloadTried) return;
+  const tick = () => {
+    _idleReloadTimer = null;
+    if (_autoReloadTried) return;
+    const busy = _pbBusyForReload();
+    if (busy) { _idleReloadTimer = setTimeout(tick, 30000); return; }
+    _autoReloadTried = true;
+    console.log('[pwa] auto-reload vers v' + remote + ' — ecran redevenu calme');
+    _cacheBustReload(remote);
+  };
+  _idleReloadTimer = setTimeout(tick, 30000);
+}
 async function checkForUpdate(opts) {
   opts = opts || {};
   if (_updateBannerShown) return;
@@ -49471,13 +49514,19 @@ async function checkForUpdate(opts) {
     // le fermer d'un ✕ le supprimait jusqu'à la fin de la session — une PWA
     // n'étant jamais vraiment fermée, ça pouvait durer des jours. Résultat
     // vécu : des correctifs déployés que l'appareil n'exécutait toujours pas.
-    // Le rechargement n'est tenté QU'AU RETOUR AU PREMIER PLAN (opts.foreground) :
-    // à ce moment personne n'est en train de saisir, et rien n'est perdu — l'état
-    // vit dans localStorage et en base.
-    if (opts.foreground && !_autoReloadTried && !_hasOpenModal()) {
-      _autoReloadTried = true;
-      _cacheBustReload(remote);
-      return;
+    // v.145 : le rechargement n'attend plus le retour au premier plan — il part à
+    // la PREMIÈRE détection, quel que soit le canal. Ce qui le retient n'est plus
+    // un moment, c'est un état : cf. _pbBusyForReload.
+    console.log('[pwa] auto-reload vers v' + remote + ' detectee (embarquee : v' + APP_VERSION + ')');
+    if (!_autoReloadTried) {
+      const busy = _pbBusyForReload();
+      if (!busy) {
+        _autoReloadTried = true;
+        _cacheBustReload(remote);
+        return;
+      }
+      console.log('[pwa] rechargement differe — ' + busy);
+      _armIdleReload(remote);
     }
     // Le filet automatique n'a joué qu'une fois par session, et seulement au
     // retour au premier plan. Tout le reste du temps — app ouverte en continu,
