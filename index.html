@@ -5587,6 +5587,63 @@ const ENTITIES = [
     }
   },
   // ==========================================================================
+  // NOTES COACHS (cf. migration 20260822_001). Fil de discussion PRIVÉ entre
+  // coachs, accroché à une instance de plan d'entraînement. La clé est le MÊME
+  // couple (convocation_id + instance_date) que training_plans : il n'existe
+  // AUCUNE table `trainings` dans ce projet — une FK vers elle aurait fait
+  // échouer la migration entière. D'où `training_key` = "convocId::date",
+  // dénormalisé en deux colonnes lisibles pour les requêtes SQL manuelles.
+  // Soft-delete (deleted_at) + LWW (updated_at), patron maison.
+  // ==========================================================================
+  {
+    key: 'trainingCoachNotes', table: 'training_coach_notes', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.trainingCoachNotes || [])
+      .filter(n => n && n.id && n.convocationId && n.instanceDate)
+      .map(n => [n.id, {
+        id: n.id,
+        training_key: n.trainingKey || (n.convocationId + '::' + n.instanceDate),
+        convocation_id: n.convocationId,
+        instance_date: n.instanceDate,
+        season_id: n.seasonId || null,
+        coach_id: n.coachId || null,
+        coach_name: n.coachName || null,
+        text_md: n.textMd || '',
+        photo_data_url: n.photoDataUrl || null,
+        play_refs: Array.isArray(n.playRefs) ? n.playRefs : [],
+        created_at: n.createdAt ? new Date(n.createdAt).toISOString() : null,
+        updated_at: n.updatedAt ? new Date(n.updatedAt).toISOString() : null,
+        edited_at: n.editedAt ? new Date(n.editedAt).toISOString() : null,
+        deleted_at: n.deletedAt ? new Date(n.deletedAt).toISOString() : null,
+      }])),
+    apply: (state, rows) => {
+      const local = state.trainingCoachNotes || [];
+      const byId = new Map(local.map(n => [n.id, n]));
+      rows.forEach(r => {
+        const remote = {
+          id: r.id,
+          trainingKey: r.training_key || ((r.convocation_id || '') + '::' + (r.instance_date || '')),
+          convocationId: r.convocation_id,
+          instanceDate: r.instance_date,
+          seasonId: r.season_id || null,
+          coachId: r.coach_id || null,
+          coachName: r.coach_name || null,
+          textMd: r.text_md || '',
+          photoDataUrl: r.photo_data_url || null,
+          playRefs: Array.isArray(r.play_refs) ? r.play_refs : [],
+          createdAt: r.created_at ? Date.parse(r.created_at) : null,
+          updatedAt: r.updated_at ? Date.parse(r.updated_at) : null,
+          editedAt: r.edited_at ? Date.parse(r.edited_at) : null,
+          deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null,
+        };
+        const cur = byId.get(r.id);
+        // LWW : une édition locale encore en vol ne doit pas être écrasée par
+        // l'écho realtime de sa propre écriture.
+        if (!cur || (remote.updatedAt || 0) >= (cur.updatedAt || 0)) byId.set(r.id, remote);
+      });
+      state.trainingCoachNotes = Array.from(byId.values());
+    }
+  },
+  // ==========================================================================
   // DIFFUSIONS COACH — chantier D (cf. migration 20260607_004_broadcasts.sql).
   // broadcasts : message + média (image/vidéo) + ciblage, créé par le coach.
   // broadcastReceipts : statut par couple (broadcast × joueuse) pending → seen
@@ -7831,6 +7888,7 @@ const K = {
   guestPlayers: 'pb8_guest_players',
   trainingGuests: 'pb8_training_guests',
   trainingPlans: 'pb8_training_plans',
+  trainingCoachNotes: 'pb8_training_coach_notes',   // [{ id, trainingKey, coachId, textMd, photoDataUrl, playRefs, … }] — fil PRIVÉ coachs
   teamFilter: 'pb8_team_filter',
   broadcasts: 'pb8_broadcasts',
   broadcastReceipts: 'pb8_broadcast_receipts',
@@ -8365,6 +8423,7 @@ let state = {
   // Avant Phase 2 le plan vivait sur c.trainingPlan (localStorage only, jamais
   // synchronisé). Migration legacy → per-instance via _migrateLegacyTrainingPlans().
   trainingPlans: load(K.trainingPlans, []),
+  trainingCoachNotes: load(K.trainingCoachNotes, []),
 
   // UI state
   view: null, // { type: 'play'|'match'|'live', id }
@@ -8482,6 +8541,7 @@ function persist() {
     if (_e) _e.updatedAt = Date.now();
   }
   save(K.trainingPlans, state.trainingPlans);
+  save(K.trainingCoachNotes, state.trainingCoachNotes);
   // Push toutes les entités équipe vers Supabase (debounced 400ms)
   if (window.PbSync) PbSync.schedule(state);
 }
@@ -37495,6 +37555,7 @@ function renderTrainingPlanEditor() {
       </div>
 
       <!-- Liste des exercices avec drag-and-drop -->
+      ${tcnBlockHtml(convocId, dateStr || c.date)}
       ${plan.exercises.length === 0 ? `
         <div class="empty" style="padding:30px 16px;border:1px dashed var(--border);border-radius:8px">
           <div class="empty-icon">○</div>
@@ -37613,6 +37674,502 @@ function _saveTrainingPlanNow() {
   _flashSaved('✓ Plan sauvegardé');
 }
 
+// ============================================================
+// 🗣 NOTES COACHS + ⇄ EXOS ALTERNATIFS (v.153)
+// ------------------------------------------------------------
+// DEUX chantiers, une seule porte : le plan d'entraînement du coach.
+//
+// 1. LES NOTES COACHS — un fil plat, chronologique décroissant, accroché au
+//    couple (convocationId, instanceDate), c'est-à-dire à L'INSTANCE de plan et
+//    pas à la convocation : un entraînement récurrent a un fil par séance.
+//    ⚠ Il n'existe AUCUNE table `trainings` dans ce projet (l'entraînement vit
+//    dans `convocations` + ses `instance_overrides`). La clé applicative est
+//    donc la même que celle de training_plans : "convocId::date".
+//
+// 2. LES EXOS ALTERNATIFS — le point structurant est qu'on ne stocke PAS
+//    "variante A / variante B + un drapeau lu partout". On stocke l'exo ACTIF
+//    dans `ex` (là où les ~48 sites existants le lisent déjà) et l'alternative
+//    en RÉSERVE dans `ex.alt`. Basculer = ÉCHANGER les deux contenus.
+//    Conséquence, et c'est tout l'intérêt : les écrans joueuse, la session live,
+//    les alertes ambiantes, la prépa — rien de tout ça n'a une ligne à changer,
+//    et l'alternative leur est structurellement invisible puisqu'aucun d'eux ne
+//    lit `ex.alt`. Un drapeau lu à N endroits aurait fini par fuiter à l'endroit
+//    oublié ; ici l'oubli est impossible.
+//    ⚠ Réserve honnête : `ex.alt` voyage quand même dans le blob jsonb du plan,
+//    comme `coachNote` sur les matchs. Il n'est jamais RENDU côté joueuse. Un
+//    secret au niveau du transport demanderait une table séparée.
+//
+// Aucune migration pour le point 2 : `training_plans.plan` est un jsonb libre.
+// ============================================================
+
+// ---------- Clés & garde coach ----------
+function _tcnKey(convocId, instanceDate) { return String(convocId || '') + '::' + String(instanceDate || ''); }
+// La garde de TOUTE la feature. Le fil est coach-only : il n'est ni rendu ni
+// écrit hors d'un rôle coach. On lit state.auth.role directement (et JAMAIS
+// !isPlayer) — un rôle inconnu doit se comporter comme une joueuse.
+function _tcnIsCoach() { return !!(state.auth && state.auth.role === 'coach'); }
+
+// ---------- Lecture ----------
+// Porte UNIQUE de lecture du fil : soft-delete filtré, tri chrono DESCENDANT.
+// Tout le reste (badge, compteur, rendu, push) passe par ici.
+function tcnNotes(convocId, instanceDate) {
+  const key = _tcnKey(convocId, instanceDate);
+  return (state.trainingCoachNotes || [])
+    .filter(n => n && !n.deletedAt && (n.trainingKey || _tcnKey(n.convocationId, n.instanceDate)) === key)
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+}
+function tcnNoteById(id) { return (state.trainingCoachNotes || []).find(n => n && n.id === id && !n.deletedAt) || null; }
+
+// ---------- Non-lus (local, par identité) ----------
+// Filigrane localStorage, jamais en base : "lu" est propre à un appareil et à
+// un coach. Même patron que pb8_notif_seen.
+function _tcnSeenMap() { try { return JSON.parse(localStorage.getItem('pb8_tcn_seen_' + (typeof themeIdentityKey === 'function' ? themeIdentityKey() : 'coach')) || '{}') || {}; } catch (e) { return {}; } }
+function _tcnSeenSave(m) { try { localStorage.setItem('pb8_tcn_seen_' + (typeof themeIdentityKey === 'function' ? themeIdentityKey() : 'coach'), JSON.stringify(m)); } catch (e) {} }
+// Mes propres notes ne sont jamais "non lues" : je viens de les écrire.
+function tcnUnreadCount(convocId, instanceDate) {
+  if (!_tcnIsCoach()) return 0;
+  const seen = _tcnSeenMap()[_tcnKey(convocId, instanceDate)] || 0;
+  const me = _tcnMyCoachId();
+  return tcnNotes(convocId, instanceDate).filter(n => (n.createdAt || 0) > seen && n.coachId !== me).length;
+}
+function tcnMarkRead(convocId, instanceDate) {
+  const m = _tcnSeenMap(); m[_tcnKey(convocId, instanceDate)] = Date.now(); _tcnSeenSave(m);
+}
+
+// ---------- Identité de l'auteur ----------
+function _tcnMyCoachId() {
+  try { const c = (typeof currentCoach === 'function') ? currentCoach() : null; if (c && c.id) return c.id; } catch (e) {}
+  return (state.auth && state.auth.coachId) || 'coach';
+}
+function _tcnMyCoachName() {
+  try { const c = (typeof currentCoach === 'function') ? currentCoach() : null; if (c && (c.name || c.prenom)) return c.name || c.prenom; } catch (e) {}
+  return 'Coach';
+}
+function _tcnCoachAvatar(n) {
+  let photo = null;
+  try { const c = (state.coaches || []).find(x => x && x.id === n.coachId); if (c) photo = c.photo || null; } catch (e) {}
+  const initials = String(n.coachName || 'C').trim().slice(0, 2).toUpperCase();
+  return photo
+    ? `<img src="${photo}" style="width:30px;height:30px;border-radius:50%;object-fit:cover;flex-shrink:0">`
+    : `<div style="width:30px;height:30px;border-radius:50%;background:rgba(var(--accent-rgb),0.18);color:var(--accent);display:flex;align-items:center;justify-content:center;font-family:'Anton';font-size:11px;flex-shrink:0">${esc(initials)}</div>`;
+}
+
+// ---------- @mentions de plays ----------
+// Format stocké : @[Nom du play](play:ID). On garde le NOM dans le texte pour
+// qu'une note reste lisible même si le play est supprimé ensuite — le lien, lui,
+// se dégrade proprement (chip sans clic).
+const TCN_MENTION_RE = /@\[([^\]\n]{1,80})\]\(play:([A-Za-z0-9_.:-]{1,64})\)/g;
+function tcnExtractPlayRefs(text) {
+  const out = []; let m; TCN_MENTION_RE.lastIndex = 0;
+  while ((m = TCN_MENTION_RE.exec(String(text || '')))) { if (out.indexOf(m[2]) < 0) out.push(m[2]); }
+  return out;
+}
+// Texte nu, pour le corps du push et pour les aperçus : la mention redevient son
+// nom, sans la ferraille de syntaxe.
+function tcnPlainText(text) {
+  TCN_MENTION_RE.lastIndex = 0;
+  return String(text || '').replace(TCN_MENTION_RE, '$1').replace(/\s+/g, ' ').trim();
+}
+// Rendu : on ÉCHAPPE D'ABORD, on injecte les chips ENSUITE (patron mdToHtml).
+// Le nom a donc déjà traversé esc() quand il atterrit dans le chip.
+function tcnRenderText(text) {
+  const safe = esc(String(text || ''));
+  TCN_MENTION_RE.lastIndex = 0;
+  return safe.replace(TCN_MENTION_RE, (mm, name, pid) => {
+    const known = (state.plays || []).some(p => p && p.id === pid && !p.deletedAt);
+    const click = known ? ` onclick="_tcnOpenPlay('${esc(pid)}')" style="cursor:pointer"` : ' style="opacity:0.55"';
+    return `<span class="tcn-chip"${click} title="${known ? 'Ouvrir le play' : 'Play introuvable'}">📚 ${name}</span>`;
+  }).replace(/\n/g, '<br>');
+}
+// Lien PASSIF (choix produit) : ouvrir le play ne notifie pas son propriétaire.
+// L'ouvreur a changé de nom au fil des versions → on essaie, puis on se rabat.
+function _tcnOpenPlay(pid) {
+  const p = (state.plays || []).find(x => x && x.id === pid);
+  if (!p) { alert('Play introuvable (supprimé ?).'); return; }
+  const fns = ['openPlayDetail', 'openPlay', 'viewPlay', 'showPlay'];
+  for (const f of fns) { if (typeof window[f] === 'function') { try { closeModal(); } catch (e) {} setTimeout(() => window[f](pid), 60); return; } }
+  alert('📚 ' + (p.name || p.title || 'Play'));
+}
+
+// ---------- Écriture ----------
+function tcnAddNote(convocId, instanceDate, textMd, photoDataUrl) {
+  if (!_tcnIsCoach()) return null;
+  const txt = String(textMd || '').trim();
+  if (!txt && !photoDataUrl) return null;
+  const now = Date.now();
+  const note = {
+    id: 'tcn_' + now + '_' + Math.random().toString(36).slice(2, 8),
+    trainingKey: _tcnKey(convocId, instanceDate),
+    convocationId: convocId, instanceDate: instanceDate,
+    seasonId: (typeof getSeasonIdForDate === 'function' ? getSeasonIdForDate(instanceDate) : null) || null,
+    coachId: _tcnMyCoachId(), coachName: _tcnMyCoachName(),
+    textMd: txt, photoDataUrl: photoDataUrl || null,
+    playRefs: tcnExtractPlayRefs(txt),
+    createdAt: now, updatedAt: now, editedAt: null, deletedAt: null,
+  };
+  state.trainingCoachNotes = state.trainingCoachNotes || [];
+  state.trainingCoachNotes.push(note);
+  return note;
+}
+// Édition EN PLACE : createdAt ne bouge pas (c'est l'heure du propos), editedAt
+// naît à la première retouche — un editedAt non nul EST le badge "modifié".
+function tcnEditNote(id, textMd, photoDataUrl) {
+  const n = tcnNoteById(id);
+  if (!n) return null;
+  if (!_tcnIsCoach() || n.coachId !== _tcnMyCoachId()) return null; // on n'édite que le sien
+  const txt = String(textMd || '').trim();
+  if (!txt && !(photoDataUrl !== undefined ? photoDataUrl : n.photoDataUrl)) return null;
+  n.textMd = txt;
+  if (photoDataUrl !== undefined) n.photoDataUrl = photoDataUrl || null;
+  n.playRefs = tcnExtractPlayRefs(txt);
+  n.editedAt = Date.now(); n.updatedAt = n.editedAt;
+  return n;
+}
+function tcnDeleteNote(id) {
+  const n = tcnNoteById(id);
+  if (!n) return false;
+  if (!_tcnIsCoach() || n.coachId !== _tcnMyCoachId()) return false;
+  n.deletedAt = Date.now(); n.updatedAt = n.deletedAt;  // soft-delete : seul état terminal durable
+  return true;
+}
+
+// ---------- Push aux autres coachs ----------
+// Corps du push : 100 premiers caractères du texte NU (sans photo, sans
+// ferraille de mention), conformément à la décision produit.
+function tcnPushBody(textMd) {
+  const t = tcnPlainText(textMd);
+  return t.length > 100 ? t.slice(0, 100) + '…' : (t || '📎 Photo');
+}
+function tcnPushTitle(coachName, trainingLabel) {
+  return '💬 ' + (coachName || 'Un coach') + ' a commenté ' + (trainingLabel || "l'entraînement");
+}
+// ⚠ notifyPush() filtre l'expéditeur via pushOwnerKey(). Or TOUS les coachs
+// partagent la MÊME clé d'abonnement ('coach:-') : passer par notifyPush ne
+// notifierait donc PERSONNE (la seule clé visée serait retirée comme étant la
+// mienne). On poste directement à l'Edge Function. Contrepartie assumée et
+// documentée : l'appareil de l'auteur reçoit aussi la notification, tant que les
+// abonnements push ne portent pas une clé par coach.
+function _tcnNotifyOtherCoaches(note, trainingLabel) {
+  try {
+    if (!window.sb || (window.Pb && Pb.online === false)) return;
+    if (window.__PUSH_KILL__) return;
+    const base = window.__SB_URL__, anon = window.__SB_ANON__;
+    if (!base) return;
+    fetch(base.replace(/\/$/, '') + '/functions/v1/push-send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (anon || ''), 'apikey': anon || '' },
+      body: JSON.stringify({
+        ownerKeys: [_pushCoachKey()],
+        payload: { title: tcnPushTitle(note.coachName, trainingLabel), body: tcnPushBody(note.textMd), tag: 'tcn-' + note.trainingKey }
+      })
+    }).catch(() => {});
+  } catch (e) { /* best-effort : un push raté ne casse jamais la saisie */ }
+}
+
+// ---------- Photo ----------
+// Downscale AVANT stockage : la note voyage en dataURL dans une colonne text,
+// exactement comme la preuve pintade et la photo de profil.
+function _tcnReadPhoto(file, cb) {
+  if (!file) { cb(null); return; }
+  const fr = new FileReader();
+  fr.onload = () => {
+    const img = new Image();
+    img.onload = () => {
+      const MAX = 1200;
+      const sc = Math.min(1, MAX / Math.max(img.width, img.height));
+      const cv = document.createElement('canvas');
+      cv.width = Math.round(img.width * sc); cv.height = Math.round(img.height * sc);
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+      try { cb(cv.toDataURL('image/jpeg', 0.75)); } catch (e) { cb(fr.result); }
+    };
+    img.onerror = () => cb(fr.result);
+    img.src = fr.result;
+  };
+  fr.onerror = () => cb(null);
+  fr.readAsDataURL(file);
+}
+
+// ---------- Rendu du bloc ----------
+// Replié par défaut : le plan d'entraînement reste le sujet de l'écran.
+function _tcnToggle(convocId, dateStr) {
+  state._tcnOpen = !state._tcnOpen;
+  if (state._tcnOpen) tcnMarkRead(convocId, dateStr);
+  renderTrainingPlanEditor();
+}
+function tcnBlockHtml(convocId, dateStr) {
+  if (!_tcnIsCoach()) return '';               // ← LA garde d'invisibilité joueuse
+  const notes = tcnNotes(convocId, dateStr);
+  const unread = tcnUnreadCount(convocId, dateStr);
+  const open = !!state._tcnOpen;
+  return `
+    <div style="border:1px solid var(--border-soft);border-radius:10px;margin-bottom:10px;overflow:hidden;background:var(--bg-2)">
+      <div style="display:flex;align-items:center;gap:8px;padding:9px 11px;cursor:pointer" onclick="_tcnToggle('${esc(convocId)}','${esc(dateStr)}')">
+        <span style="font-family:'Anton';font-size:12px;text-transform:uppercase;letter-spacing:0.04em">🗣 Notes coachs</span>
+        ${unread > 0 ? `<span style="background:var(--red);color:#fff;font-family:'JetBrains Mono';font-size:9px;padding:2px 6px;border-radius:9px">💬 ${unread}</span>` : ''}
+        <span style="flex:1"></span>
+        <span title="Visible par les coachs uniquement" style="font-size:9px;font-family:'JetBrains Mono';color:var(--ink-3);background:var(--bg-3);padding:2px 6px;border-radius:5px;white-space:nowrap">👁️ coach uniquement</span>
+        <span style="font-size:10px;color:var(--ink-3)">${notes.length}</span>
+        <span style="font-size:10px;color:var(--ink-3)">${open ? '▲' : '▼'}</span>
+      </div>
+      ${open ? `
+        <div style="padding:0 11px 11px">
+          ${_tcnComposerHtml(convocId, dateStr)}
+          ${notes.length === 0
+            ? '<div style="font-size:11px;color:var(--ink-4);text-align:center;padding:10px 0">Aucune note. Le fil est privé : les joueuses ne le voient jamais.</div>'
+            : notes.map(n => _tcnNoteHtml(n)).join('')}
+        </div>` : ''}
+    </div>`;
+}
+function _tcnComposerHtml(convocId, dateStr) {
+  const editing = state._tcnEditingId ? tcnNoteById(state._tcnEditingId) : null;
+  const photo = editing ? (state._tcnPhotoBuf !== undefined ? state._tcnPhotoBuf : editing.photoDataUrl) : (state._tcnPhotoBuf || null);
+  return `
+    <div style="border:1px solid var(--border-soft);border-radius:8px;padding:8px;margin-bottom:9px;background:var(--bg)">
+      ${editing ? '<div style="font-size:9px;font-family:\'JetBrains Mono\';color:var(--orange);margin-bottom:4px;text-transform:uppercase">✎ Édition</div>' : ''}
+      <textarea id="tcn-input" rows="2" placeholder="Une note pour les autres coachs…  (@ pour citer un play)"
+        oninput="_tcnOnInput(this)" style="width:100%;background:var(--bg-2);border:1px solid var(--border-soft);border-radius:6px;padding:7px;font-size:12px;color:var(--ink);resize:vertical">${esc(editing ? editing.textMd : (state._tcnDraft || ''))}</textarea>
+      <div id="tcn-mentions"></div>
+      ${photo ? `<div style="position:relative;margin-top:6px"><img src="${photo}" style="max-height:110px;border-radius:6px;display:block"><button class="btn btn-icon" onclick="_tcnClearPhoto()" style="position:absolute;top:3px;left:3px;color:var(--red)">✕</button></div>` : ''}
+      <div style="display:flex;gap:6px;margin-top:6px;align-items:center">
+        <input type="file" accept="image/*" id="tcn-photo" style="display:none" onchange="_tcnPickPhoto(this)">
+        <button class="btn btn-ghost" style="font-size:11px;padding:5px 9px" onclick="document.getElementById('tcn-photo').click()">📎 Photo</button>
+        <span style="flex:1"></span>
+        ${editing ? `<button class="btn btn-ghost" style="font-size:11px;padding:5px 9px" onclick="_tcnCancelEdit()">Annuler</button>` : ''}
+        <button class="btn btn-primary" style="font-size:11px;padding:5px 11px" onclick="_tcnSubmit('${esc(convocId)}','${esc(dateStr)}')">${editing ? 'Enregistrer' : 'Publier'}</button>
+      </div>
+    </div>`;
+}
+function _tcnNoteHtml(n) {
+  const mine = n.coachId === _tcnMyCoachId();
+  return `
+    <div style="display:flex;gap:8px;padding:8px 0;border-top:1px solid var(--border-soft)">
+      ${_tcnCoachAvatar(n)}
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:baseline;gap:6px;flex-wrap:wrap">
+          <span style="font-family:'Anton';font-size:11px;text-transform:uppercase">${esc(n.coachName || 'Coach')}</span>
+          <span style="font-size:9px;font-family:'JetBrains Mono';color:var(--ink-4)">${_tcnWhen(n.createdAt)}</span>
+          ${n.editedAt ? `<span style="font-size:9px;font-family:'JetBrains Mono';color:var(--orange)">modifié ${_tcnHour(n.editedAt)}</span>` : ''}
+          <span style="flex:1"></span>
+          ${mine ? `<button class="btn btn-icon" style="width:22px;height:18px;font-size:10px;padding:0" onclick="_tcnStartEdit('${esc(n.id)}')">✎</button>
+                    <button class="btn btn-icon" style="width:22px;height:18px;font-size:10px;padding:0;color:var(--red)" onclick="_tcnDelete('${esc(n.id)}')">✕</button>` : ''}
+        </div>
+        <div style="font-size:12px;color:var(--ink-2);line-height:1.45;margin-top:3px;word-break:break-word">${tcnRenderText(n.textMd)}</div>
+        ${n.photoDataUrl ? `<img src="${n.photoDataUrl}" style="max-width:100%;max-height:190px;border-radius:6px;margin-top:6px;display:block">` : ''}
+      </div>
+    </div>`;
+}
+function _tcnHour(ts) { const d = new Date(ts); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); }
+function _tcnWhen(ts) {
+  if (!ts) return '';
+  const diff = Date.now() - ts;
+  if (diff < 60000) return "à l'instant";
+  if (diff < 3600000) return Math.floor(diff / 60000) + ' min';
+  if (diff < 86400000) return _tcnHour(ts);
+  try { return formatDate(new Date(ts).toISOString().slice(0, 10), 'short') + ' · ' + _tcnHour(ts); } catch (e) { return _tcnHour(ts); }
+}
+
+// ---------- Interactions ----------
+function _tcnOnInput(el) {
+  state._tcnDraft = el.value;
+  const box = document.getElementById('tcn-mentions');
+  if (!box) return;
+  // Dropdown @ : on ne cherche QUE sur le fragment courant, celui qui suit le
+  // dernier @ non encore résolu. Sinon toute la note redevient une requête.
+  const upTo = el.value.slice(0, el.selectionStart);
+  const m = /@([^@\n\]]{0,40})$/.exec(upTo);
+  if (!m) { box.innerHTML = ''; return; }
+  const q = m[1].toLowerCase();
+  const hits = (state.plays || []).filter(p => p && !p.deletedAt && String(p.name || p.title || '').toLowerCase().includes(q)).slice(0, 6);
+  box.innerHTML = hits.length ? `<div style="border:1px solid var(--border-soft);border-radius:6px;margin-top:4px;overflow:hidden">` + hits.map(p =>
+    `<div onclick="_tcnPickPlay('${esc(p.id)}')" style="padding:6px 8px;font-size:11px;cursor:pointer;border-bottom:1px solid var(--border-soft)">📚 ${esc(p.name || p.title || 'Play')}</div>`).join('') + '</div>'
+    : '<div style="font-size:10px;color:var(--ink-4);padding:4px 2px">Aucun play</div>';
+}
+function _tcnPickPlay(pid) {
+  const el = document.getElementById('tcn-input'); if (!el) return;
+  const p = (state.plays || []).find(x => x && x.id === pid); if (!p) return;
+  const name = String(p.name || p.title || 'Play').replace(/[\[\]()]/g, '');
+  const cut = el.selectionStart;
+  const before = el.value.slice(0, cut).replace(/@([^@\n\]]{0,40})$/, '');
+  el.value = before + '@[' + name + '](play:' + pid + ') ' + el.value.slice(cut);
+  state._tcnDraft = el.value;
+  const box = document.getElementById('tcn-mentions'); if (box) box.innerHTML = '';
+  el.focus();
+}
+function _tcnPickPhoto(input) {
+  const f = input && input.files && input.files[0]; if (!f) return;
+  _tcnReadPhoto(f, (d) => { state._tcnPhotoBuf = d; renderTrainingPlanEditor(); });
+}
+function _tcnClearPhoto() { state._tcnPhotoBuf = null; renderTrainingPlanEditor(); }
+function _tcnStartEdit(id) { state._tcnEditingId = id; state._tcnPhotoBuf = undefined; state._tcnOpen = true; renderTrainingPlanEditor(); }
+function _tcnCancelEdit() { state._tcnEditingId = null; state._tcnPhotoBuf = null; renderTrainingPlanEditor(); }
+function _tcnDelete(id) {
+  if (!confirm('Supprimer cette note ?')) return;
+  if (tcnDeleteNote(id)) { persist(); try { PbSync.flushNow(state); } catch (e) {} }
+  renderTrainingPlanEditor();
+}
+function _tcnSubmit(convocId, dateStr) {
+  const el = document.getElementById('tcn-input');
+  const txt = el ? el.value : (state._tcnDraft || '');
+  if (state._tcnEditingId) {
+    const n = tcnEditNote(state._tcnEditingId, txt, state._tcnPhotoBuf);
+    if (!n) { alert('Note vide ou non modifiable.'); return; }
+    state._tcnEditingId = null; state._tcnPhotoBuf = null; state._tcnDraft = '';
+    persist(); try { PbSync.flushNow(state); } catch (e) {}
+    renderTrainingPlanEditor();
+    return;
+  }
+  const note = tcnAddNote(convocId, dateStr, txt, state._tcnPhotoBuf || null);
+  if (!note) { alert('Écris quelque chose (ou ajoute une photo).'); return; }
+  state._tcnDraft = ''; state._tcnPhotoBuf = null;
+  persist(); try { PbSync.flushNow(state); } catch (e) {}
+  tcnMarkRead(convocId, dateStr);
+  const c = state.convocations.find(x => x.id === convocId);
+  _tcnNotifyOtherCoaches(note, (c && c.title) ? c.title : ("l'entraînement du " + (typeof formatDate === 'function' ? formatDate(dateStr, 'short') : dateStr)));
+  renderTrainingPlanEditor();
+}
+
+// ============================================================
+// ⇄ EXOS ALTERNATIFS
+// ------------------------------------------------------------
+// `ex` porte TOUJOURS l'exo actif ; `ex.alt` porte la réserve. Un seul champ
+// dérivé, `ex.activeVariant`, sert uniquement à afficher le bon libellé — aucune
+// lecture métier n'en dépend.
+// ============================================================
+function _altOf(ex) { return (ex && ex.alt && (ex.alt.title || ex.alt.description)) ? ex.alt : null; }
+// Poser une alternative. 1 SEULE par exo : une seconde pose REMPLACE la première.
+function altSet(ex, alt) {
+  if (!ex || !alt) return null;
+  const title = String(alt.title || '').trim();
+  if (!title) return null;
+  ex.alt = { title: title, description: String(alt.description || '').trim(), exoTemplateId: alt.exoTemplateId || null };
+  if (!ex.activeVariant) ex.activeVariant = 'main';
+  return ex.alt;
+}
+// Basculer = ÉCHANGER les contenus. C'est ce qui rend l'alternative invisible
+// côté joueuse sans toucher une seule ligne des écrans joueuse.
+function altSwap(ex) {
+  const alt = _altOf(ex); if (!alt) return false;
+  const mainSnap = { title: ex.title, description: ex.description || '', exoTemplateId: ex.exoTemplateId || null };
+  ex.title = alt.title;
+  ex.description = alt.description || '';
+  ex.exoTemplateId = alt.exoTemplateId || null;
+  ex.alt = mainSnap;
+  ex.activeVariant = (ex.activeVariant === 'alt') ? 'main' : 'alt';
+  return true;
+}
+// ✕ supprime la RÉSERVE, jamais l'exo affiché : `ex` est par construction l'actif.
+function altClear(ex) {
+  if (!ex) return false;
+  delete ex.alt; delete ex.activeVariant;
+  return true;
+}
+// Rendu — coach only, et c'est la deuxième garde (la première étant que rien
+// dans les écrans joueuse ne lit ex.alt).
+function altRowHtml(ex, idx) {
+  if (!_tcnIsCoach()) return '';
+  const alt = _altOf(ex);
+  if (!alt) return `
+    <div style="padding:5px 10px;border-top:1px dashed var(--border-soft);text-align:right">
+      <button class="btn btn-ghost" style="font-size:10px;padding:3px 8px;color:var(--ink-3)" onclick="event.stopPropagation();openAltExoModal(${idx})">⇄ Alternative</button>
+    </div>`;
+  return `
+    <div style="border-top:1px dashed var(--border-soft);background:var(--bg-3)">
+      <div style="text-align:center;font-family:'JetBrains Mono';font-size:8px;letter-spacing:0.12em;color:var(--ink-4);padding:3px 0;text-transform:uppercase">─── ou ─── 👁️ privé coach</div>
+      <div style="display:flex;align-items:center;gap:8px;padding:5px 10px 7px;opacity:0.6">
+        <span style="font-size:12px">💪</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-family:'Anton';font-size:11px;text-transform:uppercase;line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(alt.title)}</div>
+          ${alt.description ? `<div style="font-size:10px;color:var(--ink-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(mdToPlain(alt.description))}</div>` : ''}
+        </div>
+        <button class="btn btn-ghost" style="font-size:10px;padding:3px 8px" onclick="event.stopPropagation();altSwapExercise(${idx})">⇄ Basculer</button>
+        <button class="btn btn-icon" style="width:22px;height:20px;font-size:10px;padding:0;color:var(--red)" onclick="event.stopPropagation();altClearExercise(${idx})">✕</button>
+      </div>
+    </div>`;
+}
+// Badge ACTIF, posé sur la ligne principale quand une alternative existe.
+function altActiveBadge(ex) {
+  return _altOf(ex) ? `<span style="font-size:8px;font-family:'JetBrains Mono';color:var(--green);background:rgba(34,197,94,0.14);padding:1px 5px;border-radius:4px;letter-spacing:0.06em">ACTIF</span>` : '';
+}
+function _altExAt(idx) {
+  const t = state._editingTraining; if (!t) return null;
+  const c = state.convocations.find(x => x.id === t.convocId); if (!c) return null;
+  const plan = resolveTrainingPlan(c, t.dateStr || c.date);
+  return plan.exercises[idx] || null;
+}
+function altSwapExercise(idx) {
+  const ex = _altExAt(idx); if (!ex) return;
+  altSwap(ex); persist(); try { PbSync.flushNow(state); } catch (e) {}
+  renderTrainingPlanEditor();
+}
+function altClearExercise(idx) {
+  const ex = _altExAt(idx); if (!ex) return;
+  if (!confirm("Supprimer l'alternative ? (l'exo actif est conservé)")) return;
+  altClear(ex); persist(); try { PbSync.flushNow(state); } catch (e) {}
+  renderTrainingPlanEditor();
+}
+// ---------- Modale de sélection : biblio OU custom ----------
+function openAltExoModal(idx) {
+  state._altBuf = { idx: idx, tab: 'lib', q: '', name: '', desc: '' };
+  renderAltExoModal();
+}
+function _altTab(t) { if (state._altBuf) { state._altBuf.tab = t; renderAltExoModal(); } }
+function _altQ(v) { if (state._altBuf) { state._altBuf.q = v; renderAltExoModal(); setTimeout(() => { const e = document.getElementById('alt-q'); if (e) { e.focus(); e.setSelectionRange(v.length, v.length); } }, 10); } }
+function renderAltExoModal() {
+  const b = state._altBuf; if (!b) return;
+  const ex = _altExAt(b.idx);
+  const lib = (typeof exoTemplates === 'function' ? exoTemplates() : (state.exoTemplates || []).filter(e => e && !e.deletedAt));
+  const q = (b.q || '').toLowerCase();
+  const hits = lib.filter(e => !q || String(e.name || '').toLowerCase().includes(q)).slice(0, 40);
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">${esc(ex ? ex.title : 'Exercice')}</div>
+        <div class="modal-title">⇄ Exercice alternatif</div>
+      </div>
+      <button class="modal-close" onclick="closeModal();state._altBuf=null;setTimeout(()=>renderTrainingPlanEditor(),50)">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:10px;color:var(--ink-3);margin-bottom:8px">👁️ L'alternative reste privée : les joueuses ne voient que l'exercice actif.</div>
+      <div style="display:flex;gap:6px;margin-bottom:9px">
+        <button class="btn ${b.tab === 'lib' ? 'btn-primary' : 'btn-ghost'}" style="flex:1;font-size:11px;padding:6px" onclick="_altTab('lib')">📚 Depuis la biblio</button>
+        <button class="btn ${b.tab === 'custom' ? 'btn-primary' : 'btn-ghost'}" style="flex:1;font-size:11px;padding:6px" onclick="_altTab('custom')">✏️ Custom à la volée</button>
+      </div>
+      ${b.tab === 'lib' ? `
+        <input id="alt-q" value="${esc(b.q || '')}" placeholder="Rechercher un exo…" oninput="_altQ(this.value)"
+          style="width:100%;background:var(--bg-2);border:1px solid var(--border-soft);border-radius:6px;padding:7px;font-size:12px;color:var(--ink);margin-bottom:8px">
+        ${lib.length === 0 ? '<div style="font-size:11px;color:var(--ink-4);text-align:center;padding:12px">Bibliothèque vide. Ajoute des exos dans 🏋 Biblio.</div>' : ''}
+        ${hits.map(e => `<div onclick="_altPickTemplate('${esc(e.id)}')" style="padding:8px;border:1px solid var(--border-soft);border-radius:6px;margin-bottom:5px;cursor:pointer">
+            <div style="font-family:'Anton';font-size:12px;text-transform:uppercase">${esc(e.name || 'Exercice')}</div>
+            ${e.description ? `<div style="font-size:10px;color:var(--ink-3);margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${esc(mdToPlain(e.description))}</div>` : ''}
+          </div>`).join('')}
+      ` : `
+        <input id="alt-name" value="${esc(b.name || '')}" placeholder="Nom de l'exercice"
+          style="width:100%;background:var(--bg-2);border:1px solid var(--border-soft);border-radius:6px;padding:8px;font-size:12px;color:var(--ink);margin-bottom:7px">
+        <textarea id="alt-desc" rows="4" placeholder="Description / dose (ex : 4×12, repos 30 s)"
+          style="width:100%;background:var(--bg-2);border:1px solid var(--border-soft);border-radius:6px;padding:8px;font-size:12px;color:var(--ink);resize:vertical">${esc(b.desc || '')}</textarea>
+        <button class="btn btn-primary btn-block" style="margin-top:9px" onclick="_altValidateCustom()">Valider</button>
+      `}
+    </div>`);
+}
+function _altPickTemplate(tid) {
+  const b = state._altBuf; if (!b) return;
+  const t = (state.exoTemplates || []).find(e => e && e.id === tid); if (!t) return;
+  const ex = _altExAt(b.idx); if (!ex) return;
+  altSet(ex, { title: t.name || 'Exercice', description: t.description || '', exoTemplateId: t.id });
+  persist(); try { PbSync.flushNow(state); } catch (e) {}
+  closeModal(); state._altBuf = null; setTimeout(() => renderTrainingPlanEditor(), 50);
+}
+function _altValidateCustom() {
+  const b = state._altBuf; if (!b) return;
+  const name = (document.getElementById('alt-name') || {}).value || '';
+  const desc = (document.getElementById('alt-desc') || {}).value || '';
+  if (!String(name).trim()) { alert("Donne un nom à l'exercice alternatif."); return; }
+  const ex = _altExAt(b.idx); if (!ex) return;
+  altSet(ex, { title: name, description: desc, exoTemplateId: null });
+  persist(); try { PbSync.flushNow(state); } catch (e) {}
+  closeModal(); state._altBuf = null; setTimeout(() => renderTrainingPlanEditor(), 50);
+}
+
 function trainingExerciseRow(ex, idx, totalCount, startTime, endTime) {
   // ex.source === 'play' → on tire les images/desc depuis le play lié, sinon depuis l'exo lui-même (custom)
   const linkedPlay = ex.source === 'play' && ex.playId ? state.plays.find(p => p.id === ex.playId) : null;
@@ -37650,6 +38207,7 @@ function trainingExerciseRow(ex, idx, totalCount, startTime, endTime) {
         <div style="flex:1;min-width:0;padding:10px 12px;cursor:pointer" onclick="openTrainingExerciseDetail(${idx})">
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">
             <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;line-height:1.2;flex:1;min-width:0">${esc(ex.title)}</div>
+            ${altActiveBadge(ex)}
             <span style="font-size:9px;color:${ex.source === 'play' ? 'var(--orange)' : 'var(--ink-3)'};font-family:'JetBrains Mono'">${ex.source === 'play' ? '📚' : '✎'}</span>
           </div>
           <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.04em">
@@ -37664,6 +38222,7 @@ function trainingExerciseRow(ex, idx, totalCount, startTime, endTime) {
           ${idx < totalCount - 1 ? `<button class="btn btn-icon" onclick="moveTrainingExercise(${idx},1)" style="width:24px;height:20px;font-size:9px;padding:0">▼</button>` : ''}
         </div>
       </div>
+      ${altRowHtml(ex, idx)}
     </div>
   `;
 }
@@ -49799,7 +50358,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.152';
+const APP_VERSION = '2026-08-19.153';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
