@@ -8854,6 +8854,35 @@ function convocInstanceRoster(c, instanceDate) {
 // identique à la clôture : toute joueuse de l'effectif non explicitement absente
 // est comptée présente (donc « à l'heure » si aucun retard saisi).
 // Retour : { attendance_training:{seasonId:{pid:n}}, attendance_match:{...}, punctuality:{...} }.
+// « L'appel a été fait » : le coach a validé au moins une arrivée sur cette
+// instance. C'est le SEUL signal fiable qu'il était là, montre en main — une
+// instance simplement clôturée (ou AUTO-clôturée au bout de 2h, sans personne
+// devant l'écran) ne dit rien des horaires réels.
+function _callSheetDone(sheet) {
+  return !!(sheet && sheet.arrivals && Object.keys(sheet.arrivals).length > 0);
+}
+function _convocCallSheet(c, dateStr) {
+  if (!c) return null;
+  return (c.recurrence
+    ? ((c.instanceOverrides || {})[dateStr] || {}).callSheet
+    : c.callSheet) || null;
+}
+// Une instance est COMPTABILISABLE dès que le coach a tranché : clôture
+// explicite OU appel fait.
+//
+// BUG (v.146) : seule la clôture comptait pour les PRÉSENCES, alors que la
+// PONCTUALITÉ, elle, se comptait sur l'appel SANS exiger la clôture. Les deux
+// dérivations lisaient la même instance et n'en tiraient pas le même verdict —
+// d'où le symptôme rapporté : « j'ai fait 2 entraînements, aucune présence
+// reportée » (appel fait, « ✓ Clôturer » jamais cliqué : le bouton est un
+// SECOND geste, distinct de « 📋 Faire l'appel »).
+// Faire l'appel EST la prise de présence. Exiger en plus la clôture faisait
+// disparaître en silence toute séance appelée mais non clôturée.
+function _convocInstanceCounts(c, inst) {
+  if (!inst) return false;
+  return inst.closed === true || _callSheetDone(_convocCallSheet(c, inst.date));
+}
+
 function computeAutoScoresFromSource(fromISO, toISO) {
   const out = { attendance_training: {}, attendance_match: {}, punctuality: {} };
   const bump = (type, sid, pid, delta) => {
@@ -8868,7 +8897,7 @@ function computeAutoScoresFromSource(fromISO, toISO) {
       const sid = getSeasonIdForDate(date);
       const pool = (_seasonsLoaded() && sid) ? getSeasonPlayers(sid, { team }) : (state.players || []);
       // Présences : seules les instances CLÔTURÉES comptent (miroir du modèle live).
-      if (inst.closed) {
+      if (_convocInstanceCounts(c, inst)) {
         const responses = inst.responses || {};
         const type = c.type === 'match' ? 'attendance_match' : 'attendance_training';
         pool.forEach(p => {
@@ -8880,7 +8909,11 @@ function computeAutoScoresFromSource(fromISO, toISO) {
       const sheet = (c.recurrence
         ? ((c.instanceOverrides || {})[date] || {}).callSheet
         : c.callSheet) || null;
-      const arrivals = sheet && sheet.arrivals;
+      // RETARDS CONDITIONNELS : un retard ne compte QUE si l'appel a été fait.
+      // Sans appel, aucune heure d'arrivée n'a été observée — dériver un retard
+      // d'une clôture (a fortiori d'une AUTO-clôture) serait une sanction
+      // inventée. `_callSheetDone` est la seule porte.
+      const arrivals = _callSheetDone(sheet) ? sheet.arrivals : null;
       if (arrivals) {
         Object.keys(arrivals).forEach(pid => {
           const late = (arrivals[pid] && arrivals[pid].lateMin) || 0;
@@ -9161,7 +9194,7 @@ function _pointsAttendanceBySeason(seasonId) {
     instances.forEach(inst => {
       // Seules les instances CLÔTURÉES comptent : avant la clôture, l'appel
       // n'est pas fait et les RSVP sont des intentions, pas des présences.
-      if (!inst.closed) return;
+      if (!_convocInstanceCounts(c, inst)) return;
       // La saison de la DATE, jamais celle de la convocation : une convoc
       // récurrente traverse la bascule de saison (c'est le bug de la PR #69).
       if (getSeasonIdForDate(inst.date) !== seasonId) return;
@@ -40121,6 +40154,14 @@ function challengeCard(c, isCoach) {
   }
   const max = Math.max(...entries.map(e => e.score), 1);
   const _seriesLike = _challengeHasSeries(c);
+  // PLIAGE (v.146) : côté coach, on ne déroule le classement entier que sur
+  // demande. Jamais côté joueuse (elle cherche SA ligne, pas un sommaire), et
+  // jamais tant que personne n'a marqué : replier un classement vide n'aurait
+  // rien à cacher et ferait juste un chevron mort.
+  const _collapsible = isCoach && entries.length > CHALLENGE_TOP_N && entries.some(e => e.score > 0);
+  const _open = !_collapsible || isChallengeExpanded(c.id);
+  const _visible = _open ? entries : entries.slice(0, CHALLENGE_TOP_N);
+  const _hiddenCount = entries.length - _visible.length;
 
   return `
     <div class="list-section">
@@ -40135,7 +40176,8 @@ function challengeCard(c, isCoach) {
           ${(!isAuto && challengePointsReward(c) > 0) ? `<span class="chip chip-green">🏆 +${challengePointsReward(c)} pts</span>` : ''}
         </div>
         <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:4px">
-          <div style="flex:1;min-width:0;font-family:'Anton';font-size:18px;text-transform:uppercase;letter-spacing:0.02em">${esc(c.title)}</div>
+          <div style="flex:1;min-width:0;font-family:'Anton';font-size:18px;text-transform:uppercase;letter-spacing:0.02em;${_collapsible ? 'cursor:pointer' : ''}" ${_collapsible ? `onclick="toggleChallengeExpand('${c.id}')"` : ''}>${_collapsible ? `<span style="color:var(--ink-3);font-size:14px">${_open ? '▾' : '▸'}</span> ` : ''}${esc(c.title)}</div>
+          ${_collapsible ? `<button class="btn btn-icon" style="flex:0 0 auto;font-size:11px;font-family:'JetBrains Mono'" aria-expanded="${_open}" title="${_open ? 'Replier le classement' : 'Voir le classement complet'}" onclick="event.stopPropagation();toggleChallengeExpand('${c.id}')">${_open ? '▾' : '+' + _hiddenCount}</button>` : ''}
           <button class="btn btn-icon" style="flex:0 0 auto;font-size:18px" title="${_isChallengeFavorited(c) ? 'Retirer des favoris' : 'Ajouter aux favoris'}" aria-label="Favori" onclick="event.stopPropagation();toggleChallengeFavorite('${c.id}')">${_isChallengeFavorited(c) ? '⭐' : '☆'}</button>
         </div>
         <div style="font-size:12px;color:var(--ink-3);line-height:1.5">${esc(c.desc)}</div>
@@ -40161,7 +40203,7 @@ function challengeCard(c, isCoach) {
         // personne n'a marqué, le classement reste neutre (pas de médaille
         // or/argent/bronze sur des scores nuls) → évite le faux podium.
         const anyScore = entries.some(e => e.score > 0);
-        return entries.map((e, i) => {
+        return _visible.map((e, i) => {
         const medal = (e.score > 0 && anyScore) ? (i === 0 ? 'gold' : i === 1 ? 'silver' : i === 2 ? 'bronze' : '') : '';
         const myPid = state.auth && state.auth.role === 'player' ? state.auth.playerId : null;
         const isMine = myPid && myPid === e.id;
@@ -40191,6 +40233,34 @@ function challengeCard(c, isCoach) {
       })()}
     </div>
   `;
+}
+
+// ============================================================
+// PLIAGE DES CLASSEMENTS DE DÉFIS (coach) — top 3 + dépliage au clic
+// ------------------------------------------------------------
+// Le classement COMPLET de chaque défi était rendu en entier, tous les défis
+// empilés sur le même écran : à 12 joueuses et 6 défis, le coach scrollait 70
+// lignes pour retrouver un titre. On n'affiche donc que le TOP 3, le reste se
+// déplie d'un clic sur le titre.
+//
+// L'état ouvert/fermé est une PRÉFÉRENCE DE LECTURE, stockée en local et hors
+// du moteur de sync : la persister en base la propagerait à tous les coachs et
+// à tous les appareils, alors que « ce défi-là, je le garde ouvert » ne
+// regarde que l'écran qu'on a sous les yeux.
+const CHALLENGE_TOP_N = 3;
+const CHALLENGE_EXPAND_KEY = 'pb8_challenge_expanded';
+function _challengeExpandMap() {
+  try { return JSON.parse(localStorage.getItem(CHALLENGE_EXPAND_KEY) || '{}') || {}; }
+  catch (e) { return {}; }
+}
+function isChallengeExpanded(cid) {
+  return _challengeExpandMap()[cid] === true;
+}
+function toggleChallengeExpand(cid) {
+  const m = _challengeExpandMap();
+  if (m[cid]) delete m[cid]; else m[cid] = true;
+  try { localStorage.setItem(CHALLENGE_EXPAND_KEY, JSON.stringify(m)); } catch (e) {}
+  render();
 }
 
 // Toggle de période (mois / trimestre / saison) au-dessus des compteurs auto.
@@ -49437,7 +49507,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.145';
+const APP_VERSION = '2026-08-19.146';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
