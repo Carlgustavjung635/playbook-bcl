@@ -40231,7 +40231,15 @@ function challengeCard(c, isCoach) {
   // demande. Jamais côté joueuse (elle cherche SA ligne, pas un sommaire), et
   // jamais tant que personne n'a marqué : replier un classement vide n'aurait
   // rien à cacher et ferait juste un chevron mort.
-  const _collapsible = isCoach && entries.length > CHALLENGE_TOP_N && entries.some(e => e.score > 0);
+  // v.148 — les COMPTEURS AUTO ne se pliaient JAMAIS, et la garde ci-dessus en
+  // était la cause : leurs classements sont presque tout à 0 (à plus forte
+  // raison en début de saison), donc « personne n’a marqué » y est vrai en
+  // permanence — c’est précisément la liste la plus vide qui restait dépliée.
+  // On plie donc l’auto même à 0 : ses lignes ne sont PAS éditables
+  // (canEdit = !isAuto && …), il n’y a rien à atteindre derrière le top 3.
+  // Sur un défi MANUEL la garde reste : là, chaque ligne est une saisie
+  // (peer entry) — replier un défi neuf rendrait 18 joueuses injoignables.
+  const _collapsible = isCoach && entries.length > CHALLENGE_TOP_N && (isAuto || entries.some(e => e.score > 0));
   const _open = !_collapsible || isChallengeExpanded(c.id);
   const _visible = _open ? entries : entries.slice(0, CHALLENGE_TOP_N);
   const _hiddenCount = entries.length - _visible.length;
@@ -49598,7 +49606,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.147';
+const APP_VERSION = '2026-08-19.148';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
