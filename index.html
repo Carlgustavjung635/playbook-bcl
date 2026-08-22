@@ -8944,12 +8944,13 @@ function computeAutoScoresFromSource(fromISO, toISO) {
           // APPEL FAIT : présente = validée sur la feuille. Point. Aucune présence
           // par défaut, aucune présence déduite d'un RSVP.
           if (arrivals) { if (arrivals[p.id]) bump(type, sid, p.id, 1); return; }
-          // PAS D'APPEL (instance seulement clôturée) : on garde le modèle RSVP
-          // historique — mais via resolveEffectivePresence, qui voit AUSSI le
-          // SECOND GISEMENT d'indisponibilité (porté par la joueuse, hors réponse
-          // d'instance). C'est lui que la lecture brute des réponses ignorait.
-          const eff = resolveEffectivePresence(p.id, date, (inst.responses || {})[p.id]);
-          if (eff.status === 'present') bump(type, sid, p.id, 1);
+          // PAS D'APPEL (instance seulement clôturée) : AUCUNE présence par
+          // défaut. Sans feuille, personne n'a observé qui était là — seule une
+          // présence explicitement déclarée compte. Une joueuse convoquée qui
+          // n'a rien répondu n'est PAS créditée : c'est exactement ce qui faisait
+          // apparaître une indisponible de longue durée à chaque séance.
+          const _r = (inst.responses || {})[p.id];
+          if (_r && _r.status === 'present') bump(type, sid, p.id, 1);
         });
       }
       if (arrivals) {
@@ -9051,7 +9052,23 @@ function _autoScoresForWindow(fromISO, toISO) {
 // Map { playerId: score } d'un défi. AUTO → recompute ; sinon c.scores.
 // period : 'season' (bornes de la saison DU DÉFI) | 'month' | 'trimester'.
 //          défaut = filtre période courant (getChallengePeriod).
-function autoChallengeScores(c, period) {
+// CORRECTIONS COACH (v.151). Le compteur est DÉRIVÉ : depuis la PR #72 il est
+// recalculé à la lecture et `c.scores` n'est plus jamais lu — la modale
+// « éditer les compteurs » écrivait donc dans le vide. Ce n'était pas une
+// régression récente, mais le coach n'avait plus aucune prise sur le chiffre.
+//
+// On ne revient PAS à un score écrit en base (c'est ce qui cumulait entre
+// saisons). On empile une couche de CORRECTIONS au-dessus du dérivé, rangée
+// sous une clé réservée du jsonb `scores` déjà synchronisé → zéro migration,
+// et les valeurs héritées à plat restent ignorées.
+//
+// Une correction n'est retenue que si elle DIFFÈRE du calcul (cf.
+// saveEditAutoChallenge) : rouvrir la modale et enregistrer sans rien toucher
+// ne fige rien, et corriger la source (la feuille d'appel) reprend la main.
+// Bornée à la période « saison » : une correction est un total de saison,
+// la plaquer sur une fenêtre semaine/mois n'aurait aucun sens.
+const AUTO_SCORE_OVERRIDES_KEY = '__overrides';
+function autoChallengeScores(c, period, raw) {
   if (!c || !c.autoCount) return (c && c.scores) || {};
   period = period || getChallengePeriod();
   const sid = c.seasonId || state.currentSeasonId;
@@ -9065,7 +9082,17 @@ function autoChallengeScores(c, period) {
     w = challengePeriodWindow(period);
   }
   const comp = _autoScoresForWindow(w.from, w.to);
-  return (comp[c.type] && comp[c.type][sid]) || {};
+  const base = (comp[c.type] && comp[c.type][sid]) || {};
+  if (raw || period !== 'season') return base;
+  const ov = (c.scores || {})[AUTO_SCORE_OVERRIDES_KEY];
+  if (!ov || typeof ov !== 'object') return base;
+  const out = { ...base };
+  Object.keys(ov).forEach(pid => {
+    const v = ov[pid];
+    if (v === null || v === undefined) return;
+    out[pid] = Math.max(0, parseInt(v, 10) || 0);
+  });
+  return out;
 }
 function getAutoScoreFor(c, playerId, period) {
   return autoChallengeScores(c, period)[playerId] || 0;
@@ -9243,7 +9270,7 @@ function _pointsAttendanceBySeason(seasonId) {
       const _arrivals = _callSheetDone(_sheet) ? _sheet.arrivals : null;
       pool.forEach(p => {
         if (_arrivals) { if (!_arrivals[p.id]) return; }
-        else if (resolveEffectivePresence(p.id, inst.date, (inst.responses || {})[p.id]).status !== 'present') return;
+        else { const _r = (inst.responses || {})[p.id]; if (!_r || _r.status !== 'present') return; }
         (out[p.id] = out[p.id] || []).push({
           sourceId: c.id + '|' + inst.date,
           at: Date.parse(inst.date + 'T12:00:00'),
@@ -39573,6 +39600,7 @@ function openCallSheet(parentId, dateStr) {
                 ` : `<div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">En attente...</div>`}
               </div>
               ${validated ? `
+                <button class="btn btn-icon" onclick="editArrivalLate('${parentId}','${dateStr}','${p.id}')" title="Corriger le retard">✎</button>
                 <button class="btn btn-icon" onclick="undoArrival('${parentId}','${dateStr}','${p.id}')" title="Annuler validation">↺</button>
               ` : `
                 <div style="display:flex;gap:4px">
@@ -39593,7 +39621,14 @@ function openCallSheet(parentId, dateStr) {
             // (indispo) il n'y a aucune ligne → `r.reason` levait un TypeError
             // et la feuille d'appel ne s'ouvrait plus du tout.
             const r = _convocResp(c, dateStr, p.id);
-            return `<span style="padding:6px 10px;background:var(--bg-2);border:1px solid var(--border);border-radius:16px;font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono'">#${p.num} ${esc(p.name)} · ${esc((r.auto ? r.motif : r.reason) || '?')}</span>`;
+            // ELLE EST VENUE QUAND MÊME. Sans ce bouton, une joueuse ayant
+            // annoncé son absence ne pouvait pas être pointée : elle n'apparaît
+            // que dans cette liste, et la feuille est désormais ce que compte
+            // le compteur — elle restait invisible malgré sa présence réelle.
+            const _came = !!arrivals[p.id];
+            return `<span style="padding:6px 10px;background:${_came ? 'var(--bg-3)' : 'var(--bg-2)'};border:1px solid ${_came ? 'var(--green)' : 'var(--border)'};border-radius:16px;font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';display:inline-flex;align-items:center;gap:6px">#${p.num} ${esc(p.name)} · ${esc((r.auto ? r.motif : r.reason) || '?')}${_came
+              ? `<button class="btn btn-icon" onclick="undoArrival('${parentId}','${dateStr}','${p.id}')" title="Retirer de la feuille" style="width:22px;height:22px;font-size:10px;color:var(--green)">✓</button>`
+              : `<button class="btn btn-icon" onclick="validateArrival('${parentId}','${dateStr}','${p.id}')" title="Elle est venue quand même : la pointer présente" style="width:22px;height:22px;font-size:10px">+</button>`}</span>`;
           }).join('')}
         </div>
       ` : ''}
@@ -39652,6 +39687,51 @@ function undoArrival(parentId, dateStr, pid) {
   }
 
   delete sheet.arrivals[pid];
+  persist();
+  closeModal();
+  setTimeout(() => openCallSheet(parentId, dateStr), 50);
+}
+
+// CORRIGER LE RETARD À LA SOURCE. L'appel calcule les minutes à l'horloge au
+// moment du tap ; le coach doit pouvoir rectifier après coup (validation
+// tardive, erreur de manip). On corrige la FEUILLE, pas le compteur : c'est
+// elle que lisent les compteurs, la correction se propage donc partout sans
+// aucun override à maintenir.
+function editArrivalLate(parentId, dateStr, pid) {
+  const c = state.convocations.find(x => x.id === parentId);
+  const player = (state.players || []).find(p => p.id === pid);
+  if (!c || !player) return;
+  const sheet = getCallSheet(c, c.recurrence ? dateStr : null);
+  const entry = (sheet.arrivals || {})[pid];
+  if (!entry) return;
+  const back = `closeModal();setTimeout(()=>openCallSheet('${parentId}','${dateStr}'),50)`;
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">Retard · ${esc(player.name)}</div>
+      <button class="modal-close" onclick="${back}">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="eyebrow-muted mb-2">Minutes de retard</div>
+      <input id="late-edit" type="number" min="0" step="1" value="${entry.lateMin || 0}"
+        style="width:100%;padding:12px;background:var(--bg-2);border:1px solid var(--border);border-radius:8px;color:var(--ink);font-family:'Anton';font-size:26px;text-align:center">
+      <div style="font-size:11px;color:var(--ink-3);margin-top:8px;line-height:1.5">
+        0 = à l'heure. Le compteur ponctualité suit cette valeur.
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="${back}">Annuler</button>
+      <button class="btn btn-primary" onclick="saveArrivalLate('${parentId}','${dateStr}','${pid}')">Enregistrer</button>
+    </div>
+  `);
+}
+function saveArrivalLate(parentId, dateStr, pid) {
+  const c = state.convocations.find(x => x.id === parentId);
+  if (!c) return;
+  const sheet = getCallSheet(c, c.recurrence ? dateStr : null);
+  const entry = (sheet.arrivals || {})[pid];
+  if (!entry) return;
+  const el = document.getElementById('late-edit');
+  entry.lateMin = Math.max(0, parseInt(el && el.value, 10) || 0);
   persist();
   closeModal();
   setTimeout(() => openCallSheet(parentId, dateStr), 50);
@@ -40472,10 +40552,17 @@ function saveEditAutoChallenge(cid) {
   const pool = _autoChallengePool(c);
   const before = { ...(c.scores || {}) };
   c.scores = c.scores || {};
+  // On enregistre un ÉCART au calcul, pas un score : une valeur laissée telle
+  // quelle ne fige rien, et remettre la valeur calculée efface la correction.
+  const computed = autoChallengeScores(c, 'season', true);
+  const ov = { ...(c.scores[AUTO_SCORE_OVERRIDES_KEY] || {}) };
   pool.forEach(p => {
     const el = document.getElementById('ed-' + p.id);
-    if (el) c.scores[p.id] = Math.max(0, parseInt(el.value) || 0);
+    if (!el) return;
+    const v = Math.max(0, parseInt(el.value) || 0);
+    if (v === (computed[p.id] || 0)) delete ov[p.id]; else ov[p.id] = v;
   });
+  c.scores[AUTO_SCORE_OVERRIDES_KEY] = ov;
   _logChallengeAudit('edit', { challengeId: c.id, type: c.type, seasonId: c.seasonId, before, after: { ...c.scores } });
   persist(); closeModal(); render();
   if (typeof showToast === 'function') showToast('✓ Compteurs enregistrés');
@@ -49651,7 +49738,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.150';
+const APP_VERSION = '2026-08-19.151';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
