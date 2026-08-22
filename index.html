@@ -27573,6 +27573,21 @@ function openUnavailForm(playerId, id) {
       <button class="modal-close" onclick="openPlayerSeasonPanel('${esc(playerId)}')">✕</button>
     </div>
     <div class="modal-body">
+      ${u ? '' : `
+      <div class="fld">
+        <label class="fld-label">Type d'indisponibilité</label>
+        <div style="display:flex;gap:6px">
+          <div style="flex:1;padding:8px 10px;border:1px solid var(--orange);border-radius:8px;background:rgba(var(--accent-rgb),0.08);text-align:center">
+            <div style="font-size:12px">🏖️ Agenda</div>
+            <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">VACANCES · EXAMENS · PERSO</div>
+          </div>
+          <div role="button" tabindex="0" style="flex:1;padding:8px 10px;border:1px solid var(--border);border-radius:8px;text-align:center;cursor:pointer" onclick="openInjuryModal('${esc(playerId)}','panel')">
+            <div style="font-size:12px">🏥 Médical</div>
+            <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">BLESSURE · SOIN · HISTORIQUE</div>
+          </div>
+        </div>
+        <div style="margin-top:5px;font-size:10px;color:var(--ink-3);line-height:1.5">Le médical s'écrit dans le suivi de la joueuse (avec restrictions et historique) ; les deux apparaissent ensuite dans la même liste.</div>
+      </div>`}
       <div class="fld">
         <label class="fld-label">Du</label>
         <input id="un-start" type="date" value="${esc((u && u.startsAt) || isoDate(new Date()))}">
@@ -27600,11 +27615,63 @@ function openUnavailForm(playerId, id) {
   `);
 }
 
-// Section « Indisponibilités » du panneau joueuse (coach).
+// Écran « Indispos » du panneau joueuse (coach) — PORTE UNIQUE.
+//
+// Le suivi médical (`p.injury`) et les périodes d'indisponibilité décrivent le
+// MÊME fait — « elle n'est pas là ». Les DONNÉES étaient déjà fusionnées depuis
+// `_unavailEffectiveOn`, qui interroge les deux gisements ; seule l'UX ne l'était
+// pas : la coach déclarait une blessure sur la fiche du roster, revenait ici, et
+// trouvait l'écran vide. Deux écrans pour un concept, c'est un écran qui a l'air
+// de mentir. Les deux sources sont donc rendues dans la MÊME liste, chacune avec
+// son tag (🏖️ agenda / 🏥 médical), et chaque ligne renvoie vers l'éditeur qui
+// sait l'écrire.
+//
+// AUCUN changement de stockage : le médical reste dans `p.injury` (+
+// `injuryHistory`), l'agenda dans `player_unavailabilities`. La fusion est
+// purement visuelle — c'est `_unavailEffectiveOn` qui reste la vérité comptée.
 function renderUnavailSection(playerId) {
   if (!_unavailIsCoach()) return '';
   const today = isoDate(new Date());
+  const p = (state.players || []).find(x => x.id === playerId) || {};
   const all = _unavailsOf(playerId);
+  const tag = (icon, label, color) => `<span style="font-size:8px;font-family:'JetBrains Mono';letter-spacing:0.06em;padding:1px 5px;border-radius:999px;border:1px solid ${color};color:${color};flex:none">${icon} ${label}</span>`;
+
+  // --- Source médicale, rendue comme une période --------------------------
+  // Seul `indispo` compte absente (cf. _medicalUnavailOn) : `amenage` et `soin`
+  // s'entraînent. La ligne le DIT, sinon la coach croit avoir sorti la joueuse
+  // de l'effectif alors que rien n'a bougé côté convocs.
+  const inj = (p.injury && p.injury.status && p.injury.status !== 'apte') ? p.injury : null;
+  const injCfg = inj ? (INJURY_STATUS[inj.status] || INJURY_STATUS.indispo) : null;
+  const medRow = !inj ? '' : `
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--border-soft);border-left:3px solid ${injCfg.color};border-radius:8px;margin-bottom:6px">
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+            <span style="font-size:12px">${injCfg.icon} ${esc(injCfg.label)}</span>
+            ${tag('🏥', 'MÉDICAL', injCfg.color)}
+          </div>
+          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">${esc(_unavailRangeLabel({ startsAt: inj.startDate || today, endsAt: inj.returnDate || null }))}</div>
+          ${inj.description ? `<div style="font-size:11px;color:var(--ink-3);margin-top:3px;font-style:italic">${esc(inj.description)}</div>` : ''}
+          ${inj.restrictions ? `<div style="font-size:11px;color:var(--ink-3);margin-top:3px;font-style:italic">Restrictions : ${esc(inj.restrictions)}</div>` : ''}
+          <div style="font-size:9px;font-family:'JetBrains Mono';margin-top:3px;color:${inj.status === 'indispo' ? 'var(--red)' : 'var(--ink-3)'}">${inj.status === 'indispo' ? 'COMPTÉE ABSENTE' : 'PRÉSENTE · AMÉNAGÉE'}</div>
+        </div>
+        <button class="btn btn-ghost" style="font-size:10px;padding:4px 6px;flex:none" onclick="openInjuryModal('${esc(playerId)}','panel')">✎</button>
+      </div>`;
+  const hist = Array.isArray(p.injuryHistory) ? p.injuryHistory : [];
+  const histRow = (h) => {
+    const cfg = INJURY_STATUS[h.status] || INJURY_STATUS.indispo;
+    return `
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--border-soft);border-left:3px solid var(--border);border-radius:8px;margin-bottom:6px;opacity:0.55">
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+            <span style="font-size:12px">${cfg.icon} ${esc(cfg.label)}</span>
+            ${tag('🏥', 'MÉDICAL', 'var(--ink-3)')}
+          </div>
+          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">${esc(_unavailRangeLabel({ startsAt: h.startDate || '', endsAt: h.endDate || null }))}</div>
+          ${h.description ? `<div style="font-size:11px;color:var(--ink-3);margin-top:3px;font-style:italic">${esc(h.description)}</div>` : ''}
+        </div>
+      </div>`;
+  };
+
   const row = (u) => {
     const meta = _unavailMeta(u.reason);
     const current = u.startsAt <= today && (!u.endsAt || u.endsAt >= today);
@@ -27612,7 +27679,7 @@ function renderUnavailSection(playerId) {
     return `
       <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--border-soft);border-left:3px solid ${current ? 'var(--orange)' : 'var(--border)'};border-radius:8px;margin-bottom:6px${past ? ';opacity:0.55' : ''}">
         <div style="flex:1;min-width:0">
-          <div style="font-size:12px">${meta.icon} ${esc(meta.label)}${current ? ' <span style="font-size:9px;color:var(--orange);font-family:\'JetBrains Mono\'">EN COURS</span>' : ''}</div>
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"><span style="font-size:12px">${meta.icon} ${esc(meta.label)}</span>${tag('🏖️', 'AGENDA', 'var(--ink-3)')}${current ? '<span style="font-size:9px;color:var(--orange);font-family:\'JetBrains Mono\'">EN COURS</span>' : ''}</div>
           <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px">${esc(_unavailRangeLabel(u))}</div>
           ${u.notes ? `<div style="font-size:11px;color:var(--ink-3);margin-top:3px;font-style:italic">${esc(u.notes)}</div>` : ''}
         </div>
@@ -27623,13 +27690,19 @@ function renderUnavailSection(playerId) {
   const current = all.filter(u => u.startsAt <= today && (!u.endsAt || u.endsAt >= today));
   const future = all.filter(u => u.startsAt > today);
   const past = all.filter(u => u.endsAt && u.endsAt < today);
+  const nothing = !all.length && !inj && !hist.length;
   return `
-    <div class="eyebrow-muted mb-2" style="margin-top:16px">🏖️ Indisponibilités</div>
+    <div class="eyebrow-muted mb-2" style="margin-top:16px">🩺 Indispos & suivi médical</div>
+    ${medRow}
     ${current.length ? current.map(row).join('') : ''}
     ${future.length ? `<div style="font-size:9px;font-family:'JetBrains Mono';color:var(--ink-3);text-transform:uppercase;margin:8px 0 4px">À venir</div>${future.map(row).join('')}` : ''}
-    ${past.length ? `<div style="font-size:9px;font-family:'JetBrains Mono';color:var(--ink-3);text-transform:uppercase;margin:8px 0 4px">Passées</div>${past.map(row).join('')}` : ''}
-    ${all.length ? '' : '<div style="font-size:11px;color:var(--ink-3);margin-bottom:6px">Aucune indisponibilité déclarée.</div>'}
-    <button class="btn btn-secondary btn-block" style="font-size:11px;padding:7px" onclick="openUnavailForm('${esc(playerId)}')">＋ Ajouter une indisponibilité</button>`;
+    ${(past.length || hist.length) ? `<div style="font-size:9px;font-family:'JetBrains Mono';color:var(--ink-3);text-transform:uppercase;margin:8px 0 4px">Passées</div>${past.map(row).join('')}${hist.slice().reverse().map(histRow).join('')}` : ''}
+    ${nothing ? '<div style="font-size:11px;color:var(--ink-3);margin-bottom:6px">Aucune indisponibilité déclarée — ni agenda, ni médicale.</div>' : ''}
+    <div style="display:flex;gap:6px">
+      <button class="btn btn-secondary" style="flex:1;font-size:11px;padding:7px" onclick="openUnavailForm('${esc(playerId)}')">🏖️ ＋ Agenda</button>
+      <button class="btn btn-secondary" style="flex:1;font-size:11px;padding:7px" onclick="openInjuryModal('${esc(playerId)}','panel')">🏥 ${inj ? 'Modifier le médical' : '＋ Médical'}</button>
+    </div>
+    ${hist.length ? `<button class="btn btn-ghost btn-block" style="font-size:10px;padding:6px;margin-top:6px" onclick="openInjuryModal('${esc(playerId)}','panel')">📜 Historique médical (${hist.length})</button>` : ''}`;
 }
 
 // Bandeau discret sur l'accueil de la joueuse, uniquement si elle est
@@ -43448,9 +43521,24 @@ function renderInjuryStatus(p) {
   `;
 }
 
-function openInjuryModal(pid) {
+// Retour d'écran après le suivi médical. Ce modal s'ouvre maintenant depuis DEUX
+// endroits : la fiche du roster (`editPlayer`) et l'écran « Indispos » du panneau
+// saison. Refermer en dur sur `editPlayer` ferait atterrir la coach venue du
+// panneau dans un formulaire qu'elle n'a jamais ouvert — d'où la provenance,
+// posée à l'ouverture et relue par Annuler / Enregistrer / Guéri.
+window._injuryReturn = window._injuryReturn || 'edit';
+function _injuryGoBack(pid) {
+  const to = window._injuryReturn;
+  closeModal();
+  setTimeout(() => {
+    try { if (to === 'panel') openPlayerSeasonPanel(pid); else editPlayer(pid); }
+    catch (e) { try { render(); } catch (e2) {} }
+  }, 50);
+}
+function openInjuryModal(pid, from) {
   const p = state.players.find(x => x.id === pid);
   if (!p) return;
+  window._injuryReturn = (from === 'panel') ? 'panel' : 'edit';
   const inj = p.injury || { status: 'apte' };
   const todayStr = new Date().toISOString().slice(0,10);
   openModal(`
@@ -43459,7 +43547,7 @@ function openInjuryModal(pid) {
         <div class="eyebrow">${esc(p.name)}</div>
         <div class="modal-title">Suivi médical</div>
       </div>
-      <button class="modal-close" onclick="closeModal();setTimeout(()=>editPlayer('${pid}'),50)">✕</button>
+      <button class="modal-close" onclick="_injuryGoBack('${pid}')">✕</button>
     </div>
     <div class="modal-body">
       <div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:14px;font-size:11px;color:var(--ink-2);line-height:1.5">
@@ -43516,7 +43604,7 @@ function openInjuryModal(pid) {
     </div>
     <div class="modal-footer" style="flex-direction:column;gap:6px">
       <div style="display:flex;gap:6px;width:100%">
-        <button class="btn btn-secondary btn-block" onclick="closeModal();setTimeout(()=>editPlayer('${pid}'),50)">Annuler</button>
+        <button class="btn btn-secondary btn-block" onclick="_injuryGoBack('${pid}')">Annuler</button>
         <button class="btn btn-primary btn-block" onclick="saveInjury('${pid}')">Enregistrer</button>
       </div>
       ${inj.status && inj.status !== 'apte' ? `<button class="btn btn-ghost btn-block" style="color:var(--green);font-size:11px" onclick="markAsHealed('${pid}')">✓ Marquer comme guéri·e (archive)</button>` : ''}
@@ -43641,8 +43729,7 @@ function saveInjury(pid) {
   };
   persist();
   _pushInjury(p);
-  closeModal();
-  setTimeout(() => editPlayer(pid), 50);
+  _injuryGoBack(pid);
 }
 
 function markAsHealed(pid) {
@@ -43660,8 +43747,7 @@ function markAsHealed(pid) {
   // Une guérison EFFACE le statut : cet effacement doit voyager comme une
   // déclaration, sinon l'autre appareil garde une joueuse indispo à vie.
   _pushInjury(p);
-  closeModal();
-  setTimeout(() => editPlayer(pid), 50);
+  _injuryGoBack(pid);
 }
 
 // Badge compact pour afficher le statut sur les listes (convoc)
@@ -45298,9 +45384,14 @@ function editPlayer(pid) {
       </div>
 
       <div style="padding-top:14px;border-top:1px solid var(--border-soft);margin-top:14px">
-        <div class="eyebrow-muted" style="margin-bottom:10px">🏥 Suivi médical (privé coach)</div>
+        <div class="eyebrow-muted" style="margin-bottom:10px">🩺 Disponibilité (privé coach)</div>
         ${renderInjuryStatus(p)}
-        <button class="btn btn-secondary btn-block" style="margin-top:8px;font-size:11px" onclick="openInjuryModal('${pid}')">${p.injury && p.injury.status && p.injury.status !== 'apte' ? '✎ Modifier statut médical' : '+ Déclarer blessure / aménagement'}</button>
+        ${(() => {
+          const n = (state.playerUnavailabilities || []).filter(u => !u.deletedAt && u.playerId === pid).length;
+          return n ? `<div style="margin-top:6px;font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase">🏖️ ${n} indispo${n > 1 ? 's' : ''} d'agenda</div>` : '';
+        })()}
+        <button class="btn btn-secondary btn-block" style="margin-top:8px;font-size:11px" onclick="closeModal();setTimeout(()=>openPlayerSeasonPanel('${pid}'),50)">🩺 Gérer indispos &amp; médical</button>
+        <div style="margin-top:6px;font-size:10px;color:var(--ink-3);line-height:1.5">Blessures et indisponibilités d'agenda se saisissent au même endroit, sur l'écran « Dans la saison ».</div>
       </div>
 
       <div style="padding-top:14px;border-top:1px solid var(--border-soft);margin-top:14px">
@@ -49507,7 +49598,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.146';
+const APP_VERSION = '2026-08-19.147';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
