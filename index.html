@@ -8804,11 +8804,35 @@ function _ensureAutoChallenges() {
 // comportement (c.seasonId puis currentSeasonId) → jamais pire qu'avant.
 
 // Saison (id) couvrant une date ISO 'YYYY-MM-DD'. null si aucune / non chargées.
+//
+// TROU D'INTERSAISON (v.149) : les saisons courent du 1er sept. au 30 juin —
+// juillet et août n'appartiennent donc à AUCUNE plage [startDate, endDate].
+// Une date d'été rendait `null`, et `computeAutoScoresFromSource` jette tout ce
+// qui n'a pas de saison (`bump` : `if (!sid) return;`). Symptôme : deux
+// entraînements de prépa appelés les 19 et 21 août, appel fait, 12 arrivées en
+// base — et « Présences » comme « Ponctualité » restaient à 0. La clôture, elle,
+// créditait bien 2026-2027 (`seasonIdForConvocInstance` retombe sur `c.seasonId`) :
+// la MÊME instance était rattachée par un chemin et jetée par l'autre.
+//
+// `seasonDateWindow` encode déjà la règle qui ferme le trou (l'été appartient à
+// la saison qui COMMENCE) et sert les ressentis depuis la v.123. On la branche
+// ici, sur la porte unique, pour que TOUT ce qui est daté en hérite.
+// L'appartenance exacte est testée d'abord : le comportement à l'intérieur d'une
+// plage est inchangé, on ne fait que combler les creux. Les fenêtres pavent sans
+// se chevaucher (borne basse exclusive = fin de la précédente) → une date tombe
+// dans une saison et une seule, jamais deux.
 function getSeasonIdForDate(dateStr) {
   if (!dateStr || !_seasonsLoaded()) return null;
-  const hit = (state.seasons || []).find(s =>
+  const exact = (state.seasons || []).find(s =>
     s.startDate && dateStr >= s.startDate && (!s.endDate || dateStr <= s.endDate));
-  return hit ? hit.id : null;
+  if (exact) return exact.id;
+  const list = (state.seasons || []).filter(s => s && s.startDate)
+    .slice().sort((a, b) => a.startDate.localeCompare(b.startDate));
+  const paved = list.find(s => {
+    const w = seasonDateWindow(s);
+    return dateStr > w.after && dateStr <= w.to;
+  });
+  return paved ? paved.id : null;
 }
 
 // Saison à créditer pour une instance de convoc (clôture / appel) : priorité à
@@ -49606,7 +49630,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.148';
+const APP_VERSION = '2026-08-19.149';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
