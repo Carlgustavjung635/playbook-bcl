@@ -8920,24 +8920,38 @@ function computeAutoScoresFromSource(fromISO, toISO) {
       const date = inst.date;
       const sid = getSeasonIdForDate(date);
       const pool = (_seasonsLoaded() && sid) ? getSeasonPlayers(sid, { team }) : (state.players || []);
-      // Présences : seules les instances CLÔTURÉES comptent (miroir du modèle live).
-      if (_convocInstanceCounts(c, inst)) {
-        const responses = inst.responses || {};
-        const type = c.type === 'match' ? 'attendance_match' : 'attendance_training';
-        pool.forEach(p => {
-          const r = responses[p.id];
-          if (!r || r.status === 'present') bump(type, sid, p.id, 1);
-        });
-      }
-      // Ponctualité : depuis les arrivées saisies (indépendant du flag clôturé).
-      const sheet = (c.recurrence
-        ? ((c.instanceOverrides || {})[date] || {}).callSheet
-        : c.callSheet) || null;
+      // LA FEUILLE D'APPEL EST LA SEULE OBSERVATION RÉELLE de qui était là. On la
+      // lit AVANT tout le reste : présences et retards en dérivent, d'une seule et
+      // même source.
+      //
+      // BUG (v.150) : le compteur ne lisait QUE les RSVP, jamais la feuille, avec
+      // « pas de réponse = présente ». Deux symptômes en miroir sur cette ligne :
+      //   • une joueuse indisponible de longue durée (grossesse, blessure) n'a
+      //     aucune réponse d'instance : elle était créditée présente à CHAQUE
+      //     séance comptabilisée, sans avoir jamais mis les pieds au gymnase ;
+      //   • une joueuse ayant annoncé son absence puis venue quand même était
+      //     pointée sur la feuille et restait invisible au compteur.
+      // L'appel est un fait observé, montre en main ; le RSVP est une intention.
+      const sheet = _convocCallSheet(c, date);
       // RETARDS CONDITIONNELS : un retard ne compte QUE si l'appel a été fait.
       // Sans appel, aucune heure d'arrivée n'a été observée — dériver un retard
       // d'une clôture (a fortiori d'une AUTO-clôture) serait une sanction
       // inventée. `_callSheetDone` est la seule porte.
       const arrivals = _callSheetDone(sheet) ? sheet.arrivals : null;
+      if (_convocInstanceCounts(c, inst)) {
+        const type = c.type === 'match' ? 'attendance_match' : 'attendance_training';
+        pool.forEach(p => {
+          // APPEL FAIT : présente = validée sur la feuille. Point. Aucune présence
+          // par défaut, aucune présence déduite d'un RSVP.
+          if (arrivals) { if (arrivals[p.id]) bump(type, sid, p.id, 1); return; }
+          // PAS D'APPEL (instance seulement clôturée) : on garde le modèle RSVP
+          // historique — mais via resolveEffectivePresence, qui voit AUSSI le
+          // SECOND GISEMENT d'indisponibilité (porté par la joueuse, hors réponse
+          // d'instance). C'est lui que la lecture brute des réponses ignorait.
+          const eff = resolveEffectivePresence(p.id, date, (inst.responses || {})[p.id]);
+          if (eff.status === 'present') bump(type, sid, p.id, 1);
+        });
+      }
       if (arrivals) {
         Object.keys(arrivals).forEach(pid => {
           const late = (arrivals[pid] && arrivals[pid].lateMin) || 0;
@@ -9222,10 +9236,14 @@ function _pointsAttendanceBySeason(seasonId) {
       // La saison de la DATE, jamais celle de la convocation : une convoc
       // récurrente traverse la bascule de saison (c'est le bug de la PR #69).
       if (getSeasonIdForDate(inst.date) !== seasonId) return;
-      const responses = inst.responses || {};
+      // MÊME source de vérité que computeAutoScoresFromSource : appel fait → la
+      // feuille tranche ; sinon RSVP + indisponibilités. Deux dérivations qui
+      // lisent la même instance doivent en tirer le MÊME verdict (leçon v.146).
+      const _sheet = _convocCallSheet(c, inst.date);
+      const _arrivals = _callSheetDone(_sheet) ? _sheet.arrivals : null;
       pool.forEach(p => {
-        const r = responses[p.id];
-        if (r && r.status && r.status !== 'present') return;
+        if (_arrivals) { if (!_arrivals[p.id]) return; }
+        else if (resolveEffectivePresence(p.id, inst.date, (inst.responses || {})[p.id]).status !== 'present') return;
         (out[p.id] = out[p.id] || []).push({
           sourceId: c.id + '|' + inst.date,
           at: Date.parse(inst.date + 'T12:00:00'),
@@ -39425,8 +39443,11 @@ function openEventInstance(parentId, dateStr) {
               <button class="btn btn-secondary" style="grid-column:span 2" onclick="editConvoc('${parentId}')">✎ Modifier l'événement</button>
             `}
           </div>
+          <!-- L'appel reste OUVERT après la clôture : il est désormais la source
+               de vérité du compteur, donc le seul endroit où corriger une
+               présence. Le gater sur la clôture enfermait le coach dehors. -->
+          <button class="btn ${instance.closed ? 'btn-secondary' : 'btn-primary'} btn-block" style="margin-bottom:6px" onclick="openCallSheet('${parentId}','${dateStr}')">${instance.closed ? "✎ Corriger l'appel" : "📋 Faire l'appel"}</button>
           ${!instance.closed ? `
-            <button class="btn btn-primary btn-block" style="margin-bottom:6px" onclick="openCallSheet('${parentId}','${dateStr}')">📋 Faire l'appel</button>
             <button class="btn btn-secondary btn-block" style="margin-bottom:6px" onclick="closeConvocation('${parentId}','${isRecurrent ? dateStr : ''}')">✓ Clôturer (comptabiliser présences)</button>
           ` : ''}
           ${isRecurrent ? `<button class="btn btn-ghost btn-block" onclick="editConvoc('${parentId}')" style="font-size:10px">Modifier toute la série...</button>` : ''}
@@ -49630,7 +49651,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.149';
+const APP_VERSION = '2026-08-19.150';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
