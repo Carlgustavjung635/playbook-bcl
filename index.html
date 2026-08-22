@@ -37772,14 +37772,21 @@ function tcnPlainText(text) {
 }
 // Rendu : on ÉCHAPPE D'ABORD, on injecte les chips ENSUITE (patron mdToHtml).
 // Le nom a donc déjà traversé esc() quand il atterrit dans le chip.
+// Le chip EST factorisé (v.154) : les notes coachs et le descriptif des exos du
+// plan partagent exactement le même rendu, le même clic, la même dégradation.
+// `safeName` arrive DÉJÀ échappé (patron mdToHtml : on échappe D'ABORD).
+function _pbMentionChip(safeName, pid) {
+  const known = (state.plays || []).some(p => p && p.id === pid && !p.deletedAt);
+  const st = 'display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border-radius:10px;background:rgba(var(--accent-rgb),0.14);color:var(--accent);font-size:0.92em;line-height:1.5;white-space:nowrap;' + (known ? 'cursor:pointer' : 'opacity:0.55');
+  // stopPropagation : le chip vit aussi dans la ligne d'exo côté joueuse, dont le
+  // parent bascule le « fait ✓ » au clic. Sans ça, ouvrir un play cocherait l'exo.
+  const click = known ? ` onclick="event.stopPropagation();_tcnOpenPlay('${esc(pid)}')"` : '';
+  return `<span class="tcn-chip"${click} style="${st}" title="${known ? 'Ouvrir le play' : 'Play introuvable'}">📚 ${safeName}</span>`;
+}
 function tcnRenderText(text) {
   const safe = esc(String(text || ''));
   TCN_MENTION_RE.lastIndex = 0;
-  return safe.replace(TCN_MENTION_RE, (mm, name, pid) => {
-    const known = (state.plays || []).some(p => p && p.id === pid && !p.deletedAt);
-    const click = known ? ` onclick="_tcnOpenPlay('${esc(pid)}')" style="cursor:pointer"` : ' style="opacity:0.55"';
-    return `<span class="tcn-chip"${click} title="${known ? 'Ouvrir le play' : 'Play introuvable'}">📚 ${name}</span>`;
-  }).replace(/\n/g, '<br>');
+  return safe.replace(TCN_MENTION_RE, (mm, name, pid) => _pbMentionChip(name, pid)).replace(/\n/g, '<br>');
 }
 // Lien PASSIF (choix produit) : ouvrir le play ne notifie pas son propriétaire.
 // L'ouvreur a changé de nom au fil des versions → on essaie, puis on se rabat.
@@ -37789,6 +37796,57 @@ function _tcnOpenPlay(pid) {
   const fns = ['openPlayDetail', 'openPlay', 'viewPlay', 'showPlay'];
   for (const f of fns) { if (typeof window[f] === 'function') { try { closeModal(); } catch (e) {} setTimeout(() => window[f](pid), 60); return; } }
   alert('📚 ' + (p.name || p.title || 'Play'));
+}
+
+// ---------- Le @mention, réemployé hors des notes coachs (v.154) ----------
+// Le champ n'est plus imposé : on passe l'élément et l'id de sa boîte à
+// suggestions. `applyFn` est le NOM d'une fonction globale que l'hôte fournit
+// pour persister la valeur — car le `onchange` d'un textarea ne part JAMAIS
+// quand c'est du JS qui écrit dedans : sans ce rappel, la mention serait perdue.
+window._pbMentionApply = window._pbMentionApply || {};
+function pbMentionOnInput(el, boxId, applyFn) {
+  if (applyFn) window._pbMentionApply[el.id] = applyFn;
+  const box = document.getElementById(boxId); if (!box) return;
+  // On ne cherche QUE sur le fragment courant, celui qui suit le dernier @ non
+  // encore résolu. Sinon tout le descriptif redeviendrait une requête.
+  const upTo = el.value.slice(0, el.selectionStart);
+  const m = /@([^@\n\]]{0,40})$/.exec(upTo);
+  if (!m) { box.innerHTML = ''; return; }
+  const q = m[1].toLowerCase();
+  const hits = (state.plays || []).filter(p => p && !p.deletedAt && String(p.name || p.title || '').toLowerCase().includes(q)).slice(0, 6);
+  box.innerHTML = hits.length ? `<div style="border:1px solid var(--border-soft);border-radius:6px;margin-top:4px;overflow:hidden">` + hits.map(p =>
+    `<div onclick="pbMentionPick('${esc(el.id)}','${esc(boxId)}','${esc(p.id)}')" style="padding:6px 8px;font-size:11px;cursor:pointer;border-bottom:1px solid var(--border-soft)">📚 ${esc(p.name || p.title || 'Play')}</div>`).join('') + '</div>'
+    : '<div style="font-size:10px;color:var(--ink-4);padding:4px 2px">Aucun play</div>';
+}
+function pbMentionPick(inputId, boxId, pid) {
+  const el = document.getElementById(inputId); if (!el) return;
+  const p = (state.plays || []).find(x => x && x.id === pid); if (!p) return;
+  const name = String(p.name || p.title || 'Play').replace(/[\[\]()]/g, '');
+  const cut = el.selectionStart;
+  const before = el.value.slice(0, cut).replace(/@([^@\n\]]{0,40})$/, '');
+  el.value = before + '@[' + name + '](play:' + pid + ') ' + el.value.slice(cut);
+  const box = document.getElementById(boxId); if (box) box.innerHTML = '';
+  const fn = window._pbMentionApply[inputId];
+  if (fn && typeof window[fn] === 'function') { try { window[fn](el.value); } catch (e) {} }
+  el.focus();
+}
+// Markdown + mentions. ⚠ `@[Nom](play:ID)` EST un lien markdown valide : laisser
+// mdToHtml passer dessus fabriquerait un <a href="play:ID"> mort. On sort donc
+// les mentions AVANT (jeton alphanumérique, que ni mdEscape ni mdInline ni
+// mdStripArtefacts ne touchent) et on réinjecte les chips APRÈS.
+function pbRenderMdWithMentions(text) {
+  const chips = [];
+  TCN_MENTION_RE.lastIndex = 0;
+  const stubbed = String(text || '').replace(TCN_MENTION_RE, (mm, name, pid) => {
+    chips.push(_pbMentionChip(esc(name), pid));
+    return 'XPBMENTION' + (chips.length - 1) + 'X';
+  });
+  const html = (typeof mdToHtml === 'function') ? mdToHtml(stubbed) : esc(stubbed).replace(/\n/g, '<br>');
+  return html.replace(/XPBMENTION(\d+)X/g, (mm, i) => chips[+i] || '');
+}
+// Aperçu nu (lignes repliées, clamp 2 lignes) : la mention redevient son nom.
+function pbPlainWithMentions(text) {
+  return (typeof mdToPlain === 'function') ? mdToPlain(tcnPlainText(text)) : tcnPlainText(text);
 }
 
 // ---------- Écriture ----------
@@ -38079,7 +38137,7 @@ function altRowHtml(ex, idx) {
         <span style="font-size:12px">💪</span>
         <div style="flex:1;min-width:0">
           <div style="font-family:'Anton';font-size:11px;text-transform:uppercase;line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(alt.title)}</div>
-          ${alt.description ? `<div style="font-size:10px;color:var(--ink-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(mdToPlain(alt.description))}</div>` : ''}
+          ${alt.description ? `<div style="font-size:10px;color:var(--ink-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(pbPlainWithMentions(alt.description))}</div>` : ''}
         </div>
         <button class="btn btn-ghost" style="font-size:10px;padding:3px 8px" onclick="event.stopPropagation();altSwapExercise(${idx})">⇄ Basculer</button>
         <button class="btn btn-icon" style="width:22px;height:20px;font-size:10px;padding:0;color:var(--red)" onclick="event.stopPropagation();altClearExercise(${idx})">✕</button>
@@ -38213,7 +38271,7 @@ function trainingExerciseRow(ex, idx, totalCount, startTime, endTime) {
           <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.04em">
             ${hasGroups ? `${(ex.groups || []).length} groupes` : '1 groupe'}${totalGroupPlayers > 0 ? ` · ${totalGroupPlayers} joueuses` : ''}
           </div>
-          ${(ex.description || '').trim() ? `<div style="font-size:11px;color:var(--ink-2);margin-top:4px;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${esc(mdToPlain(ex.description))}</div>` : ''}
+          ${(ex.description || '').trim() ? `<div style="font-size:11px;color:var(--ink-2);margin-top:4px;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${esc(pbPlainWithMentions(ex.description))}</div>` : ''}
         </div>
 
         <div style="display:flex;flex-direction:column;gap:2px;padding:8px 6px;justify-content:center">
@@ -39117,7 +39175,8 @@ function renderExerciseDetail() {
 
       <div class="fld">
         <label class="fld-label">Description / consignes</label>
-        <textarea id="ex-desc" rows="3" placeholder="Objectif, consignes, variantes..." onchange="updateExerciseField('description',this.value)">${esc(ex.description || '')}</textarea>
+        <textarea id="ex-desc" rows="3" placeholder="Objectif, consignes, variantes…  (@ pour citer un play)" oninput="pbMentionOnInput(this,'ex-desc-mentions','_exoApplyDesc')" onchange="updateExerciseField('description',this.value)">${esc(ex.description || '')}</textarea>
+        <div id="ex-desc-mentions"></div>
       </div>
 
       <!-- BANDEAU PLAY LIÉ -->
@@ -39298,6 +39357,9 @@ function updateExerciseField(field, value) {
   c.trainingPlan.exercises[state._editingExerciseIdx][field] = value;
   persist();
 }
+// Rappel du driver @mention : c'est du JS qui a écrit dans le textarea, donc
+// aucun onchange ne partira jamais. On persiste explicitement.
+function _exoApplyDesc(v) { updateExerciseField('description', v); }
 
 function addExerciseGroup() {
   const c = state.convocations.find(x => x.id === state._editingTraining.convocId);
@@ -39741,7 +39803,7 @@ function openMyTrainingPlan(convocId, dateStr) {
                   <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;text-transform:uppercase">
                     ⏱ ${ex.duration || '?'}min${myGroup ? ' · 👥 ' + esc(myGroup.name) : ''}${allImages.length ? ' · 📷 ' + allImages.length : ''}${hasVideo ? ' · 🎬' : ''}${allAttachments.length ? ' · 📎 ' + allAttachments.length : ''}
                   </div>
-                  ${ex.description ? `<div class="md-content" style="font-size:12px;color:var(--ink-2);margin-top:6px">${mdToHtml(ex.description)}</div>` : ''}
+                  ${ex.description ? `<div class="md-content" style="font-size:12px;color:var(--ink-2);margin-top:6px">${pbRenderMdWithMentions(ex.description)}</div>` : ''}
 
                   ${linkedPlay && linkedPlay.concepts && linkedPlay.concepts.length > 0 ? `
                     <div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:8px" onclick="event.stopPropagation()">
@@ -50358,7 +50420,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.153';
+const APP_VERSION = '2026-08-19.154';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
