@@ -9068,19 +9068,62 @@ function _autoScoresForWindow(fromISO, toISO) {
 // Bornée à la période « saison » : une correction est un total de saison,
 // la plaquer sur une fenêtre semaine/mois n'aurait aucun sens.
 const AUTO_SCORE_OVERRIDES_KEY = '__overrides';
+// Fenêtre de calcul d'un défi auto, extraite pour être partagée avec la garde
+// d'éligibilité ci-dessous : les deux DOIVENT lire la même période.
+//
+// TROU D'INTERSAISON, seconde moitié (v.152). La v.149 avait réparé
+// l'ATTRIBUTION (à quelle saison appartient une date d'été) mais pas la
+// FENÊTRE : celle-ci démarrait encore au 1er septembre, donc les séances de
+// juillet-août n'étaient même pas lues en vue « saison ». On ouvre la borne
+// basse sur la fin de la saison précédente — les instances de cette journée
+// tampon portent l'id de la saison d'AVANT et sont écartées au filtrage par
+// sid, donc rien n'est compté deux fois.
+//
+// La borne HAUTE reste endDate, et ce n'est pas un oubli : elle borne la
+// génération des occurrences récurrentes. L'ouvrir (9999-12-31) ferait
+// dérouler des centaines de milliers d'instances hebdomadaires et figerait
+// l'app. C'est aussi la bonne règle : l'été appartient à la saison qui
+// COMMENCE, donc à la suivante.
+function _autoChallengeWindow(c, period) {
+  const sid = c.seasonId || state.currentSeasonId;
+  if (period !== 'season') return challengePeriodWindow(period);
+  const season = (state.seasons || []).find(s => s.id === sid);
+  if (!season || !season.startDate) return challengePeriodWindow('season');
+  const sw = seasonDateWindow(season);
+  return { from: sw.after || season.startDate, to: season.endDate || '9999-12-31' };
+}
+
+// PONCTUALITÉ : on ne classe QUE les joueuses venues au moins une fois.
+//
+// Être classée sur sa ponctualité sans avoir mis les pieds à un entraînement
+// n'a aucun sens — et comme le défi est « moins c'est mieux », une joueuse
+// jamais venue affiche forcément 0 minute de retard et coiffait au poteau
+// celles qui viennent et arrivent à l'heure. Le podium récompensait l'absence.
+//
+// On lit la MÊME fenêtre que le compteur, et les corrections coach du compteur
+// de présences comptent : ramener une présence à 0 fait bien sortir la joueuse
+// du classement ponctualité.
+// Retour : null = aucune restriction ; sinon le Set des ids classables.
+function autoChallengeEligibleIds(c, period) {
+  if (!c || !c.autoCount || c.type !== 'punctuality') return null;
+  period = period || getChallengePeriod();
+  const sid = c.seasonId || state.currentSeasonId;
+  const w = _autoChallengeWindow(c, period);
+  const comp = _autoScoresForWindow(w.from, w.to);
+  const att = { ...((comp.attendance_training && comp.attendance_training[sid]) || {}) };
+  const attCh = (state.challenges || []).find(x => x.autoCount && x.type === 'attendance_training' && x.seasonId === sid);
+  const ov = attCh && attCh.scores ? attCh.scores[AUTO_SCORE_OVERRIDES_KEY] : null;
+  if (ov && typeof ov === 'object' && period === 'season') {
+    Object.keys(ov).forEach(pid => { att[pid] = Math.max(0, parseInt(ov[pid], 10) || 0); });
+  }
+  return new Set(Object.keys(att).filter(pid => (att[pid] || 0) > 0));
+}
+
 function autoChallengeScores(c, period, raw) {
   if (!c || !c.autoCount) return (c && c.scores) || {};
   period = period || getChallengePeriod();
   const sid = c.seasonId || state.currentSeasonId;
-  let w;
-  if (period === 'season') {
-    const season = (state.seasons || []).find(s => s.id === sid);
-    w = (season && season.startDate)
-      ? { from: season.startDate, to: season.endDate || '9999-12-31' }
-      : challengePeriodWindow('season');
-  } else {
-    w = challengePeriodWindow(period);
-  }
+  const w = _autoChallengeWindow(c, period);
   const comp = _autoScoresForWindow(w.from, w.to);
   const base = (comp[c.type] && comp[c.type][sid]) || {};
   if (raw || period !== 'season') return base;
@@ -15582,22 +15625,31 @@ function playerChallengeRow(c, playerId) {
   // SAISON : ranking parmi l'effectif courant uniquement (sinon une joueuse
   // partie continue à peser dans le classement de la saison en cours).
   const _seasonPool = currentSeasonPlayers();
-  const sorted = _seasonPool.map(p => ({ id: p.id, score: scores[p.id] || 0 }));
+  // MÊME garde que le classement coach : sans elle, la joueuse lirait un rang
+  // que le tableau du coach ne lui donne pas (affiché ≠ classé).
+  const _elig = autoChallengeEligibleIds(c);
+  const _ranked = _elig ? _seasonPool.filter(p => _elig.has(p.id)) : _seasonPool;
+  const sorted = _ranked.map(p => ({ id: p.id, score: scores[p.id] || 0 }));
   if (c.lowerIsBetter) {
     sorted.sort((a,b) => a.score - b.score);
   } else {
     sorted.sort((a,b) => b.score - a.score);
   }
   const myRank = sorted.findIndex(s => s.id === playerId) + 1;
-  const total = _seasonPool.length;
+  const total = _ranked.length;
   const max = Math.max(...sorted.map(s => s.score), 1);
   const isAuto = c.autoCount;
   const isSeriesLike = _challengeHasSeries(c);
   const nb = isSeriesLike ? _challengeSeriesOf(c, playerId).length : 0;
   const unitWord = c.mode === 'timed' ? 'run' : (c.mode === 'countdown_score' ? 'essai' : 'série');
+  // myRank vaut 0 quand la joueuse n'est pas classable (findIndex → -1) : sans
+  // ce libellé elle lisait « 0ème/21 », ce qui ressemble à un bug.
+  const _rankLabel = myRank === 0
+    ? 'Non classée'
+    : `${myRank}<sup>${myRank===1?'er':'ème'}</sup>/${total}`;
   const subLabel = isSeriesLike
-    ? `${myRank}<sup>${myRank===1?'er':'ème'}</sup>/${total} · ${esc(_aggregateLabel(c).toLowerCase())} · ${nb} ${unitWord}${nb>1?'s':''}`
-    : `${myRank}<sup>${myRank===1?'er':'ème'}</sup>/${total} · ${esc(c.metric)}`;
+    ? `${_rankLabel} · ${esc(_aggregateLabel(c).toLowerCase())} · ${nb} ${unitWord}${nb>1?'s':''}`
+    : `${_rankLabel} · ${esc(c.metric)}`;
   const tierBadge = (c.tiers && c.tiers.length) ? _challengeTierBadge(c, myScore, false) : '';
   const pctOfMax = max > 0 ? (myScore / max) * 100 : 0;
   const medal = myRank === 1 ? '🥇' : myRank === 2 ? '🥈' : myRank === 3 ? '🥉' : '';
@@ -40344,7 +40396,12 @@ function challengeCard(c, isCoach) {
   const _seasonPool2 = _seasonsLoaded() && _seasonId2
     ? getSeasonPlayers(_seasonId2, { team: _chTeam })
     : (state.players || []);
-  const entries = _seasonPool2.map(p => ({ id: p.id, name: p.name, num: p.num, score: scores[p.id] || 0 }));
+  // PONCTUALITÉ : une joueuse jamais venue n'entre pas au classement (cf.
+  // autoChallengeEligibleIds). Le filtre s'applique AVANT le tri et le top 3.
+  const _elig = isAuto ? autoChallengeEligibleIds(c, _period) : null;
+  const entries = _seasonPool2
+    .filter(p => !_elig || _elig.has(p.id))
+    .map(p => ({ id: p.id, name: p.name, num: p.num, score: scores[p.id] || 0 }));
   if (c.lowerIsBetter) {
     entries.sort((a,b) => a.score - b.score);
   } else {
@@ -40520,7 +40577,11 @@ function openEditAutoChallenge(cid) {
   const c = state.challenges.find(x => x.id === cid);
   if (!c || !c.autoCount) return;
   const pool = _autoChallengePool(c).slice().sort((a, b) => (a.num || 0) - (b.num || 0));
-  const scores = c.scores || {};
+  // On pré-remplit avec le compteur RÉELLEMENT AFFICHÉ (dérivé + corrections),
+  // pas avec le scalaire brut que plus personne ne lit : sinon le coach corrige
+  // à partir d'un chiffre qu'il n'a jamais vu, et « ne rien toucher » écrirait
+  // une correction sur toute la ligne.
+  const scores = autoChallengeScores(c, 'season');
   openModal(`
     <div class="modal-header">
       <div>
@@ -49738,7 +49799,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.151';
+const APP_VERSION = '2026-08-19.152';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
