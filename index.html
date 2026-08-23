@@ -48492,6 +48492,71 @@ window.addEventListener('hashchange', () => render());
 // 2) tout le reste est piloté par window.PbSync (sync engine générique)
 // Tamponne la dernière connexion de la joueuse courante (rôle 'player').
 // Optimiste local + UPDATE ciblé Supabase (silencieux si colonne absente).
+// Fusion d'un lot `players` venu du serveur dans state.players. Extrait tel quel
+// de _initPlayersSync pour devenir REJOUABLE. Le canal `players` vit HORS du
+// moteur PbSync (pattern dédié : fetchPlayers + subscribePlayers), or le re-pull
+// de fond posé en v.139 ne connaît que `PbSync.fetchAll` — il ne couvrait donc
+// PAS cette table. Passé le boot, un appareil resté ouvert n'apprenait plus rien
+// de `players` que par le websocket Realtime, qu'iOS tue en arrière-plan sans
+// rien rejouer au réveil.
+//
+// Vécu en prod (2026-08-23) : Joséphine tamponnait bien son last_seen_at — la
+// ligne en base porte l'horodatage à la seconde de sa demande de pintade — mais
+// l'écran EFFECTIF du coach, ouvert depuis la veille, affichait encore la veille.
+// Rien n'était local : c'est la LECTURE qui était figée, exactement le mode de
+// panne de v.139, sur la seule entité que v.139 avait laissée de côté.
+//
+// pushLocalOnly : au BOOT on repousse les joueuses connues en local seulement
+// (rattrapage d'une création faite hors-ligne). Sur un RE-pull, surtout pas : la
+// ligne a pu être supprimée par un autre appareil entre-temps, et la repousser
+// la ressusciterait à chaque battement.
+function _mergeRemotePlayers(remote, opts) {
+  if (!remote || !remote.length) return;
+  const localById = Object.fromEntries(state.players.map(p => [p.id, p]));
+  const merged = remote.map(rp => {
+    const lp = localById[rp.id] || {};
+    return { ...lp, id: rp.id, name: rp.name, num: rp.num,
+      photo: rp.photo || lp.photo || null,
+      pin: lp.pin || '0000',
+      feedback: rp.feedback || lp.feedback || {},
+      lastSeenAt: rp.last_seen_at ? Date.parse(rp.last_seen_at) : (lp.lastSeenAt || null),
+      // Postes / taille / date de naissance : si la colonne manque (fallback
+      // select), rp.xxx = undefined → on garde la valeur locale.
+      postes: Array.isArray(rp.postes) ? rp.postes : (lp.postes || []),
+      tailleCm: (rp.taille_cm != null) ? rp.taille_cm : (lp.tailleCm != null ? lp.tailleCm : null),
+      dateNaissance: (rp.date_naissance !== undefined) ? (rp.date_naissance || null) : (lp.dateNaissance || null),
+      // État des notifications (migration 20260807_001). Colonne absente →
+      // rp.notif_permission undefined → on garde ce qu'on avait en local.
+      // NULL en base = « jamais mesuré », un état bien distinct de 'denied' :
+      // afficher « a refusé » alors qu'on n'en sait rien serait la meilleure
+      // façon de faire passer une joueuse pour ce qu'elle n'est pas.
+      notifPermission: (rp.notif_permission !== undefined) ? (rp.notif_permission || null) : (lp.notifPermission || null),
+      notifPermissionAt: (rp.notif_permission_at !== undefined)
+        ? (rp.notif_permission_at ? Date.parse(rp.notif_permission_at) : null)
+        : (lp.notifPermissionAt || null),
+      // Statut médical (migration 20260806_001). Colonne absente → rp.injury
+      // undefined → on garde le local : un build déployé avant la migration
+      // ne doit pas effacer ce que l'appareil savait déjà.
+      injury: (rp.injury !== undefined) ? (rp.injury || null) : (lp.injury || null),
+      injuryHistory: Array.isArray(rp.injury_history) ? rp.injury_history : (lp.injuryHistory || []) };
+  });
+  const remoteIds = new Set(remote.map(r => r.id));
+  const localOnly = state.players.filter(p => !remoteIds.has(p.id));
+  state.players = [...merged, ...localOnly];
+  if (opts && opts.pushLocalOnly) localOnly.forEach(p => PbStore.upsertPlayer(p).catch(()=>{}));
+}
+
+// Re-pull du canal `players`, à brancher partout où l'on rejoue `PbSync.fetchAll`
+// (retour au premier plan, retour en ligne, battement de fond, pull-to-refresh).
+// Silencieux : un échec laisse l'état local en place, comme fetchAll.
+async function _refetchPlayers() {
+  if (!window.PbStore || !PbStore.fetchPlayers) return false;
+  try {
+    _mergeRemotePlayers(await PbStore.fetchPlayers(), { pushLocalOnly: false });
+    return true;
+  } catch (e) { console.warn('[resync] fetchPlayers:', e && e.message); return false; }
+}
+
 // Tampon "dernière connexion" de la joueuse courante.
 // force=true : login / boot (toujours). Sinon : retour au premier plan, throttlé
 // à 1 push serveur / 5 min pour ne pas marteler la DB. CORRECTIF : avant, le
@@ -48558,40 +48623,8 @@ function _initPlayersSync() {
 
   // --- A) Players (logique spécifique, conserve la fusion pin + extras) ---
   PbStore.fetchPlayers().then(remote => {
-    if (remote && remote.length) {
-      const localById = Object.fromEntries(state.players.map(p => [p.id, p]));
-      const merged = remote.map(rp => {
-        const lp = localById[rp.id] || {};
-        return { ...lp, id: rp.id, name: rp.name, num: rp.num,
-          photo: rp.photo || lp.photo || null,
-          pin: lp.pin || '0000',
-          feedback: rp.feedback || lp.feedback || {},
-          lastSeenAt: rp.last_seen_at ? Date.parse(rp.last_seen_at) : (lp.lastSeenAt || null),
-          // Postes / taille / date de naissance : si la colonne manque (fallback
-          // select), rp.xxx = undefined → on garde la valeur locale.
-          postes: Array.isArray(rp.postes) ? rp.postes : (lp.postes || []),
-          tailleCm: (rp.taille_cm != null) ? rp.taille_cm : (lp.tailleCm != null ? lp.tailleCm : null),
-          dateNaissance: (rp.date_naissance !== undefined) ? (rp.date_naissance || null) : (lp.dateNaissance || null),
-          // État des notifications (migration 20260807_001). Colonne absente →
-          // rp.notif_permission undefined → on garde ce qu'on avait en local.
-          // NULL en base = « jamais mesuré », un état bien distinct de 'denied' :
-          // afficher « a refusé » alors qu'on n'en sait rien serait la meilleure
-          // façon de faire passer une joueuse pour ce qu'elle n'est pas.
-          notifPermission: (rp.notif_permission !== undefined) ? (rp.notif_permission || null) : (lp.notifPermission || null),
-          notifPermissionAt: (rp.notif_permission_at !== undefined)
-            ? (rp.notif_permission_at ? Date.parse(rp.notif_permission_at) : null)
-            : (lp.notifPermissionAt || null),
-          // Statut médical (migration 20260806_001). Colonne absente → rp.injury
-          // undefined → on garde le local : un build déployé avant la migration
-          // ne doit pas effacer ce que l'appareil savait déjà.
-          injury: (rp.injury !== undefined) ? (rp.injury || null) : (lp.injury || null),
-          injuryHistory: Array.isArray(rp.injury_history) ? rp.injury_history : (lp.injuryHistory || []) };
-      });
-      const remoteIds = new Set(remote.map(r => r.id));
-      const localOnly = state.players.filter(p => !remoteIds.has(p.id));
-      state.players = [...merged, ...localOnly];
-      localOnly.forEach(p => PbStore.upsertPlayer(p).catch(()=>{}));
-    }
+    // Boot : pushLocalOnly → une joueuse créée hors-ligne remonte enfin en base.
+    _mergeRemotePlayers(remote, { pushLocalOnly: true });
     // Dernière connexion : si une joueuse charge l'app, on tamponne son
     // last_seen_at (après la fusion → la joueuse existe dans state.players).
     try { _touchCurrentPlayerLastSeen(true); } catch (e) {}
@@ -50343,7 +50376,8 @@ function _isStandalonePWA() {
 async function refreshFromCloud() {
   if (window.Pb && Pb.online === false) return false;
   try {
-    if (window.PbSync && PbSync.fetchAll) await PbSync.fetchAll(state);
+    // `players` vit hors du moteur PbSync : fetchAll ne le couvre pas (cf. _refetchPlayers).
+    if (window.PbSync && PbSync.fetchAll) await Promise.all([PbSync.fetchAll(state), _refetchPlayers()]);
     _lastDataResync = Date.now(); // le battement de fond n'a plus rien à refaire
     try { ensureCurrentSeasonId(); } catch (e) {}
     persist();
@@ -50394,7 +50428,10 @@ async function resyncData(reason) {
   if (Date.now() - _lastDataResync < DATA_RESYNC_COOLDOWN) return false;
   _lastDataResync = Date.now();
   try {
-    await PbSync.fetchAll(state);
+    // `players` est le SEUL canal resté hors du moteur PbSync. Sans ce re-pull,
+    // l'écran EFFECTIF d'un appareil resté ouvert reste figé sur ce qu'il avait
+    // au boot — dernière connexion, photo, statut médical, état des notifs.
+    await Promise.all([PbSync.fetchAll(state), _refetchPlayers()]);
     try { ensureCurrentSeasonId(); } catch (e) {}
     persist();
     render();
@@ -50420,7 +50457,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.154';
+const APP_VERSION = '2026-08-19.155';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
