@@ -42685,6 +42685,27 @@ function challengeCard(c, isCoach) {
         // personne n'a marqué, le classement reste neutre (pas de médaille
         // or/argent/bronze sur des scores nuls) → évite le faux podium.
         const anyScore = entries.some(e => e.score > 0);
+        // v.162 — REPLIÉ : le podium tient sur UNE ligne. Trois `lb-row`
+        // pleines (barre de progression + score 20px + libellé de métrique)
+        // prenaient presque la hauteur du classement entier : plier ne rendait
+        // donc pas la page plus lisible, c'était le but même du pliage. Replié,
+        // on ne garde que ce qui se lit d'un coup d'œil — qui mène, de combien.
+        // Prénom seul et tronqué : sur une ligne unique, un nom complet mange
+        // la place des deux autres du podium.
+        if (_collapsible && !_open) {
+          const shortName = n => { const f = String(n || '').trim().split(/\s+/)[0] || ''; return f.length > 10 ? f.slice(0, 9) + '…' : f; };
+          // Pas de médaille sur des scores nuls (même règle que les lignes
+          // pleines) : sans score, on annonce l'effectif, pas un faux podium.
+          if (!anyScore) return `<div onclick="toggleChallengeExpand('${c.id}')" style="padding:10px 16px;cursor:pointer;font-size:10px;font-family:'JetBrains Mono';color:var(--ink-3);font-style:italic">Aucun score · ${entries.length} joueuse${entries.length > 1 ? 's' : ''}</div>`;
+          const MEDALS = ['🥇', '🥈', '🥉'];
+          return `<div onclick="toggleChallengeExpand('${c.id}')" style="display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 14px;padding:10px 16px;cursor:pointer" title="Voir le classement complet">
+            ${_visible.map((e, i) => `<span style="display:inline-flex;align-items:baseline;gap:5px;white-space:nowrap">
+              <span style="font-size:12px">${MEDALS[i] || ''}</span>
+              <span style="font-family:'Anton';font-size:13px;text-transform:uppercase;letter-spacing:0.02em">${esc(shortName(e.name))}</span>
+              <span style="font-family:'Anton';font-size:14px;color:var(--orange)">${_seriesLike ? esc(_fmtChallengeScore(c, e.score)) : e.score}</span>
+            </span>`).join('')}
+          </div>`;
+        }
         return _visible.map((e, i) => {
         const medal = (e.score > 0 && anyScore) ? (i === 0 ? 'gold' : i === 1 ? 'silver' : i === 2 ? 'bronze' : '') : '';
         const myPid = state.auth && state.auth.role === 'player' ? state.auth.playerId : null;
@@ -52055,7 +52076,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.161';
+const APP_VERSION = '2026-08-19.162';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
