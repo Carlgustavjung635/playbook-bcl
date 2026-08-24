@@ -30,6 +30,22 @@
     · l'IMPORT / EXPORT JSON d'UNE animation, format d'échange atk-zone ;
     · l'EXPORT PHOTO — un PNG du temps affiché, ou la série complète en ZIP.
 
+  ── CE QUE LA v.174 AJOUTE ────────────────────────────────────────────────
+    · la POINTE des flèches est un `marker-end`, plus un triangle peint à part
+      — c'est ce qui supprime le « pli » visible avant la tête sur les courbes
+      (le trait s'arrête désormais pile à la base de la pointe) ;
+    · l'ÉCRAN, un trait plein terminé par une barre perpendiculaire. C'est un
+      déplacement comme un autre pour le modèle (isMoveKind) ;
+    · la TAILLE des jetons — S 0,75× · M 1× · L 1,25×, publiée dans le JSON
+      (`players_size`). Tout l'habillage étant exprimé en fraction de PR,
+      chiffres, ballons et pointes suivent sans cas particulier ;
+    · le MIROIR ⇋, qui bascule le play sur l'autre demi-terrain (ou l'autre
+      panier) en retournant les coordonnées pour de bon ;
+    · les COULEURS D'ÉQUIPE, lues sur le thème (`--pb-primary` /
+      `--pb-secondary`, complémentaire HSL à défaut) plutôt qu'en dur ;
+    · le LOGO du club peint sur le parquet, embarqué en data: URI pour
+      survivre à l'export photo.
+
   ── UN TEMPS = UNE PHOTO + CE QUI SE PASSE PENDANT ────────────────────────
   Chaque temps porte SES PROPRES positions (`pos`) plutôt que de les dériver
   du temps précédent à la volée. C'est un choix, et il est motivé :
@@ -140,6 +156,20 @@
     --warn:#F59E0B; --ok:#34D399; --err:#F87171; --scrim:rgba(0,0,0,.6);
   }
 
+  /* ── COULEURS D'ÉQUIPE — tokens de thème (v.174) ──────────────────────
+     `--pb-primary` (attaque) et `--pb-secondary` (défense) sont désormais LA
+     source des couleurs de jetons et de flèches. Elles portent ici les valeurs
+     historiques — cyan / violet — pour que rien ne bouge par défaut, mais
+     applyTeamColors() les RELIT au démarrage et à chaque bascule de thème :
+     si la page hôte, un thème custom ou ?accent=/?accent2= en fournissent
+     d'autres, ce sont celles-là qui pilotent tout. Secondaire absente ⇒ elle
+     est dérivée de la primaire par rotation de +180° en HSL. Aucune des deux
+     lisible ⇒ on garde ces valeurs de repli, telles quelles. */
+  :root{--pb-primary:#22D3EE; --pb-secondary:#7B2FFF}
+  @media (prefers-color-scheme: dark){:root{--pb-primary:#22D3EE; --pb-secondary:#8B4CFF}}
+  html[data-theme="light"]{--pb-primary:#22D3EE; --pb-secondary:#7B2FFF}
+  html[data-theme="dark"]{--pb-primary:#22D3EE; --pb-secondary:#8B4CFF}
+
   *{box-sizing:border-box}
   html,body{height:100%}
   body{
@@ -219,14 +249,29 @@
   .hp{fill:none; stroke:var(--hoop); stroke-width:1.15; stroke-linecap:round}
 
   /* ── Flèches ───────────────────────────────────────────────────────── */
+  /* v.174 — LA POINTE EST UN marker-end, PLUS UN TRIANGLE DESSINÉ À PART.
+     Avant, le tracé allait jusqu'à la pointe ET un triangle était peint
+     par-dessus, orienté sur la tangente FINALE. Sur une courbe un peu serrée,
+     le trait s'écartait latéralement de cet axe sur la longueur de la tête et
+     ressortait par le flanc du triangle : le « pli » / blob visible juste
+     avant la pointe. Désormais le tracé s'arrête EXACTEMENT à la base de la
+     tête (updateArrow rogne de hl en plus) et le marker prend le relais dans
+     l'axe de la tangente : plus rien ne dépasse, à n'importe quelle courbure. */
   .arw .body{fill:none; stroke-linecap:round; stroke-linejoin:round; pointer-events:none}
-  .arw .head{stroke:none; pointer-events:none}
   /* Zone de saisie invisible et large : sur iPhone, un trait de 1,4 unité
      est intouchable au doigt. pointer-events:stroke ne capte QUE le tracé. */
   .arw .hit{fill:none; stroke:transparent; stroke-width:9; pointer-events:stroke; cursor:pointer}
-  .arw.atk .body, .arw.atk .head{stroke:var(--arw-atk); fill:var(--arw-atk)}
-  .arw.def .body, .arw.def .head{stroke:var(--arw-def); fill:var(--arw-def)}
-  .arw.shot .body, .arw.shot .head{stroke:var(--arw-shot); fill:var(--arw-shot)}
+  .arw.atk .body{stroke:var(--arw-atk); marker-end:url(#mkAtk)}
+  .arw.def .body{stroke:var(--arw-def); marker-end:url(#mkDef)}
+  .arw.shot .body{stroke:var(--arw-shot); marker-end:url(#mkShot)}
+  /* Écran (screen) : même trait plein qu'un déplacement, mais terminé par une
+     barre PERPENDICULAIRE — le « mur » posé par la joueuse. Trois classes,
+     donc plus spécifique que `.arw.atk .body` : le marker T gagne. */
+  .arw.atk.screen .body{marker-end:url(#mkScrAtk)}
+  .arw.def.screen .body{marker-end:url(#mkScrDef)}
+  #mkAtk .h, #mkScrAtk .h{fill:var(--arw-atk)}
+  #mkDef .h, #mkScrDef .h{fill:var(--arw-def)}
+  #mkShot .h{fill:var(--arw-shot)}
   .arw .body{stroke-width:1.45}
   /* Passe = trait pointillé (convention basket). Le tiret est exprimé en
      unités terrain, donc il garde la même densité dans les deux modes. */
@@ -244,9 +289,13 @@
   /* Les waypoints ne sont manipulables qu'en sélection et en gomme (poser,
      déplacer, retirer) — pendant un tracé de flèche ils ne feraient que gêner. */
   body[data-tool="move"] .arw .wp, body[data-tool="pass"] .arw .wp,
-  body[data-tool="shot"] .arw .wp{display:none}
+  body[data-tool="shot"] .arw .wp, body[data-tool="screen"] .arw .wp{display:none}
   body[data-tool="move"] .arw .wphit, body[data-tool="pass"] .arw .wphit,
-  body[data-tool="shot"] .arw .wphit{display:none}
+  body[data-tool="shot"] .arw .wphit, body[data-tool="screen"] .arw .wphit{display:none}
+
+  /* Logo peint sur le parquet : sous les jetons ET sous les flèches, comme sur
+     un vrai terrain. pointer-events:none, sinon il volerait les taps du fond. */
+  .logo{pointer-events:none}
 
   .token{cursor:grab}
   /* Ombre PEINTE (ellipse en dégradé radial) plutôt qu'un filter CSS : un
@@ -441,6 +490,7 @@
   <div class="seg">
     <button class="btn sm on" id="t-select" title="Sélection / déplacement">👆</button>
     <button class="btn sm"    id="t-move"   title="Flèche de déplacement">→</button>
+    <button class="btn sm"    id="t-screen" title="Écran (screen) — trait terminé par une barre">⊥</button>
     <button class="btn sm"    id="t-pass"   title="Flèche de passe">⇢</button>
     <button class="btn sm"    id="t-shot"   title="Tir">🎯</button>
     <button class="btn sm"    id="t-erase"  title="Supprimer flèche / point de passage">🚫</button>
@@ -455,8 +505,17 @@
   <div class="seg">
     <button class="btn sm on" id="m-half" title="Demi-terrain">½</button>
     <button class="btn sm"    id="m-full" title="Terrain complet">▭</button>
+    <button class="btn sm"    id="b-mirror" title="Miroir : bascule le play sur l'autre demi-terrain (gauche ⇄ droite)">⇋</button>
     <button class="btn sm on" id="v-2d" title="Vue d'édition">2D</button>
     <button class="btn sm"    id="v-3d" disabled title="Vue de lecture 3D — jalon 4">3D</button>
+  </div>
+  <div class="sep"></div>
+  <!-- Taille des jetons : S 0,75× · M 1× · L 1,25×. Chiffres et ballons
+       suivent, tout est exprimé en fraction de PR. -->
+  <div class="seg">
+    <button class="btn sm"    id="z-s" title="Petits jetons (0,75×)">S</button>
+    <button class="btn sm on" id="z-m" title="Jetons normaux (1×)">M</button>
+    <button class="btn sm"    id="z-l" title="Grands jetons (1,25×)">L</button>
   </div>
   <div class="badge">
     <span>👥 <b id="i-tok">—</b></span>
@@ -639,8 +698,47 @@
   })();
   var TOKMAP = (function () { var m = {}, i; for (i = 0; i < TOKENS.length; i++) m[TOKENS[i].id] = TOKENS[i]; return m; })();
 
+  // ── Pointes de flèche & barre d'écran (v.174) ────────────────────────
+  // Longueurs en unités terrain, donc dépendantes de PR (mode ET taille des
+  // jetons) : les markers sont en `userSpaceOnUse` et RECONSTRUITS à chaque
+  // drawAll(), pas figés une fois pour toutes.
+  function headLen(kind) { return PR * (kind === 'move' ? 0.8 : 0.72); }
+  function headWid(kind) { return PR * (kind === 'move' ? 0.4 : 0.34); }
+  // Barre d'écran : demi-longueur, puis épaisseur. La consigne parlait de
+  // « 2-3 unités terrain », mais 2-3 unités = 20-30 cm, à peine plus large que
+  // le trait lui-même (1,45) — la barre serait invisible. On la cale donc sur
+  // le jeton : 0,85 × PR de demi-longueur, soit ~1,55 m de barre en
+  // demi-terrain. C'est la notation basket habituelle, et elle reste juste
+  // quel que soit le mode de terrain ou la taille choisie.
+  var SCR_HALF = 0.85, SCR_THICK = 1.9;
+
+  // viewBox == markerWidth/Height ⇒ échelle 1:1, aucune surprise quand PR
+  // change. refX/refY placent le point de RÉFÉRENCE (celui qui atterrit sur la
+  // fin du tracé) à la BASE de la tête : le trait s'arrête là, la tête
+  // continue dans l'axe de la tangente.
+  function markerArrow(id, kind) {
+    var hl = headLen(kind), hw = headWid(kind);
+    var w = f(hl), h = f(hw * 2);
+    return '<marker id="' + id + '" markerUnits="userSpaceOnUse" orient="auto" overflow="visible"'
+      + ' markerWidth="' + w + '" markerHeight="' + h + '" viewBox="0 0 ' + w + ' ' + h + '"'
+      + ' refX="0" refY="' + f(hw) + '">'
+      + '<path class="h" d="M 0 0 L ' + w + ' ' + f(hw) + ' L 0 ' + h + ' Z"/></marker>';
+  }
+  // Écran : la barre est CENTRÉE sur la fin du tracé (refX au milieu de son
+  // épaisseur, refY au milieu de sa longueur) et perpendiculaire, puisque
+  // orient="auto" aligne le +x du marker sur la tangente.
+  function markerScreen(id) {
+    var half = PR * SCR_HALF, w = f(SCR_THICK), h = f(half * 2);
+    return '<marker id="' + id + '" markerUnits="userSpaceOnUse" orient="auto" overflow="visible"'
+      + ' markerWidth="' + w + '" markerHeight="' + h + '" viewBox="0 0 ' + w + ' ' + h + '"'
+      + ' refX="' + f(SCR_THICK / 2) + '" refY="' + f(half) + '">'
+      + '<rect class="h" x="0" y="0" width="' + w + '" height="' + h + '" rx="' + f(SCR_THICK / 2) + '"/></marker>';
+  }
+
   function defs() {
     return '<defs>'
+      + markerArrow('mkAtk', 'move') + markerArrow('mkDef', 'move') + markerArrow('mkShot', 'pass')
+      + markerScreen('mkScrAtk') + markerScreen('mkScrDef')
       + '<linearGradient id="gOut" x1="0" y1="0" x2="0" y2="1"><stop class="a" offset="0"/><stop class="b" offset="1"/></linearGradient>'
       + '<linearGradient id="gFloor" x1="0" y1="0" x2="0" y2="1"><stop class="a" offset="0"/><stop class="b" offset="1"/></linearGradient>'
       + '<linearGradient id="gDisc" x1="0" y1="0" x2="0" y2="1"><stop class="a" offset="0"/><stop class="b" offset="1"/></linearGradient>'
@@ -649,6 +747,28 @@
       + '<radialGradient id="gSheen" cx="50%" cy="34%" r="72%"><stop class="a" offset="0"/><stop class="b" offset="1"/></radialGradient>'
       + '<radialGradient id="gShadow"><stop class="a" offset="0"/><stop class="b" offset="0.6"/><stop class="c" offset="1"/></radialGradient>'
       + '</defs>';
+  }
+
+  // ── Logo « peint sur le parquet » (v.174) ────────────────────────────
+  // Diamètre = 60 % de celui du cercle, opacité 0,34 : présent, jamais
+  // envahissant, et il vit dans la couche TERRAIN — donc sous les flèches et
+  // sous les jetons, exactement comme la peinture d'un vrai parquet.
+  //
+  // Placement : en terrain complet, le centre du rond central (parquet NBA).
+  // En DEMI-terrain le rond central est coupé en deux par le bord de l'image —
+  // un logo posé là déborderait dans la zone de remise en touche. On le met
+  // donc sur le cercle des lancers francs, le seul cercle entièrement visible
+  // d'un demi-terrain et son centre optique.
+  //
+  // Le href est vide au départ : il est renseigné par applyLogo() une fois le
+  // PNG chargé EN data: URI. Un href de fichier ne survivrait pas à l'export
+  // photo (un SVG rasterisé depuis une data: URL n'a pas le droit d'aller
+  // chercher une ressource externe : le logo manquerait sur le PNG).
+  function courtLogo(cx, cy, r) {
+    var s = f(r * 1.2);
+    return '<image class="logo" id="court-logo" style="display:none" opacity="0.34"'
+      + ' x="' + f(cx - r * 0.6) + '" y="' + f(cy - r * 0.6) + '"'
+      + ' width="' + s + '" height="' + s + '" preserveAspectRatio="xMidYMid meet"/>';
   }
 
   function halfCourt() {
@@ -671,6 +791,8 @@
       + '<line class="hp" x1="78" y1="24" x2="96" y2="24"/>'
       + '<line class="hp" x1="87" y1="24" x2="87" y2="25.5"/>'
       + '<circle class="hp" cx="87" cy="27.75" r="2.25"/>'
+      // Logo du club, sur le cercle des lancers francs (cf. courtLogo).
+      + courtLogo(87, 70, 18)
       // Voile lumineux : donne du relief au parquet sans coûter une frame.
       + '<rect class="sheen" x="12" y="12" width="150" height="140"/>';
   }
@@ -699,6 +821,8 @@
       + '<line class="hp" x1="280" y1="78" x2="280" y2="96"/>'
       + '<line class="hp" x1="280" y1="87" x2="278.5" y2="87"/>'
       + '<circle class="hp" cx="276.25" cy="87" r="2.25"/>'
+      // Logo du club, au centre du rond central — parquet NBA.
+      + courtLogo(152, 87, 18)
       + '<rect class="sheen" x="12" y="12" width="280" height="150"/>';
   }
 
@@ -742,7 +866,7 @@
     return {
       id: null, title: '', tag: '', side: 'attaque', color: '#22D3EE',
       description: '', points: '', author: '',
-      ballStart: 'a1', defOn: false, mode: 'half',
+      ballStart: 'a1', defOn: false, mode: 'half', tokenSize: 1,
       half: { steps: [ makeStep(startPos('half')) ] },
       full: { steps: [ makeStep(startPos('full')) ] }
     };
@@ -771,7 +895,14 @@
   function steps() { return doc[doc.mode].steps; }
   function step() { return steps()[cur] || steps()[0]; }
   function pos() { return step().pos; }
-  function hoop() { return MODES[mode()].hoop; }
+  // Terrain complet : on tire sur le panier le PLUS PROCHE de la tireuse.
+  // Sans ça, un play basculé par le miroir (⇋) continuerait d'attaquer le
+  // panier de droite et le tir traverserait tout le terrain.
+  function hoop(from) {
+    var m = MODES[mode()];
+    if (mode() !== 'full' || !from) return m.hoop;
+    return from.x < 152 ? { x: 27.75, y: 87 } : m.hoop;
+  }
 
   // Un jeton « live » : identité statique + position du temps courant. Les
   // écritures passent TOUJOURS par pos()[id], jamais par cet objet jetable.
@@ -793,15 +924,26 @@
   // Le jeton doit rester ~40 px de diamètre à l'écran quel que soit le mode :
   // on l'exprime donc en fraction de la largeur du viewBox (qui, lui, est
   // toujours mis à l'échelle sur la largeur disponible).
-  function radiusFor(m) { return MODES[m].w / 19; }
+  // × doc.tokenSize (S 0,75 · M 1 · L 1,25) : TOUT ce qui habille le jeton —
+  // chiffre, ballon, halo, ombre, pointes de flèche, barre d'écran — est
+  // exprimé en fraction de PR, donc tout suit sans un seul cas particulier.
+  var SIZES = { s: 0.75, m: 1, l: 1.25 };
+  function radiusFor(m) { return MODES[m].w / 19 * (doc && doc.tokenSize || 1); }
 
   // Sortie d'un temps = sa photo à laquelle on applique ses déplacements.
   // Sert à fabriquer le temps suivant et à détecter les décalages.
+  // Un ÉCRAN déplace la joueuse exactement comme un déplacement : c'est un
+  // trajet, il se termine simplement par un mur au lieu d'une pointe. Tout ce
+  // qui raisonne « qui bouge pendant ce temps » passe donc par isMoveKind() —
+  // sortie du temps, lecture animée, et la règle « une seule trajectoire par
+  // joueuse et par temps ».
+  function isMoveKind(k) { return k === 'move' || k === 'screen'; }
+
   function endPos(st) {
     var p = clonePos(st.pos), i, a;
     for (i = 0; i < st.arw.length; i++) {
       a = st.arw[i];
-      if (a.kind !== 'move') continue;
+      if (!isMoveKind(a.kind)) continue;
       var d = typeof a.to === 'string' ? p[a.to] : a.to;
       if (d && p[a.from]) p[a.from] = { x: d.x, y: d.y };
     }
@@ -857,6 +999,7 @@
     layM = document.getElementById('lay-meas');
     drawTokens();
     drawArrows();
+    applyLogo();      // le terrain vient d'être reconstruit : on re-pose le logo
     syncInfo();
   }
 
@@ -980,14 +1123,6 @@
     return { d: d, ang: Math.atan2(dy, dx) };
   }
 
-  function headPath(x, y, ang, hl, hw) {
-    var cx = Math.cos(ang), sy = Math.sin(ang);
-    var bx = x - hl * cx, by = y - hl * sy;
-    return 'M ' + f(x) + ' ' + f(y)
-      + ' L ' + f(bx - hw * sy) + ' ' + f(by + hw * cx)
-      + ' L ' + f(bx + hw * sy) + ' ' + f(by - hw * cx) + ' Z';
-  }
-
   function arrowMarkup(a) {
     var t = tokById(a.from);
     var cls = 'arw ' + (t && t.side === 'atk' ? 'atk' : 'def') + ' ' + a.kind;
@@ -996,7 +1131,7 @@
       wp += '<circle class="wphit" data-arw="' + a.id + '" data-i="' + i + '" cx="' + f(v[i].x) + '" cy="' + f(v[i].y) + '" r="' + f(PR * 0.85) + '"/>'
           + '<circle class="wp" data-arw="' + a.id + '" data-i="' + i + '" cx="' + f(v[i].x) + '" cy="' + f(v[i].y) + '" r="' + f(PR * 0.3) + '"/>';
     return '<g class="' + cls + '" data-id="' + a.id + '">'
-      + '<path class="hit" d=""/><path class="body" d=""/><path class="head" d=""/>' + wp + '</g>';
+      + '<path class="hit" d=""/><path class="body" d=""/>' + wp + '</g>';
   }
 
   // Le tir n'est pas une flèche du modèle mais un drapeau sur le temps : on le
@@ -1004,7 +1139,7 @@
   // supprimer la tireuse du terrain ne laisse jamais de flèche orpheline.
   function shotMarkup() {
     return '<g class="arw shot" data-id="__shot">'
-      + '<path class="hit" d=""/><path class="body" d=""/><path class="head" d=""/></g>';
+      + '<path class="hit" d=""/><path class="body" d=""/></g>';
   }
 
   function drawArrows() {
@@ -1017,7 +1152,7 @@
     var gs = layA.querySelectorAll('.arw');
     for (i = 0; i < gs.length; i++) {
       var g = gs[i], id = g.getAttribute('data-id');
-      arwEl[id] = { g: g, body: g.querySelector('.body'), hit: g.querySelector('.hit'), head: g.querySelector('.head') };
+      arwEl[id] = { g: g, body: g.querySelector('.body'), hit: g.querySelector('.hit') };
       updateArrow(id);
       attachArrowPointer(g, id);
     }
@@ -1034,7 +1169,7 @@
     if (id === '__shot') {
       var s = tokById(step().shot);
       if (!s) return;
-      var h = hoop();
+      var h = hoop(s);
       a = { kind: 'shot', to: null };
       p = [{ x: s.x, y: s.y }, { x: h.x, y: h.y }];
       endPad = 2.6;
@@ -1046,14 +1181,18 @@
       endPad = typeof a.to === 'string' ? PR + 1.2 : 0;
     }
     shrink(p, 0, PR + 0.8);
-    shrink(p, p.length - 1, endPad);
-    var r  = buildPath(p);
-    var k  = a.kind;
-    var hl = PR * (k === 'move' ? 0.8 : 0.72);
-    var hw = PR * (k === 'move' ? 0.4 : 0.34);
+    // ── LE FIX DU « PLI » AVANT LA POINTE (v.174) ──────────────────────
+    // La pointe est maintenant un marker posé sur le DERNIER point du tracé.
+    // On rogne donc de sa longueur EN PLUS du retrait de bord : la pointe
+    // retombe exactement là où visait la flèche, et le trait s'arrête pile à
+    // sa base. Il ne peut plus longer la tête et ressortir par son flanc,
+    // quelle que soit la courbure — c'était ça, le blob.
+    // Un ÉCRAN ne rogne rien : sa barre est CENTRÉE sur la fin du tracé.
+    var hl = a.kind === 'screen' ? 0 : headLen(id === '__shot' ? 'pass' : 'move');
+    shrink(p, p.length - 1, endPad + hl);
+    var r = buildPath(p);
     el.body.setAttribute('d', r.d);
     el.hit.setAttribute('d', r.d);
-    el.head.setAttribute('d', headPath(p[p.length - 1].x, p[p.length - 1].y, r.ang, hl, hw));
   }
 
   function arrowsOf(tokId) {
@@ -1223,16 +1362,16 @@
     if (!pending) { pending = id; syncSelection(); setHint(); return; }
     if (pending === id) { pending = null; syncSelection(); setHint(); return; }
     if (tool === 'pass') { addArrow('pass', pending, id); pending = null; syncSelection(); return; }
-    // Mode déplacement : cliquer un autre jeton vaut « va à cet endroit ».
+    // Déplacement / écran : cliquer un autre jeton vaut « va à cet endroit ».
     var t = tokById(id);
-    addArrow('move', pending, { x: t.x, y: t.y });
+    addArrow(tool, pending, { x: t.x, y: t.y });
     pending = null; syncSelection();
   }
 
   function onCourtClick(p) {
     if (playing) return;
-    if (tool === 'move' && pending) {
-      addArrow('move', pending, clampPt(p, 1));
+    if (isMoveKind(tool) && pending) {
+      addArrow(tool, pending, clampPt(p, 1));
       pending = null; syncSelection();
       return;
     }
@@ -1245,8 +1384,8 @@
     // destinations pour la même joueuse au même moment ne veut rien dire, et
     // l'animation devrait en choisir une au hasard. La nouvelle remplace.
     var l = step().arw, i;
-    if (kind === 'move') {
-      for (i = l.length - 1; i >= 0; i--) if (l[i].kind === 'move' && l[i].from === from) l.splice(i, 1);
+    if (isMoveKind(kind)) {
+      for (i = l.length - 1; i >= 0; i--) if (isMoveKind(l[i].kind) && l[i].from === from) l.splice(i, 1);
     }
     l.push({ id: uid('w'), kind: kind, from: from, to: to, via: [] });
     drawArrows(); syncInfo(); renderTimeline(); touch(); setHint();
@@ -1329,10 +1468,15 @@
   var strip = document.getElementById('tl-strip');
 
   function stepSummary(st) {
-    var mv = 0, ps = 0, i;
-    for (i = 0; i < st.arw.length; i++) { if (st.arw[i].kind === 'move') mv++; else ps++; }
+    var mv = 0, ps = 0, sc = 0, i;
+    for (i = 0; i < st.arw.length; i++) {
+      if (st.arw[i].kind === 'move') mv++;
+      else if (st.arw[i].kind === 'screen') sc++;
+      else ps++;
+    }
     var out = [];
     if (mv) out.push(mv + '→');
+    if (sc) out.push(sc + '⊥');
     if (ps) out.push(ps + '⇢');
     if (st.shot) out.push('🎯');
     return out.join(' ') || '·';
@@ -1479,7 +1623,7 @@
 
     for (i = 0; i < st.arw.length; i++) {
       var a = st.arw[i];
-      if (a.kind !== 'move') continue;
+      if (!isMoveKind(a.kind)) continue;
       var t = tokById(a.from, p0);
       if (!visible(t)) continue;
       var pts = rawPts(a, p0);
@@ -1582,7 +1726,7 @@
     // 3) tir
     var sh = pPaths.shot;
     if (sh) {
-      var sf = win(u, PLAY.shot), S = live[sh.id], H = hoop();
+      var sf = win(u, PLAY.shot), S = live[sh.id], H = hoop(S);
       if (S) {
         // Halo qui respire sur la tireuse pendant la première moitié.
         var pulseT = clamp(sf / 0.45, 0, 1);
@@ -1796,6 +1940,7 @@
   var HINTS = {
     select: 'Glisse les jetons. <b>Tape</b> une joueuse puis <b>🏀</b> pour lui donner le ballon.<br><b>Double-tape une flèche</b> pour lui ajouter un point de passage.',
     move:   'Tape la joueuse qui se déplace, <b>puis l\'endroit où elle va</b>. Flèche pleine.',
+    screen: 'Tape la <b>poseuse d\'écran</b>, puis <b>où elle pose son écran</b>. Trait terminé par une barre.',
     pass:   'Tape la <b>passeuse</b>, puis la <b>réceptionneuse</b>. Flèche pointillée.',
     shot:   'Tape la joueuse qui <b>tire</b> à la fin de ce temps. Re-tape pour annuler.',
     erase:  'Tape une flèche pour la <b>supprimer</b>, un point de passage pour le <b>retirer</b>.'
@@ -1820,7 +1965,7 @@
   // ─────────────────────────────────────────────────────────────────────
   // 10. UI — outils, terrain, vue
   // ─────────────────────────────────────────────────────────────────────
-  var TOOLS = ['select', 'move', 'pass', 'shot', 'erase'];
+  var TOOLS = ['select', 'move', 'screen', 'pass', 'shot', 'erase'];
   function setTool(t) {
     if (playing || document.body.classList.contains('playing')) exitPlay();
     tool = t;
@@ -1875,6 +2020,56 @@
   document.getElementById('m-half').addEventListener('click', function () { setMode('half'); });
   document.getElementById('m-full').addEventListener('click', function () { setMode('full'); });
 
+  // ── MIROIR : basculer le play sur l'autre demi-terrain ───────────────
+  // Les deux demi-terrains sont géométriquement identiques au miroir près :
+  // « le même play de l'autre côté » n'est donc pas une nouvelle vue, c'est la
+  // MÊME donnée avec x → largeur − x. On la retourne pour de bon (positions,
+  // destinations libres et points de passage, sur TOUS les temps du mode
+  // courant) plutôt que de porter un drapeau « je suis à droite » qu'il
+  // faudrait ensuite honorer dans le drag, l'export, la lecture et le JSON.
+  // L'opération est sa propre inverse : re-taper ⇋ ramène le play d'où il
+  // venait, donc rien n'est jamais perdu.
+  //
+  // Les jetons ne se touchent pas : ils ne portent aucune orientation propre.
+  // Les tirs non plus — en terrain complet, hoop() vise déjà le panier le plus
+  // proche, donc ils suivent le play sans rien à recalculer.
+  function mirrorMode() {
+    if (document.body.classList.contains('playing')) exitPlay();
+    var W = MODES[mode()].w, l = steps(), i, j, k;
+    function mx(p) { if (p && typeof p.x === 'number') p.x = f(W - p.x); }
+    for (i = 0; i < l.length; i++) {
+      for (k in l[i].pos) mx(l[i].pos[k]);
+      for (j = 0; j < l[i].arw.length; j++) {
+        var a = l[i].arw[j];
+        if (a.to && typeof a.to === 'object') mx(a.to);
+        (a.via || []).forEach(mx);
+      }
+    }
+    active = null; pending = null;
+    drawAll(); renderTimeline(); setHint(); touch();
+    toast(mode() === 'half' ? 'Play basculé sur l\'autre demi-terrain.' : 'Play basculé sur l\'autre panier.', 'ok');
+  }
+  document.getElementById('b-mirror').addEventListener('click', mirrorMode);
+
+  // ── Taille des jetons ────────────────────────────────────────────────
+  function syncSizeButtons() {
+    var v = doc.tokenSize || 1, k;
+    for (k in SIZES) document.getElementById('z-' + k).classList.toggle('on', SIZES[k] === v);
+  }
+  function setTokenSize(k) {
+    var v = SIZES[k] || 1;
+    if ((doc.tokenSize || 1) === v) return;
+    doc.tokenSize = v;
+    syncSizeButtons();
+    // drawAll() recalcule PR, donc les jetons, les chiffres, les ballons ET
+    // les markers (pointes / barres d'écran) d'un seul geste.
+    if (document.body.classList.contains('playing')) exitPlay();
+    drawAll(); touch();
+  }
+  Object.keys(SIZES).forEach(function (k) {
+    document.getElementById('z-' + k).addEventListener('click', function () { setTokenSize(k); });
+  });
+
   // Le bouton 3D est présent mais désactivé tant que VIEWS['3d'].ready est
   // false — la bascule elle-même est déjà écrite, il ne manquera que le
   // renderer au jalon 4.
@@ -1889,13 +2084,163 @@
   document.getElementById('v-3d').addEventListener('click', function () { setView('3d'); });
   document.getElementById('v-3d').disabled = !VIEWS['3d'].ready;
 
+  // ─────────────────────────────────────────────────────────────────────
+  // 10 bis. COULEURS D'ÉQUIPE PILOTÉES PAR LE THÈME (v.174)
+  // ─────────────────────────────────────────────────────────────────────
+  // Les jetons et les flèches ne sont plus cyan/violet en dur : ils dérivent
+  // de `--pb-primary` (attaque) et `--pb-secondary` (défense). L'ordre de
+  // recherche va du plus explicite au plus général —
+  //   ?accent= / ?accent2=  (l'appelant a le dernier mot)
+  //   --pb-primary / --pb-secondary
+  //   --accent / --primary / --accent-rgb   (les tokens de l'app)
+  // — et si RIEN n'est lisible, on ne touche à rien : le repli déclaré dans
+  // la feuille de style (cyan/violet) tient, en clair comme en sombre.
+  //
+  // Pas de secondaire ⇒ elle est la COMPLÉMENTAIRE de la primaire (+180° en
+  // HSL), avec une saturation plancher : la complémentaire d'un gris est un
+  // gris, et deux équipes grises ne se distinguent pas.
+  //
+  // Une seule teinte suffit à tout : les variantes claires (dégradé du jeton),
+  // le liseré sombre, l'encre du chiffre (choisie au contraste) et la couleur
+  // des flèches (assombrie sur parquet clair, éclaircie sur parquet sombre).
+  function hx2(n) { n = Math.round(clamp(n, 0, 255)); return (n < 16 ? '0' : '') + n.toString(16); }
+  function rgbHex(r, g, b) { return '#' + hx2(r) + hx2(g) + hx2(b); }
+  function hexToRgb(h) {
+    return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+  }
+  // Accepte #abc, #aabbcc, rgb()/rgba(), et « 255, 107, 0 » — la forme que
+  // prend `--accent-rgb` côté app, qui n'est pas une couleur CSS valide seule.
+  function hexOf(v) {
+    v = String(v == null ? '' : v).trim();
+    if (!v) return null;
+    if (/^#[0-9a-f]{3}$/i.test(v)) return ('#' + v[1] + v[1] + v[2] + v[2] + v[3] + v[3]).toLowerCase();
+    if (/^#[0-9a-f]{6}$/i.test(v)) return v.toLowerCase();
+    if (/^#[0-9a-f]{8}$/i.test(v)) return v.slice(0, 7).toLowerCase();
+    var m = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(v);
+    if (!m) m = /^([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*$/.exec(v);
+    if (m) return rgbHex(+m[1], +m[2], +m[3]);
+    return null;
+  }
+  function rgb2hsl(c) {
+    var r = c[0] / 255, g = c[1] / 255, b = c[2] / 255;
+    var mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+    var l = (mx + mn) / 2, h = 0, s = 0;
+    if (d) {
+      s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn);
+      h = mx === r ? ((g - b) / d + (g < b ? 6 : 0)) : mx === g ? ((b - r) / d + 2) : ((r - g) / d + 4);
+      h *= 60;
+    }
+    return [h, s, l];
+  }
+  function hsl2hex(h, s, l) {
+    h = ((h % 360) + 360) % 360; s = clamp(s, 0, 1); l = clamp(l, 0, 1);
+    var c = (1 - Math.abs(2 * l - 1)) * s, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = l - c / 2;
+    var t = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x]
+          : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+    return rgbHex((t[0] + m) * 255, (t[1] + m) * 255, (t[2] + m) * 255);
+  }
+  function shift(hex, dh, ds, dl) {
+    var q = rgb2hsl(hexToRgb(hex));
+    return hsl2hex(q[0] + (dh || 0), clamp(q[1] + (ds || 0), 0, 1), clamp(q[2] + (dl || 0), 0, 1));
+  }
+  function complement(hex) {
+    var q = rgb2hsl(hexToRgb(hex));
+    return hsl2hex(q[0] + 180, Math.max(q[1], 0.55), clamp(q[2], 0.35, 0.62));
+  }
+  // Luminance relative (WCAG) : décide si le chiffre du jeton s'écrit en
+  // sombre ou en clair. Un seuil, pas un ressenti.
+  function lum(hex) {
+    var c = hexToRgb(hex).map(function (v) {
+      v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+    });
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  }
+  function inkOn(hex) { return lum(hex) > 0.38 ? '#06212a' : '#ffffff'; }
+
+  var TEAM_VARS = ['--player', '--player-hi', '--player-ink', '--def', '--def-hi',
+                   '--def-ink', '--def-line', '--arw-atk', '--arw-def'];
+  function readVar(names) {
+    var cs = getComputedStyle(document.documentElement), i, h;
+    for (i = 0; i < names.length; i++) {
+      h = hexOf(cs.getPropertyValue(names[i]));
+      if (h) return h;
+    }
+    return null;
+  }
+  function isDarkNow() {
+    var t = document.documentElement.getAttribute('data-theme');
+    if (t === 'dark') return true;
+    if (t === 'light') return false;
+    return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  }
+  function applyTeamColors() {
+    var R = document.documentElement, i;
+    // On RETIRE d'abord nos propres surcharges : sinon on relirait la valeur
+    // qu'on a écrite au tour précédent au lieu de celle du thème courant, et
+    // la couleur dériverait à chaque bascule 🌓.
+    for (i = 0; i < TEAM_VARS.length; i++) R.style.removeProperty(TEAM_VARS[i]);
+    var qa = Q && Q.get ? Q.get('accent') : null;
+    var qb = Q && Q.get ? Q.get('accent2') : null;
+    var p = hexOf(qa) || readVar(['--pb-primary', '--accent', '--primary', '--accent-rgb']);
+    if (!p) return;   // rien de lisible : le repli de la feuille de style tient
+    var s = hexOf(qb) || readVar(['--pb-secondary', '--secondary']) || complement(p);
+    var dark = isDarkNow();
+    R.style.setProperty('--player', p);
+    R.style.setProperty('--player-hi', shift(p, 0, -0.05, dark ? 0.22 : 0.18));
+    R.style.setProperty('--player-ink', inkOn(p));
+    R.style.setProperty('--def', s);
+    R.style.setProperty('--def-hi', shift(s, 0, -0.05, dark ? 0.20 : 0.16));
+    R.style.setProperty('--def-ink', inkOn(s));
+    R.style.setProperty('--def-line', shift(s, 0, 0.05, -0.28));
+    // Les flèches vivent SUR le parquet : sur un parquet clair une teinte vive
+    // se lit mal, sur un parquet sombre c'est l'inverse.
+    R.style.setProperty('--arw-atk', dark ? shift(p, 0, 0, 0.06) : shift(p, 0, 0.05, -0.16));
+    R.style.setProperty('--arw-def', dark ? shift(s, 0, 0, 0.08) : s);
+  }
+
   function toggleTheme() {
     var c = document.documentElement.getAttribute('data-theme');
     var n = c === 'dark' ? 'light' : (c === 'light' ? '' : 'dark');
     if (n) document.documentElement.setAttribute('data-theme', n);
     else document.documentElement.removeAttribute('data-theme');
+    applyTeamColors();
   }
   document.getElementById('a-theme').addEventListener('click', function () { toggleTheme(); closeSheets(); });
+  if (window.matchMedia) {
+    var mq = window.matchMedia('(prefers-color-scheme: dark)');
+    if (mq.addEventListener) mq.addEventListener('change', applyTeamColors);
+  }
+
+  // ── Logo du parquet ──────────────────────────────────────────────────
+  // Chargé UNE fois, converti en data: URI, puis re-posé après chaque
+  // drawAll(). Le data: est indispensable : à l'export photo le SVG est
+  // rasterisé depuis une data: URL, et un SVG servi ainsi n'a pas le droit
+  // d'aller chercher une ressource externe — avec un simple chemin, le logo
+  // serait à l'écran mais absent du PNG.
+  var LOGO_SRC = '/assets/bcl-logo-256.png';
+  var XLINK = 'http://www.w3.org/1999/xlink';
+  var logoData = null;
+  function applyLogo() {
+    var el = document.getElementById('court-logo');
+    if (!el || !logoData) return;
+    el.setAttribute('href', logoData);
+    el.setAttributeNS(XLINK, 'xlink:href', logoData);
+    el.style.display = '';
+  }
+  fetch(LOGO_SRC)
+    .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
+    .then(function (b) {
+      return new Promise(function (res, rej) {
+        var rd = new FileReader();
+        rd.onload = function () { res(String(rd.result)); };
+        rd.onerror = function () { rej(new Error('lecture impossible')); };
+        rd.readAsDataURL(b);
+      });
+    })
+    .then(function (d) { logoData = d; applyLogo(); })
+    // TODO logo introuvable (assets/bcl-logo-256.png déplacé ?) : le parquet
+    // reste nu. Ce n'est pas bloquant, on ne dérange donc pas le coach.
+    .catch(function () {});
 
   // Le CTM est relu à chaque frame de drag : rien à invalider ici, on remet
   // seulement les jetons dans les clous après une rotation d'écran.
@@ -2001,15 +2346,20 @@
     }
     var outSteps = [], flat = [];
     for (i = 0; i < st.length; i++) {
-      var s = st[i], moves = [], passes = [];
+      var s = st[i], moves = [], passes = [], screens = [];
       for (j = 0; j < s.arw.length; j++) {
         var a = s.arw[j];
         var via = (a.via || []).map(pt);
-        if (a.kind === 'move') {
+        if (isMoveKind(a.kind)) {
           var d = typeof a.to === 'string' ? s.pos[a.to] : a.to;
           if (!d) continue;
-          moves.push({ player: numOf(a.from), to: pt(d), via: via });
-          flat.push({ step: i, kind: 'move', from: numOf(a.from), to: pt(d), via: via });
+          var rec = { player: numOf(a.from), to: pt(d), via: via };
+          // `screens` est une clé À PART et non un champ `kind` dans `moves` :
+          // un lecteur qui ne connaît pas les écrans (le format d'échange
+          // atk-zone, un export antérieur à la v.174) ignore la clé et affiche
+          // un play correct, simplement sans les barres.
+          if (a.kind === 'screen') screens.push(rec); else moves.push(rec);
+          flat.push({ step: i, kind: a.kind, from: numOf(a.from), to: pt(d), via: via });
         } else {
           passes.push({ from: numOf(a.from), to: typeof a.to === 'string' ? numOf(a.to) : pt(a.to), via: via });
           flat.push({ step: i, kind: 'pass', from: numOf(a.from), to: typeof a.to === 'string' ? numOf(a.to) : pt(a.to), via: via });
@@ -2021,6 +2371,7 @@
       outSteps.push({
         n: i + 1, note: s.note || '',
         moves: moves,
+        screens: screens,
         // `pass` (singulier) duplique passes[0] : c'est la clé du format
         // d'échange atk-zone. `passes` porte le cas — rare mais réel — de deux
         // passes dans le même temps.
@@ -2041,6 +2392,7 @@
       points_md: doc.points || '',
       court_type: doc.mode,
       defense_enabled: !!doc.defOn,
+      players_size: doc.tokenSize || 1,
       ball_start: doc.ballStart ? numOf(doc.ballStart) : null,
       created_by: doc.author || null,
       players: players,
@@ -2103,6 +2455,10 @@
     d.author = pick(o, 'created_by', 'createdBy', 'author') || '';
     d.mode = m;
     d.defOn = !!pick(o, 'defense_enabled', 'defenseEnabled');
+    // Taille des jetons : on n'accepte que les trois crans connus. Un fichier
+    // qui dirait 3,7 étalerait des jetons plus larges que la raquette.
+    var ts = +pick(o, 'players_size', 'playersSize', 'token_size');
+    d.tokenSize = (ts === 0.75 || ts === 1 || ts === 1.25) ? ts : 1;
     d.ballStart = refId(pick(o, 'ball_start', 'ballStart'));
 
     // Positions de départ : ce que `players` dit, complété par la disposition
@@ -2140,6 +2496,14 @@
         if (!from || !to) continue;
         st.arw.push({ id: uid('w'), kind: 'move', from: from, to: to, via: (Array.isArray(mv.via) ? mv.via : []).map(refPoint).filter(Boolean) });
       }
+      var scr = Array.isArray(s.screens) ? s.screens : [];
+      for (j = 0; j < scr.length; j++) {
+        var sc = scr[j];
+        var sfrom = refId(pick(sc, 'player', 'p', 'from', 'id'));
+        var sto = refPoint(pick(sc, 'to', 'dest', 'end'));
+        if (!sfrom || !sto) continue;
+        st.arw.push({ id: uid('w'), kind: 'screen', from: sfrom, to: sto, via: (Array.isArray(sc.via) ? sc.via : []).map(refPoint).filter(Boolean) });
+      }
       var ps = Array.isArray(s.passes) ? s.passes : (s.pass ? [s.pass] : []);
       for (j = 0; j < ps.length; j++) {
         var pa = ps[j];
@@ -2171,6 +2535,7 @@
     document.getElementById('m-half').classList.toggle('on', doc.mode === 'half');
     document.getElementById('m-full').classList.toggle('on', doc.mode === 'full');
     document.getElementById('b-def').classList.toggle('on', !!doc.defOn);
+    syncSizeButtons();
     metaToForm(); syncTitle();
     drawAll(); renderTimeline(); setHint();
   }
@@ -2226,6 +2591,10 @@
     'fill', 'fill-opacity', 'stroke', 'stroke-opacity', 'stroke-width',
     'stroke-dasharray', 'stroke-dashoffset', 'stroke-linecap', 'stroke-linejoin',
     'opacity', 'display', 'visibility',
+    // v.174 — sans ça, l'export photo sortirait des flèches SANS pointe et des
+    // écrans SANS barre : la tête n'est plus un <path> du document, c'est un
+    // marker référencé par une propriété CSS.
+    'marker-end',
     'font-size', 'font-weight', 'font-family', 'text-anchor',
     'stop-color', 'stop-opacity'
   ];
@@ -2265,7 +2634,16 @@
       // Inliner AVANT de retirer quoi que ce soit : les deux arbres sont
       // parcourus en parallèle, ils doivent avoir exactement la même forme.
       inlineStyles(svg, clone);
-      var kill = [].slice.call(clone.querySelectorAll('#lay-meas, #lay-play, .hit, .wphit, .halo'));
+      // Les markers (pointes, barres d'écran) vivent dans <defs> : selon le
+      // navigateur, le `display` CALCULÉ de leurs enfants peut valoir `none`.
+      // Recopié tel quel dans la copie, il ferait disparaître toutes les
+      // pointes du PNG. On le retire — un marker n'est de toute façon dessiné
+      // que là où il est référencé.
+      [].slice.call(clone.querySelectorAll('marker, marker *')).forEach(function (e) {
+        e.style.removeProperty('display');
+        e.style.removeProperty('visibility');
+      });
+      var kill =[].slice.call(clone.querySelectorAll('#lay-meas, #lay-play, .hit, .wphit, .halo'));
       kill.forEach(function (e) { if (e.parentNode) e.parentNode.removeChild(e); });
       clone.setAttribute('width', W);
       clone.setAttribute('height', H);
@@ -2542,6 +2920,7 @@
       });
     });
     if (d.mode !== 'full') d.mode = 'half';
+    if (d.tokenSize !== 0.75 && d.tokenSize !== 1.25) d.tokenSize = 1;
     return d;
   }
 
@@ -2646,8 +3025,10 @@
   // ─────────────────────────────────────────────────────────────────────
   function setContext(txt) { document.getElementById('doc-ctx').textContent = txt; }
 
+  applyTeamColors();   // AVANT le premier drawAll : les jetons naissent déjà à la bonne couleur
   syncTitle();
   metaToForm();
+  syncSizeButtons();
   drawAll();
   renderTimeline();
   setHint();
