@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1,user-scalable=no">
+<meta name="color-scheme" content="light dark">
+<meta name="robots" content="noindex">
+<title>Éditeur de plays — POC drag</title>
+<!--
+  ══════════════════════════════════════════════════════════════════════════
+  JALON 1 — POC éditeur de plays (drag & drop iPhone)
+  ══════════════════════════════════════════════════════════════════════════
+  Fichier TOTALEMENT ISOLÉ de l'app (index.html) : aucun import, aucun état
+  partagé, aucune écriture en base. Objectif unique : valider la qualité du
+  drag d'un jeton sur iPhone Safari avant de construire les jalons 2 & 3.
+
+  UNITÉS — 1 unité SVG = 10 cm. Toutes les cotes viennent des dimensions
+  officielles FIBA :
+    terrain 28,00 × 15,00 m · raquette 4,90 m de large · ligne des lancers
+    francs à 5,80 m de la ligne de fond · cercle des LF r = 1,80 m ·
+    arc à 3 pts r = 6,75 m depuis l'axe du cercle · corners droits à 0,90 m
+    des lignes de touche · cercle (panier) à 1,575 m du fond, r = 0,225 m ·
+    planche à 1,20 m du fond, largeur 1,80 m · zone de non-charge r = 1,25 m.
+
+  MARGE — 12 unités (1,20 m) tout autour de l'aire de jeu : c'est l'espace
+  hors terrain où se place la joueuse qui fait la remise en touche. Le clamp
+  du jeton autorise cette zone (sinon impossible de dessiner une touche).
+
+  Étendre au jalon 2 : ajouter des jetons dans PLAYERS[], le moteur de drag
+  est déjà générique (attachDrag(g, token)).
+-->
+<style>
+  /* ── Thème : suit le système, surchargeable par le bouton ☀/🌙 ─────── */
+  :root{
+    --bg:#F2F4F7; --panel:#FFFFFF; --ink:#10141A; --ink-2:#5B6472;
+    --border:#D7DCE4; --btn:#FFFFFF; --btn-on:#10141A; --btn-on-ink:#FFFFFF;
+    --out:#E4E8EE;        /* zone hors-jeu (remises en touche) */
+    --court:#EFE0C6;      /* parquet */
+    --line:#8B7A5E;       /* lignes du terrain */
+    --hoop:#E4572E;       /* panier / planche */
+    --player:#22D3EE; --player-ink:#052A33; --shadow:rgba(0,0,0,.22);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0A0D12; --panel:#141A22; --ink:#EAF0F7; --ink-2:#8894A5;
+      --border:#242C38; --btn:#1B2430; --btn-on:#22D3EE; --btn-on-ink:#052A33;
+      --out:#111720; --court:#1B222C; --line:#4D5A6D; --hoop:#F2703F;
+      --player:#22D3EE; --player-ink:#052A33; --shadow:rgba(0,0,0,.55);
+    }
+  }
+  html[data-theme="light"]{
+    --bg:#F2F4F7; --panel:#FFFFFF; --ink:#10141A; --ink-2:#5B6472;
+    --border:#D7DCE4; --btn:#FFFFFF; --btn-on:#10141A; --btn-on-ink:#FFFFFF;
+    --out:#E4E8EE; --court:#EFE0C6; --line:#8B7A5E; --hoop:#E4572E;
+    --shadow:rgba(0,0,0,.22);
+  }
+  html[data-theme="dark"]{
+    --bg:#0A0D12; --panel:#141A22; --ink:#EAF0F7; --ink-2:#8894A5;
+    --border:#242C38; --btn:#1B2430; --btn-on:#22D3EE; --btn-on-ink:#052A33;
+    --out:#111720; --court:#1B222C; --line:#4D5A6D; --hoop:#F2703F;
+    --shadow:rgba(0,0,0,.55);
+  }
+
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+    display:flex; flex-direction:column; height:100dvh;
+    /* Rien ne doit scroller : le drag ne doit jamais entrer en concurrence
+       avec le scroll/bounce iOS. */
+    overflow:hidden; overscroll-behavior:none;
+    -webkit-user-select:none; user-select:none; -webkit-touch-callout:none;
+    -webkit-tap-highlight-color:transparent;
+    padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  header{
+    display:flex; align-items:center; gap:10px; padding:10px 12px;
+    background:var(--panel); border-bottom:1px solid var(--border); flex:none;
+  }
+  header .title{font-size:13px; font-weight:700; letter-spacing:.02em; flex:1}
+  header .sub{font-size:10px; color:var(--ink-2); font-weight:500}
+  .btn{
+    appearance:none; border:1px solid var(--border); background:var(--btn);
+    color:var(--ink); border-radius:9px; padding:0 12px; min-height:38px;
+    font-size:13px; font-weight:600; cursor:pointer; touch-action:manipulation;
+  }
+  .btn.on{background:var(--btn-on); color:var(--btn-on-ink); border-color:var(--btn-on)}
+  .bar{
+    display:flex; align-items:center; gap:8px; padding:8px 12px; flex:none;
+    flex-wrap:wrap; border-bottom:1px solid var(--border); background:var(--panel);
+  }
+  .seg{display:flex; gap:6px}
+  .badge{
+    margin-left:auto; display:flex; gap:8px; align-items:center;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px;
+    color:var(--ink-2);
+  }
+  .badge b{color:var(--ink); font-weight:700}
+  .stage{flex:1; min-height:0; padding:8px; display:flex}
+  svg{
+    width:100%; height:100%; display:block;
+    /* CLÉ iPhone : coupe scroll, pinch et double-tap-zoom sur toute la
+       surface du terrain, sinon Safari « vole » le geste au 1er mouvement. */
+    touch-action:none;
+  }
+  .out{fill:var(--out)}
+  .court{fill:var(--court)}
+  .ln{fill:none; stroke:var(--line); stroke-width:.9; stroke-linecap:round}
+  .hp{fill:none; stroke:var(--hoop); stroke-width:1.3; stroke-linecap:round}
+  .token{cursor:grab}
+  .token .disc{
+    fill:var(--player); stroke:var(--player-ink); stroke-width:.8;
+    filter:drop-shadow(0 1.4px 2.2px var(--shadow));
+  }
+  .token .num{
+    fill:var(--player-ink); font-weight:800; text-anchor:middle;
+    font-family:-apple-system,BlinkMacSystemFont,sans-serif; pointer-events:none;
+  }
+  /* Retour visuel au doigt : léger grossissement, sans transition (une
+     transition ajouterait de la latence perçue pendant le déplacement). */
+  .token.drag{cursor:grabbing}
+  .token.drag .disc{stroke-width:1.4; filter:drop-shadow(0 3px 5px var(--shadow))}
+  .hint{
+    flex:none; margin:0; padding:6px 12px 10px; font-size:11px; line-height:1.5;
+    color:var(--ink-2); text-align:center;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <button class="btn" onclick="location.href='/'">←</button>
+  <div class="title">Éditeur de plays <span class="sub">· POC drag (jalon 1)</span></div>
+  <button class="btn" id="theme" title="Thème">🌓</button>
+</header>
+
+<div class="bar">
+  <div class="seg">
+    <button class="btn on" id="m-half">🏀 Demi</button>
+    <button class="btn"    id="m-full">🏀 Plein</button>
+  </div>
+  <div class="badge">
+    <span>x: <b id="px">—</b></span>
+    <span>y: <b id="py">—</b></span>
+    <span><b id="fps">—</b> fps</span>
+  </div>
+</div>
+
+<div class="stage"><svg id="court" xmlns="http://www.w3.org/2000/svg"></svg></div>
+
+<p class="hint">Glisse le jeton <b>1</b>. Il peut sortir de l'aire de jeu jusqu'au bord gris (remise en touche).</p>
+
+<script>
+(function () {
+  'use strict';
+
+  // ─────────────────────────────────────────────────────────────────────
+  // 1. GÉOMÉTRIE DU TERRAIN (1 unité = 10 cm)
+  // ─────────────────────────────────────────────────────────────────────
+  var M = 12;              // marge hors-jeu (1,20 m) pour les remises en touche
+  var R3 = 67.5;           // rayon arc 3 pts (6,75 m)
+  var CORNER = 9;          // corners 3 pts à 0,90 m de la touche
+  // Écart vertical entre le centre du cercle et le point de raccord de
+  // l'arc sur la ligne droite du corner : √(R3² − (demi-largeur − 0,90 m)²)
+  var JOIN = Math.sqrt(R3 * R3 - 66 * 66);   // ≈ 14,15
+
+  var MODES = {
+    // Demi-terrain vertical (panier en haut) — orientation naturelle sur iPhone.
+    half: { vb: '0 0 174 164', w: 174, h: 164, start: { x: 87, y: 100 } },
+    // Terrain complet horizontal (deux paniers).
+    full: { vb: '0 0 304 174', w: 304, h: 174, start: { x: 152, y: 87 } }
+  };
+
+  function halfCourt() {
+    return ''
+      + '<rect class="out" x="0" y="0" width="174" height="164"/>'
+      + '<rect class="court" x="12" y="12" width="150" height="140"/>'
+      // Limites de l'aire de jeu (fond + touches) et ligne médiane.
+      + '<rect class="ln" x="12" y="12" width="150" height="140"/>'
+      + '<line class="ln" x1="12" y1="152" x2="162" y2="152"/>'
+      // Demi cercle central (l'autre moitié est hors du demi-terrain).
+      + '<path class="ln" d="M 69 152 A 18 18 0 0 1 105 152"/>'
+      // Raquette 4,90 m (x 62,5 → 111,5) profonde de 5,80 m + cercle des LF.
+      + '<rect class="ln" x="62.5" y="12" width="49" height="58"/>'
+      + '<circle class="ln" cx="87" cy="70" r="18"/>'
+      // Arc à 3 pts : corners droits puis arc de 6,75 m autour du panier.
+      + '<path class="ln" d="M 21 12 L 21 ' + f(27.75 + JOIN) + ' A 67.5 67.5 0 0 0 153 ' + f(27.75 + JOIN) + ' L 153 12"/>'
+      // Zone de non-charge (1,25 m).
+      + '<path class="ln" d="M 74.5 27.75 A 12.5 12.5 0 0 0 99.5 27.75"/>'
+      // Planche + cercle.
+      + '<line class="hp" x1="78" y1="24" x2="96" y2="24"/>'
+      + '<line class="hp" x1="87" y1="24" x2="87" y2="25.5"/>'
+      + '<circle class="hp" cx="87" cy="27.75" r="2.25"/>';
+  }
+
+  function fullCourt() {
+    var j = f(41.9), jr = f(262.1);   // raccords arc/corner (27,75 ± JOIN)
+    return ''
+      + '<rect class="out" x="0" y="0" width="304" height="174"/>'
+      + '<rect class="court" x="12" y="12" width="280" height="150"/>'
+      + '<rect class="ln" x="12" y="12" width="280" height="150"/>'
+      + '<line class="ln" x1="152" y1="12" x2="152" y2="162"/>'
+      + '<circle class="ln" cx="152" cy="87" r="18"/>'
+      // ── Panier gauche ────────────────────────────────────────────────
+      + '<rect class="ln" x="12" y="62.5" width="58" height="49"/>'
+      + '<circle class="ln" cx="70" cy="87" r="18"/>'
+      + '<path class="ln" d="M 12 21 L ' + j + ' 21 A 67.5 67.5 0 0 1 ' + j + ' 153 L 12 153"/>'
+      + '<path class="ln" d="M 27.75 74.5 A 12.5 12.5 0 0 1 27.75 99.5"/>'
+      + '<line class="hp" x1="24" y1="78" x2="24" y2="96"/>'
+      + '<line class="hp" x1="24" y1="87" x2="25.5" y2="87"/>'
+      + '<circle class="hp" cx="27.75" cy="87" r="2.25"/>'
+      // ── Panier droit (miroir) ────────────────────────────────────────
+      + '<rect class="ln" x="234" y="62.5" width="58" height="49"/>'
+      + '<circle class="ln" cx="234" cy="87" r="18"/>'
+      + '<path class="ln" d="M 292 21 L ' + jr + ' 21 A 67.5 67.5 0 0 0 ' + jr + ' 153 L 292 153"/>'
+      + '<path class="ln" d="M 276.25 74.5 A 12.5 12.5 0 0 0 276.25 99.5"/>'
+      + '<line class="hp" x1="280" y1="78" x2="280" y2="96"/>'
+      + '<line class="hp" x1="280" y1="87" x2="278.5" y2="87"/>'
+      + '<circle class="hp" cx="276.25" cy="87" r="2.25"/>';
+  }
+
+  function f(n) { return Math.round(n * 100) / 100; }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // 2. ÉTAT
+  // ─────────────────────────────────────────────────────────────────────
+  var svg = document.getElementById('court');
+  var elX = document.getElementById('px');
+  var elY = document.getElementById('py');
+  var elFps = document.getElementById('fps');
+
+  var mode = 'half';
+  var pos = { x: MODES.half.start.x, y: MODES.half.start.y };
+  var PR = 0;              // rayon du jeton, recalculé par mode
+  var tok = null;          // <g> du jeton
+
+  // Le jeton doit rester ~40 px de diamètre à l'écran quel que soit le mode :
+  // on l'exprime donc en fraction de la largeur du viewBox (qui, lui, est
+  // toujours mis à l'échelle sur la largeur disponible).
+  function radiusFor(m) { return MODES[m].w / 19; }
+
+  function draw() {
+    var cfg = MODES[mode];
+    PR = radiusFor(mode);
+    svg.setAttribute('viewBox', cfg.vb);
+    svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    svg.innerHTML = (mode === 'half' ? halfCourt() : fullCourt())
+      + '<g class="token" id="tok">'
+      + '<circle class="disc" cx="0" cy="0" r="' + f(PR) + '"/>'
+      + '<text class="num" x="0" y="0" dy="0.35em" font-size="' + f(PR * 1.05) + '">1</text>'
+      + '</g>';
+    tok = document.getElementById('tok');
+    attachDrag(tok);
+    setPos(pos.x, pos.y);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // 3. POSITION + CLAMP
+  // ─────────────────────────────────────────────────────────────────────
+  // Le jeton peut aller jusqu'au bord du viewBox (donc dans la marge de
+  // remise en touche) mais jamais au-delà : le disque reste entièrement
+  // visible.
+  function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+  function setPos(x, y) {
+    var cfg = MODES[mode];
+    pos.x = clamp(x, PR, cfg.w - PR);
+    pos.y = clamp(y, PR, cfg.h - PR);
+    // transform (composited) plutôt que cx/cy : moins de recalcul par frame.
+    tok.setAttribute('transform', 'translate(' + f(pos.x) + ' ' + f(pos.y) + ')');
+    elX.textContent = Math.round(pos.x);
+    elY.textContent = Math.round(pos.y);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // 4. DRAG — PointerEvents (iPhone + desktop, même chemin de code)
+  // ─────────────────────────────────────────────────────────────────────
+  // Écran → coordonnées SVG via getScreenCTM().inverse() : exact quelle que
+  // soit la mise à l'échelle du viewBox, le zoom ou la rotation de l'écran.
+  function toSvg(clientX, clientY) {
+    var ctm = svg.getScreenCTM();
+    if (!ctm) return null;
+    var p = svg.createSVGPoint();
+    p.x = clientX; p.y = clientY;
+    return p.matrixTransform(ctm.inverse());
+  }
+
+  function attachDrag(g) {
+    var dragging = false;
+    var off = { x: 0, y: 0 };     // écart doigt ↔ centre au moment du grab
+    var pending = null;           // dernier pointermove non encore rendu
+    var raf = 0;
+
+    // On ne rend QU'UNE fois par frame : les pointermove arrivent souvent
+    // plus vite que 60 Hz sur iPhone (jusqu'à 120 Hz), inutile de recalculer
+    // le CTM à chaque événement.
+    function flush() {
+      raf = 0;
+      var e = pending; pending = null;
+      if (!e) return;
+      var p = toSvg(e.clientX, e.clientY);
+      if (!p) return;
+      setPos(p.x + off.x, p.y + off.y);
+      fpsTick();
+    }
+
+    g.addEventListener('pointerdown', function (e) {
+      e.preventDefault();
+      var p = toSvg(e.clientX, e.clientY);
+      if (!p) return;
+      dragging = true;
+      off.x = pos.x - p.x;
+      off.y = pos.y - p.y;
+      // Capture : le doigt garde le jeton même s'il sort du <g> (et on reçoit
+      // toujours le pointerup, y compris hors de l'élément).
+      try { g.setPointerCapture(e.pointerId); } catch (_) {}
+      g.classList.add('drag');
+      fpsReset();
+    }, { passive: false });
+
+    g.addEventListener('pointermove', function (e) {
+      if (!dragging) return;
+      e.preventDefault();
+      pending = e;
+      if (!raf) raf = requestAnimationFrame(flush);
+    }, { passive: false });
+
+    function end(e) {
+      if (!dragging) return;
+      dragging = false;
+      if (pending) { if (raf) cancelAnimationFrame(raf); raf = 0; flush(); }
+      try { g.releasePointerCapture(e.pointerId); } catch (_) {}
+      g.classList.remove('drag');
+      elFps.textContent = '—';
+    }
+    g.addEventListener('pointerup', end);
+    g.addEventListener('pointercancel', end);
+    // Filet iOS : un geste système (swipe bord d'écran) peut avaler le pointer.
+    g.addEventListener('lostpointercapture', function () { g.classList.remove('drag'); });
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // 5. COMPTEUR FPS (mesure la fluidité réelle du drag sur l'appareil)
+  // ─────────────────────────────────────────────────────────────────────
+  var fpsN = 0, fpsT = 0;
+  function fpsReset() { fpsN = 0; fpsT = performance.now(); elFps.textContent = '…'; }
+  function fpsTick() {
+    fpsN++;
+    var now = performance.now();
+    if (now - fpsT >= 400) {
+      elFps.textContent = Math.round(fpsN * 1000 / (now - fpsT));
+      fpsN = 0; fpsT = now;
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // 6. UI
+  // ─────────────────────────────────────────────────────────────────────
+  function setMode(m) {
+    if (m === mode) return;
+    mode = m;
+    document.getElementById('m-half').classList.toggle('on', m === 'half');
+    document.getElementById('m-full').classList.toggle('on', m === 'full');
+    pos.x = MODES[m].start.x;
+    pos.y = MODES[m].start.y;
+    draw();
+  }
+  document.getElementById('m-half').addEventListener('click', function () { setMode('half'); });
+  document.getElementById('m-full').addEventListener('click', function () { setMode('full'); });
+
+  document.getElementById('theme').addEventListener('click', function () {
+    var cur = document.documentElement.getAttribute('data-theme');
+    var next = cur === 'dark' ? 'light' : (cur === 'light' ? '' : 'dark');
+    if (next) document.documentElement.setAttribute('data-theme', next);
+    else document.documentElement.removeAttribute('data-theme');
+  });
+
+  // Le CTM change quand la fenêtre bouge : rien à recalculer ici (il est relu
+  // à chaque frame de drag), mais on garde le jeton dans les clous.
+  window.addEventListener('resize', function () { setPos(pos.x, pos.y); });
+
+  draw();
+})();
+</script>
+</body>
+</html>

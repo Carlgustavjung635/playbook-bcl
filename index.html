@@ -16197,6 +16197,7 @@ function renderPlays() {
         <div>
           <div class="eyebrow-muted">${items.length} ${items.length > 1 ? 'plays' : 'play'}${orphanItems.length > 0 ? ' · ' + orphanItems.length + ' dispo' : ''}</div>
           <h2 class="display-lg mt-2">Playbook</h2>
+          ${isCoach ? _pbEditorV2Row() : ''}
         </div>
         ${isCoach && canEditSharedLibrary() ? `<button class="btn btn-primary" onclick="editPlay()">+ NOUVEAU</button>` : ''}
       </div>
@@ -16264,6 +16265,37 @@ function renderPlays() {
       ` : ''}
     </div>
   `;
+}
+
+// ── ÉDITEUR DE PLAYS v2 (beta) ───────────────────────────────────────────
+// JALON 1 : POC de drag & drop, isolé dans /src/plays-editor-poc.html. Aucun
+// code ni état partagé avec l'app, aucune persistance, aucune migration.
+// Gaté par un flag localStorage (défaut OFF) : tant qu'il n'est pas coché, le
+// bouton d'accès n'existe pas dans le DOM. Réglage coach-only (la ligne n'est
+// rendue que si isCoach dans renderPlays).
+const PB_EDITOR_V2_FLAG = 'pb_editor_v2_enabled';
+function pbEditorV2Enabled() {
+  try { return localStorage.getItem(PB_EDITOR_V2_FLAG) === 'true'; } catch (e) { return false; }
+}
+function togglePbEditorV2(on) {
+  try { localStorage.setItem(PB_EDITOR_V2_FLAG, on ? 'true' : 'false'); } catch (e) {}
+  render();
+}
+function openPbEditorV2() {
+  // Double garde : même si le bouton fuitait, le flag reste la seule porte.
+  if (!pbEditorV2Enabled()) return;
+  location.href = '/src/plays-editor-poc.html';
+}
+function _pbEditorV2Row() {
+  const on = pbEditorV2Enabled();
+  return `
+    <div style="margin-top:10px;display:flex;flex-wrap:wrap;align-items:center;gap:10px">
+      <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em">
+        <input type="checkbox" ${on ? 'checked' : ''} onchange="togglePbEditorV2(this.checked)">
+        <span>Éditeur de plays v2 (beta)</span>
+      </label>
+      ${on ? `<button class="btn btn-secondary" style="font-size:12px" onclick="openPbEditorV2()">🆕 Nouvel éditeur (beta)</button>` : ''}
+    </div>`;
 }
 
 function toggleShowInactivePlays() {
@@ -52236,7 +52268,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.168';
+const APP_VERSION = '2026-08-19.169';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
