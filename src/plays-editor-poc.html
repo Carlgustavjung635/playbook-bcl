@@ -47,6 +47,13 @@
     · le LOGO du club peint sur le parquet, embarqué en data: URI pour
       survivre à l'export photo.
 
+  ── CE QUE LA v.175 AJOUTE ────────────────────────────────────────────────
+    · l'ÉTIQUETTE des pastilles — chiffres 1…5 ou lettres A…E pour l'attaque,
+      la défense restant X1…X5 (`player_label_style`). C'est de l'AFFICHAGE
+      pur : le modèle désigne toujours les joueuses par leur id, et le format
+      d'échange par son numéro signé. Une seule fonction, labelOf(), sert le
+      jeton, l'encart d'info et le fil d'aide.
+
   ── UN TEMPS = UNE PHOTO + CE QUI SE PASSE PENDANT ────────────────────────
   Chaque temps porte SES PROPRES positions (`pos`) plutôt que de les dériver
   du temps précédent à la volée. C'est un choix, et il est motivé :
@@ -518,6 +525,7 @@
     <button class="btn sm"    id="z-s" title="Petits jetons (0,75×)">S</button>
     <button class="btn sm on" id="z-m" title="Jetons normaux (1×)">M</button>
     <button class="btn sm"    id="z-l" title="Grands jetons (1,25×)">L</button>
+    <button class="btn sm"    id="b-label" title="Étiquette des pastilles : chiffres 1…5 ou lettres A…E (l'attaque seulement — la défense reste X1…X5)">🔢</button>
   </div>
   <div class="badge">
     <span>👥 <b id="i-tok">—</b></span>
@@ -886,7 +894,7 @@
     return {
       id: null, title: '', tag: '', side: 'attaque', color: '#22D3EE',
       description: '', points: '', author: '',
-      ballStart: 'a1', defOn: false, mode: 'half', tokenSize: 1,
+      ballStart: 'a1', defOn: false, mode: 'half', tokenSize: 1, labelStyle: 'numbers',
       half: { steps: [ makeStep(startPos('half')) ] },
       full: { steps: [ makeStep(startPos('full')) ] }
     };
@@ -933,6 +941,24 @@
     if (!q) return null;
     return { id: t.id, side: t.side, n: t.n, x: q.x, y: q.y };
   }
+  // ── ÉTIQUETTE D'UN JETON (v.175) ─────────────────────────────────────
+  // LE seul endroit qui décide de ce qui est écrit sur une pastille.
+  // tokenMarkup, syncInfo et setHint passent tous par ici : trois formules
+  // parallèles finiraient par diverger, et la barre d'info annoncerait
+  // « 🏀 3 » pendant que le jeton afficherait « C » — de quoi faire douter le
+  // coach de ce qu'il a sous les yeux.
+  //
+  // Le style ne concerne QUE l'attaque : `X1…X5` est déjà la convention des
+  // coachs pour la défense, il n'y a rien à y basculer.
+  var ATK_LETTERS = 'ABCDE';
+  function labelOf(id) {
+    var t = TOKMAP[id];
+    if (!t) return '';
+    if (t.side !== 'atk') return 'X' + t.n;
+    if (doc && doc.labelStyle === 'letters') return ATK_LETTERS.charAt(t.n - 1) || String(t.n);
+    return String(t.n);
+  }
+
   function visible(t) { return !!t && (t.side === 'atk' || doc.defOn); }
   // Une flèche n'est rendue (ni comptée) que si ses deux extrémités le sont.
   function arwVisible(a) {
@@ -1024,7 +1050,7 @@
   }
 
   function tokenMarkup(t) {
-    var lbl = t.side === 'atk' ? String(t.n) : 'X' + t.n;
+    var lbl = labelOf(t.id);
     var fs  = t.side === 'atk' ? PR * 1.05 : PR * 0.82;
     var br  = PR * 0.44, bx = PR * 0.82, by = -PR * 0.78;
     return '<g class="token ' + t.side + '" data-id="' + t.id + '">'
@@ -1944,7 +1970,9 @@
     elTok.textContent = doc.defOn ? '10' : '5';
     elArw.textContent = String(n);
     var b = tokById(holderAt(cur));
-    elBal.textContent = (b && visible(b)) ? (b.side === 'atk' ? '#' + b.n : 'X' + b.n) : '—';
+    // Pas de préfixe « # » : il ne veut plus rien dire devant une lettre, et
+    // le 🏀 de l'encart annonce déjà de quoi on parle.
+    elBal.textContent = (b && visible(b)) ? labelOf(b.id) : '—';
   }
 
   var fpsN = 0, fpsT = 0;
@@ -1973,8 +2001,7 @@
       return;
     }
     if (pending) {
-      var t = tokById(pending);
-      h = 'Source : <b>' + (t.side === 'atk' ? t.n : 'X' + t.n) + '</b> — '
+      h = 'Source : <b>' + labelOf(pending) + '</b> — '
         + (tool === 'pass' ? 'tape maintenant la réceptionneuse.' : 'tape maintenant la destination.')
         + ' (tape dans le vide pour annuler)';
     } else {
@@ -2089,6 +2116,26 @@
   }
   Object.keys(SIZES).forEach(function (k) {
     document.getElementById('z-' + k).addEventListener('click', function () { setTokenSize(k); });
+  });
+
+  // ── Étiquette des pastilles : chiffres ou lettres (v.175) ────────────
+  // Affichage PUR : le modèle continue de désigner les joueuses par leur id
+  // ('a3') et le format d'échange par son numéro SIGNÉ (+3 / −3). Basculer ne
+  // renumérote donc rien, et un JSON exporté en lettres reste lisible par
+  // n'importe quel outil qui ignore `player_label_style`.
+  function syncLabelButton() {
+    var letters = doc.labelStyle === 'letters';
+    var b = document.getElementById('b-label');
+    b.textContent = letters ? '🔤' : '🔢';
+    b.classList.toggle('on', letters);
+  }
+  document.getElementById('b-label').addEventListener('click', function () {
+    doc.labelStyle = doc.labelStyle === 'letters' ? 'numbers' : 'letters';
+    syncLabelButton();
+    // Les positions vivent dans step().pos, pas dans le DOM : redessiner les
+    // jetons ne peut pas les perdre. Et pas de drawAll() — ni le terrain ni
+    // les flèches n'ont bougé, seul le texte des pastilles change.
+    drawTokens(); syncInfo(); setHint(); touch();
   });
 
   // Le bouton 3D est présent mais désactivé tant que VIEWS['3d'].ready est
@@ -2414,6 +2461,7 @@
       court_type: doc.mode,
       defense_enabled: !!doc.defOn,
       players_size: doc.tokenSize || 1,
+      player_label_style: doc.labelStyle === 'letters' ? 'letters' : 'numbers',
       ball_start: doc.ballStart ? numOf(doc.ballStart) : null,
       created_by: doc.author || null,
       players: players,
@@ -2480,6 +2528,9 @@
     // qui dirait 3,7 étalerait des jetons plus larges que la raquette.
     var ts = +pick(o, 'players_size', 'playersSize', 'token_size');
     d.tokenSize = (ts === 0.75 || ts === 1 || ts === 1.25) ? ts : 1;
+    // Liste fermée : tout ce qui n'est pas 'letters' retombe sur les chiffres,
+    // qui restent le défaut historique.
+    d.labelStyle = pick(o, 'player_label_style', 'playerLabelStyle', 'label_style') === 'letters' ? 'letters' : 'numbers';
     d.ballStart = refId(pick(o, 'ball_start', 'ballStart'));
 
     // Positions de départ : ce que `players` dit, complété par la disposition
@@ -2556,7 +2607,7 @@
     document.getElementById('m-half').classList.toggle('on', doc.mode === 'half');
     document.getElementById('m-full').classList.toggle('on', doc.mode === 'full');
     document.getElementById('b-def').classList.toggle('on', !!doc.defOn);
-    syncSizeButtons();
+    syncSizeButtons(); syncLabelButton();
     metaToForm(); syncTitle();
     drawAll(); renderTimeline(); setHint();
   }
@@ -2942,6 +2993,7 @@
     });
     if (d.mode !== 'full') d.mode = 'half';
     if (d.tokenSize !== 0.75 && d.tokenSize !== 1.25) d.tokenSize = 1;
+    if (d.labelStyle !== 'letters') d.labelStyle = 'numbers';
     return d;
   }
 
@@ -3050,6 +3102,7 @@
   syncTitle();
   metaToForm();
   syncSizeButtons();
+  syncLabelButton();
   drawAll();
   renderTimeline();
   setHint();
