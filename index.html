@@ -4005,6 +4005,21 @@
   .feed-empty-icon { font-size: 30px; opacity: 0.6; margin-bottom: 8px; }
   .feed-empty-title { font-family: 'Anton'; font-size: 15px; text-transform: uppercase; letter-spacing: 0.02em; }
   .feed-empty-sub { margin-top: 5px; font-size: 11px; color: var(--ink-3); line-height: 1.5; }
+  /* « 👀 Qui a réagi » — rendu COACH uniquement (cf. _feedCanSeeReactors). */
+  .feed-react-who { margin-right: 4px; opacity: 0.75; }
+  .feed-react-who:hover { opacity: 1; }
+  .feed-reactors-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 0; border-bottom: 1px solid var(--border-soft);
+  }
+  .feed-reactors-row:last-child { border-bottom: none; }
+  .feed-reactors-emoji { font-size: 18px; line-height: 1; flex: none; }
+  .feed-reactors-who { flex: 1; min-width: 0; font-size: 13px; color: var(--ink-1); line-height: 1.45; }
+  .feed-reactors-n {
+    flex: none; font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    color: var(--ink-3); background: var(--surface-2, rgba(127,127,127,0.12));
+    border-radius: 999px; padding: 2px 8px;
+  }
   /* Tablette : le mur reste lisible sans s'étirer sur toute la largeur. */
   @media (min-width: 768px) {
     .feed-photo { max-height: 260px; }
@@ -27301,6 +27316,264 @@ function _feedSrcPoints(scope, since) {
     .filter(e => e.ts >= since && _feedInSeason(e.ts));
 }
 
+// --- SOURCE 7 : GAGES — À TIRER, PUIS TIRÉ ----------------------------------
+// Deux moments, DEUX horodatages déjà en base (`assignedAt`, `drawnAt`) : rien à
+// écrire, comme partout ailleurs ici.
+//
+// 🔴 LE CONTENU DU GAGE NE SORT JAMAIS. Ni le texte, ni le `gageId`, ni le
+// résultat du tirage (accepté / passé) : la Boîte à gages est anonyme par
+// construction, et « X a tiré son gage » est un fait de la vie du groupe là où
+// « X doit faire Y » est une punition publiée sur le mur. Même règle que
+// l'historique de points, qui ne reprend pas non plus le texte du gage.
+//
+// GROUPÉ PAR LOT (playerId, assignedAt) : le coach assigne un batch de N gages
+// d'un coup (une boucle sur un même `now`) — ce serait N lignes jumelles.
+function _feedSrcGages(scope, since) {
+  const lots = {};
+  const out = [];
+  (state.gageDraws || []).forEach(d => {
+    if (!d || d.deletedAt || d.status === 'adjust') return;
+    if (!d.playerId || !scope.has(d.playerId)) return;
+    if (d.assignedAt) {
+      const k = d.playerId + '|' + d.assignedAt;
+      if (!lots[k]) lots[k] = { pid: d.playerId, ts: d.assignedAt, n: 0 };
+      lots[k].n++;
+    }
+    if (d.drawnAt) {
+      out.push(Object.assign({
+        id: 'af:gagedrawn:' + d.id,
+        type: 'gage_drawn',
+        ts: d.drawnAt,
+        icon: '🎲',
+        text: 'a tiré son gage',
+        meta: '',
+        photoUrl: ''
+      }, _feedActorFields(scope.get(d.playerId))));
+    }
+  });
+  Object.values(lots).forEach(l => {
+    out.push(Object.assign({
+      id: 'af:gageowed:' + l.pid + ':' + l.ts,
+      type: 'gage_assigned',
+      ts: l.ts,
+      icon: '🎲',
+      text: l.n > 1 ? 'a ' + l.n + ' gages à tirer' : 'a un gage à tirer',
+      meta: '',
+      photoUrl: ''
+    }, _feedActorFields(scope.get(l.pid))));
+  });
+  return out.filter(e => e.ts >= since && _feedInSeason(e.ts));
+}
+
+// --- SOURCE 8 : ARDOISE — DETTE POSÉE, PUIS MACHINE LANCÉE ------------------
+// Le RÈGLEMENT de la dette a déjà sa source (n° 4, `ardoise_done`) depuis la
+// v.127 : on ne le redouble pas ici. Ces deux lignes-là sont l'amont.
+// Comme pour les gages, ni le menu ni les exos ne sortent tant que la dette
+// n'est pas réglée — le mur annonce qu'il y a une ardoise, pas ce qu'elle coûte.
+function _feedSrcArdoiseOpened(scope, since) {
+  const out = [];
+  (state.ardoiseAssignments || []).forEach(a => {
+    if (!a || a.deletedAt || !scope.has(a.playerId)) return;
+    const p = scope.get(a.playerId);
+    const given = a.assignedAt || a.createdAt || 0;
+    if (given) {
+      out.push(Object.assign({
+        id: 'af:ardgiven:' + a.id,
+        type: 'ardoise_assigned',
+        ts: given,
+        icon: '🎰',
+        text: 'a été ardoisée',
+        meta: '',
+        photoUrl: ''
+      }, _feedActorFields(p)));
+    }
+    // `mode === 'casino'` : SEUL `_ardCommitSpin` le pose, en même temps que
+    // `drawnAt`. Une dette montée à la main par le coach passe directement en
+    // `in_progress` sans machine — il n'y a rien eu à tirer.
+    if (a.drawnAt && a.mode === 'casino') {
+      out.push(Object.assign({
+        id: 'af:arddrawn:' + a.id,
+        type: 'ardoise_drawn',
+        ts: a.drawnAt,
+        icon: '🎰',
+        text: 'a tiré son ardoise à la machine',
+        meta: (a.items || []).length ? (a.items || []).length + ' exos' : '',
+        photoUrl: ''
+      }, _feedActorFields(p)));
+    }
+  });
+  return out.filter(e => e.ts >= since && _feedInSeason(e.ts));
+}
+
+// --- SOURCE 9 : ENTRÉE DANS LE TOP 3 D'UN DÉFI ------------------------------
+// Même gisement et même lecture chronologique que les records (source 3) : on
+// rejoue les tentatives dans l'ordre et on regarde le classement BASCULER. Une
+// source séparée plutôt qu'une greffe dans _feedSrcChallenges : les 50
+// assertions de scripts/test-activity-feed.mjs portent sur cette fonction-là.
+//
+// GARDE : il faut au moins QUATRE joueuses classées. À trois ou moins, « entrer
+// dans le top 3 » ne dit rien — tout le monde y est.
+function _feedSrcChallengeTop3(scope, since) {
+  const challenges = (typeof currentSeasonChallenges === 'function') ? currentSeasonChallenges() : (state.challenges || []);
+  const out = [];
+  (challenges || []).forEach(c => {
+    if (!c || c.autoCount) return;
+    if (!(c.mode === 'series' || c.mode === 'timed' || c.mode === 'countdown_score')) return;
+    const field = c.mode === 'timed' ? 'durationMs' : 'made';
+    const lower = !!c.lowerIsBetter;
+    const title = (c.title || 'un défi').trim();
+    const all = [];
+    Object.keys(c.series || {}).forEach(pid => {
+      if (!scope.has(pid)) return;
+      ((c.series[pid] || []) || []).forEach(s => {
+        if (!s || s.deletedAt) return;
+        const v = Number(s[field]);
+        if (!Number.isFinite(v) || v <= 0) return;
+        all.push({ pid, id: s.id, ts: s.createdAt || 0, value: v });
+      });
+    });
+    all.sort((a, b) => (a.ts || 0) - (b.ts || 0) || String(a.id).localeCompare(String(b.id)));
+
+    const best = {};
+    const rankOf = (pid) => {
+      const v = best[pid];
+      if (v == null) return Infinity;
+      let r = 1;
+      Object.keys(best).forEach(k => { if (k !== pid && (lower ? best[k] < v : best[k] > v)) r++; });
+      return r;
+    };
+    all.forEach(a => {
+      const prev = best[a.pid];
+      if (prev != null && !(lower ? a.value < prev : a.value > prev)) return;  // pas d'amélioration → pas de mouvement
+      const before = rankOf(a.pid);
+      best[a.pid] = a.value;
+      const after = rankOf(a.pid);
+      if (Object.keys(best).length < 4) return;
+      if (after > 3 || before <= 3) return;
+      out.push(Object.assign({
+        id: 'af:top3:' + c.id + ':' + a.id,
+        type: 'challenge_top3',
+        ts: a.ts,
+        icon: '🥉',
+        text: 'entre dans le top 3 de « ' + title + ' »',
+        meta: after === 1 ? '1re place' : after + 'e place',
+        photoUrl: ''
+      }, _feedActorFields(scope.get(a.pid))));
+    });
+  });
+  return out.filter(e => e.ts >= since && _feedInSeason(e.ts));
+}
+
+// --- CHRONOLOGIE DE PRÉSENCE (sources 10 et 11) -----------------------------
+// Une entrée par instance CLÔTURÉE où la joueuse était attendue, AVEC son
+// verdict — présente ou non. `_pointsAttendanceBySeason` ne rend que les
+// présences : une série « d'affilée » se casse sur ce qui MANQUE, il faut donc
+// les absences aussi. Les règles de lecture sont copiées telles quelles (feuille
+// d'appel si elle est faite, sinon RSVP + indisponibilités) : deux dérivations
+// qui lisent la même instance doivent en tirer le MÊME verdict (leçon v.146).
+//
+// Mémoïsé le temps d'une dérivation : les deux sources qui s'en servent le
+// demanderaient sinon deux fois, et la boucle traverse toutes les instances de
+// la saison.
+function _feedAttendanceTimeline(scope) {
+  if (window._pbFeedTimeline) return window._pbFeedTimeline;
+  const out = {};
+  window._pbFeedTimeline = out;
+  const sid = (typeof getActiveSeasonId === 'function') ? getActiveSeasonId() : null;
+  if (!sid || typeof getConvocInstances !== 'function') return out;
+  const season = (state.seasons || []).find(s => s.id === sid);
+  const todayISO = isoDate(new Date());
+  const from = (season && season.startDate) || '2000-01-01';
+  const to = (season && season.endDate && season.endDate < todayISO) ? season.endDate : todayISO;
+  (state.convocations || []).forEach(c => {
+    if (!c || c.deletedAt || c.type === 'match') return;
+    const team = c.teamTag === 'both' ? 'all' : (c.teamTag === 'e2' ? 'e2' : 'e1');
+    let pool = [];
+    try { pool = getSeasonPlayers(sid, { team }) || []; } catch (e) { pool = []; }
+    let instances = [];
+    try { instances = getConvocInstances(c, from, to); } catch (e) { instances = []; }
+    instances.forEach(inst => {
+      if (!_convocInstanceCounts(c, inst)) return;
+      if (getSeasonIdForDate(inst.date) !== sid) return;
+      const sheet = _convocCallSheet(c, inst.date);
+      const arrivals = _callSheetDone(sheet) ? sheet.arrivals : null;
+      pool.forEach(p => {
+        if (!p || !scope.has(p.id)) return;
+        const present = arrivals
+          ? !!arrivals[p.id]
+          : (((inst.responses || {})[p.id] || {}).status === 'present');
+        (out[p.id] = out[p.id] || []).push({ date: inst.date, present: present });
+      });
+    });
+  });
+  Object.keys(out).forEach(pid => out[pid].sort((a, b) => String(a.date).localeCompare(String(b.date))));
+  return out;
+}
+
+// --- SOURCE 10 : SÉRIE DE PRÉSENCES -----------------------------------------
+// Une ligne au PALIER FRANCHI, jamais à chaque séance : sinon la joueuse la plus
+// assidue occuperait le mur à elle seule. La ligne est datée de la séance qui a
+// fait basculer le compteur, et son id la porte — la série se recalcule à chaque
+// lecture, donc une présence corrigée après coup déplace ou efface l'événement
+// tout seul (c'est tout l'intérêt du mur dérivé).
+const FEED_STREAK_TIERS = [5, 10, 15, 20, 25];
+function _feedSrcStreaks(scope, since) {
+  const timeline = _feedAttendanceTimeline(scope);
+  const out = [];
+  Object.keys(timeline).forEach(pid => {
+    const p = scope.get(pid);
+    if (!p) return;
+    let run = 0;
+    timeline[pid].forEach(e => {
+      if (!e.present) { run = 0; return; }
+      run++;
+      if (FEED_STREAK_TIERS.indexOf(run) === -1) return;
+      out.push(Object.assign({
+        id: 'af:streak:' + pid + ':' + run + ':' + e.date,
+        type: 'attendance_streak',
+        ts: Date.parse(e.date + 'T12:00:00'),
+        icon: '🔥',
+        text: 'enchaîne ' + run + ' entraînements d\'affilée',
+        meta: '',
+        photoUrl: ''
+      }, _feedActorFields(p)));
+    });
+  });
+  return out.filter(e => e.ts >= since && _feedInSeason(e.ts));
+}
+
+// --- SOURCE 11 : RETOUR APRÈS INDISPONIBILITÉ -------------------------------
+// La PREMIÈRE présence qui suit la fin d'une période. Le MOTIF ne sort jamais —
+// même règle que UNAVAIL_LABEL : une indisponibilité n'est pas forcément
+// médicale, et le mur est lu par tout le groupe. « De retour », rien d'autre.
+//
+// Seul `state.playerUnavailabilities` est lu. Le statut médical de la fiche
+// (`p.injury`) porte les mêmes dates mais reste LOCAL, hors base (v.97/98) : le
+// dériver donnerait un mur différent sur chaque appareil.
+//
+// L'id est clé sur la DATE DU RETOUR, pas sur la fin de période : deux périodes
+// qui se chevauchent produisent alors le même id, et le dédoublonnage de
+// pbFeedEvents efface le doublon sans qu'on ait à le chercher ici.
+function _feedSrcComeback(scope, since) {
+  const timeline = _feedAttendanceTimeline(scope);
+  const out = [];
+  (state.playerUnavailabilities || []).forEach(u => {
+    if (!u || u.deletedAt || !u.endsAt || !u.playerId || !scope.has(u.playerId)) return;
+    const back = (timeline[u.playerId] || []).find(e => e.present && e.date > u.endsAt);
+    if (!back) return;
+    out.push(Object.assign({
+      id: 'af:comeback:' + u.playerId + ':' + back.date,
+      type: 'unavail_comeback',
+      ts: Date.parse(back.date + 'T12:00:00'),
+      icon: '💪',
+      text: 'est de retour à l\'entraînement',
+      meta: '',
+      photoUrl: ''
+    }, _feedActorFields(scope.get(u.playerId))));
+  });
+  return out.filter(e => e.ts >= since && _feedInSeason(e.ts));
+}
+
 // --- LA PORTE UNIQUE --------------------------------------------------------
 // Chaque source est isolée dans son propre try : une source qui casse (donnée
 // exotique, feature pas encore migrée) ne doit pas emporter le mur entier —
@@ -27309,6 +27582,7 @@ function pbFeedEvents(opts) {
   const o = opts || {};
   const since = Number.isFinite(o.since) ? o.since : _feedWindowStart();
   const scope = o.scope || _feedPlayerScope();
+  window._pbFeedTimeline = null;   // la chronologie de présence est valable LE TEMPS d'une dérivation
   const out = [];
   const run = (fn) => {
     try {
@@ -27325,6 +27599,11 @@ function pbFeedEvents(opts) {
   run(_feedSrcArdoise);
   run(_feedSrcBirthdays);
   run(_feedSrcPoints);
+  run(_feedSrcGages);
+  run(_feedSrcArdoiseOpened);
+  run(_feedSrcChallengeTop3);
+  run(_feedSrcStreaks);
+  run(_feedSrcComeback);
   (window._pbFeedExtraSources || []).forEach(fn => { if (typeof fn === 'function') run(fn); });
   // Dédoublonnage par id : deux sources qui produiraient le même identifiant
   // (une extension mal réglée) ne doivent pas doubler la ligne.
@@ -27463,11 +27742,62 @@ function _feedAvatar(ev) {
   const initial = esc(String(ev.actorLabel || '?').replace(/^#\d+\s*/, '').charAt(0).toUpperCase() || '?');
   return `<div class="feed-avatar feed-avatar-fallback">${initial}</div>`;
 }
+// --- QUI A RÉAGI — COACH SEULEMENT ------------------------------------------
+// Côté joueuse RIEN NE CHANGE : le compteur, et c'est tout. Nommer publiquement
+// qui a aimé une séance, c'est surtout donner à lire qui ne l'a PAS aimée — le
+// complément trahit (leçon v.114), et le mur est un endroit où l'on se félicite,
+// pas un sociogramme du vestiaire. Le coach, lui, lit le mur comme un
+// thermomètre du groupe : c'est son métier de voir qui décroche.
+//
+// Garde POSITIVE (`role === 'coach'`), jamais `!== 'player'` : un rôle ajouté
+// demain doit être exclu par défaut, comme feedIsVisible().
+function _feedCanSeeReactors() {
+  return !!(state.auth && state.auth.role === 'coach');
+}
+function _feedReactorLabel(r) {
+  const p = (state.players || []).find(x => x && x.id === r.actorId);
+  if (p) return p.name || 'Joueuse';
+  if (r.actorKind === 'coach') {
+    const c = (state.coaches || []).find(x => x && x.id === r.actorId);
+    return (c && c.name) || 'Coach';
+  }
+  return 'Inconnue';
+}
+// Regroupé PAR EMOJI (« ❤️ Emma, Delph — 👏 Cécile ») : la réaction posée porte
+// autant d'information que la personne qui l'a posée.
+function showFeedReactors(eventId) {
+  if (!_feedCanSeeReactors()) return;
+  const rows = feedReactionsOf(eventId);
+  const groups = FEED_EMOJIS
+    .map(e => ({ e, who: rows.filter(r => r.emoji === e.id).map(_feedReactorLabel).sort((a, b) => a.localeCompare(b)) }))
+    .filter(g => g.who.length);
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">👀 Qui a réagi</div>
+      <button class="modal-close" onclick="closeModal()" aria-label="Fermer">✕</button>
+    </div>
+    <div class="modal-body">
+      ${!groups.length
+        ? `<div class="feed-empty-sub">Personne n'a encore réagi.</div>`
+        : groups.map(g => `
+          <div class="feed-reactors-row">
+            <span class="feed-reactors-emoji">${g.e.char}</span>
+            <span class="feed-reactors-who">${esc(g.who.join(', '))}</span>
+            <span class="feed-reactors-n">${g.who.length}</span>
+          </div>`).join('')}
+    </div>`);
+}
 function _feedReactionBar(ev) {
   const tally = feedReactionTally(ev.id);
   const canReact = !!_feedActor();
+  const total = FEED_EMOJIS.reduce((n, e) => n + ((tally[e.id] || {}).n || 0), 0);
   return `
     <div class="feed-reactions">
+      ${_feedCanSeeReactors() && total ? `
+        <button class="feed-react feed-react-who"
+          onclick="showFeedReactors('${esc(ev.id)}')"
+          aria-label="Voir qui a réagi" title="Voir qui a réagi"
+        ><span class="feed-react-emoji">👀</span></button>` : ''}
       ${FEED_EMOJIS.map(e => {
         const t = tally[e.id] || { n: 0, mine: false, who: [] };
         const who = t.who.filter(Boolean).slice(0, 6).join(', ');
@@ -50457,7 +50787,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.155';
+const APP_VERSION = '2026-08-19.156';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
