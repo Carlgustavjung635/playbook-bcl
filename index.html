@@ -7980,6 +7980,14 @@ const DEFAULT_CHALLENGES = [
     scope: 'season', scores: {}, autoCount: true, lowerIsBetter: true
   },
   {
+    // Le titre dit « défis-gages » et pas « défis » tout court : cette page
+    // s'appelle déjà Défis, et un compteur nommé « Points défis » s'y lirait
+    // comme le score des défis de la page. Ce sont les défis assignés en gage.
+    id: 'c5', title: 'Points défis-gages', desc: 'Points gagnés en relevant les défis assignés par le coach',
+    type: 'defi_points', metric: 'pts', endDate: '2026-06-30',
+    scope: 'season', scores: {}, autoCount: true
+  },
+  {
     id: 'c3', title: 'Free Throw Streak', desc: 'Plus longue série de LF consécutifs à l\'entraînement',
     type: 'skill', metric: 'LF', endDate: '2026-05-31',
     scope: 'individual', scores: {}
@@ -8399,7 +8407,7 @@ let state = {
     // Migration : ajouter scope si manquant
     ch.forEach(c => {
       if (!c.scope) {
-        if (c.autoCount && (c.type === 'attendance_training' || c.type === 'attendance_match' || c.type === 'punctuality')) c.scope = 'season';
+        if (c.autoCount && (c.type === 'attendance_training' || c.type === 'attendance_match' || c.type === 'punctuality' || c.type === 'defi_points')) c.scope = 'season';
         else c.scope = 'individual';
       }
     });
@@ -9106,7 +9114,7 @@ function _convocInstanceCounts(c, inst) {
 }
 
 function computeAutoScoresFromSource(fromISO, toISO) {
-  const out = { attendance_training: {}, attendance_match: {}, punctuality: {} };
+  const out = { attendance_training: {}, attendance_match: {}, punctuality: {}, defi_points: {} };
   const bump = (type, sid, pid, delta) => {
     if (!sid) return;
     out[type][sid] = out[type][sid] || {};
@@ -9181,6 +9189,24 @@ function computeAutoScoresFromSource(fromISO, toISO) {
       }
     });
   });
+  // POINTS DÉFIS-GAGES (cf. 20260824_003) — somme des barèmes figés sur les
+  // défis-gages VALIDÉS par le coach. Un défi tiré, ou même marqué fait par la
+  // joueuse, ne compte pas : seule la validation coach atteste.
+  // Rattachement : saison de la date de VALIDATION, avec repli sur la saison
+  // portée par la ligne (une validation en intersaison ne doit pas être jetée).
+  // On ne pose jamais de zéro : une joueuse sans défi validé n'apparaît pas au
+  // classement, elle n'y est pas dernière.
+  (state.gageDraws || []).forEach(d => {
+    if (!d || d.status !== 'coach_confirmed' || _drawKind(d) !== 'defi') return;
+    if (!d.playerId) return;
+    const pts = Math.max(0, Number(d.pointsAwarded) || 0);
+    if (!pts) return;
+    const when = d.validatedAt || d.confirmedAt || d.completedAt || null;
+    if (!when) return;
+    const date = isoDate(new Date(when));
+    if ((fromISO && date < fromISO) || (toISO && date > toISO)) return;
+    bump('defi_points', getSeasonIdForDate(date) || d.seasonId || null, d.playerId, pts);
+  });
   return out;
 }
 
@@ -9214,7 +9240,7 @@ function recomputeAutoChallengeScores(opts) {
   const computed = computeAutoScoresFromSource(fromISO, todayISO);
   const report = [];
   const backup = [];
-  ['attendance_training', 'attendance_match', 'punctuality'].forEach(type => {
+  ['attendance_training', 'attendance_match', 'punctuality', 'defi_points'].forEach(type => {
     const bySeason = computed[type] || {};
     const seasonIds = new Set([
       ...Object.keys(bySeason),

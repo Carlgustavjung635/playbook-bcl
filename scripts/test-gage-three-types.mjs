@@ -490,4 +490,87 @@ t('le sourceType reste gage_done pour les trois (enum DB inchangée)', () => {
   assert.ok(_POINTS_SOURCE_TYPES_DB.includes(e[0].sourceType), 'sinon un override coach gèlerait la synchro du ledger');
 });
 
-console.log('\n✅ ' + pass + ' assertions OK — tirage au sort des 3 types, garder/retirer/annuler, dette cloisonnée, agrégation, anti-auto-défi, random figé, points des défis.\n');
+// --- Compteur auto « Points défis-gages » (extrait fidèle) ------------------
+function isoDate(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+// Saisons 1er sept. → 30 juin : juillet/août sont HORS plage (d'où le repli).
+function getSeasonIdForDate(date) {
+  if (date >= '2025-09-01' && date <= '2026-06-30') return 's2025';
+  if (date >= '2026-09-01' && date <= '2027-06-30') return 's2026';
+  return null;
+}
+function computeDefiPoints(fromISO, toISO) {
+  const out = {};
+  const bump = (sid, pid, delta) => {
+    if (!sid) return;
+    out[sid] = out[sid] || {};
+    out[sid][pid] = (out[sid][pid] || 0) + delta;
+  };
+  (state.gageDraws || []).forEach(d => {
+    if (!d || d.status !== 'coach_confirmed' || _drawKind(d) !== 'defi') return;
+    if (!d.playerId) return;
+    const pts = Math.max(0, Number(d.pointsAwarded) || 0);
+    if (!pts) return;
+    const when = d.validatedAt || d.confirmedAt || d.completedAt || null;
+    if (!when) return;
+    const date = isoDate(new Date(when));
+    if ((fromISO && date < fromISO) || (toISO && date > toISO)) return;
+    bump(getSeasonIdForDate(date) || d.seasonId || null, d.playerId, pts);
+  });
+  return out;
+}
+// Pose un défi validé « à la main », pour maîtriser la date de validation.
+function seedValidatedDefi(pid, pts, dateISO, seasonId) {
+  state.gageDraws.push({
+    id: uid(), playerId: pid, kind: 'defi', status: 'coach_confirmed',
+    defiTemplateId: 'd1', pointsAwarded: pts,
+    validatedAt: Date.parse(dateISO + 'T18:00:00'), seasonId: seasonId || 's2025'
+  });
+}
+
+console.log('\nSCÉNARIO 8 — compteur auto « Points défis-gages »');
+fresh();
+t('somme des barèmes figés, par joueuse et par saison', () => {
+  seedValidatedDefi('p1', 20, '2026-01-10');
+  seedValidatedDefi('p1', 35, '2026-02-14');
+  seedValidatedDefi('p2', 20, '2026-02-20');
+  const m = computeDefiPoints('2025-09-01', '2026-06-30');
+  assert.deepStrictEqual(m.s2025, { p1: 55, p2: 20 });
+});
+t('une joueuse sans défi validé n\'a AUCUNE entrée (pas de zéro au classement)', () => {
+  assert.strictEqual(computeDefiPoints('2025-09-01', '2026-06-30').s2025.p3, undefined);
+});
+t('un défi tiré ou dit-fait ne compte pas : seule la validation coach', () => {
+  fresh();
+  const r = assignDrawKeep('p1', 'defi');
+  r.row.validatedAt = Date.parse('2026-01-10T18:00:00'); r.row.seasonId = 's2025';
+  assert.strictEqual(computeDefiPoints('2025-09-01', '2026-06-30').s2025, undefined, 'accepted ne compte pas');
+  r.row.status = 'player_done';
+  assert.strictEqual(computeDefiPoints('2025-09-01', '2026-06-30').s2025, undefined, 'player_done non plus');
+  r.row.status = 'coach_confirmed';
+  assert.strictEqual(computeDefiPoints('2025-09-01', '2026-06-30').s2025.p1, 20);
+});
+t('sanctions et gages classiques n\'entrent pas dans ce compteur', () => {
+  fresh();
+  seedValidatedDefi('p1', 20, '2026-01-10');
+  state.gageDraws.push({ id: uid(), playerId: 'p1', kind: 'sanction_physique', status: 'coach_confirmed', pointsAwarded: 99, validatedAt: Date.parse('2026-01-11T18:00:00'), seasonId: 's2025' });
+  state.gageDraws.push({ id: uid(), playerId: 'p1', kind: 'classique', status: 'coach_confirmed', pointsAwarded: 99, validatedAt: Date.parse('2026-01-12T18:00:00'), seasonId: 's2025' });
+  assert.deepStrictEqual(computeDefiPoints('2025-09-01', '2026-06-30').s2025, { p1: 20 });
+});
+t('une validation hors fenêtre est exclue', () => {
+  fresh();
+  seedValidatedDefi('p1', 20, '2026-02-01');
+  assert.strictEqual(computeDefiPoints('2026-03-01', '2026-06-30').s2025, undefined);
+});
+t('une validation en intersaison retombe sur la saison de la ligne', () => {
+  fresh();
+  seedValidatedDefi('p1', 20, '2026-07-15', 's2025');        // juillet = hors plage saison
+  assert.strictEqual(getSeasonIdForDate('2026-07-15'), null, 'le trou d\'intersaison existe bien');
+  assert.strictEqual(computeDefiPoints('2025-09-01', '2026-08-31').s2025.p1, 20, 'rattachée, pas jetée');
+});
+t('un défi à 0 point ne cree pas de ligne au classement', () => {
+  fresh();
+  seedValidatedDefi('p1', 0, '2026-01-10');
+  assert.deepStrictEqual(computeDefiPoints('2025-09-01', '2026-06-30'), {});
+});
+
+console.log('\n✅ ' + pass + ' assertions OK — tirage au sort des 3 types, garder/retirer/annuler, dette cloisonnée, agrégation, anti-auto-défi, random figé, points des défis, compteur auto.\n');
