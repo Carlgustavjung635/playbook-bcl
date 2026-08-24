@@ -21795,6 +21795,7 @@ function _gagesCoachClassiqueHtml() {
       <div class="px">
         <div style="font-size:12px;color:var(--ink-3);margin-bottom:14px">${admin ? 'Modère les propositions, garnis le pool, puis fais <strong>tirer au sort</strong> un gage à une joueuse (elle découvre lequel au tirage).' : 'Fais <strong>tirer au sort</strong> un gage du pool à une de tes joueuses. Tu peux aussi proposer des idées (validées par l\'admin).'}</div>
         <button class="btn btn-primary btn-block" onclick="openAssignGage('classique')" style="margin-bottom:6px">➕ Faire tirer un gage à…</button>
+        <button class="btn btn-secondary btn-block" onclick="openGageDrawPreview('classique')" style="margin-bottom:6px">🧪 Tester le tirage</button>
         <div style="display:flex;gap:6px">
           <button class="btn btn-secondary" style="flex:1" onclick="${admin ? 'openCoachAddGage()' : 'openCoachProposeGage()'}">🎁 ${admin ? 'Ajouter un gage' : 'Proposer un gage'}</button>
           <button class="btn btn-secondary" style="flex:1" onclick="openGageDebtManager()">🎛️ Gérer les dettes</button>
@@ -22864,6 +22865,117 @@ function cancelKindDraw(drawId) {
   if (typeof showToast === 'function') showToast('❌ Assignation annulée');
 }
 
+// --- Coach : « 🧪 Tester le tirage » (PREVIEW, strictement en lecture) ------
+// Le coach veut voir ce que le pool crache avant d'assigner quoi que ce soit.
+// Ce mode réutilise l'écran de tirage de la joueuse — même overlay, même
+// roulette — mais n'écrit RIEN : aucune ligne gage_draws, aucun push, aucune
+// entrée de mur. C'est un miroir, pas un tirage. Le décompte 3-2-1 est sauté :
+// un coach qui re-teste dix fois n'a pas à attendre deux secondes à chaque fois.
+function openGageDrawPreview(kind) {
+  window._gagePreviewKind = GAGE_KINDS[kind] ? kind : 'classique';
+  if (!window._gagePreviewFilter) window._gagePreviewFilter = 'all';
+  _gagePreviewRoll();
+}
+// Le pool du preview n'a pas de joueuse cible : il montre le RÉSERVOIR du type,
+// pas ce que telle joueuse peut tirer (le filtre « qui la cite » se joue, lui,
+// à l'assignation réelle). Pour les défis, un filtre permet de voir séparément
+// ceux qui tirent une joueuse au hasard et les autres.
+function _gagePreviewPool(kind, filter) {
+  if (kind === 'classique') {
+    return currentSeasonGages().filter(_gageTirable).map(g => ({ id: g.id, name: g.text, _gage: g }));
+  }
+  if (kind === 'sanction_physique') return sanctionTemplatesList();
+  const l = gageDefisList();
+  if (filter === 'random') return l.filter(t => t.involvesRandom);
+  if (filter === 'norandom') return l.filter(t => !t.involvesRandom);
+  return l;
+}
+function _gagePreviewHost() {
+  let host = document.getElementById('gage-overlay');
+  if (!host) { host = document.createElement('div'); host.id = 'gage-overlay'; document.body.appendChild(host); }
+  window._gageOverlayOpen = true;
+  document.body.style.overflow = 'hidden';
+  return host;
+}
+function _gagePreviewRoll() {
+  const kind = window._gagePreviewKind || 'classique';
+  const pool = _gagePreviewPool(kind, window._gagePreviewFilter);
+  const host = _gagePreviewHost();
+  if (!pool.length) {
+    host.innerHTML = `
+      <div class="gage-screen">
+        <div class="gage-eyebrow">🧪 Mode test</div>
+        <div class="gage-card">Réservoir vide — rien à tirer.</div>
+        ${_gagePreviewControlsHtml(kind, false)}
+      </div>`;
+    return;
+  }
+  _gagePreviewSpin(pool[Math.floor(Math.random() * pool.length)], 7);
+}
+function _gagePreviewSpin(picked, ticks) {
+  const host = document.getElementById('gage-overlay'); if (!host) return;
+  if (ticks > 0) {
+    const pool = _gagePreviewPool(window._gagePreviewKind || 'classique', window._gagePreviewFilter);
+    const sample = pool.length ? pool[Math.floor(Math.random() * pool.length)].name : picked.name;
+    host.innerHTML = `
+      <div class="gage-screen">
+        <div class="gage-eyebrow">🧪 Tirage de test…</div>
+        <div class="gage-card gage-spin">${esc(sample)}</div>
+      </div>`;
+    window._gageTo = setTimeout(() => _gagePreviewSpin(picked, ticks - 1), 85 + (7 - ticks) * 20);
+  } else {
+    _gagePreviewResult(picked);
+  }
+}
+function _gagePreviewResult(picked) {
+  const host = document.getElementById('gage-overlay'); if (!host) return;
+  const kind = window._gagePreviewKind || 'classique';
+  const meta = GAGE_KINDS[kind];
+  let sub = '', involved = '';
+  if (kind === 'classique') {
+    const gm = _gageTypeMeta(picked._gage);
+    sub = gm.label + (_gageTypeOf(picked._gage) === 'time_limited' && picked._gage.timeLimitHours ? ' · ' + _fmtDuration(picked._gage.timeLimitHours) : '');
+  } else if (kind === 'sanction_physique') {
+    sub = [picked.category, _sanctionDose(picked)].filter(Boolean).join(' · ');
+  } else {
+    sub = 'à valider sous ' + (Number.isFinite(picked.windowDays) ? picked.windowDays : 7) + ' j';
+    // On simule aussi la résolution de la joueuse au hasard, sur la roster
+    // complète (pas de cible dans un test) : c'est justement ce qu'on veut voir.
+    const named = _defiInvolvedIds(picked).map(_playerNameOf);
+    if (picked.involvesRandom) {
+      const pool = _assignGagePlayers().filter(p => !_defiInvolvedIds(picked).includes(p.id));
+      if (pool.length) named.push(pool[Math.floor(Math.random() * pool.length)].name + ' (tirée au sort)');
+      else named.push('— roster trop petite pour le tirage');
+    }
+    involved = named.join(', ');
+  }
+  host.innerHTML = `
+    <div class="gage-screen gage-reveal">
+      <div class="gage-eyebrow">🧪 Mode test · ${meta.icon} ${esc(meta.plural)}</div>
+      <div class="gage-card">${esc(picked.name)}</div>
+      ${sub ? `<div class="gage-type-banner" style="border-color:var(--orange);color:var(--orange)">${esc(sub)}</div>` : ''}
+      ${involved ? `<div class="gage-type-banner" style="border-color:#8b5cf6;color:#8b5cf6">👥 Avec : ${esc(involved)}</div>` : ''}
+      ${picked.description ? `<div style="font-size:12px;color:var(--ink-2);max-width:340px;line-height:1.45">${esc(picked.description)}</div>` : ''}
+      ${_gagePreviewControlsHtml(kind, true)}
+    </div>`;
+}
+function _gagePreviewControlsHtml(kind, canRetest) {
+  const f = window._gagePreviewFilter || 'all';
+  const filters = [['all', 'Tous'], ['random', 'Avec aléatoire'], ['norandom', 'Sans aléatoire']];
+  return `
+    <div style="display:flex;flex-direction:column;gap:10px;width:100%;max-width:340px;margin-top:8px">
+      ${kind === 'defi' ? `<div style="display:flex;gap:5px">
+        ${filters.map(([k, lbl]) => `<button class="btn ${k === f ? 'btn-primary' : 'btn-secondary'}" style="flex:1;font-size:10px;padding:8px 3px" onclick="setGagePreviewFilter('${k}')">${esc(lbl)}</button>`).join('')}
+      </div>` : ''}
+      ${canRetest ? `<button class="btn btn-primary btn-block" style="font-size:15px;padding:14px" onclick="_gagePreviewRoll()">🔄 Re-tester</button>` : ''}
+      <button class="btn btn-secondary btn-block" style="font-size:14px;padding:12px" onclick="_closeGageOverlay()">Fermer</button>
+      <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-align:center;text-transform:uppercase;letter-spacing:0.04em;line-height:1.5">
+        🧪 Simulation — rien n'est assigné, personne n'est notifié
+      </div>
+    </div>`;
+}
+function setGagePreviewFilter(k) { window._gagePreviewFilter = k; _gagePreviewRoll(); }
+
 // --- Onglets coach : 💪 Sanctions / 🎯 Défis --------------------------------
 function _gagesCoachKindTabs() {
   const cur = state._gageTab || 'classique';
@@ -22916,6 +23028,7 @@ function _gagesCoachSanctionHtml() {
     <div class="px">
       <div style="font-size:12px;color:var(--ink-3);margin-bottom:12px;line-height:1.5">Exos de <strong>sanction</strong> — base dédiée, séparée de celle de l'ardoise. Les sanctions d'une même joueuse s'additionnent en un seul programme.</div>
       <button class="btn btn-primary btn-block" onclick="openAssignGage('sanction_physique')" style="margin-bottom:6px">➕ Assigner une sanction</button>
+      <button class="btn btn-secondary btn-block" onclick="openGageDrawPreview('sanction_physique')" style="margin-bottom:6px">🧪 Tester le tirage</button>
       ${admin ? `<button class="btn btn-secondary btn-block" onclick="openSanctionTemplateEditor('')">💪 Ajouter un exo à la base</button>` : ''}
     </div>
     ${_kindOwedSectionHtml('sanction_physique')}
@@ -22963,6 +23076,7 @@ function _gagesCoachDefiHtml() {
     <div class="px">
       <div style="font-size:12px;color:var(--ink-3);margin-bottom:12px;line-height:1.5">Défis <strong>individuels</strong> posés comme gage — base dédiée, sans rapport avec les défis collectifs de la saison.</div>
       <button class="btn btn-primary btn-block" onclick="openAssignGage('defi')" style="margin-bottom:6px">➕ Assigner un défi</button>
+      <button class="btn btn-secondary btn-block" onclick="openGageDrawPreview('defi')" style="margin-bottom:6px">🧪 Tester le tirage</button>
       ${admin ? `<button class="btn btn-secondary btn-block" onclick="openGageDefiEditor('')">🎯 Ajouter un défi à la base</button>` : ''}
     </div>
     ${_kindOwedSectionHtml('defi')}
@@ -51885,7 +51999,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.159';
+const APP_VERSION = '2026-08-19.160';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
