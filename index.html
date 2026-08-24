@@ -4869,6 +4869,10 @@ const ENTITIES = [
       const out = {};
       (state.challenges || []).forEach(c => {
         Object.entries(c.scores || {}).forEach(([pid, val]) => {
+          // `player_id` porte une FK vers players : une cle technique (l'ancien
+          // panier '__overrides') fait rejeter TOUT le lot par la base et gele la
+          // synchro de la table. On ne pousse que des lignes de joueuse.
+          if (pid.startsWith('__') || !Number.isFinite(Number(val))) return;
           out[`${c.id}|${pid}`] = { challenge_id: c.id, player_id: pid, score: Number(val) || 0 };
         });
       });
@@ -9254,7 +9258,8 @@ function recomputeAutoChallengeScores(opts) {
       const pids = new Set([...Object.keys(before), ...Object.keys(after)]);
       let changedPlayers = 0, beforeTotal = 0, afterTotal = 0;
       pids.forEach(pid => {
-        const b = before[pid] || 0, a = after[pid] || 0;
+        const bOv = _decAutoOverride(before[pid]);
+        const b = (bOv !== null) ? bOv : (before[pid] || 0), a = after[pid] || 0;
         beforeTotal += b; afterTotal += a;
         if (b !== a) changedPlayers++;
       });
@@ -9263,7 +9268,15 @@ function recomputeAutoChallengeScores(opts) {
       }
       if (!dryRun) {
         backup.push({ challengeId: ch.id, type, seasonId: sid, scores: { ...before } });
-        ch.scores = { ...after };
+        // Le recalcul ecrase les corrections coach : il faut les NEUTRALISER
+        // (0) et non laisser tomber la cle, sinon la ligne negative survit en
+        // base et revient au prochain fetch.
+        const next = { ...after };
+        Object.keys(before).forEach(pid => {
+          if (_decAutoOverride(before[pid]) !== null && next[pid] == null) next[pid] = 0;
+        });
+        delete next[AUTO_SCORE_OVERRIDES_KEY];
+        ch.scores = next;
       }
     });
   });
@@ -9314,6 +9327,49 @@ function _autoScoresForWindow(fromISO, toISO) {
 // Bornée à la période « saison » : une correction est un total de saison,
 // la plaquer sur une fenêtre semaine/mois n'aurait aucun sens.
 const AUTO_SCORE_OVERRIDES_KEY = '__overrides';
+
+// CORRECTION COACH D'UN COMPTEUR AUTO : encodee DANS la ligne de la joueuse.
+// ------------------------------------------------------------
+// L'ancienne correction vivait dans c.scores['__overrides'] = { pid: valeur }.
+// Ce panier n'a JAMAIS pu quitter l'appareil : le canal `challenge_scores`
+// aplatit c.scores en une ligne (challenge_id, player_id, score numerique), et
+// `player_id` porte une FK vers players -> la ligne « __overrides » est refusee
+// par la base. Au retour du serveur, apply() reecrit c.scores EN ENTIER avec des
+// nombres : la correction etait ecrasee par le calcul brut. D'ou « je corrige
+// les minutes de retard, ca revient comme avant » — v.152 avait repare la
+// LECTURE, pas le canal d'ECRITURE.
+//
+// On range donc la correction dans la ligne de la joueuse, qui elle voyage :
+// score NEGATIF = correction coach, valeur = -score - 1 (-1 -> 0, -6 -> 5). Le
+// scalaire POSITIF herite d'avant #72 reste ignore : il est contamine par les
+// clotures cross-saison, et un vieux 12 ne doit pas se transformer en correction.
+// Effacer une correction = ecrire 0, jamais supprimer la cle : une ligne absente
+// du dump n'est pas supprimee cote serveur et reviendrait au prochain fetch.
+function _encAutoOverride(v) { return -(Math.max(0, parseInt(v, 10) || 0) + 1); }
+function _decAutoOverride(raw) {
+  const n = Number(raw);
+  return (Number.isFinite(n) && n <= -1) ? Math.round(-n - 1) : null;
+}
+// Map { pid: valeur } des corrections coach, ou null si aucune. Lit AUSSI
+// l'ancien panier local (appareil jamais resynchronise) pour ne perdre aucune
+// correction saisie avant ce correctif.
+function autoScoreOverrides(c) {
+  const sc = (c && c.scores) || {};
+  const out = {};
+  const legacy = sc[AUTO_SCORE_OVERRIDES_KEY];
+  if (legacy && typeof legacy === 'object') {
+    Object.keys(legacy).forEach(pid => {
+      const v = parseInt(legacy[pid], 10);
+      if (Number.isFinite(v)) out[pid] = Math.max(0, v);
+    });
+  }
+  Object.keys(sc).forEach(pid => {
+    if (pid === AUTO_SCORE_OVERRIDES_KEY) return;
+    const v = _decAutoOverride(sc[pid]);
+    if (v !== null) out[pid] = v;
+  });
+  return Object.keys(out).length ? out : null;
+}
 // Fenêtre de calcul d'un défi auto, extraite pour être partagée avec la garde
 // d'éligibilité ci-dessous : les deux DOIVENT lire la même période.
 //
@@ -9358,8 +9414,8 @@ function autoChallengeEligibleIds(c, period) {
   const comp = _autoScoresForWindow(w.from, w.to);
   const att = { ...((comp.attendance_training && comp.attendance_training[sid]) || {}) };
   const attCh = (state.challenges || []).find(x => x.autoCount && x.type === 'attendance_training' && x.seasonId === sid);
-  const ov = attCh && attCh.scores ? attCh.scores[AUTO_SCORE_OVERRIDES_KEY] : null;
-  if (ov && typeof ov === 'object' && period === 'season') {
+  const ov = attCh ? autoScoreOverrides(attCh) : null;
+  if (ov && period === 'season') {
     Object.keys(ov).forEach(pid => { att[pid] = Math.max(0, parseInt(ov[pid], 10) || 0); });
   }
   return new Set(Object.keys(att).filter(pid => (att[pid] || 0) > 0));
@@ -9373,8 +9429,8 @@ function autoChallengeScores(c, period, raw) {
   const comp = _autoScoresForWindow(w.from, w.to);
   const base = (comp[c.type] && comp[c.type][sid]) || {};
   if (raw || period !== 'season') return base;
-  const ov = (c.scores || {})[AUTO_SCORE_OVERRIDES_KEY];
-  if (!ov || typeof ov !== 'object') return base;
+  const ov = autoScoreOverrides(c);
+  if (!ov) return base;
   const out = { ...base };
   Object.keys(ov).forEach(pid => {
     const v = ov[pid];
@@ -42865,7 +42921,11 @@ function resetAutoChallenge(cid) {
   if (!c || !c.autoCount) return;
   if (!confirm(`Réinitialiser « ${c.title} » à 0 pour toutes les joueuses (saison en cours) ?\n\nLes compteurs actuels seront effacés.\nAction tracée dans le journal d'audit.`)) return;
   const before = { ...(c.scores || {}) };
+  // Vider l'objet ne remet rien a zero : le compteur affiche est DERIVE des
+  // sources, et les lignes deja en base ne sont pas supprimees par le dump.
+  // « A zero » s'ecrit donc comme une correction explicite a 0 par joueuse.
   c.scores = {};
+  _autoChallengePool(c).forEach(p => { c.scores[p.id] = _encAutoOverride(0); });
   _logChallengeAudit('reset', { challengeId: c.id, type: c.type, seasonId: c.seasonId, before });
   persist(); render();
   if (typeof showToast === 'function') showToast('↺ Compteur réinitialisé');
@@ -42920,14 +42980,20 @@ function saveEditAutoChallenge(cid) {
   // On enregistre un ÉCART au calcul, pas un score : une valeur laissée telle
   // quelle ne fige rien, et remettre la valeur calculée efface la correction.
   const computed = autoChallengeScores(c, 'season', true);
-  const ov = { ...(c.scores[AUTO_SCORE_OVERRIDES_KEY] || {}) };
+  // L'ecart est encode en NEGATIF dans la ligne de la joueuse (cf.
+  // _encAutoOverride) : c'est le seul emplacement qui traverse la synchro.
+  const legacy = { ...(c.scores[AUTO_SCORE_OVERRIDES_KEY] || {}) };
   pool.forEach(p => {
     const el = document.getElementById('ed-' + p.id);
     if (!el) return;
     const v = Math.max(0, parseInt(el.value) || 0);
-    if (v === (computed[p.id] || 0)) delete ov[p.id]; else ov[p.id] = v;
+    delete legacy[p.id];
+    // 0 = « plus de correction » (et non « cle supprimee » : une cle absente
+    // du dump ne s'efface pas cote serveur).
+    c.scores[p.id] = (v === (computed[p.id] || 0)) ? 0 : _encAutoOverride(v);
   });
-  c.scores[AUTO_SCORE_OVERRIDES_KEY] = ov;
+  if (Object.keys(legacy).length) c.scores[AUTO_SCORE_OVERRIDES_KEY] = legacy;
+  else delete c.scores[AUTO_SCORE_OVERRIDES_KEY];
   _logChallengeAudit('edit', { challengeId: c.id, type: c.type, seasonId: c.seasonId, before, after: { ...c.scores } });
   persist(); closeModal(); render();
   if (typeof showToast === 'function') showToast('✓ Compteurs enregistrés');
@@ -52140,7 +52206,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.164';
+const APP_VERSION = '2026-08-19.166';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
