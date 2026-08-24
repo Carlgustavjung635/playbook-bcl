@@ -14760,7 +14760,15 @@ function openPointsAdjust(playerId) {
     <div class="modal-body">
       <div class="fld">
         <label class="fld-label">Points (négatif pour un malus)</label>
-        <input id="pts-adj-delta" type="number" step="1" min="-1000" max="1000" inputmode="numeric" placeholder="Ex : 20 ou -10" oninput="_ptsAdjSyncDirect()">
+        <!-- PAS de type="number" + inputmode="numeric" : sur iPhone ce couple
+             ouvre un pavé numérique SANS touche « - », donc un coach ne pouvait
+             pas saisir le malus que le placeholder lui proposait. Le champ passe
+             en `text` (le signe se tape), et le bouton « ± » l'inverse sans avoir
+             besoin d'AUCUNE touche — c'est lui la garantie, quel que soit l'OS. -->
+        <div style="display:flex;gap:8px;align-items:stretch">
+          <input id="pts-adj-delta" type="text" inputmode="numeric" pattern="-?[0-9]*" autocomplete="off" placeholder="Ex : 20 ou -10" style="flex:1;min-width:0" oninput="_ptsAdjNormalize()">
+          <button type="button" class="btn btn-secondary" style="flex:0 0 auto;min-width:46px;font-size:17px;line-height:1" title="Inverser le signe (bonus ⇄ malus)" aria-label="Inverser le signe : bonus ou malus" onclick="_ptsAdjToggleSign()">±</button>
+        </div>
       </div>
       <div class="fld">
         <label class="fld-label">Motif</label>
@@ -14815,6 +14823,28 @@ function openPointsAdjust(playerId) {
 // savePointsAdjust — c'est pourquoi la règle est REFAITE à l'enregistrement, et
 // une troisième fois à la lecture (_pointsEntryClaimed). Trois gardes pour une
 // règle, parce que c'est celle dont le contournement est le plus tentant.
+// Le champ est un `text` : plus rien n'empêche d'y coller « 12 pts » ou de
+// taper « --5 ». On nettoie donc à chaque frappe — chiffres, et un seul « - »
+// de tête — pour que `Number()` en aval retrouve exactement ce qu'il attendait
+// du temps où le champ était un `number`.
+function _ptsAdjNormalize() {
+  const el = document.getElementById('pts-adj-delta');
+  if (el) {
+    const cleaned = String(el.value || '').replace(/[^0-9-]/g, '').replace(/(?!^)-/g, '').slice(0, 5);
+    if (cleaned !== el.value) el.value = cleaned;
+  }
+  _ptsAdjSyncDirect();
+}
+// Bascule bonus ⇄ malus. Sur un champ vide, on pose le « - » seul : le signe
+// reste visible pendant que le coach tape les chiffres.
+function _ptsAdjToggleSign() {
+  const el = document.getElementById('pts-adj-delta');
+  if (!el) return;
+  const v = String(el.value || '').trim();
+  el.value = v.startsWith('-') ? v.slice(1) : ('-' + v);
+  _ptsAdjNormalize();
+  try { el.focus(); } catch (e) {}
+}
 function _ptsAdjSyncDirect() {
   const deltaEl = document.getElementById('pts-adj-delta');
   const box = document.getElementById('pts-adj-direct');
@@ -52206,7 +52236,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.166';
+const APP_VERSION = '2026-08-19.167';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
