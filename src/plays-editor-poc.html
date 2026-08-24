@@ -34,7 +34,8 @@
     · la POINTE des flèches est un `marker-end`, plus un triangle peint à part
       — c'est ce qui supprime le « pli » visible avant la tête sur les courbes
       (le trait s'arrête désormais pile à la base de la pointe) ;
-    · l'ÉCRAN, un trait plein terminé par une barre perpendiculaire. C'est un
+    · l'ÉCRAN — une flèche de déplacement ENTIÈRE (trait plein + pointe) suivie
+      de la barre perpendiculaire qui matérialise le mur à l'arrivée. C'est un
       déplacement comme un autre pour le modèle (isMoveKind) ;
     · la TAILLE des jetons — S 0,75× · M 1× · L 1,25×, publiée dans le JSON
       (`players_size`). Tout l'habillage étant exprimé en fraction de PR,
@@ -264,9 +265,10 @@
   .arw.atk .body{stroke:var(--arw-atk); marker-end:url(#mkAtk)}
   .arw.def .body{stroke:var(--arw-def); marker-end:url(#mkDef)}
   .arw.shot .body{stroke:var(--arw-shot); marker-end:url(#mkShot)}
-  /* Écran (screen) : même trait plein qu'un déplacement, mais terminé par une
-     barre PERPENDICULAIRE — le « mur » posé par la joueuse. Trois classes,
-     donc plus spécifique que `.arw.atk .body` : le marker T gagne. */
+  /* Écran (screen) : une flèche de déplacement ENTIÈRE — même trait plein,
+     même pointe — suivie de la barre perpendiculaire qui matérialise le mur.
+     Seul le marker change, et il porte les deux formes d'un coup. Trois
+     classes, donc plus spécifique que `.arw.atk .body` : c'est lui qui gagne. */
   .arw.atk.screen .body{marker-end:url(#mkScrAtk)}
   .arw.def.screen .body{marker-end:url(#mkScrDef)}
   #mkAtk .h, #mkScrAtk .h{fill:var(--arw-atk)}
@@ -704,13 +706,13 @@
   // drawAll(), pas figés une fois pour toutes.
   function headLen(kind) { return PR * (kind === 'move' ? 0.8 : 0.72); }
   function headWid(kind) { return PR * (kind === 'move' ? 0.4 : 0.34); }
-  // Barre d'écran : demi-longueur, puis épaisseur. La consigne parlait de
-  // « 2-3 unités terrain », mais 2-3 unités = 20-30 cm, à peine plus large que
-  // le trait lui-même (1,45) — la barre serait invisible. On la cale donc sur
-  // le jeton : 0,85 × PR de demi-longueur, soit ~1,55 m de barre en
-  // demi-terrain. C'est la notation basket habituelle, et elle reste juste
-  // quel que soit le mode de terrain ou la taille choisie.
-  var SCR_HALF = 0.85, SCR_THICK = 1.9;
+  // Barre d'écran : DEMI-longueur (donc ~5 unités de chaque côté en
+  // demi-terrain, soit un mur d'un mètre — la largeur d'épaules d'une
+  // joueuse), puis épaisseur. Exprimée en fraction de PR pour rester juste
+  // quel que soit le mode de terrain ET la taille de jetons choisie.
+  // Épaisseur 2,6 contre 1,45 pour le trait : c'est ce qui distingue au coup
+  // d'œil « l'écran est POSÉ ici » du simple tracé qui y mène.
+  var SCR_HALF = 0.55, SCR_THICK = 2.6;
 
   // viewBox == markerWidth/Height ⇒ échelle 1:1, aucune surprise quand PR
   // change. refX/refY placent le point de RÉFÉRENCE (celui qui atterrit sur la
@@ -724,15 +726,33 @@
       + ' refX="0" refY="' + f(hw) + '">'
       + '<path class="h" d="M 0 0 L ' + w + ' ' + f(hw) + ' L 0 ' + h + ' Z"/></marker>';
   }
-  // Écran : la barre est CENTRÉE sur la fin du tracé (refX au milieu de son
-  // épaisseur, refY au milieu de sa longueur) et perpendiculaire, puisque
-  // orient="auto" aligne le +x du marker sur la tangente.
+  // ÉCRAN = une flèche de déplacement COMPLÈTE + le mur à l'arrivée. Le marker
+  // porte donc les DEUX formes : le même triangle qu'un déplacement (la
+  // joueuse va bien quelque part), puis la barre perpendiculaire juste
+  // derrière la pointe. Un lecteur lit la phrase entière — « elle se déplace
+  // là, et elle y pose un écran ».
+  //
+  // Un seul marker et pas deux formes séparées : SVG n'accepte qu'un
+  // `marker-end` par tracé, et surtout les deux doivent partager EXACTEMENT
+  // la même orientation. Les faire tourner ensemble dans le même marker le
+  // garantit ; deux dessins indépendants rouvriraient le décalage d'axe qui
+  // causait le « pli » (cf. updateArrow).
+  //
+  // Géométrie, en coordonnées marker (+x = sens du déplacement) :
+  //   refX = 0        base du triangle, là où s'arrête le tracé
+  //   x = hl          pointe du triangle == la DESTINATION visée
+  //   x ∈ [hl, hl+th] la barre, face interne collée sur la destination
   function markerScreen(id) {
-    var half = PR * SCR_HALF, w = f(SCR_THICK), h = f(half * 2);
+    var hl = headLen('move'), hw = headWid('move');
+    var half = PR * SCR_HALF, th = SCR_THICK;
+    var H = Math.max(hw, half) * 2, W = hl + th, cy = H / 2;
     return '<marker id="' + id + '" markerUnits="userSpaceOnUse" orient="auto" overflow="visible"'
-      + ' markerWidth="' + w + '" markerHeight="' + h + '" viewBox="0 0 ' + w + ' ' + h + '"'
-      + ' refX="' + f(SCR_THICK / 2) + '" refY="' + f(half) + '">'
-      + '<rect class="h" x="0" y="0" width="' + w + '" height="' + h + '" rx="' + f(SCR_THICK / 2) + '"/></marker>';
+      + ' markerWidth="' + f(W) + '" markerHeight="' + f(H) + '" viewBox="0 0 ' + f(W) + ' ' + f(H) + '"'
+      + ' refX="0" refY="' + f(cy) + '">'
+      + '<path class="h" d="M 0 ' + f(cy - hw) + ' L ' + f(hl) + ' ' + f(cy) + ' L 0 ' + f(cy + hw) + ' Z"/>'
+      + '<rect class="h" x="' + f(hl) + '" y="' + f(cy - half) + '" width="' + f(th) + '"'
+      + ' height="' + f(half * 2) + '" rx="' + f(th / 2) + '"/>'
+      + '</marker>';
   }
 
   function defs() {
@@ -1187,8 +1207,9 @@
     // retombe exactement là où visait la flèche, et le trait s'arrête pile à
     // sa base. Il ne peut plus longer la tête et ressortir par son flanc,
     // quelle que soit la courbure — c'était ça, le blob.
-    // Un ÉCRAN ne rogne rien : sa barre est CENTRÉE sur la fin du tracé.
-    var hl = a.kind === 'screen' ? 0 : headLen(id === '__shot' ? 'pass' : 'move');
+    // L'écran rogne EXACTEMENT comme un déplacement : son marker commence lui
+    // aussi par un triangle, la barre n'arrive qu'après la pointe.
+    var hl = headLen(id === '__shot' ? 'pass' : 'move');
     shrink(p, p.length - 1, endPad + hl);
     var r = buildPath(p);
     el.body.setAttribute('d', r.d);
@@ -1940,7 +1961,7 @@
   var HINTS = {
     select: 'Glisse les jetons. <b>Tape</b> une joueuse puis <b>🏀</b> pour lui donner le ballon.<br><b>Double-tape une flèche</b> pour lui ajouter un point de passage.',
     move:   'Tape la joueuse qui se déplace, <b>puis l\'endroit où elle va</b>. Flèche pleine.',
-    screen: 'Tape la <b>poseuse d\'écran</b>, puis <b>où elle pose son écran</b>. Trait terminé par une barre.',
+    screen: 'Tape la <b>poseuse d\'écran</b>, puis <b>où elle pose son écran</b>. Flèche de déplacement + le mur à l\'arrivée.',
     pass:   'Tape la <b>passeuse</b>, puis la <b>réceptionneuse</b>. Flèche pointillée.',
     shot:   'Tape la joueuse qui <b>tire</b> à la fin de ce temps. Re-tape pour annuler.',
     erase:  'Tape une flèche pour la <b>supprimer</b>, un point de passage pour le <b>retirer</b>.'
