@@ -5,21 +5,30 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1,user-scalable=no">
 <meta name="color-scheme" content="light dark">
 <meta name="robots" content="noindex">
-<title>Éditeur de plays — POC (jalon 3)</title>
+<title>Éditeur d'animations — plays BCL</title>
 <!--
   ══════════════════════════════════════════════════════════════════════════
-  JALON 3 — temps (steps) · lecture animée · persistance · import/export
+  ÉDITEUR D'ANIMATIONS — un média du play, au même titre qu'une vidéo
   ══════════════════════════════════════════════════════════════════════════
-  Fichier toujours ISOLÉ de l'app (index.html) : aucun import de son code,
-  aucun état partagé, aucune entité PbSync. Ce que le jalon 3 ajoute par
-  rapport au jalon 2 :
+  Le fichier ne partage toujours AUCUN code ni état avec index.html : il est
+  invoqué en pleine page depuis la fiche d'un play, avec le play (et
+  éventuellement l'animation) en paramètres d'URL —
+
+      /src/plays-editor-poc.html?play=<idPlay>[&anim=<idAnim>][&mode=view]
+
+  — et il écrit son résultat dans `plays.animations` (migration
+  20260823_002). Sans `?play=`, il s'ouvre en BAC À SABLE : tout fonctionne
+  sauf la publication.
+
+  Ce que ce jalon apporte, par rapport au drag-and-drop du jalon 2 :
 
     · les TEMPS (steps) — un play n'est plus une photo mais une suite de
       photos, chacune avec ses flèches ;
     · la LECTURE animée de ces temps (rAF, jamais setInterval) ;
-    · la PERSISTANCE — brouillon local toutes les 5 s + publication dans la
-      table `plays_v2` (migration 20260823_001) ;
-    · l'IMPORT / EXPORT JSON, format d'échange atk-zone.
+    · la PERSISTANCE — brouillon local toutes les 5 s + publication dans les
+      animations du play ;
+    · l'IMPORT / EXPORT JSON d'UNE animation, format d'échange atk-zone ;
+    · l'EXPORT PHOTO — un PNG du temps affiché, ou la série complète en ZIP.
 
   ── UN TEMPS = UNE PHOTO + CE QUI SE PASSE PENDANT ────────────────────────
   Chaque temps porte SES PROPRES positions (`pos`) plutôt que de les dériver
@@ -415,7 +424,7 @@
 
 <header>
   <button class="btn sm" onclick="location.href='/'">←</button>
-  <div class="title" id="doc-title">Sans titre <span class="sub">· POC jalon 3</span></div>
+  <div class="title"><span id="doc-title">Sans titre</span> <span class="sub" id="doc-ctx"></span></div>
   <button class="btn sm" id="b-meta" title="Informations du play">⚙️</button>
   <button class="btn sm" id="b-menu" title="Plays, publication, JSON">⋯</button>
 </header>
@@ -523,13 +532,19 @@
 </div>
 
 <div class="sheet" id="sh-menu">
-  <h2>⋯ Play</h2>
-  <div class="row"><button class="btn wide" id="a-plays">📚 Plays publiés</button></div>
-  <div class="row"><button class="btn wide" id="a-publish">💾 Publier</button></div>
-  <div class="row"><button class="btn wide" id="a-export">📤 Exporter en JSON</button></div>
-  <div class="row"><button class="btn wide" id="a-import">📥 Importer un JSON</button></div>
-  <div class="row"><button class="btn wide" id="a-newdoc">✨ Nouveau play</button></div>
-  <div class="row"><button class="btn wide danger" id="a-delete">🗑 Supprimer ce play</button></div>
+  <h2>⋯ Animation</h2>
+  <div class="row"><button class="btn wide" id="a-plays">🎬 Animations de ce play</button></div>
+  <div class="row"><button class="btn wide" id="a-publish">💾 Publier dans le play</button></div>
+  <div class="row">
+    <button class="btn" id="a-png">📸 Photo</button>
+    <button class="btn" id="a-series">🎞 Série photos</button>
+  </div>
+  <div class="row">
+    <button class="btn" id="a-export">📤 Exporter JSON</button>
+    <button class="btn" id="a-import">📥 Importer JSON</button>
+  </div>
+  <div class="row"><button class="btn wide" id="a-newdoc">✨ Nouvelle animation</button></div>
+  <div class="row"><button class="btn wide danger" id="a-delete">🗑 Retirer du play</button></div>
   <div class="row"><button class="btn wide" id="a-theme">🌓 Thème</button></div>
   <div class="fld" style="margin-top:6px">
     <label for="f-author">Signé</label>
@@ -538,7 +553,7 @@
 </div>
 
 <div class="sheet" id="sh-plays">
-  <h2>📚 Plays publiés</h2>
+  <h2 id="sh-plays-h">🎬 Animations de ce play</h2>
   <div class="plist" id="plays-list"><div class="empty">Chargement…</div></div>
   <div class="row" style="margin-top:10px"><button class="btn wide" id="pl-reload">↻ Rafraîchir</button></div>
 </div>
@@ -1939,8 +1954,7 @@
     F[k].addEventListener('change', formToMeta);
   });
   function syncTitle() {
-    document.getElementById('doc-title').innerHTML =
-      esc(doc.title || 'Sans titre') + ' <span class="sub">· POC jalon 3</span>';
+    document.getElementById('doc-title').textContent = doc.title || 'Sans titre';
   }
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -2018,7 +2032,7 @@
     }
     return {
       format: 'pb-play/2',
-      id: doc.id || slug(doc.title) || 'play',
+      id: doc.id || slug(doc.title) || 'anim',
       title: doc.title || 'Sans titre',
       tag: doc.tag || null,
       side: doc.side || 'attaque',
@@ -2178,7 +2192,7 @@
   var fileIn = document.getElementById('f-import');
   document.getElementById('a-import').addEventListener('click', function () {
     closeSheets();
-    if (dirty && !confirm('Un play est en cours d\'édition.\nL\'import va le remplacer. Continuer ?')) return;
+    if (dirty && !confirm('Une animation est en cours d\'édition.\nL\'import va la remplacer. Continuer ?')) return;
     fileIn.value = '';
     fileIn.click();
   });
@@ -2201,12 +2215,211 @@
   });
 
   // ─────────────────────────────────────────────────────────────────────
-  // 13. PERSISTANCE — brouillon local + publication Supabase
+  // 13. EXPORT PHOTO — PNG d'un temps, série ZIP de tous les temps
   // ─────────────────────────────────────────────────────────────────────
+  // Rastériser un <svg> du document ne suffit pas : une fois sérialisé, il est
+  // COUPÉ de la feuille de style, donc de toutes les var(--…). Un export naïf
+  // sort un terrain blanc sur fond blanc. On inline donc les styles CALCULÉS
+  // sur une copie avant de sérialiser — c'est la seule façon d'obtenir la même
+  // image que ce que le coach a sous les yeux, thème sombre compris.
+  var STYLE_PROPS = [
+    'fill', 'fill-opacity', 'stroke', 'stroke-opacity', 'stroke-width',
+    'stroke-dasharray', 'stroke-dashoffset', 'stroke-linecap', 'stroke-linejoin',
+    'opacity', 'display', 'visibility',
+    'font-size', 'font-weight', 'font-family', 'text-anchor',
+    'stop-color', 'stop-opacity'
+  ];
+
+  function inlineStyles(src, dst) {
+    var a = [src].concat([].slice.call(src.querySelectorAll('*')));
+    var b = [dst].concat([].slice.call(dst.querySelectorAll('*')));
+    for (var i = 0; i < a.length && i < b.length; i++) {
+      var cs = getComputedStyle(a[i]), s = '', j, k, v;
+      for (j = 0; j < STYLE_PROPS.length; j++) {
+        k = STYLE_PROPS[j];
+        v = cs.getPropertyValue(k);
+        if (!v) continue;
+        // Une référence de dégradé doit rester RELATIVE : le navigateur renvoie
+        // une URL absolue (http://…#gDisc), qui ne résout plus une fois le SVG
+        // servi en data:. On ne garde que le fragment.
+        var m = /^url\((.*)\)$/.exec(v.trim());
+        if (m) {
+          var frag = m[1].replace(/["']/g, ''), h = frag.indexOf('#');
+          if (h < 0) continue;
+          v = 'url(' + frag.slice(h) + ')';
+        }
+        s += k + ':' + v + ';';
+      }
+      b[i].setAttribute('style', s);
+    }
+  }
+
+  // Le PNG fait ~1800 px de large quel que soit le mode de terrain : assez pour
+  // une impression A4 ou une projection, sans peser 4 Mo par temps.
+  function courtPng() {
+    return new Promise(function (res, rej) {
+      var c0 = MODES[mode()];
+      var scale = 1800 / c0.w;
+      var W = Math.round(c0.w * scale), H = Math.round(c0.h * scale);
+      var clone = svg.cloneNode(true);
+      // Inliner AVANT de retirer quoi que ce soit : les deux arbres sont
+      // parcourus en parallèle, ils doivent avoir exactement la même forme.
+      inlineStyles(svg, clone);
+      var kill = [].slice.call(clone.querySelectorAll('#lay-meas, #lay-play, .hit, .wphit, .halo'));
+      kill.forEach(function (e) { if (e.parentNode) e.parentNode.removeChild(e); });
+      clone.setAttribute('width', W);
+      clone.setAttribute('height', H);
+      clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+      var xml = new XMLSerializer().serializeToString(clone);
+      var img = new Image();
+      img.onload = function () {
+        var cv = document.createElement('canvas');
+        cv.width = W; cv.height = H;
+        cv.getContext('2d').drawImage(img, 0, 0, W, H);
+        // Aucune image externe dans la scène (le terrain est 100 % vectoriel) :
+        // le canvas ne peut donc pas être teinté, toBlob passe toujours.
+        cv.toBlob(function (b) { b ? res(b) : rej(new Error('canvas vide')); }, 'image/png');
+      };
+      img.onerror = function () { rej(new Error('SVG non rasterisable')); };
+      img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
+    });
+  }
+
+  function dl(blob, name) {
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1500);
+  }
+
+  function baseName() { return slug(doc.title) || 'animation'; }
+
+  document.getElementById('a-png').addEventListener('click', function () {
+    closeSheets();
+    if (document.body.classList.contains('playing')) exitPlay();
+    toast('Photo…');
+    courtPng()
+      .then(function (b) { dl(b, baseName() + '-' + pad2(cur + 1) + '.png'); toast('Photo enregistrée.', 'ok'); })
+      .catch(function (e) { toast('Photo impossible — ' + e.message, 'err'); });
+  });
+
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+
+  // Série : un PNG par temps, dans UN seul fichier. Enchaîner N téléchargements
+  // ne marche pas sur iPhone (Safari ne laisse passer que le premier), et un
+  // ZIP « stored » (aucune compression) tient en une trentaine de lignes — un
+  // PNG est déjà compressé, un deflate par-dessus ne gagnerait quasi rien.
+  var CRC_T = null;
+  function crc32(u8) {
+    if (!CRC_T) {
+      CRC_T = new Uint32Array(256);
+      for (var n = 0; n < 256; n++) {
+        var c = n;
+        for (var k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+        CRC_T[n] = c >>> 0;
+      }
+    }
+    var r = 0xFFFFFFFF, i;
+    for (i = 0; i < u8.length; i++) r = CRC_T[(r ^ u8[i]) & 0xFF] ^ (r >>> 8);
+    return (r ^ 0xFFFFFFFF) >>> 0;
+  }
+
+  function zipStore(files) {
+    var enc = new TextEncoder(), parts = [], central = [], offset = 0, i;
+    for (i = 0; i < files.length; i++) {
+      var nm = enc.encode(files[i].name), data = files[i].data, crc = crc32(data);
+      var lh = new DataView(new ArrayBuffer(30));
+      lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true);
+      lh.setUint16(6, 0, true); lh.setUint16(8, 0, true);
+      lh.setUint16(10, 0, true); lh.setUint16(12, 0, true);
+      lh.setUint32(14, crc, true);
+      lh.setUint32(18, data.length, true); lh.setUint32(22, data.length, true);
+      lh.setUint16(26, nm.length, true); lh.setUint16(28, 0, true);
+      parts.push(new Uint8Array(lh.buffer), nm, data);
+      var ch = new DataView(new ArrayBuffer(46));
+      ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true);
+      ch.setUint16(8, 0, true); ch.setUint16(10, 0, true);
+      ch.setUint16(12, 0, true); ch.setUint16(14, 0, true);
+      ch.setUint32(16, crc, true);
+      ch.setUint32(20, data.length, true); ch.setUint32(24, data.length, true);
+      ch.setUint16(28, nm.length, true); ch.setUint16(30, 0, true); ch.setUint16(32, 0, true);
+      ch.setUint16(34, 0, true); ch.setUint16(36, 0, true); ch.setUint32(38, 0, true);
+      ch.setUint32(42, offset, true);
+      central.push(new Uint8Array(ch.buffer), nm);
+      offset += 30 + nm.length + data.length;
+    }
+    var csize = 0;
+    for (i = 0; i < central.length; i++) csize += central[i].length;
+    var eo = new DataView(new ArrayBuffer(22));
+    eo.setUint32(0, 0x06054b50, true);
+    eo.setUint16(4, 0, true); eo.setUint16(6, 0, true);
+    eo.setUint16(8, files.length, true); eo.setUint16(10, files.length, true);
+    eo.setUint32(12, csize, true); eo.setUint32(16, offset, true); eo.setUint16(20, 0, true);
+    return new Blob(parts.concat(central, [new Uint8Array(eo.buffer)]), { type: 'application/zip' });
+  }
+
+  document.getElementById('a-series').addEventListener('click', function () {
+    closeSheets();
+    if (document.body.classList.contains('playing')) exitPlay();
+    var back = cur, l = steps(), shots = [], i = 0;
+    toast('Série photos — 0/' + l.length + '…');
+    function next() {
+      if (i >= l.length) {
+        gotoStep(back);
+        var files = shots.map(function (s, k) {
+          return { name: baseName() + '-' + pad2(k + 1) + '.png', data: s };
+        });
+        dl(zipStore(files), baseName() + '-photos.zip');
+        toast(l.length + ' photos dans le ZIP.', 'ok');
+        return;
+      }
+      cur = i;
+      drawTokens(); drawArrows();
+      courtPng()
+        .then(function (b) { return b.arrayBuffer(); })
+        .then(function (ab) {
+          shots.push(new Uint8Array(ab));
+          i++;
+          toast('Série photos — ' + i + '/' + l.length + '…');
+          next();
+        })
+        .catch(function (e) { gotoStep(back); toast('Série interrompue — ' + e.message, 'err'); });
+    }
+    next();
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // 14. PERSISTANCE — brouillon local + animations d'un play existant
+  // ─────────────────────────────────────────────────────────────────────
+  // L'animation n'est PAS une entité à part : c'est un média du play, au même
+  // titre qu'une vidéo ou une photo. Elle vit donc dans `plays.animations`
+  // (jsonb, un tableau d'objets au format d'échange de la section 12) et non
+  // dans une table dédiée.
+  //
+  // CANAL SÉPARÉ, ET C'EST VOLONTAIRE — l'entité PbSync `plays` d'index.html
+  // LIT la colonne (pour afficher la liste des animations) mais ne l'ÉCRIT
+  // jamais. Sans cette asymétrie, un appareil au localStorage un peu vieux
+  // repousserait son `animations` périmé au prochain flush et effacerait le
+  // travail d'un autre : c'est exactement le scénario du playbook
+  // « réconcilier avant de pousser ». Ici l'éditeur est le seul écrivain, et
+  // un upsert PostgREST ne touche pas aux colonnes qu'on ne lui donne pas.
+  //
+  // Il reste une course, assumée : deux coachs qui éditent DEUX animations du
+  // MÊME play en même temps. On la réduit en relisant le tableau juste avant
+  // d'écrire et en ne remplaçant que l'entrée concernée (read-modify-write) ;
+  // la fenêtre résiduelle se compte en centaines de millisecondes.
+  //
   // Clé publishable, déjà publique dans index.html (cf. en-tête du fichier).
   var SB_URL = 'https://orertxlsvkdqayybgwaq.supabase.co';
   var SB_KEY = 'sb_publishable_pJwgqWwDDhhST6xh9IbzbA_a0ANDwUt';
   var DRAFT_KEY = 'pb_editor_v2_draft';
+
+  var Q = new URLSearchParams(location.search);
+  var playId = Q.get('play') || null;      // le play auquel on est rattaché
+  var wantAnim = Q.get('anim') || null;    // l'animation à ouvrir, s'il y en a
+  var wantView = Q.get('mode') === 'view'; // ouvrir directement en lecture
+  var playTitle = '';
 
   function sbFetch(path, opts) {
     opts = opts || {};
@@ -2225,6 +2438,30 @@
     });
   }
 
+  // Message parlant plutôt qu'un code HTTP : au premier essai, la cause la plus
+  // probable est que la migration n'a pas encore été appliquée.
+  function sbMsg(e) {
+    if (/animations/.test(e.message) && /column|colonne/i.test(e.message))
+      return 'colonne plays.animations absente — applique la migration 20260823_002.';
+    if (/HTTP 40[04]/.test(e.message)) return 'play introuvable ou colonne animations absente (migration 20260823_002).';
+    return e.message;
+  }
+
+  function fetchAnims() {
+    if (!playId) return Promise.resolve([]);
+    return sbFetch('plays?id=eq.' + encodeURIComponent(playId) + '&select=id,title,animations&limit=1')
+      .then(function (rows) {
+        if (!rows || !rows.length) throw new Error('play introuvable');
+        playTitle = rows[0].title || '';
+        return Array.isArray(rows[0].animations) ? rows[0].animations : [];
+      });
+  }
+
+  function writeAnims(list) {
+    return sbFetch('plays?id=eq.' + encodeURIComponent(playId),
+      { method: 'PATCH', body: { animations: list }, prefer: 'return=minimal' });
+  }
+
   // `dirty` = du travail non publié existe. On ne réécrit le brouillon que
   // s'il a changé : un setInterval qui sérialise 10 temps toutes les 5 s pour
   // rien réveille le CPU de l'iPhone sans raison.
@@ -2238,7 +2475,7 @@
   }
 
   function draftPayload() {
-    return JSON.stringify({ v: 2, at: new Date().toISOString(), doc: doc, cur: cur });
+    return JSON.stringify({ v: 3, at: new Date().toISOString(), play: playId, doc: doc, cur: cur });
   }
   function saveDraft() {
     try {
@@ -2263,6 +2500,12 @@
     var o;
     try { o = JSON.parse(raw); } catch (e) { return; }
     if (!o || !o.doc || !o.doc.half) return;
+    // Un brouillon appartient à SON play : le proposer sur un autre play
+    // ferait recoller le travail au mauvais endroit.
+    if ((o.play || null) !== playId) return;
+    // Et il n'a plus d'intérêt si on vient d'ouvrir l'animation qu'il décrit
+    // dans une version déjà publiée — sauf s'il est plus récent, ce qu'on ne
+    // peut pas savoir : on le propose, le coach tranche.
     var when = '';
     try { when = new Date(o.at).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }); } catch (e) {}
     document.getElementById('draft-txt').textContent =
@@ -2305,104 +2548,133 @@
   // ── Publier ──────────────────────────────────────────────────────────
   document.getElementById('a-publish').addEventListener('click', function () {
     closeSheets();
+    if (!playId) { toast('Bac à sable : ouvre l\'éditeur depuis un play pour publier.', 'err'); return; }
     if (!doc.title.trim()) { metaToForm(); openSheet('sh-meta'); toast('Un titre est obligatoire pour publier.', 'err'); F.title.focus(); return; }
-    if (!doc.id) doc.id = (slug(doc.title) || 'play') + '-' + Math.random().toString(36).slice(2, 7);
+    if (!doc.id) doc.id = (slug(doc.title) || 'anim') + '-' + Math.random().toString(36).slice(2, 7);
     var o = toJSON();
-    var row = {
-      id: doc.id, title: o.title, tag: o.tag, side: o.side, color: o.color,
-      description: o.description, points_md: o.points_md, ball_start: o.ball_start,
-      players: o.players, arrows: o.arrows, steps: o.steps,
-      defense_enabled: o.defense_enabled, court_type: o.court_type,
-      created_by: o.created_by, updated_at: new Date().toISOString(), deleted_at: null
-    };
+    o.updated_at = new Date().toISOString();
     toast('Publication…');
-    sbFetch('plays_v2', { method: 'POST', body: row, prefer: 'resolution=merge-duplicates,return=minimal' })
-      .then(function () {
-        dirty = false; saveDraft();
-        toast('Publié : ' + o.title, 'ok');
+    fetchAnims()
+      .then(function (list) {
+        var out = list.slice(), i, found = false;
+        for (i = 0; i < out.length; i++) if (out[i] && out[i].id === o.id) { out[i] = o; found = true; break; }
+        if (!found) out.push(o);
+        return writeAnims(out).then(function () { return out.length; });
       })
-      .catch(function (e) {
-        // Le cas le plus probable au premier essai : la migration n'a pas
-        // encore été appliquée. On le dit, plutôt que de laisser un code HTTP.
-        var m = /HTTP 40[04]/.test(e.message) ? 'table plays_v2 absente — applique la migration 20260823_001.' : e.message;
-        toast('Échec de la publication — ' + m, 'err');
-      });
+      .then(function (n) {
+        dirty = false; saveDraft();
+        toast('Publiée dans « ' + (playTitle || 'le play') + ' » (' + n + ' animation' + (n > 1 ? 's' : '') + ').', 'ok');
+      })
+      .catch(function (e) { toast('Échec de la publication — ' + sbMsg(e), 'err'); });
   });
 
-  // ── Supprimer (soft-delete) ──────────────────────────────────────────
+  // ── Supprimer une animation du play ──────────────────────────────────
   document.getElementById('a-delete').addEventListener('click', function () {
     closeSheets();
-    if (!doc.id) { toast('Ce play n\'a jamais été publié.', 'err'); return; }
-    if (!confirm('Supprimer « ' + (doc.title || doc.id) + ' » de la liste publiée ?')) return;
-    sbFetch('plays_v2?id=eq.' + encodeURIComponent(doc.id),
-      { method: 'PATCH', body: { deleted_at: new Date().toISOString() }, prefer: 'return=minimal' })
-      .then(function () { toast('Supprimé.', 'ok'); doc.id = null; touch(); })
-      .catch(function (e) { toast('Échec de la suppression — ' + e.message, 'err'); });
+    if (!playId || !doc.id) { toast('Cette animation n\'a jamais été publiée.', 'err'); return; }
+    if (!confirm('Retirer « ' + (doc.title || doc.id) + ' » des animations de ce play ?')) return;
+    var gone = doc.id;
+    fetchAnims()
+      .then(function (list) {
+        return writeAnims(list.filter(function (a) { return a && a.id !== gone; }));
+      })
+      .then(function () { doc.id = null; touch(); toast('Animation retirée du play.', 'ok'); })
+      .catch(function (e) { toast('Échec de la suppression — ' + sbMsg(e), 'err'); });
   });
 
-  // ── Liste des plays publiés ──────────────────────────────────────────
+  // ── Liste des animations du play ─────────────────────────────────────
   var plist = document.getElementById('plays-list');
   function loadPlays() {
+    if (!playId) {
+      plist.innerHTML = '<div class="empty">Bac à sable — cet éditeur n\'est rattaché à aucun play.<br>'
+        + 'Ouvre-le depuis la fiche d\'un play pour publier une animation.</div>';
+      return;
+    }
     plist.innerHTML = '<div class="empty">Chargement…</div>';
-    sbFetch('plays_v2?deleted_at=is.null&select=id,title,tag,side,color,court_type,steps,updated_at&order=updated_at.desc&limit=100')
-      .then(function (rows) {
-        if (!rows || !rows.length) { plist.innerHTML = '<div class="empty">Aucun play publié pour l\'instant.</div>'; return; }
+    fetchAnims()
+      .then(function (list) {
+        document.getElementById('sh-plays-h').textContent = '🎬 Animations de « ' + (playTitle || '…') + ' »';
+        if (!list.length) { plist.innerHTML = '<div class="empty">Aucune animation sur ce play pour l\'instant.</div>'; return; }
         var html = '', i;
-        for (i = 0; i < rows.length; i++) {
-          var r = rows[i];
+        for (i = 0; i < list.length; i++) {
+          var r = list[i] || {};
           var nst = Array.isArray(r.steps) ? r.steps.length : 0;
           html += '<div class="pitem" data-id="' + esc(r.id) + '">'
             + '<span class="dot" style="background:' + esc(/^#[0-9a-f]{3,8}$/i.test(r.color || '') ? r.color : '#22D3EE') + '"></span>'
-            + '<span class="t"><b>' + esc(r.title) + '</b><small>'
+            + '<span class="t"><b>' + esc(r.title || 'Sans titre') + '</b><small>'
             + esc(r.tag || r.side || '') + ' · ' + nst + ' temps · '
             + esc(r.court_type === 'full' ? 'terrain complet' : 'demi-terrain') + '</small></span>'
             + '<span style="font-size:16px;color:var(--ink-2)">›</span></div>';
         }
         plist.innerHTML = html;
       })
-      .catch(function (e) {
-        var m = /HTTP 40[04]/.test(e.message) ? 'table plays_v2 absente — applique la migration 20260823_001.' : e.message;
-        plist.innerHTML = '<div class="empty">Impossible de charger — ' + esc(m) + '</div>';
-      });
+      .catch(function (e) { plist.innerHTML = '<div class="empty">Impossible de charger — ' + esc(sbMsg(e)) + '</div>'; });
   }
   plist.addEventListener('click', function (e) {
     var it = e.target && e.target.closest ? e.target.closest('.pitem') : null;
     if (!it) return;
     var id = it.getAttribute('data-id');
-    if (dirty && !confirm('Un play est en cours d\'édition.\nL\'ouvrir va le remplacer. Continuer ?')) return;
-    sbFetch('plays_v2?id=eq.' + encodeURIComponent(id) + '&select=*&limit=1')
-      .then(function (rows) {
-        if (!rows || !rows.length) throw new Error('play introuvable');
-        var d = fromJSON(rows[0]);
+    if (dirty && !confirm('Une animation est en cours d\'édition.\nL\'ouvrir va la remplacer. Continuer ?')) return;
+    fetchAnims()
+      .then(function (list) {
+        var found = null, i;
+        for (i = 0; i < list.length; i++) if (list[i] && list[i].id === id) found = list[i];
+        if (!found) throw new Error('animation introuvable');
+        var d = fromJSON(found);
         closeSheets();
         loadDoc(d);
         dirty = false; saveDraft();
-        toast('Ouvert : ' + d.title, 'ok');
+        toast('Ouverte : ' + d.title, 'ok');
       })
-      .catch(function (err) { toast('Ouverture impossible — ' + err.message, 'err'); });
+      .catch(function (err) { toast('Ouverture impossible — ' + sbMsg(err), 'err'); });
   });
   document.getElementById('a-plays').addEventListener('click', function () { openSheet('sh-plays'); loadPlays(); });
   document.getElementById('pl-reload').addEventListener('click', loadPlays);
 
   document.getElementById('a-newdoc').addEventListener('click', function () {
     closeSheets();
-    if (dirty && !confirm('Un play est en cours d\'édition. Le remplacer par un play vierge ?')) return;
+    if (dirty && !confirm('Une animation est en cours d\'édition. La remplacer par une animation vierge ?')) return;
     loadDoc(makeDoc());
     dirty = false;
     try { localStorage.removeItem(DRAFT_KEY); } catch (e) {}
     lastSaved = '';
-    toast('Nouveau play.', 'ok');
+    toast('Nouvelle animation.', 'ok');
   });
 
   // ─────────────────────────────────────────────────────────────────────
-  // 14. DÉMARRAGE
+  // 15. DÉMARRAGE
   // ─────────────────────────────────────────────────────────────────────
+  function setContext(txt) { document.getElementById('doc-ctx').textContent = txt; }
+
   syncTitle();
   metaToForm();
   drawAll();
   renderTimeline();
   setHint();
-  offerDraft();
+
+  if (!playId) {
+    setContext('bac à sable');
+    offerDraft();
+  } else {
+    setContext('chargement du play…');
+    fetchAnims()
+      .then(function (list) {
+        setContext(playTitle ? '↳ ' + playTitle : '↳ play');
+        if (!wantAnim) { offerDraft(); return; }
+        var found = null, i;
+        for (i = 0; i < list.length; i++) if (list[i] && list[i].id === wantAnim) found = list[i];
+        if (!found) { toast('Animation introuvable — on repart d\'une page blanche.', 'err'); offerDraft(); return; }
+        loadDoc(fromJSON(found));
+        dirty = false;
+        // mode=view : on déroule tout de suite, l'éditeur sert de lecteur.
+        if (wantView) setTimeout(function () { document.getElementById('p-play').click(); }, 260);
+      })
+      .catch(function (e) {
+        setContext('play injoignable');
+        toast('Play injoignable — ' + sbMsg(e), 'err');
+        offerDraft();
+      });
+  }
 })();
 </script>
 </body>

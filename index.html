@@ -4634,7 +4634,16 @@ const ENTITIES = [
           desc: r.descr || '', tags: r.tags || [],
           videoUrl: videos[0] ? videos[0].url : '',  // legacy
           videos: videos,
-          images: merged
+          images: merged,
+          // animations : canal en LECTURE SEULE de ce côté-ci. Le dump ci-dessus
+          // ne pousse volontairement pas cette colonne — seul l'éditeur v2
+          // l'écrit, en read-modify-write. Sans cette asymétrie, un appareil au
+          // localStorage en retard réécrirait un tableau périmé au prochain
+          // flush et effacerait le travail d'un autre (cf. le playbook
+          // « réconcilier avant de pousser » et l'en-tête de la migration
+          // 20260823_002). Fallback sur le local : tant que la migration n'est
+          // pas appliquée, r.animations est undefined et on ne perd rien.
+          animations: Array.isArray(r.animations) ? r.animations : (local.animations || [])
         };
       });
       // Préserve les locaux récents non encore push (id format uid() = 'x...')
@@ -16281,10 +16290,20 @@ function togglePbEditorV2(on) {
   try { localStorage.setItem(PB_EDITOR_V2_FLAG, on ? 'true' : 'false'); } catch (e) {}
   render();
 }
-function openPbEditorV2() {
-  // Double garde : même si le bouton fuitait, le flag reste la seule porte.
-  if (!pbEditorV2Enabled()) return;
-  location.href = '/src/plays-editor-poc.html';
+// L'éditeur est un module invoqué DEPUIS une fiche play : il reçoit le play
+// (et éventuellement l'animation à ouvrir) en paramètres d'URL, et écrit son
+// résultat dans plays.animations. Sans play, il s'ouvre en bac à sable.
+//
+// Le flag ne garde que la CRÉATION — ouvrir une animation déjà publiée doit
+// marcher pour tout le monde, y compris les joueuses, sinon le média serait
+// publié mais invisible.
+function openPbEditorV2(playId, animId, mode) {
+  if (!animId && !pbEditorV2Enabled()) return;
+  const q = [];
+  if (playId) q.push('play=' + encodeURIComponent(playId));
+  if (animId) q.push('anim=' + encodeURIComponent(animId));
+  if (mode) q.push('mode=' + encodeURIComponent(mode));
+  location.href = '/src/plays-editor-poc.html' + (q.length ? '?' + q.join('&') : '');
 }
 function _pbEditorV2Row() {
   const on = pbEditorV2Enabled();
@@ -16474,6 +16493,11 @@ function renderPlayDetail() {
   const isCoach = state.auth.role === 'coach';
   const images = p.images || [];
   const concepts = p.concepts || [];
+  const animations = Array.isArray(p.animations) ? p.animations : [];
+  const hasAnim = animations.length > 0;
+  // Le flag ne garde plus que la CRÉATION : une animation déjà publiée se
+  // regarde sans rien activer, sinon elle serait invisible pour l'équipe.
+  const canAddAnim = isCoach && canEditSharedLibrary() && pbEditorV2Enabled();
   const hasGallery = images.length > 0;
   // Normalise videos[] avec backward compat sur videoUrl legacy
   const videos = (p.videos && p.videos.length) ? p.videos
@@ -16565,7 +16589,27 @@ function renderPlayDetail() {
         </div>
       ` : ''}
 
-      ${!hasGallery && !hasVideo && !hasDesc ? `
+      ${(hasAnim || canAddAnim) ? `
+        <div class="list-section">
+          <div style="padding:14px 16px">
+            <div class="eyebrow-muted mb-2">🎬 Animations${hasAnim ? ` (${animations.length})` : ''}</div>
+            ${animations.map(a => `
+              <div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-top:1px solid var(--border)">
+                <span style="width:9px;height:9px;border-radius:50%;flex:none;background:${/^#[0-9a-f]{3,8}$/i.test(a.color || '') ? a.color : 'var(--orange)'}"></span>
+                <span style="flex:1;min-width:0">
+                  <b style="display:block;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.title || 'Sans titre')}</b>
+                  <small style="font-size:11px;color:var(--ink-3)">${esc(a.tag || a.side || '')} · ${Array.isArray(a.steps) ? a.steps.length : 0} temps · ${a.court_type === 'full' ? 'terrain complet' : 'demi-terrain'}</small>
+                </span>
+                <button class="btn btn-secondary" onclick="openPbEditorV2('${p.id}','${esc(a.id)}','view')" title="Lire l'animation">▶</button>
+                ${isCoach && canEditSharedLibrary() ? `<button class="btn btn-secondary" onclick="openPbEditorV2('${p.id}','${esc(a.id)}')" title="Modifier l'animation">✎</button>` : ''}
+              </div>
+            `).join('')}
+            ${canAddAnim ? `<button class="btn btn-secondary btn-block" style="margin-top:12px" onclick="openPbEditorV2('${p.id}')">🆕 Créer une animation</button>` : ''}
+          </div>
+        </div>
+      ` : ''}
+
+      ${!hasGallery && !hasVideo && !hasDesc && !hasAnim ? `
         <div class="empty">
           <div class="empty-icon">○</div>
           <div class="empty-title">Play vide</div>
@@ -52268,7 +52312,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.172';
+const APP_VERSION = '2026-08-19.173';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
