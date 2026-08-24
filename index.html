@@ -42688,7 +42688,16 @@ function challengeCard(c, isCoach) {
   // (canEdit = !isAuto && …), il n’y a rien à atteindre derrière le top 3.
   // Sur un défi MANUEL la garde reste : là, chaque ligne est une saisie
   // (peer entry) — replier un défi neuf rendrait 18 joueuses injoignables.
-  const _collapsible = isCoach && entries.length > CHALLENGE_TOP_N && (isAuto || entries.some(e => e.score > 0));
+  // v.164 — ZÉRO PARTICIPATION : on ne rend PAS le classement. Un défi neuf
+  // alignait 21 lignes à 0 (barre vide, score 0, médailles neutralisées) :
+  // beaucoup de hauteur, aucune information. Titre + bandeau, rien d'autre.
+  // Coach ET joueuse : le bruit est le même des deux côtés.
+  // ⚠ Le bandeau reste une PORTE (clic = déplier). Sur un défi MANUEL chaque
+  // ligne EST la saisie (peer entry) : masquer sans porte gèlerait le défi à 0
+  // pour toujours, personne ne pouvant plus y inscrire le premier score.
+  const _anyScore = entries.some(e => e.score > 0);
+  const _emptyBoard = entries.length > 0 && !_anyScore;
+  const _collapsible = isCoach && !_emptyBoard && entries.length > CHALLENGE_TOP_N;
   const _open = !_collapsible || isChallengeExpanded(c.id);
   const _visible = _open ? entries : entries.slice(0, CHALLENGE_TOP_N);
   const _hiddenCount = entries.length - _visible.length;
@@ -42732,7 +42741,15 @@ function challengeCard(c, isCoach) {
         // Refonte UX (audit) : ne couronne pas une "leader" à 0. Tant que
         // personne n'a marqué, le classement reste neutre (pas de médaille
         // or/argent/bronze sur des scores nuls) → évite le faux podium.
-        const anyScore = entries.some(e => e.score > 0);
+        const anyScore = _anyScore;
+        // v.164 — personne n'a marqué : bandeau à la place du classement.
+        if (_emptyBoard && !isChallengeExpanded(c.id)) {
+          const canEnter = !isAuto && (isCoach || (state.auth && state.auth.role === 'player'));
+          return `<div onclick="toggleChallengeExpand('${c.id}')" style="padding:12px 16px;display:flex;align-items:center;flex-wrap:wrap;gap:6px;cursor:pointer;font-size:10px;font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.04em;color:var(--ink-3)" title="${canEnter ? 'Ouvrir pour saisir un score' : 'Ouvrir le classement'}">
+            <span>⚪ Aucune participation</span>
+            <span style="color:var(--ink-4);text-transform:none;letter-spacing:0">· ${canEnter ? 'toucher pour saisir' : 'toucher pour ouvrir'}</span>
+          </div>`;
+        }
         // v.162 — REPLIÉ : le podium tient sur UNE ligne. Trois `lb-row`
         // pleines (barre de progression + score 20px + libellé de métrique)
         // prenaient presque la hauteur du classement entier : plier ne rendait
@@ -42742,9 +42759,8 @@ function challengeCard(c, isCoach) {
         // la place des deux autres du podium.
         if (_collapsible && !_open) {
           const shortName = n => { const f = String(n || '').trim().split(/\s+/)[0] || ''; return f.length > 10 ? f.slice(0, 9) + '…' : f; };
-          // Pas de médaille sur des scores nuls (même règle que les lignes
-          // pleines) : sans score, on annonce l'effectif, pas un faux podium.
-          if (!anyScore) return `<div onclick="toggleChallengeExpand('${c.id}')" style="padding:10px 16px;cursor:pointer;font-size:10px;font-family:'JetBrains Mono';color:var(--ink-3);font-style:italic">Aucun score · ${entries.length} joueuse${entries.length > 1 ? 's' : ''}</div>`;
+          // (v.164 : plus de cas « tout à 0 » ici — un classement vide ne se
+          // plie plus, il ne s'affiche pas. Cf. _emptyBoard plus haut.)
           const MEDALS = ['🥇', '🥈', '🥉'];
           return `<div onclick="toggleChallengeExpand('${c.id}')" style="display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 14px;padding:10px 16px;cursor:pointer" title="Voir le classement complet">
             ${_visible.map((e, i) => `<span style="display:inline-flex;align-items:baseline;gap:5px;white-space:nowrap">
@@ -52124,7 +52140,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.163';
+const APP_VERSION = '2026-08-19.164';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
