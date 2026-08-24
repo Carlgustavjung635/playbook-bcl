@@ -5834,6 +5834,7 @@ const ENTITIES = [
           sanctionTemplateId: r.sanction_template_id || null,
           defiTemplateId: r.defi_template_id || null,
           resolvedInvolvedPlayerIds: Array.isArray(r.resolved_involved_player_ids) ? r.resolved_involved_player_ids.filter(Boolean) : [],
+          pointsAwarded: Number.isFinite(r.points_awarded) ? r.points_awarded : 0,
           deadlineAt: r.deadline_at ? Date.parse(r.deadline_at) : null,
           validatedAt: r.validated_at ? Date.parse(r.validated_at) : null,
           validatedBy: r.validated_by || null,
@@ -5910,6 +5911,7 @@ const ENTITIES = [
           notes: r.notes || '',
           involvedPlayerIds: Array.isArray(r.involved_player_ids) ? r.involved_player_ids.filter(Boolean) : [],
           involvesRandom: !!r.involves_random,
+          pointsReward: Number.isFinite(r.points_reward) ? r.points_reward : 20,
           deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null,
           createdAt: r.created_at ? Date.parse(r.created_at) : null,
           updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null)
@@ -6468,6 +6470,8 @@ function _dumpGageDrawRow(d) {
     // un tirage relu à chaque render changerait le sens du défi entre deux
     // ouvertures. Même principe que gage_id figé au reveal.
     resolved_involved_player_ids: Array.isArray(d.resolvedInvolvedPlayerIds) ? d.resolvedInvolvedPlayerIds.filter(Boolean) : [],
+    // Barème FIGÉ au tirage (0 pour un classique ou une sanction).
+    points_awarded: Number.isFinite(d.pointsAwarded) ? Math.max(0, d.pointsAwarded) : 0,
     deadline_at: d.deadlineAt ? new Date(d.deadlineAt).toISOString() : null,
     validated_at: d.validatedAt ? new Date(d.validatedAt).toISOString() : null,
     validated_by: d.validatedBy || null,
@@ -6494,6 +6498,7 @@ function _dumpGageDefiRow(t) {
     notes: t.notes || null,
     involved_player_ids: Array.isArray(t.involvedPlayerIds) ? t.involvedPlayerIds.filter(Boolean) : [],
     involves_random: !!t.involvesRandom,
+    points_reward: Number.isFinite(t.pointsReward) ? Math.max(0, t.pointsReward) : 20,
     deleted_at: t.deletedAt ? new Date(t.deletedAt).toISOString() : null,
     updated_at: t.updatedAt ? new Date(t.updatedAt).toISOString() : (t.createdAt ? new Date(t.createdAt).toISOString() : null)
   };
@@ -9609,25 +9614,39 @@ function _derivePointsEntries(playerId, seasonId) {
 
   // 4) GAGES — seulement 'coach_confirmed'. Accepter un gage ne le fait pas
   // passer : c'est la confirmation du coach qui atteste qu'il a été tenu.
-  if (rules.gageDonePoints > 0) {
-    (state.gageDraws || []).forEach(d => {
-      if (d.playerId !== playerId || d.status !== 'coach_confirmed') return;
-      const when = d.confirmedAt || d.completedAt || d.drawnAt || d.createdAt || null;
-      const sid = _pointsSeasonOf(when ? isoDate(new Date(when)) : null, d.seasonId);
-      if (sid !== seasonId) return;
-      out.push({
-        key: _pointsKey('gage_done', d.id),
-        sourceType: 'gage_done', sourceId: d.id,
-        delta: rules.gageDonePoints,
-        at: when,
-        label: 'Gage tenu',
-        // Le TEXTE du gage n'est volontairement pas repris : l'historique de
-        // points n'est pas un endroit où republier ce qu'une joueuse a dû faire.
-        detail: '',
-        stored: false
-      });
+  //
+  // Les trois types ne valent PAS pareil :
+  //   • gage classique  → barème global `gageDonePoints` (règle, pas prix figé) ;
+  //   • défi            → barème PROPRE au défi, figé sur la ligne au tirage
+  //                       (`pointsAwarded`) — changer le modèle ne retarife rien ;
+  //   • sanction        → RIEN. C'est une sanction, pas une récompense.
+  //
+  // On garde le sourceType `gage_done` pour les trois. Inventer un
+  // `defi_gage_done` aurait exigé d'élargir _POINTS_SOURCE_TYPES_DB et la
+  // contrainte en base : une surcharge coach sur une source hors enum fait
+  // échouer TOUT le lot d'upsert du ledger, et un lot en échec est rejoué
+  // indéfiniment — la synchro des points gèlerait pour tout le monde.
+  (state.gageDraws || []).forEach(d => {
+    if (d.playerId !== playerId || d.status !== 'coach_confirmed') return;
+    const kind = _drawKind(d);
+    if (kind === 'sanction_physique') return;
+    const delta = kind === 'defi' ? Math.max(0, Number(d.pointsAwarded) || 0) : (rules.gageDonePoints || 0);
+    if (delta <= 0) return;
+    const when = d.confirmedAt || d.completedAt || d.drawnAt || d.createdAt || null;
+    const sid = _pointsSeasonOf(when ? isoDate(new Date(when)) : null, d.seasonId);
+    if (sid !== seasonId) return;
+    out.push({
+      key: _pointsKey('gage_done', d.id),
+      sourceType: 'gage_done', sourceId: d.id,
+      delta: delta,
+      at: when,
+      label: kind === 'defi' ? 'Défi relevé' : 'Gage tenu',
+      // Le TEXTE du gage n'est volontairement pas repris : l'historique de
+      // points n'est pas un endroit où republier ce qu'une joueuse a dû faire.
+      detail: '',
+      stored: false
     });
-  }
+  });
 
   // 5) ARDOISE — dérivée comme le reste, depuis les assignations validées.
   //
@@ -22306,6 +22325,11 @@ function openSanctionTemplateEditor(id) {
   `);
   setTimeout(() => { const el = document.getElementById('sct-name'); if (el) el.focus(); }, 80);
 }
+// 0 est une valeur VOULUE (défi sans points) : on ne la confond pas avec « vide ».
+function _pointsFieldValue(id, dflt) {
+  const v = parseInt((document.getElementById(id) || {}).value, 10);
+  return Number.isFinite(v) && v >= 0 ? Math.min(v, 500) : dflt;
+}
 function _numOrNull(id, max) {
   const v = parseInt((document.getElementById(id) || {}).value, 10);
   return (Number.isFinite(v) && v > 0) ? Math.min(v, max) : null;
@@ -22388,6 +22412,20 @@ function _drawInvolvedLabel(d) {
   const cited = new Set(_defiInvolvedIds(_gageDefiById(d && d.defiTemplateId)));
   return ids.map(id => _playerNameOf(id) + (cited.has(id) ? '' : ' (tirée au sort)')).join(', ');
 }
+// --- Points d'un défi ------------------------------------------------------
+// Un défi relevé RAPPORTE (défaut 20, barème propre à chaque défi). Une
+// sanction, non : c'est une sanction, pas une récompense.
+// Le barème est FIGÉ sur la ligne au TIRAGE — pas à l'assignation, puisque le
+// coach n'assigne qu'un type et qu'on ne sait de quel défi il s'agit qu'une
+// fois pioché. Modifier le barème du modèle ne retarife donc rien.
+const GAGE_DEFI_POINTS_DEFAULT = 20;
+function _defiPointsOf(t) { return Number.isFinite(t && t.pointsReward) ? Math.max(0, t.pointsReward) : GAGE_DEFI_POINTS_DEFAULT; }
+// Pour l'AFFICHAGE : la valeur figée si elle existe, sinon celle du modèle.
+function _drawDefiPoints(d) {
+  if (_drawKind(d) !== 'defi') return 0;
+  if (Number.isFinite(d.pointsAwarded) && d.pointsAwarded > 0) return d.pointsAwarded;
+  return _defiPointsOf(_gageDefiById(d.defiTemplateId));
+}
 // Étiquette du MODÈLE (pas d'une assignation) : qui il cite, et s'il pioche.
 function _defiTplInvolvedLabel(t) {
   const named = _defiInvolvedIds(t).map(_playerNameOf);
@@ -22414,7 +22452,10 @@ function openGageDefiEditor(id) {
         <textarea id="gdf-desc" rows="3" maxlength="240" style="width:100%">${t ? esc(t.description || '') : ''}</textarea></div>
       <div class="fld" style="margin-bottom:10px"><label class="fld-label">Délai de validation (jours)</label>
         <input id="gdf-win" type="number" min="1" max="90" value="${t && Number.isFinite(t.windowDays) ? t.windowDays : 7}" style="width:100%">
-        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px">Décompté à partir de l'assignation.</div></div>
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px">Décompté à partir du tirage par la joueuse.</div></div>
+      <div class="fld" style="margin-bottom:8px"><label class="fld-label">Points si relevé</label>
+        <input id="gdf-points" type="number" min="0" max="500" value="${t ? _defiPointsOf(t) : GAGE_DEFI_POINTS_DEFAULT}" style="width:100%">
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;line-height:1.5">Crédités au score de saison quand tu valides. Figés au tirage : changer ce barème ne retarife pas les défis en cours. 0 = aucun point.</div></div>
       <div class="fld" style="margin-bottom:8px"><label class="fld-label">Joueuses impliquées (optionnel)</label>
         <select id="gdf-involved" multiple size="6" style="width:100%">
           ${_assignGagePlayers().map(p => `<option value="${p.id}"${_defiCites(t, p.id) ? ' selected' : ''}>#${p.num} ${esc(p.name)}</option>`).join('')}
@@ -22443,6 +22484,7 @@ function saveGageDefi(id) {
     windowDays: (Number.isFinite(w) && w > 0) ? Math.min(w, 90) : 7,
     involvedPlayerIds: Array.from((document.getElementById('gdf-involved') || {}).selectedOptions || []).map(o => o.value).filter(Boolean),
     involvesRandom: !!(document.getElementById('gdf-random') || {}).checked,
+    pointsReward: _pointsFieldValue('gdf-points', GAGE_DEFI_POINTS_DEFAULT),
     updatedAt: now
   };
   state.gageDefis = state.gageDefis || [];
@@ -22623,10 +22665,12 @@ function _setKindDrawItem(draw, tpl) {
   const now = Date.now();
   if (_drawKind(draw) === 'sanction_physique') {
     draw.sanctionTemplateId = tpl.id; draw.resolvedInvolvedPlayerIds = []; draw.deadlineAt = null;
+    draw.pointsAwarded = 0;                                  // une sanction ne rapporte rien
   } else {
     draw.defiTemplateId = tpl.id;
     draw.resolvedInvolvedPlayerIds = _resolveDefiInvolved(tpl, draw.playerId) || [];
     draw.deadlineAt = now + (Number.isFinite(tpl.windowDays) ? tpl.windowDays : 7) * 86400000;
+    draw.pointsAwarded = _defiPointsOf(tpl);                 // barème FIGÉ ici
   }
   draw.drawnAt = now; draw.updatedAt = now;
   persist(); _gageFlush();
@@ -22704,7 +22748,8 @@ function _kindRevealResult(draw) {
   const involved = sanction ? '' : _drawInvolvedLabel(draw);
   const sub = sanction
     ? (_sanctionDose(item) || '')
-    : (item && Number.isFinite(item.windowDays) ? 'à valider sous ' + item.windowDays + ' j' : '');
+    : [item && Number.isFinite(item.windowDays) ? 'à valider sous ' + item.windowDays + ' j' : '',
+       _drawDefiPoints(draw) ? '+' + _drawDefiPoints(draw) + ' pts si validé' : ''].filter(Boolean).join(' · ');
   host.innerHTML = `
     <div class="gage-screen gage-reveal">
       <div class="gage-eyebrow">${meta.icon} ${esc(meta.label)}${remaining > 1 ? ' · ' + remaining + ' à tirer' : ''}</div>
@@ -22800,6 +22845,14 @@ function validateGageDraw(drawId, note) {
   d.status = 'coach_confirmed'; d.confirmedAt = now;
   d.validatedAt = now; d.validatedBy = (currentCoach() || {}).id || 'admin';
   if (note !== undefined && note !== null) d.validationNote = String(note).trim().slice(0, 240) || null;
+  // Filet : une ligne tirée avant que le barème existe n'a rien de figé. On le
+  // pose ici plutôt que de perdre les points en silence. Un défi volontairement
+  // à 0 reste à 0 (Number.isFinite, pas de test de vérité).
+  if (_drawKind(d) === 'defi') {
+    if (!Number.isFinite(d.pointsAwarded)) d.pointsAwarded = _defiPointsOf(_gageDefiById(d.defiTemplateId));
+  } else if (!_isClassiqueDraw(d)) {
+    d.pointsAwarded = 0;                                     // sanction : rien
+  }
   d.updatedAt = now;
   // Un gage CLASSIQUE validé sort du pool (symétrie avec confirmGage).
   if (_isClassiqueDraw(d)) { const g = _gageById(d.gageId); if (g && !g.completedAt) { g.completedAt = now; _gageTouch(g); } }
@@ -22808,6 +22861,7 @@ function validateGageDraw(drawId, note) {
 function openValidateGageDraw(drawId) {
   const d = (state.gageDraws || []).find(x => x.id === drawId); if (!d) return;
   const kind = _drawKind(d);
+  const pts = _drawDefiPoints(d);
   const what = kind === 'sanction_physique' ? (_sanctionTplById(d.sanctionTemplateId) || {}).name
     : kind === 'defi' ? (_gageDefiById(d.defiTemplateId) || {}).name : _gageText(d.gageId);
   openModal(`
@@ -22821,7 +22875,7 @@ function openValidateGageDraw(drawId) {
       <div class="fld" style="margin-bottom:10px"><label class="fld-label">Note (optionnel)</label>
         <textarea id="gv-note" rows="2" maxlength="240" placeholder="Ex : fait avant l'échauffement" style="width:100%"></textarea></div>
       <div style="display:flex;justify-content:flex-end">
-        <button class="btn btn-primary" onclick="submitValidateGageDraw('${d.id}')">✅ Valider</button>
+        <button class="btn btn-primary" onclick="submitValidateGageDraw('${d.id}')">✅ Valider${pts ? ' (+' + pts + ' pts)' : ''}</button>
       </div>
     </div>
   `);
@@ -22938,7 +22992,7 @@ function _gagePreviewResult(picked) {
   } else if (kind === 'sanction_physique') {
     sub = [picked.category, _sanctionDose(picked)].filter(Boolean).join(' · ');
   } else {
-    sub = 'à valider sous ' + (Number.isFinite(picked.windowDays) ? picked.windowDays : 7) + ' j';
+    sub = 'à valider sous ' + (Number.isFinite(picked.windowDays) ? picked.windowDays : 7) + ' j · ' + _defiPointsOf(picked) + ' pts';
     // On simule aussi la résolution de la joueuse au hasard, sur la roster
     // complète (pas de cible dans un test) : c'est justement ce qu'on veut voir.
     const named = _defiInvolvedIds(picked).map(_playerNameOf);
@@ -23087,7 +23141,7 @@ function _gagesCoachDefiHtml() {
         const late = d.deadlineAt && d.deadlineAt < Date.now();
         return _gageCoachCard(`
           <div style="font-size:14px;color:var(--ink);line-height:1.4">🎯 ${esc(t ? t.name : '(défi retiré)')}</div>
-          <div style="font-size:10px;color:${late ? 'var(--red)' : 'var(--ink-3)'};font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${esc(_pNameShort(d.playerId))} · ${esc(_defiDeadlineLabel(d) || '—')}${d.status === 'player_done' ? ' · ✋ dit avoir fait' : ''}</div>
+          <div style="font-size:10px;color:${late ? 'var(--red)' : 'var(--ink-3)'};font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${esc(_pNameShort(d.playerId))} · ${esc(_defiDeadlineLabel(d) || '—')}${_drawDefiPoints(d) ? ' · +' + _drawDefiPoints(d) + ' pts' : ''}${d.status === 'player_done' ? ' · ✋ dit avoir fait' : ''}</div>
           ${_drawInvolvedLabel(d) ? `<div style="font-size:10px;color:var(--orange);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">👥 implique : ${esc(_drawInvolvedLabel(d))}</div>` : ''}
           <div style="display:flex;gap:6px;margin-top:8px">
             <button class="btn btn-primary" style="flex:1;font-size:12px" onclick="openValidateGageDraw('${d.id}')">✅ Valider</button>
@@ -23101,7 +23155,7 @@ function _gagesCoachDefiHtml() {
         <div style="display:flex;align-items:flex-start;gap:8px">
           <div style="flex:1;min-width:0">
             <div style="font-size:14px;color:var(--ink);line-height:1.4">${esc(t.name)}</div>
-            <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;margin-top:3px">délai ${Number.isFinite(t.windowDays) ? t.windowDays : 7} j</div>
+            <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;margin-top:3px">délai ${Number.isFinite(t.windowDays) ? t.windowDays : 7} j · ${_defiPointsOf(t)} pts</div>
             ${_defiTplInvolvedLabel(t) ? `<div style="font-size:10px;color:var(--orange);font-family:'JetBrains Mono';text-transform:uppercase;margin-top:3px">👥 implique : ${esc(_defiTplInvolvedLabel(t))}</div>` : ''}
             ${t.description ? `<div style="font-size:11px;color:var(--ink-2);margin-top:4px;line-height:1.4">${esc(t.description)}</div>` : ''}
           </div>
@@ -23184,7 +23238,7 @@ function renderPlayerKindReminders() {
         <div style="display:flex;align-items:center;gap:9px">
           <div style="font-size:20px;flex:0 0 auto">🎯</div>
           <div style="flex:1;min-width:0">
-            <div style="font-size:11px;font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:.04em;color:var(--orange)">Défi à valider ${esc(_defiDeadlineLabel(next))}</div>
+            <div style="font-size:11px;font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:.04em;color:var(--orange)">Défi à valider ${esc(_defiDeadlineLabel(next))}${_drawDefiPoints(next) ? ' · +' + _drawDefiPoints(next) + ' pts' : ''}</div>
             <div style="font-size:13px;color:var(--ink);line-height:1.35;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc((_gageDefiById(next.defiTemplateId) || {}).name || '(défi)')}${defis.length > 1 ? ` · +${defis.length - 1}` : ''}</div>
           </div>
           <div style="flex:0 0 auto;color:var(--orange);font-family:'Anton';font-size:16px">→</div>
@@ -23233,7 +23287,7 @@ function openPlayerDefis() {
             <div style="font-size:14px;color:var(--ink);line-height:1.4">${esc(t ? t.name : '(défi)')}</div>
             ${t && t.description ? `<div style="font-size:12px;color:var(--ink-2);margin-top:5px;line-height:1.45">${esc(t.description)}</div>` : ''}
             ${_drawInvolvedLabel(d) ? `<div style="font-size:12px;color:var(--ink);margin-top:6px;line-height:1.4">👥 Avec : <strong>${esc(_drawInvolvedLabel(d))}</strong></div>` : ''}
-            <div style="font-size:10px;color:${late ? 'var(--red)' : 'var(--orange)'};font-family:'JetBrains Mono';text-transform:uppercase;margin-top:7px">${esc(_defiDeadlineLabel(d) || '—')}${d.status === 'player_done' ? ' · en attente du coach' : ''}</div>
+            <div style="font-size:10px;color:${late ? 'var(--red)' : 'var(--orange)'};font-family:'JetBrains Mono';text-transform:uppercase;margin-top:7px">${esc(_defiDeadlineLabel(d) || '—')}${_drawDefiPoints(d) ? ' · +' + _drawDefiPoints(d) + ' pts si validé' : ''}${d.status === 'player_done' ? ' · en attente du coach' : ''}</div>
             ${d.status === 'accepted' ? `<button class="btn btn-primary btn-block" style="margin-top:8px;font-size:13px" onclick="markKindDrawDone('${d.id}')">J'ai relevé le défi ✓</button>` : ''}
           </div>`;
       }).join('') : '<div style="color:var(--ink-3);font-size:13px;font-style:italic">Aucun défi en cours.</div>'}
@@ -28534,7 +28588,9 @@ function _feedKindDrawEvents(d, scope, out) {
       ts: okAt,
       icon: '✅',
       text: sanction ? 'a fait sa sanction physique' : 'a relevé son défi',
-      meta: '', photoUrl: ''
+      // Les points, eux, se disent : ils sont déjà publics au classement.
+      meta: sanction ? '' : (_drawDefiPoints(d) ? '+' + _drawDefiPoints(d) + ' pts' : ''),
+      photoUrl: ''
     }, who));
   }
 }
@@ -51999,7 +52055,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.160';
+const APP_VERSION = '2026-08-19.161';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.

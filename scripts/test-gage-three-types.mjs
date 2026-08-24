@@ -109,6 +109,36 @@ function _drawInvolvedIds(d) {
   return _defiInvolvedIds(_gageDefiById(d && d.defiTemplateId));
 }
 
+// --- Points d'un défi -------------------------------------------------------
+const GAGE_DEFI_POINTS_DEFAULT = 20;
+function _defiPointsOf(t) { return Number.isFinite(t && t.pointsReward) ? Math.max(0, t.pointsReward) : GAGE_DEFI_POINTS_DEFAULT; }
+function _drawDefiPoints(d) {
+  if (_drawKind(d) !== 'defi') return 0;
+  if (Number.isFinite(d.pointsAwarded) && d.pointsAwarded > 0) return d.pointsAwarded;
+  return _defiPointsOf(_gageDefiById(d.defiTemplateId));
+}
+// L'enum applicatif borné avant envoi au ledger (index.html) : un sourceType
+// hors liste ferait échouer tout le lot d'upsert et gèlerait la synchro.
+const _POINTS_SOURCE_TYPES_DB = [
+  'training_completion', 'training_attendance', 'challenge_score',
+  'ardoise_done', 'gage_done', 'manual_adjustment'
+];
+function pointsRules() { return { gageDonePoints: 15 }; }
+// Extrait fidèle du bloc 4 de _derivePointsEntries (sans le filtre de saison,
+// que ce harnais ne modélise pas).
+function _derivedGagePoints(playerId) {
+  const rules = pointsRules(); const out = [];
+  (state.gageDraws || []).forEach(d => {
+    if (d.playerId !== playerId || d.status !== 'coach_confirmed') return;
+    const kind = _drawKind(d);
+    if (kind === 'sanction_physique') return;
+    const delta = kind === 'defi' ? Math.max(0, Number(d.pointsAwarded) || 0) : (rules.gageDonePoints || 0);
+    if (delta <= 0) return;
+    out.push({ sourceType: 'gage_done', sourceId: d.id, delta, label: kind === 'defi' ? 'Défi relevé' : 'Gage tenu' });
+  });
+  return out;
+}
+
 // --- Le tirage des types non-classiques -------------------------------------
 function pendingKindDraws(pid) { return _seasonGageDraws(pid).filter(d => d.status === 'owed' && !_isClassiqueDraw(d)); }
 function _kindPoolFor(pid, kind, excludeId) {
@@ -131,10 +161,12 @@ function _setKindDrawItem(draw, tpl) {
   const t = now();
   if (_drawKind(draw) === 'sanction_physique') {
     draw.sanctionTemplateId = tpl.id; draw.resolvedInvolvedPlayerIds = []; draw.deadlineAt = null;
+    draw.pointsAwarded = 0;
   } else {
     draw.defiTemplateId = tpl.id;
     draw.resolvedInvolvedPlayerIds = _resolveDefiInvolved(tpl, draw.playerId) || [];
     draw.deadlineAt = t + (Number.isFinite(tpl.windowDays) ? tpl.windowDays : 7) * 86400000;
+    draw.pointsAwarded = _defiPointsOf(tpl);
   }
   draw.drawnAt = t; draw.updatedAt = t;
 }
@@ -186,6 +218,9 @@ function validateGageDraw(drawId) {
   if (!d || d.status === 'coach_confirmed') return false;
   const t = now();
   d.status = 'coach_confirmed'; d.confirmedAt = t; d.validatedAt = t; d.validatedBy = 'admin';
+  if (_drawKind(d) === 'defi') {
+    if (!Number.isFinite(d.pointsAwarded)) d.pointsAwarded = _defiPointsOf(_gageDefiById(d.defiTemplateId));
+  } else if (!_isClassiqueDraw(d)) { d.pointsAwarded = 0; }
   return true;
 }
 function completeSanctionProgram(pid) { playerPendingSanctions(pid).forEach(d => validateGageDraw(d.id)); }
@@ -388,4 +423,71 @@ t('assigné → tiré → gardé → validé', () => {
   assert.strictEqual(r.row.validatedBy, 'admin');
 });
 
-console.log('\n✅ ' + pass + ' assertions OK — tirage au sort des 3 types, garder/retirer/annuler, dette cloisonnée, agrégation, anti-auto-défi, random figé.\n');
+console.log('\nSCÉNARIO 7 — les défis rapportent, les sanctions non');
+fresh();
+t('barème par défaut : 20 pts', () => {
+  assert.strictEqual(_defiPointsOf(_gageDefiById('d1')), 20);
+  assert.strictEqual(_defiPointsOf({ pointsReward: 35 }), 35);
+  assert.strictEqual(_defiPointsOf({ pointsReward: 0 }), 0, '0 est une valeur voulue, pas un vide');
+});
+t('le barème est FIGÉ au tirage, pas à l\'assignation', () => {
+  const r = assignKindDrawTo('p2', 'defi');
+  assert.strictEqual(r.row.pointsAwarded, undefined, 'rien de figé tant que rien n\'est tiré');
+  openKindDraw(r.row);
+  assert.strictEqual(r.row.pointsAwarded, 20);
+});
+t('changer le barème du modèle ne retarife PAS le défi en cours', () => {
+  const d = state.gageDraws[state.gageDraws.length - 1];
+  _gageDefiById(d.defiTemplateId).pointsReward = 99;
+  assert.strictEqual(d.pointsAwarded, 20);
+  keepKindDraw(d); validateGageDraw(d.id);
+  assert.strictEqual(_derivedGagePoints('p2').reduce((n, e) => n + e.delta, 0), 20);
+});
+t('« Retirer au sort » refige le barème du NOUVEAU défi', () => {
+  fresh();
+  _gageDefiById('d2').pointsReward = 50;
+  const r = assignKindDrawTo('p2', 'defi');
+  openKindDraw(r.row);
+  assert.strictEqual(r.row.defiTemplateId, 'd1');
+  assert.strictEqual(r.row.pointsAwarded, 20);
+  redrawKindDraw(r.row);
+  assert.strictEqual(r.row.defiTemplateId, 'd2');
+  assert.strictEqual(r.row.pointsAwarded, 50);
+});
+t('une sanction validée ne rapporte AUCUN point', () => {
+  fresh();
+  const r = assignDrawKeep('p1', 'sanction_physique');
+  assert.strictEqual(r.row.pointsAwarded, 0);
+  validateGageDraw(r.row.id);
+  assert.strictEqual(_derivedGagePoints('p1').length, 0);
+});
+t('un gage classique confirmé garde le barème GLOBAL', () => {
+  fresh();
+  state.gageDraws.push({ id: uid(), playerId: 'p1', kind: 'classique', status: 'coach_confirmed', confirmedAt: now() });
+  const e = _derivedGagePoints('p1');
+  assert.strictEqual(e.length, 1);
+  assert.strictEqual(e[0].delta, 15, 'gageDonePoints, pas le barème d\'un défi');
+  assert.strictEqual(e[0].label, 'Gage tenu');
+});
+t('un défi à 0 point ne crée aucune entrée', () => {
+  fresh();
+  _gageDefiById('d1').pointsReward = 0;
+  state.gageDefis = [_gageDefiById('d1')];
+  const r = assignDrawKeep('p2', 'defi');
+  validateGageDraw(r.row.id);
+  assert.strictEqual(_derivedGagePoints('p2').length, 0);
+});
+t('un défi non encore validé ne rapporte rien', () => {
+  fresh();
+  const r = assignDrawKeep('p2', 'defi');
+  assert.strictEqual(_derivedGagePoints('p2').length, 0, 'accepted ≠ validé');
+  validateGageDraw(r.row.id);
+  assert.strictEqual(_derivedGagePoints('p2')[0].label, 'Défi relevé');
+});
+t('le sourceType reste gage_done pour les trois (enum DB inchangée)', () => {
+  const e = _derivedGagePoints('p2');
+  assert.strictEqual(e[0].sourceType, 'gage_done');
+  assert.ok(_POINTS_SOURCE_TYPES_DB.includes(e[0].sourceType), 'sinon un override coach gèlerait la synchro du ledger');
+});
+
+console.log('\n✅ ' + pass + ' assertions OK — tirage au sort des 3 types, garder/retirer/annuler, dette cloisonnée, agrégation, anti-auto-défi, random figé, points des défis.\n');
