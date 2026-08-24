@@ -14763,7 +14763,7 @@ function openPointsAdjust(playerId) {
         <!-- PAS de type="number" + inputmode="numeric" : sur iPhone ce couple
              ouvre un pavé numérique SANS touche « - », donc un coach ne pouvait
              pas saisir le malus que le placeholder lui proposait. Le champ passe
-             en `text` (le signe se tape), et le bouton « ± » l'inverse sans avoir
+             en "text" (le signe se tape), et le bouton « ± » l'inverse sans avoir
              besoin d'AUCUNE touche — c'est lui la garantie, quel que soit l'OS. -->
         <div style="display:flex;gap:8px;align-items:stretch">
           <input id="pts-adj-delta" type="text" inputmode="numeric" pattern="-?[0-9]*" autocomplete="off" placeholder="Ex : 20 ou -10" style="flex:1;min-width:0" oninput="_ptsAdjNormalize()">
@@ -52236,7 +52236,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.167';
+const APP_VERSION = '2026-08-19.168';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
