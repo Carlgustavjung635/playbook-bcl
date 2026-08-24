@@ -5830,6 +5830,13 @@ const ENTITIES = [
           invalidatedAt: r.invalidated_at ? Date.parse(r.invalidated_at) : null,
           invalidationReason: r.invalidation_reason || null,
           seasonId: r.season_id || null,
+          kind: ['classique', 'sanction_physique', 'defi'].includes(r.kind) ? r.kind : 'classique',
+          sanctionTemplateId: r.sanction_template_id || null,
+          defiTemplateId: r.defi_template_id || null,
+          deadlineAt: r.deadline_at ? Date.parse(r.deadline_at) : null,
+          validatedAt: r.validated_at ? Date.parse(r.validated_at) : null,
+          validatedBy: r.validated_by || null,
+          validationNote: r.validation_note || null,
           createdAt: r.created_at ? Date.parse(r.created_at) : null,
           updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null)
         };
@@ -5846,6 +5853,71 @@ const ENTITIES = [
       const pendingLocal = local.filter(d => !remoteIds.has(d.id) && typeof d.id === 'string' && d.id.startsWith('x'));
       state.gageDraws = [...pendingLocal, ...fromRemote];
       if (ahead.length) _reassertRows('gage_draws', ahead.map(_dumpGageDrawRow));
+    }
+  },
+  // ==========================================================================
+  // SANCTIONS PHYSIQUES — base d'exos DÉDIÉE (cf. 20260824_001).
+  // Volontairement SÉPARÉE de exo_templates (bibliothèque de l'ardoise) : les
+  // deux pools ne doivent pas se mélanger, le coach ne veut pas voir les exos
+  // de l'ardoise quand il pose une sanction, ni l'inverse.
+  // ==========================================================================
+  {
+    key: 'sanctionTemplates', table: 'sanction_templates', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.sanctionTemplates || []).map(t => [t.id, _dumpSanctionTemplateRow(t)])),
+    apply: (state, rows) => {
+      const local = state.sanctionTemplates || [];
+      const localById = Object.fromEntries(local.map(t => [t.id, t]));
+      const remoteIds = new Set(rows.map(r => r.id));
+      const ahead = [];
+      const fromRemote = rows.map(r => {
+        const mapped = {
+          id: r.id, name: r.name || '', description: r.description || '',
+          category: r.category || '', sets: Number.isFinite(r.sets) ? r.sets : null,
+          reps: Number.isFinite(r.reps) ? r.reps : null,
+          durationSeconds: Number.isFinite(r.duration_seconds) ? r.duration_seconds : null,
+          notes: r.notes || '',
+          deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null,
+          createdAt: r.created_at ? Date.parse(r.created_at) : null,
+          updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null)
+        };
+        const loc = localById[r.id];
+        if (loc && (loc.updatedAt || 0) > (mapped.updatedAt || 0)) { ahead.push(loc); return loc; }
+        return mapped;
+      });
+      const pendingLocal = local.filter(t => !remoteIds.has(t.id) && typeof t.id === 'string' && t.id.startsWith('x'));
+      state.sanctionTemplates = [...pendingLocal, ...fromRemote];
+      if (ahead.length) _reassertRows('sanction_templates', ahead.map(_dumpSanctionTemplateRow));
+    }
+  },
+  // ==========================================================================
+  // DÉFIS-GAGES — base DÉDIÉE (cf. 20260824_001). À ne pas confondre avec
+  // `challenges` : ceux-là sont les défis COLLECTIFS de la saison. Ici c'est un
+  // défi individuel posé à une joueuse en guise de gage, avec une fenêtre.
+  // ==========================================================================
+  {
+    key: 'gageDefis', table: 'gage_defis_templates', pk: 'id', realtime: true, auth: 'anon',
+    dump: (state) => Object.fromEntries((state.gageDefis || []).map(t => [t.id, _dumpGageDefiRow(t)])),
+    apply: (state, rows) => {
+      const local = state.gageDefis || [];
+      const localById = Object.fromEntries(local.map(t => [t.id, t]));
+      const remoteIds = new Set(rows.map(r => r.id));
+      const ahead = [];
+      const fromRemote = rows.map(r => {
+        const mapped = {
+          id: r.id, name: r.name || '', description: r.description || '',
+          windowDays: Number.isFinite(r.window_days) ? r.window_days : 7,
+          notes: r.notes || '',
+          deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null,
+          createdAt: r.created_at ? Date.parse(r.created_at) : null,
+          updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null)
+        };
+        const loc = localById[r.id];
+        if (loc && (loc.updatedAt || 0) > (mapped.updatedAt || 0)) { ahead.push(loc); return loc; }
+        return mapped;
+      });
+      const pendingLocal = local.filter(t => !remoteIds.has(t.id) && typeof t.id === 'string' && t.id.startsWith('x'));
+      state.gageDefis = [...pendingLocal, ...fromRemote];
+      if (ahead.length) _reassertRows('gage_defis_templates', ahead.map(_dumpGageDefiRow));
     }
   },
   // ==========================================================================
@@ -6385,7 +6457,36 @@ function _dumpGageDrawRow(d) {
     invalidated_at: d.invalidatedAt ? new Date(d.invalidatedAt).toISOString() : null,
     invalidation_reason: d.invalidationReason || null,
     season_id: d.seasonId || null,
+    // --- 3 TYPES DE GAGE (cf. 20260824_001) : le type vit sur l'ASSIGNATION ---
+    kind: ['classique', 'sanction_physique', 'defi'].includes(d.kind) ? d.kind : 'classique',
+    sanction_template_id: d.sanctionTemplateId || null,
+    defi_template_id: d.defiTemplateId || null,
+    deadline_at: d.deadlineAt ? new Date(d.deadlineAt).toISOString() : null,
+    validated_at: d.validatedAt ? new Date(d.validatedAt).toISOString() : null,
+    validated_by: d.validatedBy || null,
+    validation_note: d.validationNote || null,
     updated_at: d.updatedAt ? new Date(d.updatedAt).toISOString() : (d.createdAt ? new Date(d.createdAt).toISOString() : null)
+  };
+}
+function _dumpSanctionTemplateRow(t) {
+  return {
+    id: t.id, name: t.name || '', description: t.description || null,
+    category: t.category || null,
+    sets: Number.isFinite(t.sets) ? t.sets : null,
+    reps: Number.isFinite(t.reps) ? t.reps : null,
+    duration_seconds: Number.isFinite(t.durationSeconds) ? t.durationSeconds : null,
+    notes: t.notes || null,
+    deleted_at: t.deletedAt ? new Date(t.deletedAt).toISOString() : null,
+    updated_at: t.updatedAt ? new Date(t.updatedAt).toISOString() : (t.createdAt ? new Date(t.createdAt).toISOString() : null)
+  };
+}
+function _dumpGageDefiRow(t) {
+  return {
+    id: t.id, name: t.name || '', description: t.description || null,
+    window_days: Number.isFinite(t.windowDays) ? t.windowDays : 7,
+    notes: t.notes || null,
+    deleted_at: t.deletedAt ? new Date(t.deletedAt).toISOString() : null,
+    updated_at: t.updatedAt ? new Date(t.updatedAt).toISOString() : (t.createdAt ? new Date(t.createdAt).toISOString() : null)
   };
 }
 function _dumpCoachRow(c) {
@@ -7909,6 +8010,8 @@ const K = {
   broadcastReceipts: 'pb8_broadcast_receipts',
   gages: 'pb8_gages',
   gageDraws: 'pb8_gage_draws',
+  sanctionTemplates: 'pb8_sanction_templates',      // [{ id, name, category, sets, reps, durationSeconds, … }] — base DÉDIÉE aux sanctions physiques
+  gageDefis: 'pb8_gage_defis',                      // [{ id, name, description, windowDays, … }] — base DÉDIÉE aux défis-gages individuels
   coaches: 'pb8_coaches', // [{ id, name, coachRole, teams[], code, createdAt, updatedAt }] — identités coach (rôles multi-équipes)
   drills: 'pb8_drills', // [{ id, name, createdBy, stimuli, lengthMs, delayMs, audioBeep, durationMode, durationValue, ... }] — drills de réaction
   drillImages: 'pb8_drill_images', // [{ id, uploadedBy, storagePath, label, url, ... }] — images custom (métadonnées ; binaire = Storage)
@@ -8355,6 +8458,10 @@ let state = {
   // Tirages de gages : [{ id, playerId, gageId, status:'owed'|'accepted'|'skipped',
   //   assignedAt, drawnAt, completedAt, seasonId, createdAt, updatedAt }]
   gageDraws: load(K.gageDraws, []),
+  // === 3 TYPES DE GAGE (cf. migration 20260824_001) ===
+  // Deux bases d'items DÉDIÉES, alimentant les assignations kind != 'classique'.
+  sanctionTemplates: load(K.sanctionTemplates, []),
+  gageDefis: load(K.gageDefis, []),
 
   // === RÔLES MULTI-COACH (cf. migration 20260709_001_coach_roles_multi_team) ===
   // coaches : identités coach PIN-only, synchronisées (comme les joueuses).
@@ -8523,6 +8630,8 @@ function persist() {
   save(K.broadcastReceipts, state.broadcastReceipts);
   save(K.gages, state.gages);
   save(K.gageDraws, state.gageDraws);
+  save(K.sanctionTemplates, state.sanctionTemplates);
+  save(K.gageDefis, state.gageDefis);
   save(K.coaches, state.coaches);
   save(K.drills, state.drills);
   save(K.drillImages, state.drillImages);
@@ -21149,7 +21258,10 @@ const GAGE_DEBT_MAX = 2;
 // les tests coach-batch restent verts). Le clamp à 0 empêche un remboursement
 // de pré-payer un skip futur ou de rendre la dette négative.
 function gageDebt(pid) {
-  const draws = _seasonGageDraws(pid);
+  // La dette est une mécanique du TIRAGE, donc du seul type « classique ». Une
+  // sanction ou un défi n'est jamais tiré, jamais passé : les compter ici ferait
+  // rembourser une dette de tirage par un exo d'abdos (cf. 20260824_001).
+  const draws = _seasonGageDraws(pid).filter(_isClassiqueDraw);
   const events = []; // { at, v } — v>0 ajoute, v<0 rembourse
   // 1) Lots de tirages (groupés par assignedAt), hors lignes 'adjust'.
   const batches = {};
@@ -21216,7 +21328,7 @@ function resetPlayerDebt(pid) {
 }
 // Tirages dûs (status 'owed') de la joueuse, plus anciens d'abord.
 function pendingDraws(pid) {
-  return _seasonGageDraws(pid).filter(d => d.status === 'owed').sort((a, b) => (a.assignedAt || 0) - (b.assignedAt || 0));
+  return _seasonGageDraws(pid).filter(d => d.status === 'owed' && _isClassiqueDraw(d)).sort((a, b) => (a.assignedAt || 0) - (b.assignedAt || 0));
 }
 // Un gage est TIRABLE ssi approuvé, non supprimé (deleted_at) et non réalisé
 // (completed_at posé quand un tirage a été coach_confirmed → retiré du pool).
@@ -21622,7 +21734,24 @@ function renderGageCoachHomeCard() {
       </div>
     </div>`;
 }
+// Écran boîte à gages : 3 ONGLETS (🎲 Classiques / 💪 Sanctions / 🎯 Défis),
+// chacun avec sa base, son assignation et sa validation. L'onglet courant vit
+// dans state._gageTab — c'est un geste, pas un état à persister.
 function renderGagesCoach() {
+  const tab = GAGE_KINDS[state._gageTab] ? state._gageTab : 'classique';
+  return `
+    <div class="fade-up">
+      <button class="detail-back" onclick="state.view=null;render()">← Équipe</button>
+      <div class="px" style="padding-top:6px">
+        <div class="display-lg" style="margin-bottom:2px">🎁 Boîte à gages</div>
+        ${_gagesCoachKindTabs()}
+      </div>
+      ${tab === 'sanction_physique' ? _gagesCoachSanctionHtml()
+        : tab === 'defi' ? _gagesCoachDefiHtml()
+        : _gagesCoachClassiqueHtml()}
+    </div>`;
+}
+function _gagesCoachClassiqueHtml() {
   const admin = isAdminCoach(); // modération + garnissage pool = admin only
   // Coach non-admin : ne voit/gère que les tirages de SES joueuses.
   const active0 = getActiveSeasonId();
@@ -21653,12 +21782,10 @@ function renderGagesCoach() {
   owed.forEach(d => { (owedByPlayer[d.playerId] = owedByPlayer[d.playerId] || 0); owedByPlayer[d.playerId]++; });
   const owedPlayers = Object.keys(owedByPlayer);
   return `
-    <div class="fade-up">
-      <button class="detail-back" onclick="state.view=null;render()">← Équipe</button>
-      <div class="px" style="padding-top:6px">
-        <div class="display-lg" style="margin-bottom:2px">🎁 Boîte à gages</div>
+    <div>
+      <div class="px">
         <div style="font-size:12px;color:var(--ink-3);margin-bottom:14px">${admin ? 'Modère les propositions, garnis le pool, puis fais <strong>tirer au sort</strong> un gage à une joueuse (elle découvre lequel au tirage).' : 'Fais <strong>tirer au sort</strong> un gage du pool à une de tes joueuses. Tu peux aussi proposer des idées (validées par l\'admin).'}</div>
-        <button class="btn btn-primary btn-block" onclick="openAssignDraw()" style="margin-bottom:6px">➕ Faire tirer un gage à…</button>
+        <button class="btn btn-primary btn-block" onclick="openAssignGage('classique')" style="margin-bottom:6px">➕ Faire tirer un gage à…</button>
         <div style="display:flex;gap:6px">
           <button class="btn btn-secondary" style="flex:1" onclick="${admin ? 'openCoachAddGage()' : 'openCoachProposeGage()'}">🎁 ${admin ? 'Ajouter un gage' : 'Proposer un gage'}</button>
           <button class="btn btn-secondary" style="flex:1" onclick="openGageDebtManager()">🎛️ Gérer les dettes</button>
@@ -22006,7 +22133,7 @@ function _readGageTypeFields(pfx) {
 
 // --- Joueuse : gages « en cours » (rappel non bloquant) + « J'ai fait » ---
 function playerActiveDraws(pid) {
-  return _seasonGageDraws(pid).filter(d => d.status === 'accepted' || d.status === 'player_done')
+  return _seasonGageDraws(pid).filter(d => _isClassiqueDraw(d) && (d.status === 'accepted' || d.status === 'player_done'))
     .sort((a, b) => (a.completedAt || 0) - (b.completedAt || 0));
 }
 // Bandeau PERSISTANT en haut de l'app tant qu'un gage accepté n'est pas « fait ».
@@ -22070,6 +22197,671 @@ function openPlayerGageInProgress() {
     </div>
     <div class="modal-body">${body}</div>
   `);
+}
+
+// ============================================================
+// TROIS TYPES DE GAGE COHABITENT (cf. migration 20260824_001)
+// ------------------------------------------------------------
+// Le coach choisit le TYPE au moment de l'assignation — il n'y a JAMAIS de
+// hasard entre les types, seulement à l'intérieur du type « classique ».
+//
+//   🎲 classique          → inchangé : devoir de tirer, roulette, dette.
+//   💪 sanction_physique  → exo pioché dans une base DÉDIÉE (sanctionTemplates,
+//                           séparée de exo_templates/ardoise), à faire au
+//                           prochain entraînement. Les sanctions d'une même
+//                           joueuse s'AGRÈGENT en un programme unique.
+//   🎯 defi               → défi individuel pioché dans une base DÉDIÉE
+//                           (gageDefis, séparée des challenges collectifs),
+//                           à valider avant une deadline.
+//
+// PREUVE : validation coach uniquement, pour les trois types. Aucune photo,
+// aucun justificatif — c'est le coach qui dit que c'est fait, point.
+//
+// LE TYPE VIT SUR L'ASSIGNATION (gage_draws.kind), pas sur l'item : `gages.
+// gage_type` est déjà pris par un autre axe (standard/secret/sport/
+// time_limited = la saveur d'un gage du pool classique) et y toucher casserait
+// le pool existant.
+//
+// CYCLE DE VIE des types non-classiques : pas de tirage, donc pas de 'owed'.
+// La ligne naît 'accepted' (= à faire) → 'coach_confirmed' (validée). Le coach
+// peut aussi 'invalidated' (annulation neutre). Ces lignes sont EXCLUES du
+// calcul de dette (gageDebt) : un accept de sanction ne doit pas rembourser une
+// dette de tirage.
+// ============================================================
+const GAGE_KINDS = {
+  classique:         { icon: '🎲', label: 'Classique',         plural: 'Classiques' },
+  sanction_physique: { icon: '💪', label: 'Sanction physique', plural: 'Sanctions'  },
+  defi:              { icon: '🎯', label: 'Défi',              plural: 'Défis'      },
+};
+function _drawKind(d) { return (d && GAGE_KINDS[d.kind]) ? d.kind : 'classique'; }
+function _isClassiqueDraw(d) { return _drawKind(d) === 'classique'; }
+
+// --- Bases d'items dédiées -------------------------------------------------
+function _byName(a, b) { return String(a.name || '').localeCompare(String(b.name || ''), 'fr'); }
+function sanctionTemplatesList() { return (state.sanctionTemplates || []).filter(t => !t.deletedAt).sort(_byName); }
+function gageDefisList() { return (state.gageDefis || []).filter(t => !t.deletedAt).sort(_byName); }
+function _sanctionTplById(id) { return (state.sanctionTemplates || []).find(t => t.id === id) || null; }
+function _gageDefiById(id) { return (state.gageDefis || []).find(t => t.id === id) || null; }
+function _fmtSecs(s) {
+  s = Math.max(0, Math.round(s || 0));
+  if (s < 60) return s + ' s';
+  const m = Math.floor(s / 60), r = s % 60;
+  return m + ' min' + (r ? ' ' + r + ' s' : '');
+}
+// Dose lisible d'un exo de sanction : « 3 × 15 » / « 45 s » / « 3 × 15 · 45 s ».
+function _sanctionDose(t, mult) {
+  if (!t) return '';
+  mult = Number.isFinite(mult) && mult > 0 ? mult : 1;
+  const bits = [];
+  const sets = Number.isFinite(t.sets) && t.sets > 0 ? t.sets * mult : 0;
+  const reps = Number.isFinite(t.reps) && t.reps > 0 ? t.reps : 0;
+  if (sets && reps) bits.push(sets + ' × ' + reps);
+  else if (reps) bits.push((reps * mult) + ' reps');
+  else if (sets) bits.push(sets + ' séries');
+  const dur = Number.isFinite(t.durationSeconds) && t.durationSeconds > 0 ? t.durationSeconds * mult : 0;
+  if (dur) bits.push(_fmtSecs(dur));
+  return bits.join(' · ');
+}
+
+// --- CRUD base SANCTIONS (admin) -------------------------------------------
+function openSanctionTemplateEditor(id) {
+  if (_denyIfScopedCoach()) return;
+  const t = id ? _sanctionTplById(id) : null;
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">💪 ${t ? 'Modifier' : 'Nouvel'} exo de sanction</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:12px;color:var(--ink-3);line-height:1.5;margin-bottom:10px">
+        Base <strong>dédiée aux sanctions</strong> — indépendante de la bibliothèque d'exos de l'ardoise.
+      </div>
+      <div class="fld" style="margin-bottom:8px"><label class="fld-label">Nom</label>
+        <input id="sct-name" type="text" maxlength="60" value="${t ? esc(t.name) : ''}" placeholder="Ex : Gainage planche" style="width:100%"></div>
+      <div class="fld" style="margin-bottom:8px"><label class="fld-label">Catégorie</label>
+        <input id="sct-cat" type="text" maxlength="24" value="${t ? esc(t.category || '') : ''}" placeholder="abdos / cardio / jambes…" style="width:100%"></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:8px">
+        <div class="fld"><label class="fld-label">Séries</label><input id="sct-sets" type="number" min="0" max="50" value="${t && Number.isFinite(t.sets) ? t.sets : ''}" style="width:100%"></div>
+        <div class="fld"><label class="fld-label">Reps</label><input id="sct-reps" type="number" min="0" max="500" value="${t && Number.isFinite(t.reps) ? t.reps : ''}" style="width:100%"></div>
+        <div class="fld"><label class="fld-label">Durée (s)</label><input id="sct-dur" type="number" min="0" max="3600" value="${t && Number.isFinite(t.durationSeconds) ? t.durationSeconds : ''}" style="width:100%"></div>
+      </div>
+      <div class="fld" style="margin-bottom:10px"><label class="fld-label">Description / consigne</label>
+        <textarea id="sct-desc" rows="2" maxlength="240" style="width:100%">${t ? esc(t.description || '') : ''}</textarea></div>
+      <div style="display:flex;justify-content:flex-end">
+        <button class="btn btn-primary" onclick="saveSanctionTemplate('${t ? t.id : ''}')">Enregistrer</button>
+      </div>
+    </div>
+  `);
+  setTimeout(() => { const el = document.getElementById('sct-name'); if (el) el.focus(); }, 80);
+}
+function _numOrNull(id, max) {
+  const v = parseInt((document.getElementById(id) || {}).value, 10);
+  return (Number.isFinite(v) && v > 0) ? Math.min(v, max) : null;
+}
+function saveSanctionTemplate(id) {
+  if (_denyIfScopedCoach()) return;
+  const name = ((document.getElementById('sct-name') || {}).value || '').trim().slice(0, 60);
+  if (!name) { if (typeof showToast === 'function') showToast('Il faut un nom'); return; }
+  const now = Date.now();
+  const patch = {
+    name,
+    category: ((document.getElementById('sct-cat') || {}).value || '').trim().slice(0, 24),
+    sets: _numOrNull('sct-sets', 50), reps: _numOrNull('sct-reps', 500),
+    durationSeconds: _numOrNull('sct-dur', 3600),
+    description: ((document.getElementById('sct-desc') || {}).value || '').trim().slice(0, 240),
+    updatedAt: now
+  };
+  state.sanctionTemplates = state.sanctionTemplates || [];
+  const cur = id ? _sanctionTplById(id) : null;
+  if (cur) Object.assign(cur, patch);
+  else state.sanctionTemplates.unshift(Object.assign({ id: uid(), notes: '', deletedAt: null, createdAt: now }, patch));
+  persist(); _gageFlush(); closeModal(); render();
+  if (typeof showToast === 'function') showToast('💪 Exo de sanction enregistré');
+}
+// Soft-delete : les assignations passées continuent de résoudre le nom de l'exo.
+function deleteSanctionTemplate(id) {
+  if (_denyIfScopedCoach()) return;
+  const t = _sanctionTplById(id); if (!t || t.deletedAt) return;
+  let ok = false; try { ok = confirm('Retirer cet exo de la base des sanctions ? Les sanctions déjà posées restent lisibles.'); } catch (e) { ok = true; }
+  if (!ok) return;
+  t.deletedAt = Date.now(); t.updatedAt = t.deletedAt;
+  persist(); _gageFlush(); render();
+  if (typeof showToast === 'function') showToast('🗑️ Exo retiré de la base');
+}
+
+// --- CRUD base DÉFIS (admin) -----------------------------------------------
+function openGageDefiEditor(id) {
+  if (_denyIfScopedCoach()) return;
+  const t = id ? _gageDefiById(id) : null;
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">🎯 ${t ? 'Modifier' : 'Nouveau'} défi</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:12px;color:var(--ink-3);line-height:1.5;margin-bottom:10px">
+        Défi <strong>individuel</strong>, posé comme gage. Rien à voir avec les défis collectifs de la saison.
+      </div>
+      <div class="fld" style="margin-bottom:8px"><label class="fld-label">Nom</label>
+        <input id="gdf-name" type="text" maxlength="60" value="${t ? esc(t.name) : ''}" placeholder="Ex : 100 lancers francs" style="width:100%"></div>
+      <div class="fld" style="margin-bottom:8px"><label class="fld-label">Description / consigne</label>
+        <textarea id="gdf-desc" rows="3" maxlength="240" style="width:100%">${t ? esc(t.description || '') : ''}</textarea></div>
+      <div class="fld" style="margin-bottom:10px"><label class="fld-label">Délai de validation (jours)</label>
+        <input id="gdf-win" type="number" min="1" max="90" value="${t && Number.isFinite(t.windowDays) ? t.windowDays : 7}" style="width:100%">
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px">Décompté à partir de l'assignation.</div></div>
+      <div style="display:flex;justify-content:flex-end">
+        <button class="btn btn-primary" onclick="saveGageDefi('${t ? t.id : ''}')">Enregistrer</button>
+      </div>
+    </div>
+  `);
+  setTimeout(() => { const el = document.getElementById('gdf-name'); if (el) el.focus(); }, 80);
+}
+function saveGageDefi(id) {
+  if (_denyIfScopedCoach()) return;
+  const name = ((document.getElementById('gdf-name') || {}).value || '').trim().slice(0, 60);
+  if (!name) { if (typeof showToast === 'function') showToast('Il faut un nom'); return; }
+  const now = Date.now();
+  const w = parseInt((document.getElementById('gdf-win') || {}).value, 10);
+  const patch = {
+    name,
+    description: ((document.getElementById('gdf-desc') || {}).value || '').trim().slice(0, 240),
+    windowDays: (Number.isFinite(w) && w > 0) ? Math.min(w, 90) : 7,
+    updatedAt: now
+  };
+  state.gageDefis = state.gageDefis || [];
+  const cur = id ? _gageDefiById(id) : null;
+  if (cur) Object.assign(cur, patch);
+  else state.gageDefis.unshift(Object.assign({ id: uid(), notes: '', deletedAt: null, createdAt: now }, patch));
+  persist(); _gageFlush(); closeModal(); render();
+  if (typeof showToast === 'function') showToast('🎯 Défi enregistré');
+}
+function deleteGageDefi(id) {
+  if (_denyIfScopedCoach()) return;
+  const t = _gageDefiById(id); if (!t || t.deletedAt) return;
+  let ok = false; try { ok = confirm('Retirer ce défi de la base ? Les défis déjà posés restent lisibles.'); } catch (e) { ok = true; }
+  if (!ok) return;
+  t.deletedAt = Date.now(); t.updatedAt = t.deletedAt;
+  persist(); _gageFlush(); render();
+  if (typeof showToast === 'function') showToast('🗑️ Défi retiré de la base');
+}
+
+// --- Assignation : le coach choisit le TYPE, puis l'item, puis la joueuse ---
+function _assignGagePlayers() {
+  const pool = visiblePlayersForUser((_seasonsLoaded() && getActiveSeasonId())
+    ? getSeasonPlayers(getActiveSeasonId(), { team: 'all' }) : (state.players || []));
+  return pool.slice().sort((a, b) => (a.num || 0) - (b.num || 0));
+}
+function openAssignGage(kind) {
+  window._assignGageKind = GAGE_KINDS[kind] ? kind : 'classique';
+  openModal(`
+    <div class="modal-header">
+      <div><div class="eyebrow-muted">Assigner un gage</div><div class="modal-title" style="font-size:15px">Choisis le type, puis la joueuse</div></div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body" id="assign-gage-body">${_assignGageBody()}</div>
+  `);
+}
+function setAssignGageKind(k) {
+  window._assignGageKind = GAGE_KINDS[k] ? k : 'classique';
+  const b = document.getElementById('assign-gage-body');
+  if (b) b.innerHTML = _assignGageBody(); else render();
+}
+function _assignGageKindTabs() {
+  const cur = window._assignGageKind || 'classique';
+  return `<div style="display:flex;gap:5px;margin-bottom:12px">
+    ${Object.entries(GAGE_KINDS).map(([k, v]) => `
+      <button class="btn ${k === cur ? 'btn-primary' : 'btn-secondary'}" style="flex:1;font-size:11px;padding:9px 4px;line-height:1.25" onclick="setAssignGageKind('${k}')">${v.icon}<br>${esc(v.plural)}</button>`).join('')}
+  </div>`;
+}
+function _assignGageBody() {
+  const kind = window._assignGageKind || 'classique';
+  const players = _assignGagePlayers();
+  if (!players.length) return _assignGageKindTabs() + '<div style="color:var(--ink-3);font-size:13px">Aucune joueuse dans la saison.</div>';
+  if (kind === 'classique') {
+    const poolCount = currentSeasonGages().filter(_gageTirable).length;
+    return _assignGageKindTabs() + `
+      ${poolCount === 0 ? '<div style="padding:10px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:12px;font-size:12px;color:var(--ink-2);line-height:1.5">⚠️ Le pool est vide : approuve des gages d\'abord, sinon la joueuse ne pourra pas tirer.</div>' : ''}
+      <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-bottom:10px;text-transform:uppercase;letter-spacing:0.04em">Elle piochera au sort. Une dette ajoute des tirages.</div>
+      ${players.map(p => {
+        const d = gageDebt(p.id); const owed = pendingDraws(p.id).length;
+        return `
+        <button class="btn btn-secondary btn-block mb-2" style="text-align:left;display:flex;justify-content:space-between;align-items:center;gap:8px" onclick="assignDrawsToPlayer('${p.id}')">
+          <span>#${p.num} ${esc(p.name)}${owed ? ` · ${owed} en attente` : ''}</span>
+          <span style="font-size:10px;font-family:'JetBrains Mono';color:${d > 0 ? 'var(--orange)' : 'var(--ink-3)'}">${d > 0 ? '+' + d + ' dette → ' + (1 + d) + ' tirages' : '1 tirage'}</span>
+        </button>`;
+      }).join('')}`;
+  }
+  const isSanction = kind === 'sanction_physique';
+  const items = isSanction ? sanctionTemplatesList() : gageDefisList();
+  if (!items.length) {
+    return _assignGageKindTabs() + `
+      <div style="padding:12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;font-size:12px;color:var(--ink-2);line-height:1.5">
+        La base ${isSanction ? 'des sanctions' : 'des défis'} est vide. Ajoute d'abord un ${isSanction ? 'exo' : 'défi'} dans l'onglet ${isSanction ? '💪 Sanctions' : '🎯 Défis'} de la boîte à gages.
+      </div>`;
+  }
+  return _assignGageKindTabs() + `
+    <div class="fld" style="margin-bottom:12px">
+      <label class="fld-label">${isSanction ? 'Exo à faire' : 'Défi à relever'}</label>
+      <select id="assign-gage-item" style="width:100%">
+        ${items.map(t => `<option value="${t.id}">${esc(t.name)}${isSanction ? (_sanctionDose(t) ? ' — ' + esc(_sanctionDose(t)) : '') : ' — ' + (Number.isFinite(t.windowDays) ? t.windowDays : 7) + ' j'}</option>`).join('')}
+      </select>
+    </div>
+    <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-bottom:10px;text-transform:uppercase;letter-spacing:0.04em">
+      ${isSanction ? 'À faire au prochain entraînement · les sanctions s\'additionnent' : 'Validé par toi, sans photo ni preuve'}
+    </div>
+    ${players.map(p => {
+      const n = isSanction ? playerPendingSanctions(p.id).length : playerPendingDefis(p.id).length;
+      return `
+      <button class="btn btn-secondary btn-block mb-2" style="text-align:left;display:flex;justify-content:space-between;align-items:center;gap:8px" onclick="assignKindDrawTo('${p.id}')">
+        <span>#${p.num} ${esc(p.name)}</span>
+        <span style="font-size:10px;font-family:'JetBrains Mono';color:${n ? 'var(--orange)' : 'var(--ink-3)'}">${n ? n + ' en cours' : '—'}</span>
+      </button>`;
+    }).join('')}`;
+}
+// Crée une ligne gage_draws d'un type non-classique. Pas de tirage : la ligne
+// naît 'accepted' (= à faire), le coach validera. `completedAt` porte l'instant
+// d'engagement (utile au tri) — inoffensif pour la dette, qui ignore ces lignes.
+function _createKindDraw(pid, kind, tplId) {
+  const now = Date.now();
+  const sid = (getSeasonIdForDate(isoDate(new Date(now))) || getActiveSeasonId()) || null;
+  const tpl = kind === 'defi' ? _gageDefiById(tplId) : null;
+  const win = tpl && Number.isFinite(tpl.windowDays) ? tpl.windowDays : 7;
+  const row = {
+    id: uid(), playerId: pid, gageId: null, kind, status: 'accepted', delta: 0,
+    sanctionTemplateId: kind === 'sanction_physique' ? tplId : null,
+    defiTemplateId: kind === 'defi' ? tplId : null,
+    deadlineAt: kind === 'defi' ? now + win * 86400000 : null,
+    assignedAt: now, drawnAt: now, completedAt: now,
+    playerDoneAt: null, confirmedAt: null, invalidatedAt: null, invalidationReason: null,
+    validatedAt: null, validatedBy: null, validationNote: null,
+    seasonId: sid, createdAt: now, updatedAt: now
+  };
+  state.gageDraws = state.gageDraws || [];
+  state.gageDraws.push(row);
+  persist(); _gageFlush();
+  return row;
+}
+function assignKindDrawTo(pid) {
+  const kind = window._assignGageKind || 'classique';
+  if (kind === 'classique') return assignDrawsToPlayer(pid);
+  const tplId = (document.getElementById('assign-gage-item') || {}).value || '';
+  if (!tplId) return;
+  const row = _createKindDraw(pid, kind, tplId);
+  const isSanction = kind === 'sanction_physique';
+  // PUSH joueuse — on annonce le TYPE, jamais le contenu (même règle que les gages).
+  try {
+    notifyPush(_pushPlayerKeys([pid]), isSanction
+      ? { title: '💪 Sanction physique', body: 'Tu as une sanction à faire au prochain entraînement', url: '/', tag: 'gage-sanction', type: 'gage_assigned' }
+      : { title: '🎯 Défi à relever', body: 'Tu as un défi à valider avant la date limite', url: '/', tag: 'gage-defi', type: 'gage_assigned' });
+  } catch (e) {}
+  try { closeModal(); } catch (e) {}
+  render();
+  if (typeof showToast === 'function') showToast(isSanction ? '💪 Sanction assignée' : '🎯 Défi assigné');
+  return row;
+}
+
+// --- Lectures : ce qui est en cours, par type ------------------------------
+function _kindDrawsOf(pid, kind) {
+  return _seasonGageDraws(pid).filter(d => _drawKind(d) === kind);
+}
+function playerPendingSanctions(pid) {
+  return _kindDrawsOf(pid, 'sanction_physique')
+    .filter(d => d.status === 'accepted' || d.status === 'player_done')
+    .sort((a, b) => (a.assignedAt || 0) - (b.assignedAt || 0));
+}
+function playerPendingDefis(pid) {
+  return _kindDrawsOf(pid, 'defi')
+    .filter(d => d.status === 'accepted' || d.status === 'player_done')
+    .sort((a, b) => (a.deadlineAt || 0) - (b.deadlineAt || 0));
+}
+// AGRÉGATION : plusieurs sanctions en attente → UN programme unique. Deux fois
+// le même exo se cumulent (séries et durées s'additionnent) plutôt que de
+// s'afficher deux fois : c'est ce que la joueuse fera réellement sur le terrain.
+function sanctionProgramFor(pid) {
+  const draws = playerPendingSanctions(pid);
+  const byTpl = new Map();
+  draws.forEach(d => {
+    const key = d.sanctionTemplateId || ('_orphan:' + d.id);
+    const t = _sanctionTplById(d.sanctionTemplateId);
+    const cur = byTpl.get(key) || { tpl: t, name: t ? t.name : '(exo retiré de la base)', category: (t && t.category) || '', times: 0, draws: [] };
+    cur.times++; cur.draws.push(d);
+    byTpl.set(key, cur);
+  });
+  const items = [...byTpl.values()].map(it => Object.assign(it, {
+    dose: _sanctionDose(it.tpl, it.times),
+    label: it.name + (it.times > 1 ? ' ×' + it.times : '')
+  }));
+  return { items, count: draws.length, draws };
+}
+function _defiDeadlineLabel(d) {
+  if (!d || !d.deadlineAt) return '';
+  const left = d.deadlineAt - Date.now();
+  return left <= 0 ? 'délai dépassé' : 'avant ' + formatDate(isoDate(new Date(d.deadlineAt)), 'short');
+}
+
+// --- Validation coach (les 3 types) : pas de photo, juste sa parole ---------
+function validateGageDraw(drawId, note) {
+  const d = (state.gageDraws || []).find(x => x.id === drawId);
+  if (!d || d.status === 'coach_confirmed') return false;
+  const now = Date.now();
+  d.status = 'coach_confirmed'; d.confirmedAt = now;
+  d.validatedAt = now; d.validatedBy = (currentCoach() || {}).id || 'admin';
+  if (note !== undefined && note !== null) d.validationNote = String(note).trim().slice(0, 240) || null;
+  d.updatedAt = now;
+  // Un gage CLASSIQUE validé sort du pool (symétrie avec confirmGage).
+  if (_isClassiqueDraw(d)) { const g = _gageById(d.gageId); if (g && !g.completedAt) { g.completedAt = now; _gageTouch(g); } }
+  return true;
+}
+function openValidateGageDraw(drawId) {
+  const d = (state.gageDraws || []).find(x => x.id === drawId); if (!d) return;
+  const kind = _drawKind(d);
+  const what = kind === 'sanction_physique' ? (_sanctionTplById(d.sanctionTemplateId) || {}).name
+    : kind === 'defi' ? (_gageDefiById(d.defiTemplateId) || {}).name : _gageText(d.gageId);
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">✅ Valider ${GAGE_KINDS[kind].icon} ${esc(GAGE_KINDS[kind].label.toLowerCase())}</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:14px;color:var(--ink);line-height:1.45;margin-bottom:10px">${esc(what || '(item retiré)')}</div>
+      <div style="font-size:12px;color:var(--ink-3);line-height:1.5;margin-bottom:10px">Aucune preuve n'est demandée : c'est <strong>ta</strong> validation qui fait foi.</div>
+      <div class="fld" style="margin-bottom:10px"><label class="fld-label">Note (optionnel)</label>
+        <textarea id="gv-note" rows="2" maxlength="240" placeholder="Ex : fait avant l'échauffement" style="width:100%"></textarea></div>
+      <div style="display:flex;justify-content:flex-end">
+        <button class="btn btn-primary" onclick="submitValidateGageDraw('${d.id}')">✅ Valider</button>
+      </div>
+    </div>
+  `);
+}
+function submitValidateGageDraw(drawId) {
+  const note = ((document.getElementById('gv-note') || {}).value || '');
+  const d = (state.gageDraws || []).find(x => x.id === drawId);
+  if (!validateGageDraw(drawId, note)) return;
+  persist(); _gageFlush();
+  try {
+    const kind = _drawKind(d);
+    notifyPush(_pushPlayerKeys([d.playerId]), {
+      title: kind === 'sanction_physique' ? '💪 Sanction validée' : kind === 'defi' ? '🎯 Défi validé' : '✅ Gage validé',
+      body: 'Ton coach a validé', url: '/', tag: 'gage-validated', type: 'gage_confirmed' });
+  } catch (e) {}
+  closeModal(); render();
+  if (typeof showToast === 'function') showToast('✅ Validé');
+}
+// « Marquer comme fait » côté coach, pour TOUTE la pile de sanctions du jour
+// d'une joueuse : le programme agrégé se clôt d'un geste.
+function completeSanctionProgram(pid) {
+  const list = playerPendingSanctions(pid);
+  if (!list.length) return;
+  let ok = false;
+  try { ok = confirm(list.length > 1 ? `Clore les ${list.length} sanctions de cette joueuse ?` : 'Clore la sanction de cette joueuse ?'); } catch (e) { ok = true; }
+  if (!ok) return;
+  list.forEach(d => validateGageDraw(d.id, null));
+  persist(); _gageFlush();
+  try { notifyPush(_pushPlayerKeys([pid]), { title: '💪 Sanction validée', body: 'Ton programme sanction est clos', url: '/', tag: 'gage-sanction-done', type: 'gage_confirmed' }); } catch (e) {}
+  render();
+  if (typeof showToast === 'function') showToast('✅ Sanctions closes');
+}
+// Annulation neutre (erreur de saisie, joueuse blessée…) — aucune dette.
+function cancelKindDraw(drawId) {
+  const d = (state.gageDraws || []).find(x => x.id === drawId); if (!d) return;
+  let ok = false; try { ok = confirm('Annuler cette assignation ? Elle ne comptera pas.'); } catch (e) { ok = true; }
+  if (!ok) return;
+  const now = Date.now();
+  d.status = 'invalidated'; d.invalidatedAt = now; d.invalidationReason = d.invalidationReason || 'Annulé par le coach'; d.updatedAt = now;
+  persist(); _gageFlush(); render();
+  if (typeof showToast === 'function') showToast('❌ Assignation annulée');
+}
+
+// --- Onglets coach : 💪 Sanctions / 🎯 Défis --------------------------------
+function _gagesCoachKindTabs() {
+  const cur = state._gageTab || 'classique';
+  return `<div style="display:flex;gap:5px;margin:10px 0 4px">
+    ${Object.entries(GAGE_KINDS).map(([k, v]) => `
+      <button class="btn ${k === cur ? 'btn-primary' : 'btn-secondary'}" style="flex:1;font-size:11px;padding:9px 4px" onclick="state._gageTab='${k}';render()">${v.icon} ${esc(v.plural)}</button>`).join('')}
+  </div>`;
+}
+function _kindDrawsInSeason(kind) {
+  const admin = isAdminCoach();
+  const active = getActiveSeasonId();
+  const visIds = admin ? null : new Set(visiblePlayersForUser(
+    (_seasonsLoaded() && active) ? getSeasonPlayers(active, { team: 'all' }) : (state.players || [])
+  ).map(p => p.id));
+  return (state.gageDraws || []).filter(d => _drawKind(d) === kind
+    && (!_seasonsLoaded() || !active || (d.seasonId ? d.seasonId === active : true))
+    && (admin || (visIds && visIds.has(d.playerId))));
+}
+function _pNameShort(pid) { const p = (state.players || []).find(x => x.id === pid); return p ? ('#' + p.num + ' ' + p.name) : '—'; }
+function _gageCoachCard(inner) { return `<div style="padding:10px 12px;background:var(--surface);border:1px solid var(--border-soft);border-radius:10px;margin-bottom:8px">${inner}</div>`; }
+function _gagesCoachSanctionHtml() {
+  const admin = isAdminCoach();
+  const base = sanctionTemplatesList();
+  const draws = _kindDrawsInSeason('sanction_physique');
+  const pending = draws.filter(d => d.status === 'accepted' || d.status === 'player_done');
+  const done = draws.filter(d => d.status === 'coach_confirmed').sort((a, b) => (b.validatedAt || b.confirmedAt || 0) - (a.validatedAt || a.confirmedAt || 0)).slice(0, 20);
+  const byPlayer = {};
+  pending.forEach(d => { (byPlayer[d.playerId] = byPlayer[d.playerId] || []).push(d); });
+  const pids = Object.keys(byPlayer);
+  return `
+    <div class="px">
+      <div style="font-size:12px;color:var(--ink-3);margin-bottom:12px;line-height:1.5">Exos de <strong>sanction</strong> — base dédiée, séparée de celle de l'ardoise. Les sanctions d'une même joueuse s'additionnent en un seul programme.</div>
+      <button class="btn btn-primary btn-block" onclick="openAssignGage('sanction_physique')" style="margin-bottom:6px">➕ Assigner une sanction</button>
+      ${admin ? `<button class="btn btn-secondary btn-block" onclick="openSanctionTemplateEditor('')">💪 Ajouter un exo à la base</button>` : ''}
+    </div>
+    <div class="section-header"><div><div class="eyebrow" style="color:var(--orange)">En attente</div><h2 class="display-md mt-2">Sanctions à faire (${pending.length})</h2></div></div>
+    <div class="px">
+      ${pids.length ? pids.map(pid => {
+        const prog = sanctionProgramFor(pid);
+        return _gageCoachCard(`
+          <div style="font-size:14px;color:var(--ink);margin-bottom:6px">${esc(_pNameShort(pid))} · <strong>${prog.count}</strong> sanction${prog.count > 1 ? 's' : ''}</div>
+          <div style="font-size:12px;color:var(--ink-2);line-height:1.6;margin-bottom:8px">${prog.items.map(it => '• ' + esc(it.label) + (it.dose ? ' <span style="color:var(--ink-3);font-family:\'JetBrains Mono\';font-size:10px">' + esc(it.dose) + '</span>' : '')).join('<br>')}</div>
+          <button class="btn btn-primary btn-block" style="font-size:12px" onclick="completeSanctionProgram('${pid}')">✅ Marquer comme fait</button>`);
+      }).join('') : '<div style="color:var(--ink-3);font-size:13px;font-style:italic;padding-bottom:8px">Aucune sanction en attente.</div>'}
+    </div>
+    <div class="section-header"><div><div class="eyebrow">Base d'exos</div><h2 class="display-md mt-2">Pool sanctions (${base.length})</h2></div></div>
+    <div class="px">
+      ${base.length ? base.map(t => _gageCoachCard(`
+        <div style="display:flex;align-items:flex-start;gap:8px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:14px;color:var(--ink);line-height:1.4">${esc(t.name)}</div>
+            <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;margin-top:3px">${esc([t.category, _sanctionDose(t)].filter(Boolean).join(' · ') || '—')}</div>
+            ${t.description ? `<div style="font-size:11px;color:var(--ink-2);margin-top:4px;line-height:1.4">${esc(t.description)}</div>` : ''}
+          </div>
+          ${admin ? `<div style="display:flex;gap:4px;flex:0 0 auto">
+            <button class="btn btn-ghost" style="padding:5px 9px;font-size:14px;line-height:1" onclick="openSanctionTemplateEditor('${t.id}')">✏️</button>
+            <button class="btn btn-ghost" style="padding:5px 9px;font-size:14px;line-height:1" onclick="deleteSanctionTemplate('${t.id}')">🗑️</button>
+          </div>` : ''}
+        </div>`)).join('') : '<div style="color:var(--ink-3);font-size:13px;font-style:italic;padding-bottom:8px">Base vide. Ajoute un exo pour pouvoir assigner des sanctions.</div>'}
+    </div>
+    ${done.length ? `
+      <div class="section-header"><div><div class="eyebrow" style="color:var(--green,#16a34a)">Validées</div><h2 class="display-md mt-2">Dernières (${done.length})</h2></div></div>
+      <div class="px" style="padding-bottom:24px">
+        ${done.map(d => _gageCoachCard(`
+          <div style="font-size:13px;color:var(--ink-2);line-height:1.4">✅ ${esc((_sanctionTplById(d.sanctionTemplateId) || {}).name || '(exo retiré)')}</div>
+          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${esc(_pNameShort(d.playerId))}${d.validationNote ? ' · ' + esc(d.validationNote) : ''}</div>`)).join('')}
+      </div>` : '<div style="height:24px"></div>'}`;
+}
+function _gagesCoachDefiHtml() {
+  const admin = isAdminCoach();
+  const base = gageDefisList();
+  const draws = _kindDrawsInSeason('defi');
+  const pending = draws.filter(d => d.status === 'accepted' || d.status === 'player_done')
+    .sort((a, b) => (a.deadlineAt || 0) - (b.deadlineAt || 0));
+  const done = draws.filter(d => d.status === 'coach_confirmed').sort((a, b) => (b.validatedAt || b.confirmedAt || 0) - (a.validatedAt || a.confirmedAt || 0)).slice(0, 20);
+  return `
+    <div class="px">
+      <div style="font-size:12px;color:var(--ink-3);margin-bottom:12px;line-height:1.5">Défis <strong>individuels</strong> posés comme gage — base dédiée, sans rapport avec les défis collectifs de la saison.</div>
+      <button class="btn btn-primary btn-block" onclick="openAssignGage('defi')" style="margin-bottom:6px">➕ Assigner un défi</button>
+      ${admin ? `<button class="btn btn-secondary btn-block" onclick="openGageDefiEditor('')">🎯 Ajouter un défi à la base</button>` : ''}
+    </div>
+    <div class="section-header"><div><div class="eyebrow" style="color:var(--orange)">En cours</div><h2 class="display-md mt-2">Défis à valider (${pending.length})</h2></div></div>
+    <div class="px">
+      ${pending.length ? pending.map(d => {
+        const t = _gageDefiById(d.defiTemplateId);
+        const late = d.deadlineAt && d.deadlineAt < Date.now();
+        return _gageCoachCard(`
+          <div style="font-size:14px;color:var(--ink);line-height:1.4">🎯 ${esc(t ? t.name : '(défi retiré)')}</div>
+          <div style="font-size:10px;color:${late ? 'var(--red)' : 'var(--ink-3)'};font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${esc(_pNameShort(d.playerId))} · ${esc(_defiDeadlineLabel(d) || '—')}${d.status === 'player_done' ? ' · ✋ dit avoir fait' : ''}</div>
+          <div style="display:flex;gap:6px;margin-top:8px">
+            <button class="btn btn-primary" style="flex:1;font-size:12px" onclick="openValidateGageDraw('${d.id}')">✅ Valider</button>
+            <button class="btn btn-ghost" style="font-size:12px" onclick="cancelKindDraw('${d.id}')">❌ Annuler</button>
+          </div>`);
+      }).join('') : '<div style="color:var(--ink-3);font-size:13px;font-style:italic;padding-bottom:8px">Aucun défi en cours.</div>'}
+    </div>
+    <div class="section-header"><div><div class="eyebrow">Base de défis</div><h2 class="display-md mt-2">Pool défis (${base.length})</h2></div></div>
+    <div class="px">
+      ${base.length ? base.map(t => _gageCoachCard(`
+        <div style="display:flex;align-items:flex-start;gap:8px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:14px;color:var(--ink);line-height:1.4">${esc(t.name)}</div>
+            <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;margin-top:3px">délai ${Number.isFinite(t.windowDays) ? t.windowDays : 7} j</div>
+            ${t.description ? `<div style="font-size:11px;color:var(--ink-2);margin-top:4px;line-height:1.4">${esc(t.description)}</div>` : ''}
+          </div>
+          ${admin ? `<div style="display:flex;gap:4px;flex:0 0 auto">
+            <button class="btn btn-ghost" style="padding:5px 9px;font-size:14px;line-height:1" onclick="openGageDefiEditor('${t.id}')">✏️</button>
+            <button class="btn btn-ghost" style="padding:5px 9px;font-size:14px;line-height:1" onclick="deleteGageDefi('${t.id}')">🗑️</button>
+          </div>` : ''}
+        </div>`)).join('') : '<div style="color:var(--ink-3);font-size:13px;font-style:italic;padding-bottom:8px">Base vide. Ajoute un défi pour pouvoir en assigner.</div>'}
+    </div>
+    ${done.length ? `
+      <div class="section-header"><div><div class="eyebrow" style="color:var(--green,#16a34a)">Relevés</div><h2 class="display-md mt-2">Derniers (${done.length})</h2></div></div>
+      <div class="px" style="padding-bottom:24px">
+        ${done.map(d => _gageCoachCard(`
+          <div style="font-size:13px;color:var(--ink-2);line-height:1.4">✅ ${esc((_gageDefiById(d.defiTemplateId) || {}).name || '(défi retiré)')}</div>
+          <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${esc(_pNameShort(d.playerId))}${d.validationNote ? ' · ' + esc(d.validationNote) : ''}</div>`)).join('')}
+      </div>` : '<div style="height:24px"></div>'}`;
+}
+
+// --- Bloc « 🩹 Sanctions à faire aujourd'hui » dans le plan d'entraînement ---
+// Coach uniquement. Ne liste que les joueuses PRÉSENTES à cette instance (une
+// sanction se fait sur le terrain : l'annoncer pour une absente est du bruit).
+function sanctionsTodayBlockHtml(convocId, dateStr) {
+  if (!state.auth || state.auth.role !== 'coach') return '';
+  const c = (state.convocations || []).find(x => x.id === convocId); if (!c) return '';
+  const d = dateStr || c.date;
+  const rows = _assignGagePlayers()
+    .map(p => ({ p, prog: sanctionProgramFor(p.id) }))
+    .filter(r => r.prog.count > 0)
+    .filter(r => {
+      try { return resolveEffectivePresence(r.p.id, d, _convocRespRaw(c, d, r.p.id)).status === 'present'; }
+      catch (e) { return true; }
+    });
+  if (!rows.length) return '';
+  const total = rows.reduce((n, r) => n + r.prog.count, 0);
+  return `
+    <div style="border:1px solid var(--orange);border-radius:10px;margin-bottom:10px;overflow:hidden;background:rgba(var(--accent-rgb),0.07)">
+      <div style="display:flex;align-items:center;gap:8px;padding:9px 11px">
+        <span style="font-family:'Anton';font-size:12px;text-transform:uppercase;letter-spacing:0.04em">🩹 Sanctions à faire aujourd'hui</span>
+        <span style="flex:1"></span>
+        <span style="font-size:9px;font-family:'JetBrains Mono';color:var(--ink-3);background:var(--bg-3);padding:2px 6px;border-radius:5px;white-space:nowrap">👁️ coach uniquement</span>
+        <span style="font-size:10px;color:var(--ink-3)">${total}</span>
+      </div>
+      <div style="padding:0 11px 11px">
+        ${rows.map(r => `
+          <div style="padding:9px 10px;background:var(--surface);border:1px solid var(--border-soft);border-radius:8px;margin-bottom:6px">
+            <div style="font-size:13px;color:var(--ink);margin-bottom:4px">#${r.p.num} ${esc(r.p.name)} · <strong>${r.prog.count}</strong> sanction${r.prog.count > 1 ? 's' : ''}</div>
+            <div style="font-size:12px;color:var(--ink-2);line-height:1.6;margin-bottom:7px">${r.prog.items.map(it => '• ' + esc(it.label) + (it.dose ? ' <span style="color:var(--ink-3);font-family:\'JetBrains Mono\';font-size:10px">' + esc(it.dose) + '</span>' : '')).join('<br>')}</div>
+            <button class="btn btn-primary btn-block" style="font-size:12px;padding:8px" onclick="completeSanctionProgram('${r.p.id}')">✅ Marquer comme fait</button>
+          </div>`).join('')}
+      </div>
+    </div>`;
+}
+
+// --- Joueuse : bandeaux discrets par type (non bloquants) -------------------
+// L'overlay bloquant reste RÉSERVÉ au tirage classique. Une sanction ou un défi
+// n'a rien d'un tirage : ils s'annoncent, ils n'interrompent pas.
+function renderPlayerKindReminders() {
+  if (!state.auth || state.auth.role !== 'player' || !state.auth.playerId) return '';
+  const pid = state.auth.playerId;
+  const prog = sanctionProgramFor(pid);
+  const defis = playerPendingDefis(pid);
+  let out = '';
+  if (prog.count) {
+    out += `
+      <div onclick="openPlayerSanctionProgram()" style="cursor:pointer;margin:0 14px 10px;padding:11px 13px;border-radius:12px;background:rgba(var(--accent-rgb),0.07);border:1px solid var(--border-soft);border-left:3px solid var(--orange)">
+        <div style="display:flex;align-items:center;gap:9px">
+          <div style="font-size:20px;flex:0 0 auto">💪</div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:11px;font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:.04em;color:var(--orange)">Sanction à faire au prochain entraînement</div>
+            <div style="font-size:13px;color:var(--ink);line-height:1.35;margin-top:2px">Ton programme sanction : <strong>${prog.items.length}</strong> exo${prog.items.length > 1 ? 's' : ''}${prog.count > prog.items.length ? ` · ${prog.count} sanctions cumulées` : ''}</div>
+          </div>
+          <div style="flex:0 0 auto;color:var(--orange);font-family:'Anton';font-size:16px">→</div>
+        </div>
+      </div>`;
+  }
+  if (defis.length) {
+    const next = defis[0];
+    out += `
+      <div onclick="openPlayerDefis()" style="cursor:pointer;margin:0 14px 10px;padding:11px 13px;border-radius:12px;background:rgba(var(--accent-rgb),0.07);border:1px solid var(--border-soft);border-left:3px solid var(--orange)">
+        <div style="display:flex;align-items:center;gap:9px">
+          <div style="font-size:20px;flex:0 0 auto">🎯</div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:11px;font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:.04em;color:var(--orange)">Défi à valider ${esc(_defiDeadlineLabel(next))}</div>
+            <div style="font-size:13px;color:var(--ink);line-height:1.35;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc((_gageDefiById(next.defiTemplateId) || {}).name || '(défi)')}${defis.length > 1 ? ` · +${defis.length - 1}` : ''}</div>
+          </div>
+          <div style="flex:0 0 auto;color:var(--orange);font-family:'Anton';font-size:16px">→</div>
+        </div>
+      </div>`;
+  }
+  return out;
+}
+function openPlayerSanctionProgram() {
+  const pid = state.auth && state.auth.playerId;
+  const prog = sanctionProgramFor(pid);
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">💪 Ton programme sanction</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      ${prog.count ? `
+        <div style="font-size:12px;color:var(--ink-3);line-height:1.5;margin-bottom:12px">
+          ${prog.count > 1 ? `Tes <strong>${prog.count}</strong> sanctions sont regroupées en un seul programme.` : 'Une sanction à faire.'} À faire au <strong>prochain entraînement</strong> — c'est ton coach qui la validera, aucune preuve à envoyer.
+        </div>
+        ${prog.items.map(it => `
+          <div style="padding:11px 12px;background:var(--surface);border:1px solid var(--border-soft);border-radius:10px;margin-bottom:8px">
+            <div style="font-size:14px;color:var(--ink);line-height:1.4">${esc(it.label)}</div>
+            <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;margin-top:3px">${esc([it.category, it.dose].filter(Boolean).join(' · ') || '—')}</div>
+            ${it.tpl && it.tpl.description ? `<div style="font-size:12px;color:var(--ink-2);margin-top:5px;line-height:1.45">${esc(it.tpl.description)}</div>` : ''}
+          </div>`).join('')}
+      ` : '<div style="color:var(--ink-3);font-size:13px;font-style:italic">Aucune sanction en cours.</div>'}
+    </div>
+  `);
+}
+function openPlayerDefis() {
+  const pid = state.auth && state.auth.playerId;
+  const defis = playerPendingDefis(pid);
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">🎯 Tes défis</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      ${defis.length ? defis.map(d => {
+        const t = _gageDefiById(d.defiTemplateId);
+        const late = d.deadlineAt && d.deadlineAt < Date.now();
+        return `
+          <div style="padding:11px 12px;background:var(--surface);border:1px solid var(--border-soft);border-radius:10px;margin-bottom:8px">
+            <div style="font-size:14px;color:var(--ink);line-height:1.4">${esc(t ? t.name : '(défi)')}</div>
+            ${t && t.description ? `<div style="font-size:12px;color:var(--ink-2);margin-top:5px;line-height:1.45">${esc(t.description)}</div>` : ''}
+            <div style="font-size:10px;color:${late ? 'var(--red)' : 'var(--orange)'};font-family:'JetBrains Mono';text-transform:uppercase;margin-top:7px">${esc(_defiDeadlineLabel(d) || '—')}${d.status === 'player_done' ? ' · en attente du coach' : ''}</div>
+            ${d.status === 'accepted' ? `<button class="btn btn-primary btn-block" style="margin-top:8px;font-size:13px" onclick="markKindDrawDone('${d.id}')">J'ai relevé le défi ✓</button>` : ''}
+          </div>`;
+      }).join('') : '<div style="color:var(--ink-3);font-size:13px;font-style:italic">Aucun défi en cours.</div>'}
+    </div>
+  `);
+}
+// La joueuse signale ; le coach valide. Le signalement ne vaut PAS validation.
+function markKindDrawDone(drawId) {
+  const d = (state.gageDraws || []).find(x => x.id === drawId);
+  const pid = state.auth && state.auth.playerId;
+  if (!d || d.playerId !== pid || d.status !== 'accepted' || _isClassiqueDraw(d)) return;
+  const now = Date.now();
+  d.status = 'player_done'; d.playerDoneAt = now; d.updatedAt = now;
+  persist(); _gageFlush();
+  try { _notifyCoachGageEvent(pid, 'player_done'); } catch (e) {}
+  try { if (typeof _pbModalOpen === 'function' && _pbModalOpen()) closeModal(); } catch (e) {}
+  if (typeof showToast === 'function') showToast('✓ Signalé · en attente du coach');
+  render();
 }
 
 // --- Coach : confirmation / remise au pool / invalidation ---
@@ -27328,12 +28120,41 @@ function _feedSrcPoints(scope, since) {
 //
 // GROUPÉ PAR LOT (playerId, assignedAt) : le coach assigne un batch de N gages
 // d'un coup (une boucle sur un même `now`) — ce serait N lignes jumelles.
+// 3 TYPES DE GAGE : sanctions et défis ont leurs propres lignes de mur. Même
+// règle que pour les gages classiques — le mur dit QU'IL SE PASSE quelque chose,
+// jamais QUOI. Personne n'a à lire sur le mur l'exo qu'une joueuse doit faire.
+function _feedKindDrawEvents(d, scope, out) {
+  const sanction = _drawKind(d) === 'sanction_physique';
+  const who = _feedActorFields(scope.get(d.playerId));
+  if (d.assignedAt) {
+    out.push(Object.assign({
+      id: 'af:kindassign:' + d.id,
+      type: sanction ? 'sanction_assigned' : 'defi_assigned',
+      ts: d.assignedAt,
+      icon: sanction ? '💪' : '🎯',
+      text: sanction ? 'a une sanction physique à faire' : 'a un défi à relever',
+      meta: '', photoUrl: ''
+    }, who));
+  }
+  const okAt = d.validatedAt || d.confirmedAt;
+  if (d.status === 'coach_confirmed' && okAt) {
+    out.push(Object.assign({
+      id: 'af:kinddone:' + d.id,
+      type: sanction ? 'sanction_done' : 'defi_done',
+      ts: okAt,
+      icon: '✅',
+      text: sanction ? 'a fait sa sanction physique' : 'a relevé son défi',
+      meta: '', photoUrl: ''
+    }, who));
+  }
+}
 function _feedSrcGages(scope, since) {
   const lots = {};
   const out = [];
   (state.gageDraws || []).forEach(d => {
     if (!d || d.deletedAt || d.status === 'adjust') return;
     if (!d.playerId || !scope.has(d.playerId)) return;
+    if (!_isClassiqueDraw(d)) { _feedKindDrawEvents(d, scope, out); return; }
     if (d.assignedAt) {
       const k = d.playerId + '|' + d.assignedAt;
       if (!lots[k]) lots[k] = { pid: d.playerId, ts: d.assignedAt, n: 0 };
@@ -37885,6 +38706,7 @@ function renderTrainingPlanEditor() {
       </div>
 
       <!-- Liste des exercices avec drag-and-drop -->
+      ${sanctionsTodayBlockHtml(convocId, dateStr || c.date)}
       ${tcnBlockHtml(convocId, dateStr || c.date)}
       ${plan.exercises.length === 0 ? `
         <div class="empty" style="padding:30px 16px;border:1px dashed var(--border);border-radius:8px">
@@ -50550,7 +51372,7 @@ function _renderBody() {
     else content = renderHomePlayer();
     // Rappel PERSISTANT (non bloquant) en tête tant qu'un gage accepté n'est pas
     // marqué « fait » (l'overlay bloquant reste réservé au tirage owed).
-    content = renderPlayerGageReminder() + content;
+    content = renderPlayerGageReminder() + renderPlayerKindReminders() + content;
   }
 
   document.getElementById('root').innerHTML = `
@@ -50787,7 +51609,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.156';
+const APP_VERSION = '2026-08-19.157';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
