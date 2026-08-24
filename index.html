@@ -5833,6 +5833,7 @@ const ENTITIES = [
           kind: ['classique', 'sanction_physique', 'defi'].includes(r.kind) ? r.kind : 'classique',
           sanctionTemplateId: r.sanction_template_id || null,
           defiTemplateId: r.defi_template_id || null,
+          resolvedInvolvedPlayerIds: Array.isArray(r.resolved_involved_player_ids) ? r.resolved_involved_player_ids.filter(Boolean) : [],
           deadlineAt: r.deadline_at ? Date.parse(r.deadline_at) : null,
           validatedAt: r.validated_at ? Date.parse(r.validated_at) : null,
           validatedBy: r.validated_by || null,
@@ -5907,6 +5908,8 @@ const ENTITIES = [
           id: r.id, name: r.name || '', description: r.description || '',
           windowDays: Number.isFinite(r.window_days) ? r.window_days : 7,
           notes: r.notes || '',
+          involvedPlayerIds: Array.isArray(r.involved_player_ids) ? r.involved_player_ids.filter(Boolean) : [],
+          involvesRandom: !!r.involves_random,
           deletedAt: r.deleted_at ? Date.parse(r.deleted_at) : null,
           createdAt: r.created_at ? Date.parse(r.created_at) : null,
           updatedAt: r.updated_at ? Date.parse(r.updated_at) : (r.created_at ? Date.parse(r.created_at) : null)
@@ -6461,6 +6464,10 @@ function _dumpGageDrawRow(d) {
     kind: ['classique', 'sanction_physique', 'defi'].includes(d.kind) ? d.kind : 'classique',
     sanction_template_id: d.sanctionTemplateId || null,
     defi_template_id: d.defiTemplateId || null,
+    // Joueuses impliquées FIGÉES à l'assignation (citées + la random résolue) :
+    // un tirage relu à chaque render changerait le sens du défi entre deux
+    // ouvertures. Même principe que gage_id figé au reveal.
+    resolved_involved_player_ids: Array.isArray(d.resolvedInvolvedPlayerIds) ? d.resolvedInvolvedPlayerIds.filter(Boolean) : [],
     deadline_at: d.deadlineAt ? new Date(d.deadlineAt).toISOString() : null,
     validated_at: d.validatedAt ? new Date(d.validatedAt).toISOString() : null,
     validated_by: d.validatedBy || null,
@@ -6485,6 +6492,8 @@ function _dumpGageDefiRow(t) {
     id: t.id, name: t.name || '', description: t.description || null,
     window_days: Number.isFinite(t.windowDays) ? t.windowDays : 7,
     notes: t.notes || null,
+    involved_player_ids: Array.isArray(t.involvedPlayerIds) ? t.involvedPlayerIds.filter(Boolean) : [],
+    involves_random: !!t.involvesRandom,
     deleted_at: t.deletedAt ? new Date(t.deletedAt).toISOString() : null,
     updated_at: t.updatedAt ? new Date(t.updatedAt).toISOString() : (t.createdAt ? new Date(t.createdAt).toISOString() : null)
   };
@@ -22329,6 +22338,60 @@ function deleteSanctionTemplate(id) {
   if (typeof showToast === 'function') showToast('🗑️ Exo retiré de la base');
 }
 
+// --- DÉFIS : joueuses impliquées (citées) + joueuse tirée au sort -----------
+// Un défi peut CITER des joueuses (« battre le meilleur temps d'Emma aux BLS »).
+// Une joueuse citée ne peut PAS tomber sur ce défi : on ne se défie pas
+// soi-même. Un défi peut aussi impliquer une joueuse AU HASARD, non nommée à la
+// création — elle est tirée AU MOMENT DE L'ASSIGNATION puis FIGÉE sur la ligne,
+// exactement comme gage_id l'est au reveal : un tirage relu à chaque render
+// changerait le sens du défi entre deux ouvertures.
+function _defiInvolvedIds(t) { return Array.isArray(t && t.involvedPlayerIds) ? t.involvedPlayerIds.filter(Boolean) : []; }
+function _playerNameOf(pid) { const p = (state.players || []).find(x => x.id === pid); return p ? p.name : '?'; }
+function _defiCites(t, pid) { return !!pid && _defiInvolvedIds(t).includes(pid); }
+// Réservoir du tirage aléatoire : roster active MOINS la cible MOINS les citées.
+// La cible en est TOUJOURS exclue — elle ne peut pas s'impliquer elle-même par
+// la bande via le random.
+function _defiRandomPool(t, targetPid) {
+  const cited = new Set(_defiInvolvedIds(t));
+  return _assignGagePlayers().filter(p => p.id !== targetPid && !cited.has(p.id));
+}
+// Peut-on assigner ce défi à cette joueuse ? null = oui, sinon le motif du refus.
+function _defiAssignBlocker(t, targetPid) {
+  if (!t) return 'Défi introuvable.';
+  if (_defiCites(t, targetPid)) return 'Ce défi cite ' + _playerNameOf(targetPid) + ' — elle ne peut pas se défier elle-même.';
+  if (t.involvesRandom && !_defiRandomPool(t, targetPid).length) return 'Impossible d\'assigner ce défi : pool de tirage vide.';
+  return null;
+}
+// Impliquées FINALES d'une assignation : les citées + la random résolue.
+function _resolveDefiInvolved(t, targetPid) {
+  const ids = _defiInvolvedIds(t).slice();
+  if (t && t.involvesRandom) {
+    const pool = _defiRandomPool(t, targetPid);
+    if (!pool.length) return null;                     // refus, cf. _defiAssignBlocker
+    ids.push(pool[Math.floor(Math.random() * pool.length)].id);
+  }
+  return ids;
+}
+// Impliquées d'une assignation : la liste FIGÉE si elle existe, sinon repli sur
+// le modèle (assignations posées avant la migration 20260824_002).
+function _drawInvolvedIds(d) {
+  if (Array.isArray(d && d.resolvedInvolvedPlayerIds) && d.resolvedInvolvedPlayerIds.length) return d.resolvedInvolvedPlayerIds;
+  return _defiInvolvedIds(_gageDefiById(d && d.defiTemplateId));
+}
+// « Emma, Cécile (tirée au sort) » — on distingue la citée de la piochée.
+function _drawInvolvedLabel(d) {
+  const ids = _drawInvolvedIds(d);
+  if (!ids.length) return '';
+  const cited = new Set(_defiInvolvedIds(_gageDefiById(d && d.defiTemplateId)));
+  return ids.map(id => _playerNameOf(id) + (cited.has(id) ? '' : ' (tirée au sort)')).join(', ');
+}
+// Étiquette du MODÈLE (pas d'une assignation) : qui il cite, et s'il pioche.
+function _defiTplInvolvedLabel(t) {
+  const named = _defiInvolvedIds(t).map(_playerNameOf);
+  if (t && t.involvesRandom) named.push('1 au hasard');
+  return named.join(', ');
+}
+
 // --- CRUD base DÉFIS (admin) -----------------------------------------------
 function openGageDefiEditor(id) {
   if (_denyIfScopedCoach()) return;
@@ -22349,6 +22412,15 @@ function openGageDefiEditor(id) {
       <div class="fld" style="margin-bottom:10px"><label class="fld-label">Délai de validation (jours)</label>
         <input id="gdf-win" type="number" min="1" max="90" value="${t && Number.isFinite(t.windowDays) ? t.windowDays : 7}" style="width:100%">
         <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px">Décompté à partir de l'assignation.</div></div>
+      <div class="fld" style="margin-bottom:8px"><label class="fld-label">Joueuses impliquées (optionnel)</label>
+        <select id="gdf-involved" multiple size="6" style="width:100%">
+          ${_assignGagePlayers().map(p => `<option value="${p.id}"${_defiCites(t, p.id) ? ' selected' : ''}>#${p.num} ${esc(p.name)}</option>`).join('')}
+        </select>
+        <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:3px;line-height:1.5">Une joueuse citée ne pourra pas tomber sur ce défi (on ne se défie pas soi-même).</div></div>
+      <label style="display:flex;align-items:flex-start;gap:8px;margin-bottom:12px;cursor:pointer">
+        <input id="gdf-random" type="checkbox"${t && t.involvesRandom ? ' checked' : ''} style="margin-top:2px;flex:0 0 auto">
+        <span style="font-size:12px;color:var(--ink-2);line-height:1.45">Impliquer une joueuse <strong>au hasard</strong> — tirée à l'assignation, hors la cible et hors les citées. Cumulable avec la liste ci-dessus.</span>
+      </label>
       <div style="display:flex;justify-content:flex-end">
         <button class="btn btn-primary" onclick="saveGageDefi('${t ? t.id : ''}')">Enregistrer</button>
       </div>
@@ -22366,6 +22438,8 @@ function saveGageDefi(id) {
     name,
     description: ((document.getElementById('gdf-desc') || {}).value || '').trim().slice(0, 240),
     windowDays: (Number.isFinite(w) && w > 0) ? Math.min(w, 90) : 7,
+    involvedPlayerIds: Array.from((document.getElementById('gdf-involved') || {}).selectedOptions || []).map(o => o.value).filter(Boolean),
+    involvesRandom: !!(document.getElementById('gdf-random') || {}).checked,
     updatedAt: now
   };
   state.gageDefis = state.gageDefis || [];
@@ -22439,18 +22513,36 @@ function _assignGageBody() {
         La base ${isSanction ? 'des sanctions' : 'des défis'} est vide. Ajoute d'abord un ${isSanction ? 'exo' : 'défi'} dans l'onglet ${isSanction ? '💪 Sanctions' : '🎯 Défis'} de la boîte à gages.
       </div>`;
   }
+  // L'item sélectionné vit hors du DOM : le corps de la modale est re-rendu à
+  // chaque changement (le filtre des joueuses en dépend), un état lu dans le
+  // <select> serait perdu au re-render.
+  const curId = items.some(t => t.id === window._assignGageItem) ? window._assignGageItem : items[0].id;
+  window._assignGageItem = curId;
+  const sel = items.find(t => t.id === curId);
+  const involvedLabel = isSanction ? '' : _defiTplInvolvedLabel(sel);
   return _assignGageKindTabs() + `
     <div class="fld" style="margin-bottom:12px">
       <label class="fld-label">${isSanction ? 'Exo à faire' : 'Défi à relever'}</label>
-      <select id="assign-gage-item" style="width:100%">
-        ${items.map(t => `<option value="${t.id}">${esc(t.name)}${isSanction ? (_sanctionDose(t) ? ' — ' + esc(_sanctionDose(t)) : '') : ' — ' + (Number.isFinite(t.windowDays) ? t.windowDays : 7) + ' j'}</option>`).join('')}
+      <select id="assign-gage-item" ${isSanction ? '' : 'onchange="setAssignGageItem(this.value)"'} style="width:100%">
+        ${items.map(t => `<option value="${t.id}"${t.id === curId ? ' selected' : ''}>${esc(t.name)}${isSanction ? (_sanctionDose(t) ? ' — ' + esc(_sanctionDose(t)) : '') : ' — ' + (Number.isFinite(t.windowDays) ? t.windowDays : 7) + ' j'}</option>`).join('')}
       </select>
+      ${involvedLabel ? `<div style="font-size:10px;color:var(--orange);font-family:'JetBrains Mono';margin-top:4px;text-transform:uppercase">👥 implique : ${esc(involvedLabel)}</div>` : ''}
     </div>
     <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-bottom:10px;text-transform:uppercase;letter-spacing:0.04em">
       ${isSanction ? 'À faire au prochain entraînement · les sanctions s\'additionnent' : 'Validé par toi, sans photo ni preuve'}
     </div>
     ${players.map(p => {
       const n = isSanction ? playerPendingSanctions(p.id).length : playerPendingDefis(p.id).length;
+      // Une joueuse citée par TOUS les défis de la base n'a aucun défi éligible :
+      // on le dit franchement plutôt que de la laisser cliquer dans le vide.
+      const noneAtAll = !isSanction && items.every(t => _defiAssignBlocker(t, p.id));
+      const blocked = isSanction ? null
+        : (noneAtAll ? 'Aucun défi disponible pour ' + p.name + ' (tous la citent)' : _defiAssignBlocker(sel, p.id));
+      if (blocked) return `
+      <div class="btn btn-secondary btn-block mb-2" aria-disabled="true" style="text-align:left;display:flex;justify-content:space-between;align-items:center;gap:8px;opacity:.4;cursor:not-allowed">
+        <span>#${p.num} ${esc(p.name)}</span>
+        <span style="font-size:9px;font-family:'JetBrains Mono';color:var(--ink-3);text-align:right;line-height:1.3">🚫 ${esc(blocked)}</span>
+      </div>`;
       return `
       <button class="btn btn-secondary btn-block mb-2" style="text-align:left;display:flex;justify-content:space-between;align-items:center;gap:8px" onclick="assignKindDrawTo('${p.id}')">
         <span>#${p.num} ${esc(p.name)}</span>
@@ -22458,10 +22550,15 @@ function _assignGageBody() {
       </button>`;
     }).join('')}`;
 }
+function setAssignGageItem(v) {
+  window._assignGageItem = v;
+  const b = document.getElementById('assign-gage-body');
+  if (b) b.innerHTML = _assignGageBody();
+}
 // Crée une ligne gage_draws d'un type non-classique. Pas de tirage : la ligne
 // naît 'accepted' (= à faire), le coach validera. `completedAt` porte l'instant
 // d'engagement (utile au tri) — inoffensif pour la dette, qui ignore ces lignes.
-function _createKindDraw(pid, kind, tplId) {
+function _createKindDraw(pid, kind, tplId, resolvedInvolved) {
   const now = Date.now();
   const sid = (getSeasonIdForDate(isoDate(new Date(now))) || getActiveSeasonId()) || null;
   const tpl = kind === 'defi' ? _gageDefiById(tplId) : null;
@@ -22470,6 +22567,7 @@ function _createKindDraw(pid, kind, tplId) {
     id: uid(), playerId: pid, gageId: null, kind, status: 'accepted', delta: 0,
     sanctionTemplateId: kind === 'sanction_physique' ? tplId : null,
     defiTemplateId: kind === 'defi' ? tplId : null,
+    resolvedInvolvedPlayerIds: Array.isArray(resolvedInvolved) ? resolvedInvolved.filter(Boolean) : [],
     deadlineAt: kind === 'defi' ? now + win * 86400000 : null,
     assignedAt: now, drawnAt: now, completedAt: now,
     playerDoneAt: null, confirmedAt: null, invalidatedAt: null, invalidationReason: null,
@@ -22486,7 +22584,18 @@ function assignKindDrawTo(pid) {
   if (kind === 'classique') return assignDrawsToPlayer(pid);
   const tplId = (document.getElementById('assign-gage-item') || {}).value || '';
   if (!tplId) return;
-  const row = _createKindDraw(pid, kind, tplId);
+  // GARDE DÉFENSIVE : le filtre du picker est du confort, pas une sécurité.
+  // C'est ici, seul endroit qui écrit vraiment la ligne, qu'on revérifie qu'une
+  // joueuse ne se voit pas assigner un défi qui la cite, et que le tirage
+  // aléatoire a bien un réservoir.
+  let resolved = [];
+  if (kind === 'defi') {
+    const t = _gageDefiById(tplId);
+    const blocker = _defiAssignBlocker(t, pid);
+    if (blocker) { if (typeof showToast === 'function') showToast('🚫 ' + blocker); return; }
+    resolved = _resolveDefiInvolved(t, pid) || [];
+  }
+  const row = _createKindDraw(pid, kind, tplId, resolved);
   const isSanction = kind === 'sanction_physique';
   // PUSH joueuse — on annonce le TYPE, jamais le contenu (même règle que les gages).
   try {
@@ -22496,7 +22605,10 @@ function assignKindDrawTo(pid) {
   } catch (e) {}
   try { closeModal(); } catch (e) {}
   render();
-  if (typeof showToast === 'function') showToast(isSanction ? '💪 Sanction assignée' : '🎯 Défi assigné');
+  if (typeof showToast === 'function') {
+    const who = isSanction ? '' : _drawInvolvedLabel(row);
+    showToast(isSanction ? '💪 Sanction assignée' : ('🎯 Défi assigné' + (who ? ' · implique ' + who : '')));
+  }
   return row;
 }
 
@@ -22701,6 +22813,7 @@ function _gagesCoachDefiHtml() {
         return _gageCoachCard(`
           <div style="font-size:14px;color:var(--ink);line-height:1.4">🎯 ${esc(t ? t.name : '(défi retiré)')}</div>
           <div style="font-size:10px;color:${late ? 'var(--red)' : 'var(--ink-3)'};font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${esc(_pNameShort(d.playerId))} · ${esc(_defiDeadlineLabel(d) || '—')}${d.status === 'player_done' ? ' · ✋ dit avoir fait' : ''}</div>
+          ${_drawInvolvedLabel(d) ? `<div style="font-size:10px;color:var(--orange);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">👥 implique : ${esc(_drawInvolvedLabel(d))}</div>` : ''}
           <div style="display:flex;gap:6px;margin-top:8px">
             <button class="btn btn-primary" style="flex:1;font-size:12px" onclick="openValidateGageDraw('${d.id}')">✅ Valider</button>
             <button class="btn btn-ghost" style="font-size:12px" onclick="cancelKindDraw('${d.id}')">❌ Annuler</button>
@@ -22714,6 +22827,7 @@ function _gagesCoachDefiHtml() {
           <div style="flex:1;min-width:0">
             <div style="font-size:14px;color:var(--ink);line-height:1.4">${esc(t.name)}</div>
             <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;margin-top:3px">délai ${Number.isFinite(t.windowDays) ? t.windowDays : 7} j</div>
+            ${_defiTplInvolvedLabel(t) ? `<div style="font-size:10px;color:var(--orange);font-family:'JetBrains Mono';text-transform:uppercase;margin-top:3px">👥 implique : ${esc(_defiTplInvolvedLabel(t))}</div>` : ''}
             ${t.description ? `<div style="font-size:11px;color:var(--ink-2);margin-top:4px;line-height:1.4">${esc(t.description)}</div>` : ''}
           </div>
           ${admin ? `<div style="display:flex;gap:4px;flex:0 0 auto">
@@ -22843,6 +22957,7 @@ function openPlayerDefis() {
           <div style="padding:11px 12px;background:var(--surface);border:1px solid var(--border-soft);border-radius:10px;margin-bottom:8px">
             <div style="font-size:14px;color:var(--ink);line-height:1.4">${esc(t ? t.name : '(défi)')}</div>
             ${t && t.description ? `<div style="font-size:12px;color:var(--ink-2);margin-top:5px;line-height:1.45">${esc(t.description)}</div>` : ''}
+            ${_drawInvolvedLabel(d) ? `<div style="font-size:12px;color:var(--ink);margin-top:6px;line-height:1.4">👥 Avec : <strong>${esc(_drawInvolvedLabel(d))}</strong></div>` : ''}
             <div style="font-size:10px;color:${late ? 'var(--red)' : 'var(--orange)'};font-family:'JetBrains Mono';text-transform:uppercase;margin-top:7px">${esc(_defiDeadlineLabel(d) || '—')}${d.status === 'player_done' ? ' · en attente du coach' : ''}</div>
             ${d.status === 'accepted' ? `<button class="btn btn-primary btn-block" style="margin-top:8px;font-size:13px" onclick="markKindDrawDone('${d.id}')">J'ai relevé le défi ✓</button>` : ''}
           </div>`;
@@ -51609,7 +51724,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.157';
+const APP_VERSION = '2026-08-19.158';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
