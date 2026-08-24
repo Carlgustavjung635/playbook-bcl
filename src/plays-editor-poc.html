@@ -384,6 +384,13 @@
     content:''; position:absolute; top:3px; left:3px; width:6px; height:6px;
     border-radius:50%; background:var(--warn);
   }
+  /* 📌 : cette position a été posée à la main dans ce temps, elle ne suit
+     plus la cascade du temps précédent (cf. recomputeStepPositions). */
+  .token .pin{display:none}
+  .token.ovr .pin{display:block}
+  .token .pin .h{fill:#000; fill-opacity:.001}
+  .token .pin .i{paint-order:stroke; pointer-events:none}
+
   .chip .x{
     position:absolute; top:-6px; right:-6px; width:20px; height:20px; display:none;
     border-radius:50%; border:1px solid var(--border); background:var(--panel);
@@ -596,6 +603,11 @@
     <label for="f-points">Points clés</label>
     <textarea id="f-points" rows="5" placeholder="Un point clé par ligne (4 idéalement)"></textarea>
     <div class="note">Une ligne = un point. Les 4 premières lignes sont mises en avant.</div>
+  </div>
+  <div class="fld">
+    <label>Cascade des temps</label>
+    <div class="row"><button class="btn wide" id="f-cascade">🔄 Activer la cascade</button></div>
+    <div class="note" id="f-cascade-note"></div>
   </div>
   <div class="row"><button class="btn wide" id="f-done">Fermer</button></div>
 </div>
@@ -886,7 +898,18 @@
     for (i = 0; i < 5; i++) { p['d' + (i+1)] = { x: LAYOUT[m].def[i].x, y: LAYOUT[m].def[i].y }; }
     return p;
   }
-  function clonePos(p) { var o = {}, k; for (k in p) o[k] = { x: p[k].x, y: p[k].y }; return o; }
+  function clonePos(p) { var o = {}, k; for (k in p) o[k] = { x: p[k].x, y: p[k].y, ovr: p[k].ovr }; return o; }
+  // ── CASCADE (v.176) ───────────────────────────────────────────────
+  // Une position porte un 3e champ : `ovr`.
+  //   ovr === false  → héritée du temps précédent, la cascade la recalcule
+  //   ovr === true   → posée À LA MAIN dans ce temps, intouchable (📌)
+  //   ovr undefined  → donnée d'AVANT la v.176 : on la traite comme un
+  //                    override. Un play ancien garde donc EXACTEMENT le
+  //                    rendu qu'il avait, et c'est le coach qui décide de
+  //                    basculer en cascade (bouton dans ⚙️).
+  function isOvr(q) { return !q || q.ovr !== false; }
+  // Photo héritée : mêmes points, tous marqués « suit la cascade ».
+  function inheritPos(p) { var o = {}, k; for (k in p) o[k] = { x: p[k].x, y: p[k].y, ovr: false }; return o; }
 
   function makeStep(pos) { return { id: uid('s'), pos: pos, arw: [], shot: null, note: '' }; }
 
@@ -1002,6 +1025,44 @@
   }
   function desynced(i) { return i > 0 && !samePos(steps()[i].pos, endPos(steps()[i - 1])); }
 
+  // ── PROPAGATION EN CASCADE (v.176) ────────────────────────────────
+  // Le coach édite le temps N (il déplace une joueuse, il rallonge une
+  // flèche) : la SORTIE du temps N change, donc l'entrée de N+1 doit
+  // suivre, et ainsi de suite jusqu'au dernier temps. Sans ça la joueuse
+  // se téléportait entre la fin de N et le début de N+1.
+  //
+  // Seules les positions marquées `ovr === false` sont recalculées : une
+  // position posée à la main est une DÉCISION du coach, la cascade ne la
+  // touche jamais (elle porte un 📌, tapable pour la relâcher).
+  //
+  // Coût : un endPos() (≈ 10 points clonés + les flèches du temps) par
+  // temps. 20 temps × 10 jetons ≈ 200 écritures — très en dessous des
+  // 16 ms d'une frame iPhone, donc on peut l'appeler à chaque édition
+  // plutôt que d'entretenir un cache à invalider.
+  function recomputeList(l, from, curIdx) {
+    var i, k, prev, p, q, hit = 0;
+    if (!(from > 1)) from = 1;
+    for (i = from; i < l.length; i++) {
+      prev = endPos(l[i - 1]);          // ← déjà recalculé au tour d'avant
+      p = l[i].pos;
+      for (k in prev) {
+        q = p[k];
+        if (isOvr(q)) continue;         // 📌 : le coach a tranché
+        if (Math.abs(q.x - prev[k].x) < 0.001 && Math.abs(q.y - prev[k].y) < 0.001) continue;
+        q.x = prev[k].x; q.y = prev[k].y;
+        if (i === curIdx) hit++;        // le temps affiché a bougé
+      }
+    }
+    return hit;
+  }
+  function recomputeStepPositions(from) { return recomputeList(steps(), from, cur); }
+  // Recalcule PUIS redessine, mais seulement si le temps à l'écran a
+  // effectivement bougé : éditer le temps 3 ne doit pas faire clignoter
+  // le terrain à chaque frame de drag.
+  function cascade(from) {
+    if (recomputeStepPositions(from) && !playing) { drawTokens(); drawArrows(); syncInfo(); }
+  }
+
   // Porteuse du ballon au DÉBUT du temps i : on repart de doc.ballStart et on
   // suit les passes. Dérivé, jamais stocké — une passe supprimée se répercute
   // donc immédiatement sur tous les temps qui suivent.
@@ -1053,7 +1114,12 @@
     var lbl = labelOf(t.id);
     var fs  = t.side === 'atk' ? PR * 1.05 : PR * 0.82;
     var br  = PR * 0.44, bx = PR * 0.82, by = -PR * 0.78;
-    return '<g class="token ' + t.side + '" data-id="' + t.id + '">'
+    // 📌 en haut à GAUCHE (le ballon occupe déjà la droite). Toujours
+    // écrit, montré par CSS via .ovr : le drag peut donc l'allumer sans
+    // reconstruire le jeton.
+    var px = -PR * 0.82, py = -PR * 0.80;
+    var pinned = cur > 0 && pos()[t.id] && pos()[t.id].ovr === true;
+    return '<g class="token ' + t.side + (pinned ? ' ovr' : '') + '" data-id="' + t.id + '">'
       + '<ellipse class="sh" cx="0" cy="' + f(PR * 0.46) + '" rx="' + f(PR * 1.02) + '" ry="' + f(PR * 0.52) + '"/>'
       + '<circle class="disc" cx="0" cy="0" r="' + f(PR) + '"/>'
       + '<circle class="halo" cx="0" cy="0" r="' + f(PR + 1.6) + '"/>'
@@ -1064,6 +1130,10 @@
       +   '<circle class="b" cx="' + f(bx) + '" cy="' + f(by) + '" r="' + f(br) + '"/>'
       +   '<line class="s" x1="' + f(bx - br) + '" y1="' + f(by) + '" x2="' + f(bx + br) + '" y2="' + f(by) + '"/>'
       +   '<line class="s" x1="' + f(bx) + '" y1="' + f(by - br) + '" x2="' + f(bx) + '" y2="' + f(by + br) + '"/>'
+      + '</g>'
+      + '<g class="pin">'
+      +   '<circle class="h" cx="' + f(px) + '" cy="' + f(py) + '" r="' + f(PR * 0.62) + '"/>'
+      +   '<text class="i" x="' + f(px) + '" y="' + f(py) + '" dy="0.35em" text-anchor="middle" font-size="' + f(PR * 0.86) + '">\uD83D\uDCCC</text>'
       + '</g>'
       + '</g>';
   }
@@ -1082,6 +1152,7 @@
       tokEl[id] = g;
       placeToken(id);
       attachTokenPointer(g, id);
+      attachPinPointer(g, id);
     }
     syncSelection();
     syncBall();
@@ -1357,12 +1428,44 @@
       set: function (p) {
         var q = pos()[id];
         q.x = p.x; q.y = p.y;
+        // Déplacer une joueuse dans un temps, c'est décider de sa place :
+        // elle sort de la cascade (📌) et ne bougera plus quand le temps
+        // précédent sera retouché.
+        if (q.ovr !== true) { q.ovr = true; if (cur > 0) { var gg = tokEl[id]; if (gg) gg.classList.add('ovr'); pinTip(); } }
         placeToken(id);
         var ids = arrowsOf(id), i;
         for (i = 0; i < ids.length; i++) updateArrow(ids[i]);
       },
       tap: function () { onTokenClick(id); }
     });
+  }
+
+  // Tap sur le 📌 : la joueuse revient dans la cascade. On intercepte en
+  // pointerdown AVANT le drag du jeton (stopPropagation), sinon le geste
+  // serait avalé par makeDrag.
+  function attachPinPointer(g, id) {
+    var pin = g.querySelector('.pin');
+    if (!pin) return;
+    pin.addEventListener('pointerdown', function (e) {
+      if (playing || cur === 0 || tool !== 'select') return;
+      if (!g.classList.contains('ovr')) return;
+      e.preventDefault(); e.stopPropagation();
+      if (!confirm('\uD83D\uDCCC ' + labelOf(id) + ' est fixée à cette position.' + '\n\n' + '\uD83D\uDD04 La faire suivre la cascade ? Elle reprendra la position de sortie du temps précédent.')) return;
+      var q = pos()[id];
+      if (!q) return;
+      q.ovr = false;
+      recomputeStepPositions(cur);
+      drawTokens(); drawArrows(); renderTimeline(); syncInfo(); touch();
+      toast('\uD83D\uDD04 ' + labelOf(id) + ' suit à nouveau la cascade.', 'ok');
+    });
+  }
+  // Une seule fois par appareil : le 📌 est discret, il mérite sa phrase.
+  function pinTip() {
+    try {
+      if (localStorage.getItem('pb_plays_pin_tip')) return;
+      localStorage.setItem('pb_plays_pin_tip', '1');
+    } catch (_) {}
+    toast('\uD83D\uDCCC Cette joueuse est fixée à cette position et ne suit plus les modifications du temps précédent.', 'ok');
   }
 
   function attachWaypointPointer(el) {
@@ -1555,7 +1658,7 @@
 
   function addStep() {
     var src = steps()[steps().length - 1];
-    steps().push(makeStep(endPos(src)));
+    steps().push(makeStep(inheritPos(endPos(src))));
     gotoStep(steps().length - 1);
     touch();
   }
@@ -1572,7 +1675,8 @@
   // toucher à ses flèches (cf. l'en-tête : on répare, on n'écrase pas en douce).
   function syncStep() {
     if (cur === 0) return;
-    steps()[cur].pos = endPos(steps()[cur - 1]);
+    steps()[cur].pos = inheritPos(endPos(steps()[cur - 1]));
+    recomputeStepPositions(cur + 1);   // les temps suivants suivent
     gotoStep(cur); touch();
     toast('Temps ' + (cur + 1) + ' recalé.', 'ok');
   }
@@ -2376,6 +2480,48 @@
   }
 
   document.getElementById('b-meta').addEventListener('click', function () { metaToForm(); openSheet('sh-meta'); });
+
+  // ── Cascade : état + bascule d'un play ancien ─────────────────────
+  // On compte sur les DEUX modes : basculer half puis découvrir que full
+  // est resté figé serait le genre d'incohérence qu'on vient de corriger.
+  function cascadeTally() {
+    var t = { pin: 0, legacy: 0 }, ms = ['half', 'full'], j, i, k, l;
+    for (j = 0; j < ms.length; j++) {
+      l = doc[ms[j]].steps;
+      for (i = 1; i < l.length; i++) for (k in l[i].pos) {
+        if (l[i].pos[k].ovr === true) t.pin++;
+        else if (l[i].pos[k].ovr === undefined) t.legacy++;
+      }
+    }
+    return t;
+  }
+  function syncCascadeNote() {
+    var t = cascadeTally(), el = document.getElementById('f-cascade-note');
+    var b = document.getElementById('f-cascade');
+    if (t.legacy) {
+      el.textContent = 'Ce play est en mode figé (format d\u2019avant la cascade) : chaque temps garde ses positions. Activer la cascade fera suivre automatiquement les temps suivants quand vous retoucherez un temps.';
+      b.disabled = false;
+    } else {
+      el.textContent = 'Cascade active. ' + (t.pin ? t.pin + ' position(s) \uD83D\uDCCC posée(s) à la main, préservée(s).' : 'Aucune position épinglée.');
+      b.disabled = !t.pin;
+      b.textContent = t.pin ? '\uD83D\uDD04 Tout remettre dans la cascade' : '\uD83D\uDD04 Cascade active';
+    }
+  }
+  document.getElementById('b-meta').addEventListener('click', syncCascadeNote);
+  document.getElementById('f-cascade').addEventListener('click', function () {
+    var t = cascadeTally();
+    if (!t.legacy && !t.pin) return;
+    if (!confirm('Tous les temps repartiront de la sortie du temps précédent.' + '\n\n' + 'Les positions posées à la main seront recalées. Vous pourrez en r\u00e9\u00e9pingler ensuite en d\u00e9pla\u00e7ant une joueuse.')) return;
+    var ms = ['half', 'full'], j, i, k, l;
+    for (j = 0; j < ms.length; j++) {
+      l = doc[ms[j]].steps;
+      for (i = 1; i < l.length; i++) for (k in l[i].pos) l[i].pos[k].ovr = false;
+      recomputeList(l, 1, -1);
+    }
+    drawTokens(); drawArrows(); renderTimeline(); syncInfo(); touch();
+    syncCascadeNote();
+    toast('\uD83D\uDD04 Cascade activée sur tout le play.', 'ok');
+  });
   document.getElementById('b-menu').addEventListener('click', function () { metaToForm(); openSheet('sh-menu'); });
   document.getElementById('f-done').addEventListener('click', closeSheets);
 
@@ -2434,7 +2580,10 @@
         }
       }
       var positions = {};
-      for (id in s.pos) positions[id] = pt(s.pos[id]);
+      // `override` est écrit EXPLICITEMENT : un lecteur qui ne le connaît
+      // pas l'ignore, et à la relecture son absence signifie « ancien
+      // fichier » — donc override, donc aucun recalcul surprise.
+      for (id in s.pos) { positions[id] = pt(s.pos[id]); positions[id].override = (s.pos[id].ovr !== false); }
       if (s.shot) flat.push({ step: i, kind: 'shot', from: numOf(s.shot) });
       outSteps.push({
         n: i + 1, note: s.note || '',
@@ -2549,13 +2698,13 @@
       var s = o.steps[i] || {};
       // `positions` si le fichier la porte (round-trip exact), sinon on dérive
       // du temps précédent — c'est la seule information disponible.
-      var sp = clonePos(prev);
+      var sp = i === 0 ? clonePos(prev) : inheritPos(prev);
       var given = pick(s, 'positions', 'pos');
       if (given && typeof given === 'object') {
         for (var k in given) {
           var kid = refId(k) || (TOKMAP[k] ? k : null);
           var q = refPoint(given[k]);
-          if (kid && q) sp[kid] = q;
+          if (kid && q) { q.ovr = (given[k] && given[k].override === false) ? false : true; sp[kid] = q; }
         }
       }
       var st = makeStep(sp);
@@ -2916,7 +3065,12 @@
   // s'il a changé : un setInterval qui sérialise 10 temps toutes les 5 s pour
   // rien réveille le CPU de l'iPhone sans raison.
   var dirty = false, lastSaved = '';
-  function touch() { dirty = true; renderTimelineSoon(); }
+  // TOUTE édition passe par touch() : c'est donc LE point unique d'où la
+  // cascade repart. Un seul appel plutôt qu'un rappel dispersé dans les
+  // douze fonctions d'édition (ajout de flèche, gomme, tir, réordonnancement
+  // des temps, miroir…) — c'est exactement l'erreur qu'on refait sinon :
+  // une porte oubliée, et le play redevient incohérent en silence.
+  function touch() { dirty = true; cascade(1); renderTimelineSoon(); }
 
   var tlRaf = 0;
   function renderTimelineSoon() {
