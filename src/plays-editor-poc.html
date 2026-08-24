@@ -5,14 +5,19 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1,user-scalable=no">
 <meta name="color-scheme" content="light dark">
 <meta name="robots" content="noindex">
-<title>Éditeur de plays — POC drag</title>
+<title>Éditeur de plays — POC (jalon 2)</title>
 <!--
   ══════════════════════════════════════════════════════════════════════════
-  JALON 1 — POC éditeur de plays (drag & drop iPhone)
+  JALON 2 — POC éditeur de plays : 5 attaquantes + défense + flèches + ballon
   ══════════════════════════════════════════════════════════════════════════
   Fichier TOTALEMENT ISOLÉ de l'app (index.html) : aucun import, aucun état
-  partagé, aucune écriture en base. Objectif unique : valider la qualité du
-  drag d'un jeton sur iPhone Safari avant de construire les jalons suivants.
+  partagé, aucune écriture en base, aucune persistance. Objectif du jalon 2 :
+  pouvoir REPRODUIRE À LA MAIN un play existant (ex. atk-zone : 5 joueuses +
+  ~17 flèches) et vérifier que le rendu tient la route sur iPhone.
+
+  Ce qui reste pour le JALON 3 : les temps (steps), l'aperçu animé,
+  l'import/export JSON et la persistance en plays_v2. Ici tout est STATIQUE :
+  rien n'est sauvegardé, un reload repart de zéro. C'est volontaire.
 
   UNITÉS — 1 unité SVG = 10 cm. Toutes les cotes viennent des dimensions
   officielles FIBA :
@@ -24,22 +29,30 @@
 
   MARGE — 12 unités (1,20 m) tout autour de l'aire de jeu : c'est l'espace
   hors terrain où se place la joueuse qui fait la remise en touche. Le clamp
-  du jeton autorise cette zone (sinon impossible de dessiner une touche).
+  des jetons autorise cette zone (sinon impossible de dessiner une touche).
 
-  VUES 2D / 3D — cf. section 0 du script. Le modèle vit en coordonnées
-  terrain, une vue n'est qu'une projection. La 2D top-down est l'identité ;
-  la 3D (lecture seule, jalon 4+) branchera son project/unproject dans le
-  même registre. L'ÉDITION reste 2D : viser un jeton en perspective avec un
-  doigt est frustrant sur iPhone.
+  MODÈLE vs VUE — cf. sections 0 et 2. Le modèle ne connaît QUE des
+  coordonnées terrain ; une vue n'est qu'une projection (project/unproject)
+  plus un dessin de terrain. La 2D top-down est l'identité, la 3D (lecture
+  seule, jalon 4+) se branchera dans le même registre sans toucher au moteur
+  d'édition. L'ÉDITION reste 2D : viser un jeton en perspective avec un doigt
+  est frustrant sur iPhone.
 
-  Étendre au jalon 2 : le moteur de drag est déjà générique — attachDrag(g)
-  s'attache à n'importe quel jeton.
+  UN MODÈLE PAR MODE (demi / plein) — les deux terrains n'ont pas le même
+  repère : au lieu de re-projeter (et de déformer) un schéma dessiné en demi
+  quand on passe en plein, chaque mode garde SON schéma. Basculer ne détruit
+  donc jamais le travail en cours.
+
+  PERF iPhone — le drag ne reconstruit RIEN : il écrit un transform sur le
+  <g> du jeton et réécrit le d= des seules flèches qui touchent ce jeton, une
+  fois par frame (rAF). Les reconstructions de scène (innerHTML) n'arrivent
+  qu'aux changements de structure : mode, défense, ajout/suppression de
+  flèche — jamais pendant un geste.
 -->
 <style>
   /* ── Thème : suit le système, surchargeable par le bouton 🌓 ─────────
-     Accent primaire cyan #22D3EE (cohérent avec le format JSON des plays),
-     accent secondaire violet #7B2FFF (contrôles actifs, halo de drag, et
-     plus tard la couleur de la défense). */
+     Accent primaire cyan #22D3EE (attaque, cohérent avec le format JSON des
+     plays), accent secondaire violet #7B2FFF (défense + contrôles actifs). */
   :root{
     --bg:#F1F3F7; --panel:#FFFFFF; --ink:#0F131A; --ink-2:#5A6472;
     --border:#DCE1E9; --btn:#FFFFFF;
@@ -49,6 +62,9 @@
     --line:#A98F66; --line-strong:#8A7048;  /* lignes du terrain */
     --hoop:#E4572E;
     --player:#22D3EE; --player-hi:#7BE7F7; --player-ink:#04252E;
+    --def:#7B2FFF; --def-hi:#A87CFF; --def-ink:#FFFFFF; --def-line:#3D1180;
+    --arw-atk:#0E9BB8; --arw-def:#7B2FFF;
+    --ball:#F97316; --ball-line:#7C2D12;
     --sheen:#FFFFFF;
   }
   @media (prefers-color-scheme: dark){
@@ -61,6 +77,9 @@
       --line:#55647A; --line-strong:#70819A;
       --hoop:#F2703F;
       --player:#22D3EE; --player-hi:#8FEEFB; --player-ink:#04252E;
+      --def:#8B4CFF; --def-hi:#B78EFF; --def-ink:#FFFFFF; --def-line:#2B0A5E;
+      --arw-atk:#38D9F0; --arw-def:#A87CFF;
+      --ball:#FB923C; --ball-line:#431407;
       --sheen:#FFFFFF;
     }
   }
@@ -69,12 +88,16 @@
     --border:#DCE1E9; --btn:#FFFFFF; --accent-2:#7B2FFF; --accent-2-ink:#FFFFFF;
     --out-hi:#EDF0F5; --out-lo:#E1E6EE; --court-hi:#F6EAD4; --court-lo:#E8D6B6;
     --line:#A98F66; --line-strong:#8A7048; --hoop:#E4572E; --player-hi:#7BE7F7;
+    --def:#7B2FFF; --def-hi:#A87CFF; --def-ink:#FFFFFF; --def-line:#3D1180;
+    --arw-atk:#0E9BB8; --arw-def:#7B2FFF; --ball:#F97316; --ball-line:#7C2D12;
   }
   html[data-theme="dark"]{
     --bg:#080B10; --panel:#121821; --ink:#E9EFF7; --ink-2:#8592A4;
     --border:#212936; --btn:#19212C; --accent-2:#9B5CFF; --accent-2-ink:#0B0616;
     --out-hi:#141B25; --out-lo:#0D1219; --court-hi:#222B37; --court-lo:#161D26;
     --line:#55647A; --line-strong:#70819A; --hoop:#F2703F; --player-hi:#8FEEFB;
+    --def:#8B4CFF; --def-hi:#B78EFF; --def-ink:#FFFFFF; --def-line:#2B0A5E;
+    --arw-atk:#38D9F0; --arw-def:#A87CFF; --ball:#FB923C; --ball-line:#431407;
   }
 
   *{box-sizing:border-box}
@@ -91,7 +114,7 @@
     padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
   }
   header{
-    display:flex; align-items:center; gap:10px; padding:10px 12px;
+    display:flex; align-items:center; gap:10px; padding:9px 12px;
     background:var(--panel); border-bottom:1px solid var(--border); flex:none;
   }
   header .title{font-size:13px; font-weight:700; letter-spacing:.02em; flex:1}
@@ -106,20 +129,23 @@
     background:var(--accent-2); color:var(--accent-2-ink);
     border-color:var(--accent-2); box-shadow:0 2px 10px -3px var(--accent-2);
   }
-  .btn:disabled{opacity:.4; cursor:default; box-shadow:none}
-  .btn.sm{min-height:32px; padding:0 10px; font-size:12px}
+  .btn:disabled{opacity:.35; cursor:default; box-shadow:none}
+  .btn.sm{min-height:34px; padding:0 9px; font-size:12px}
   .bar{
-    display:flex; align-items:center; gap:8px; padding:8px 12px; flex:none;
+    display:flex; align-items:center; gap:7px; padding:7px 10px; flex:none;
     flex-wrap:wrap; border-bottom:1px solid var(--border); background:var(--panel);
   }
-  .seg{display:flex; gap:6px}
+  .bar+.bar{padding-top:0; border-bottom:1px solid var(--border)}
+  .seg{display:flex; gap:5px}
+  .sep{width:1px; align-self:stretch; background:var(--border); margin:2px 2px}
+  /* Encart d'info : compteurs du schéma + FPS mesuré pendant le drag. */
   .badge{
     margin-left:auto; display:flex; gap:9px; align-items:center;
     font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px;
-    color:var(--ink-2);
+    color:var(--ink-2); white-space:nowrap;
   }
   .badge b{color:var(--ink); font-weight:700}
-  .stage{flex:1; min-height:0; padding:8px; display:flex}
+  .stage{flex:1; min-height:0; padding:6px 8px; display:flex}
   svg{
     width:100%; height:100%; display:block;
     /* CLÉ iPhone : coupe scroll, pinch et double-tap-zoom sur toute la
@@ -131,6 +157,8 @@
   #gOut .a{stop-color:var(--out-hi)}     #gOut .b{stop-color:var(--out-lo)}
   #gFloor .a{stop-color:var(--court-hi)} #gFloor .b{stop-color:var(--court-lo)}
   #gDisc .a{stop-color:var(--player-hi)} #gDisc .b{stop-color:var(--player)}
+  #gDef .a{stop-color:var(--def-hi)}     #gDef .b{stop-color:var(--def)}
+  #gBall .a{stop-color:var(--ball)}      #gBall .b{stop-color:var(--ball-line)}
   #gSheen .a{stop-color:var(--sheen); stop-opacity:.13}
   #gSheen .b{stop-color:var(--sheen); stop-opacity:0}
   #gShadow .a{stop-color:#000; stop-opacity:.34}
@@ -146,40 +174,92 @@
   .ln.strong{stroke:var(--line-strong); stroke-width:.95}
   .hp{fill:none; stroke:var(--hoop); stroke-width:1.15; stroke-linecap:round}
 
+  /* ── Flèches ───────────────────────────────────────────────────────── */
+  .arw .body{fill:none; stroke-linecap:round; stroke-linejoin:round; pointer-events:none}
+  .arw .head{stroke:none; pointer-events:none}
+  /* Zone de saisie invisible et large : sur iPhone, un trait de 1,4 unité
+     est intouchable au doigt. pointer-events:stroke ne capte QUE le tracé. */
+  .arw .hit{fill:none; stroke:transparent; stroke-width:9; pointer-events:stroke; cursor:pointer}
+  .arw.atk .body, .arw.atk .head{stroke:var(--arw-atk); fill:var(--arw-atk)}
+  .arw.def .body, .arw.def .head{stroke:var(--arw-def); fill:var(--arw-def)}
+  .arw .body{stroke-width:1.45}
+  /* Passe = trait pointillé (convention basket). Le tiret est exprimé en
+     unités terrain, donc il garde la même densité dans les deux modes. */
+  .arw.pass .body{stroke-width:1.25; stroke-dasharray:3.4 2.8}
+  .arw .wp{fill:var(--panel); stroke:var(--ink-2); stroke-width:.5; cursor:grab}
+  /* En mode gomme, on annonce la cible au survol/au doigt. */
+  body[data-tool="erase"] .arw .body{opacity:.9}
+  body[data-tool="erase"] .arw:hover .body{stroke:var(--hoop)}
+  body[data-tool="erase"] .arw:hover .head{fill:var(--hoop)}
+  body:not([data-tool="select"]) .arw .wp{display:none}
+
   .token{cursor:grab}
   /* Ombre PEINTE (ellipse en dégradé radial) plutôt qu'un filter CSS : un
      drop-shadow se recalcule à chaque frame et coûte cher sur iPhone, alors
      que cette ellipse suit le jeton gratuitement dans le même transform. */
   .token .sh{fill:url(#gShadow); pointer-events:none}
   .token .disc{fill:url(#gDisc); stroke:var(--player-ink); stroke-width:.55}
+  .token.def .disc{fill:url(#gDef); stroke:var(--def-line); stroke-width:.55}
   .token .halo{
     fill:none; stroke:var(--accent-2); stroke-width:1.6; opacity:0;
     pointer-events:none;
   }
+  /* Les défenseurs SONT violets : leur halo doit contraster, donc cyan. */
+  .token.def .halo{stroke:var(--player)}
   .token .num{
     fill:var(--player-ink); font-weight:800; text-anchor:middle;
     font-family:-apple-system,BlinkMacSystemFont,sans-serif; pointer-events:none;
   }
+  .token.def .num{fill:var(--def-ink)}
+  .token .ball{display:none; pointer-events:none}
+  .token.has-ball .ball{display:block}
+  .token .ball .b{fill:url(#gBall); stroke:var(--ball-line); stroke-width:.4}
+  .token .ball .s{fill:none; stroke:var(--ball-line); stroke-width:.35; stroke-linecap:round}
+  /* Sélection : la joueuse active prend le halo, les autres reculent d'un
+     cran (80 %). Une opacité, pas un filtre : gratuit au compositing. */
+  .token.active .halo{opacity:.9}
+  #lay-tok.has-active .token:not(.active){opacity:.8}
   /* Retour visuel au doigt : halo violet, aucune transition (une transition
      ajouterait de la latence perçue pendant le déplacement). */
   .token.drag{cursor:grabbing}
   .token.drag .halo{opacity:.85}
   .token.drag .disc{stroke-width:.9}
+  /* Source d'une flèche en cours de tracé : halo qui respire. */
+  .token.pending .halo{opacity:.95; animation:pulse .9s ease-in-out infinite}
+  @keyframes pulse{50%{opacity:.35}}
 
   .hint{
-    flex:none; margin:0; padding:6px 12px 10px; font-size:11px; line-height:1.5;
-    color:var(--ink-2); text-align:center;
+    flex:none; margin:0; padding:5px 12px 9px; font-size:11px; line-height:1.5;
+    color:var(--ink-2); text-align:center; min-height:34px;
   }
+  .hint b{color:var(--ink)}
 </style>
 </head>
-<body>
+<body data-tool="select">
 
 <header>
   <button class="btn" onclick="location.href='/'">←</button>
-  <div class="title">Éditeur de plays <span class="sub">· POC drag (jalon 1)</span></div>
+  <div class="title">Éditeur de plays <span class="sub">· POC jalon 2</span></div>
   <button class="btn" id="theme" title="Thème">🌓</button>
 </header>
 
+<!-- Barre 1 — OUTILS -->
+<div class="bar">
+  <div class="seg">
+    <button class="btn sm on" id="t-select" title="Sélection / déplacement">👆</button>
+    <button class="btn sm"    id="t-move"   title="Flèche de déplacement">→</button>
+    <button class="btn sm"    id="t-pass"   title="Flèche de passe">⇢</button>
+    <button class="btn sm"    id="t-erase"  title="Supprimer une flèche">🚫</button>
+  </div>
+  <div class="sep"></div>
+  <div class="seg">
+    <button class="btn sm" id="b-ball" disabled title="Donner le ballon à la joueuse active">🏀 Balle</button>
+    <button class="btn sm" id="b-def"  title="Afficher / masquer la défense">🛡️ Déf</button>
+    <button class="btn sm" id="b-reset" title="Repartir de la disposition de départ">↺</button>
+  </div>
+</div>
+
+<!-- Barre 2 — TERRAIN, VUE, INFOS -->
 <div class="bar">
   <div class="seg">
     <button class="btn sm on" id="m-half">🏀 Demi</button>
@@ -190,15 +270,16 @@
     <button class="btn sm"    id="v-3d" disabled title="Vue de lecture 3D — jalon 4">3D</button>
   </div>
   <div class="badge">
-    <span>x: <b id="px">—</b></span>
-    <span>y: <b id="py">—</b></span>
+    <span>👥 <b id="i-tok">—</b></span>
+    <span>↗ <b id="i-arw">—</b></span>
+    <span>🏀 <b id="i-ball">—</b></span>
     <span><b id="fps">—</b> fps</span>
   </div>
 </div>
 
 <div class="stage"><svg id="court" xmlns="http://www.w3.org/2000/svg"></svg></div>
 
-<p class="hint">Glisse le jeton <b>1</b>. Il peut sortir de l'aire de jeu jusqu'au bord gris (remise en touche).<br>La vue 3D sera une vue de <b>lecture</b> — l'édition reste en 2D.</p>
+<p class="hint" id="hint"></p>
 
 <script>
 (function () {
@@ -207,17 +288,17 @@
   // ─────────────────────────────────────────────────────────────────────
   // 0. VUES — 2D aujourd'hui, 3D au jalon 4+
   // ─────────────────────────────────────────────────────────────────────
-  // SÉPARATION VOULUE : le modèle (position des jetons) vit TOUJOURS en
-  // « coordonnées terrain » — origine au coin haut-gauche de la zone
-  // hors-jeu, 1 unité = 10 cm. Une vue n'est qu'une projection de ces
+  // SÉPARATION VOULUE : le modèle (positions des jetons, points des flèches)
+  // vit TOUJOURS en « coordonnées terrain » — origine au coin haut-gauche de
+  // la zone hors-jeu, 1 unité = 10 cm. Une vue n'est qu'une projection de ces
   // coordonnées vers la scène + un dessin de terrain.
   //
   //   project(p)   coordonnées terrain → coordonnées de la scène (dessin)
   //   unproject(p) coordonnées de la scène → coordonnées terrain (drag)
   //
-  // En 2D top-down les deux sont l'identité, mais TOUT le code de drag et de
-  // clamp passe déjà par elles : brancher une 3D (perspective SVG ou
-  // Three.js) au jalon 4 ne touchera pas au moteur de drag.
+  // En 2D top-down les deux sont l'identité, mais TOUT le code d'édition
+  // (drag, clamp, tracé des flèches, pose du ballon) passe déjà par elles :
+  // brancher une 3D au jalon 4 ne touchera pas au moteur d'édition.
   //
   // editable:false sur la 3D = choix assumé. Viser un jeton en perspective
   // avec un doigt sur iPhone est frustrant ; la 3D sera une vue de LECTURE
@@ -246,9 +327,28 @@
 
   var MODES = {
     // Demi-terrain vertical (panier en haut) — orientation naturelle sur iPhone.
-    half: { vb: '0 0 174 164', w: 174, h: 164, start: { x: 87, y: 100 } },
-    // Terrain complet horizontal (deux paniers).
-    full: { vb: '0 0 304 174', w: 304, h: 174, start: { x: 152, y: 87 } }
+    half: { vb: '0 0 174 164', w: 174, h: 164 },
+    // Terrain complet horizontal (deux paniers, on attaque à droite).
+    full: { vb: '0 0 304 174', w: 304, h: 174 }
+  };
+
+  // Dispositions de départ. Attaque en 2-1-2 face au panier, défense en
+  // miroir intercalée entre l'attaque et le cercle : c'est juste un point de
+  // départ raisonnable, le coach ré-arrange tout au doigt.
+  // ⚠️ Contrainte de départ : deux jetons ne doivent JAMAIS se chevaucher à
+  // l'ouverture, sinon on ne peut pas attraper celui du dessous au doigt. Le
+  // diamètre d'un jeton vaut w/9,5 unités, soit ~18,3 en demi-terrain mais
+  // ~32 en terrain plein : les écarts du plein sont donc BEAUCOUP plus larges
+  // que ceux du demi, ce n'est pas une coquille.
+  var LAYOUT = {
+    half: {
+      atk: [ {x:87,y:112}, {x:33,y:96},  {x:141,y:96},  {x:52,y:50},  {x:122,y:50} ],
+      def: [ {x:87,y:90},  {x:46,y:78},  {x:128,y:78},  {x:64,y:33},  {x:110,y:33} ]
+    },
+    full: {
+      atk: [ {x:140,y:87}, {x:168,y:30}, {x:168,y:144}, {x:228,y:48},  {x:228,y:126} ],
+      def: [ {x:174,y:87}, {x:202,y:24}, {x:202,y:150}, {x:262,y:48},  {x:262,y:126} ]
+    }
   };
 
   function defs() {
@@ -256,6 +356,8 @@
       + '<linearGradient id="gOut" x1="0" y1="0" x2="0" y2="1"><stop class="a" offset="0"/><stop class="b" offset="1"/></linearGradient>'
       + '<linearGradient id="gFloor" x1="0" y1="0" x2="0" y2="1"><stop class="a" offset="0"/><stop class="b" offset="1"/></linearGradient>'
       + '<linearGradient id="gDisc" x1="0" y1="0" x2="0" y2="1"><stop class="a" offset="0"/><stop class="b" offset="1"/></linearGradient>'
+      + '<linearGradient id="gDef" x1="0" y1="0" x2="0" y2="1"><stop class="a" offset="0"/><stop class="b" offset="1"/></linearGradient>'
+      + '<linearGradient id="gBall" x1="0" y1="0" x2="0" y2="1"><stop class="a" offset="0"/><stop class="b" offset="1"/></linearGradient>'
       + '<radialGradient id="gSheen" cx="50%" cy="34%" r="72%"><stop class="a" offset="0"/><stop class="b" offset="1"/></radialGradient>'
       + '<radialGradient id="gShadow"><stop class="a" offset="0"/><stop class="b" offset="0.6"/><stop class="c" offset="1"/></radialGradient>'
       + '</defs>';
@@ -315,139 +417,489 @@
   function f(n) { return Math.round(n * 100) / 100; }
 
   // ─────────────────────────────────────────────────────────────────────
-  // 2. ÉTAT
+  // 2. MODÈLE
   // ─────────────────────────────────────────────────────────────────────
-  var svg = document.getElementById('court');
-  var elX = document.getElementById('px');
-  var elY = document.getElementById('py');
-  var elFps = document.getElementById('fps');
+  // Un schéma par mode de terrain (cf. en-tête). Un schéma =
+  //   tok[]       jetons {id, side:'atk'|'def', n:1..5, x, y}  (coords terrain)
+  //   arw[]       flèches {id, kind:'move'|'pass', from:<idJeton>,
+  //                        to:<idJeton>|{x,y}, via:[{x,y}…]}
+  //   ballStart   id du jeton porteur (un seul), ou null
+  // La défense EXISTE toujours dans le modèle : le toggle ne fait que la
+  // montrer ou la cacher, donc couper puis rallumer la défense ne perd ni les
+  // positions ni les flèches qui la touchent.
+  function makeSchema(m) {
+    var t = [], i;
+    for (i = 0; i < 5; i++) t.push({ id: 'a' + (i+1), side: 'atk', n: i+1, x: LAYOUT[m].atk[i].x, y: LAYOUT[m].atk[i].y });
+    for (i = 0; i < 5; i++) t.push({ id: 'd' + (i+1), side: 'def', n: i+1, x: LAYOUT[m].def[i].x, y: LAYOUT[m].def[i].y });
+    return { tok: t, arw: [], ballStart: 'a1' };
+  }
 
-  var mode = 'half';
-  var pos = { x: MODES.half.start.x, y: MODES.half.start.y };  // coords terrain
-  var PR = 0;              // rayon du jeton, recalculé par mode
-  var tok = null;          // <g> du jeton
+  var svg   = document.getElementById('court');
+  var elArw = document.getElementById('i-arw');
+  var elTok = document.getElementById('i-tok');
+  var elBal = document.getElementById('i-ball');
+  var elFps = document.getElementById('fps');
+  var elHint= document.getElementById('hint');
+
+  var mode  = 'half';
+  var S     = { half: makeSchema('half'), full: makeSchema('full') };
+  var defOn = false;         // la défense est optionnelle, masquée par défaut
+  var tool  = 'select';
+  var active  = null;        // id du jeton sélectionné (halo violet)
+  var pending = null;        // id du jeton source d'une flèche en cours
+  var seq = 0;               // compteur d'ids de flèches (unique par session)
+
+  var PR = 0;                // rayon du jeton en unités terrain
+  var layC = null, layA = null, layT = null;   // couches SVG
+  var tokEl = {};            // id jeton  → { g, ... }
+  var arwEl = {};            // id flèche → { g, body, hit, head }
+
+  function sch() { return S[mode]; }
+  function tokById(id) {
+    var t = sch().tok, i;
+    for (i = 0; i < t.length; i++) if (t[i].id === id) return t[i];
+    return null;
+  }
+  function visible(t) { return t && (t.side === 'atk' || defOn); }
+  // Une flèche n'est rendue (ni comptée) que si ses deux extrémités le sont.
+  function arwVisible(a) {
+    if (!visible(tokById(a.from))) return false;
+    if (typeof a.to === 'string' && !visible(tokById(a.to))) return false;
+    return true;
+  }
 
   // Le jeton doit rester ~40 px de diamètre à l'écran quel que soit le mode :
   // on l'exprime donc en fraction de la largeur du viewBox (qui, lui, est
   // toujours mis à l'échelle sur la largeur disponible).
   function radiusFor(m) { return MODES[m].w / 19; }
 
-  function token() {
-    return '<g class="token" id="tok">'
+  // ─────────────────────────────────────────────────────────────────────
+  // 3. RENDU — trois couches, reconstruites séparément
+  // ─────────────────────────────────────────────────────────────────────
+  // terrain (jamais retouché hors changement de mode/vue) · flèches ·
+  // jetons. Le drag n'écrit que des attributs, il ne reconstruit rien.
+  function drawAll() {
+    PR = radiusFor(mode);
+    svg.setAttribute('viewBox', MODES[mode].vb);
+    svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    svg.innerHTML = defs()
+      + '<g id="lay-court">' + VIEWS[view].court(mode) + '</g>'
+      + '<g id="lay-arw"></g><g id="lay-tok"></g>';
+    layC = document.getElementById('lay-court');
+    layA = document.getElementById('lay-arw');
+    layT = document.getElementById('lay-tok');
+    drawTokens();
+    drawArrows();
+    syncInfo();
+  }
+
+  function tokenMarkup(t) {
+    var lbl = t.side === 'atk' ? String(t.n) : 'X' + t.n;
+    var fs  = t.side === 'atk' ? PR * 1.05 : PR * 0.82;
+    var br  = PR * 0.44, bx = PR * 0.82, by = -PR * 0.78;
+    return '<g class="token ' + t.side + '" data-id="' + t.id + '">'
       + '<ellipse class="sh" cx="0" cy="' + f(PR * 0.46) + '" rx="' + f(PR * 1.02) + '" ry="' + f(PR * 0.52) + '"/>'
       + '<circle class="disc" cx="0" cy="0" r="' + f(PR) + '"/>'
       + '<circle class="halo" cx="0" cy="0" r="' + f(PR + 1.6) + '"/>'
-      + '<text class="num" x="0" y="0" dy="0.35em" font-size="' + f(PR * 1.05) + '">1</text>'
+      + '<text class="num" x="0" y="0" dy="0.35em" font-size="' + f(fs) + '">' + lbl + '</text>'
+      // Ballon : petit disque orange collé en haut à droite du chiffre, avec
+      // deux coutures. Masqué par CSS tant que le jeton n'a pas .has-ball.
+      + '<g class="ball">'
+      +   '<circle class="b" cx="' + f(bx) + '" cy="' + f(by) + '" r="' + f(br) + '"/>'
+      +   '<line class="s" x1="' + f(bx - br) + '" y1="' + f(by) + '" x2="' + f(bx + br) + '" y2="' + f(by) + '"/>'
+      +   '<line class="s" x1="' + f(bx) + '" y1="' + f(by - br) + '" x2="' + f(bx) + '" y2="' + f(by + br) + '"/>'
+      + '</g>'
       + '</g>';
   }
 
-  function draw() {
-    var cfg = MODES[mode];
-    PR = radiusFor(mode);
-    svg.setAttribute('viewBox', cfg.vb);
-    svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
-    svg.innerHTML = defs() + VIEWS[view].court(mode) + token();
-    tok = document.getElementById('tok');
-    attachDrag(tok);
-    setPos(pos.x, pos.y);
+  function drawTokens() {
+    var t = sch().tok, html = '', i;
+    for (i = 0; i < t.length; i++) if (visible(t[i])) html += tokenMarkup(t[i]);
+    layT.innerHTML = html;
+    tokEl = {};
+    var gs = layT.querySelectorAll('.token');
+    for (i = 0; i < gs.length; i++) {
+      var g = gs[i], id = g.getAttribute('data-id');
+      tokEl[id] = g;
+      placeToken(tokById(id));
+      attachTokenPointer(g, id);
+    }
+    syncSelection();
+    syncBall();
   }
 
-  // ─────────────────────────────────────────────────────────────────────
-  // 3. POSITION + CLAMP
-  // ─────────────────────────────────────────────────────────────────────
-  // Le jeton peut aller jusqu'au bord du viewBox (donc dans la marge de
-  // remise en touche) mais jamais au-delà : le disque reste entièrement
-  // visible.
-  function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
-
-  function setPos(x, y) {
-    var cfg = MODES[mode];
-    pos.x = clamp(x, PR, cfg.w - PR);
-    pos.y = clamp(y, PR, cfg.h - PR);
-    var s = VIEWS[view].project(pos);   // terrain → scène (identité en 2D)
+  function placeToken(t) {
+    var g = tokEl[t.id];
+    if (!g) return;
+    var s = VIEWS[view].project(t);   // terrain → scène (identité en 2D)
     // transform (composité) plutôt que cx/cy : moins de recalcul par frame,
     // et l'ombre peinte suit le jeton sans travail supplémentaire.
-    tok.setAttribute('transform', 'translate(' + f(s.x) + ' ' + f(s.y) + ')');
-    elX.textContent = Math.round(pos.x);
-    elY.textContent = Math.round(pos.y);
+    g.setAttribute('transform', 'translate(' + f(s.x) + ' ' + f(s.y) + ')');
+  }
+
+  function syncSelection() {
+    var id;
+    for (id in tokEl) {
+      tokEl[id].classList.toggle('active', id === active);
+      tokEl[id].classList.toggle('pending', id === pending);
+    }
+    if (layT) layT.classList.toggle('has-active', !!(active && tokEl[active]));
+    document.getElementById('b-ball').disabled = !(active && tokEl[active]);
+  }
+
+  function syncBall() {
+    var id;
+    for (id in tokEl) tokEl[id].classList.toggle('has-ball', id === sch().ballStart);
+  }
+
+  // ── Flèches ──────────────────────────────────────────────────────────
+  // Points du modèle (source → waypoints → cible), en coordonnées terrain.
+  function rawPts(a) {
+    var src = tokById(a.from);
+    if (!src) return null;
+    var p = [{ x: src.x, y: src.y }], i, v = a.via || [];
+    for (i = 0; i < v.length; i++) p.push({ x: v[i].x, y: v[i].y });
+    var dst = typeof a.to === 'string' ? tokById(a.to) : a.to;
+    if (!dst) return null;
+    p.push({ x: dst.x, y: dst.y });
+    return p;
+  }
+
+  // Rogne l'extrémité i vers son voisin : le trait part du BORD du jeton et
+  // s'arrête au bord du jeton cible, jamais de centre à centre.
+  function shrink(p, i, pad) {
+    if (pad <= 0) return;
+    var j = i === 0 ? 1 : i - 1;
+    var dx = p[j].x - p[i].x, dy = p[j].y - p[i].y;
+    var L = Math.sqrt(dx * dx + dy * dy);
+    if (L < 0.01) return;
+    if (L < pad + 0.6) pad = Math.max(0, L - 0.6);
+    p[i] = { x: p[i].x + dx / L * pad, y: p[i].y + dy / L * pad };
+  }
+
+  // Tracé + angle de la pointe. Sans waypoint : segment droit. Avec : une
+  // Catmull-Rom convertie en cubiques — le chemin passe EXACTEMENT par les
+  // points posés par le coach, ce qu'une quadratique de contrôle ne fait pas.
+  function buildPath(p) {
+    var i, d, last;
+    if (p.length === 2) {
+      return {
+        d: 'M ' + f(p[0].x) + ' ' + f(p[0].y) + ' L ' + f(p[1].x) + ' ' + f(p[1].y),
+        ang: Math.atan2(p[1].y - p[0].y, p[1].x - p[0].x)
+      };
+    }
+    d = 'M ' + f(p[0].x) + ' ' + f(p[0].y);
+    var c2 = null;
+    for (i = 0; i < p.length - 1; i++) {
+      var a = p[i - 1] || p[i], b = p[i], c = p[i + 1], e = p[i + 2] || p[i + 1];
+      var k1 = { x: b.x + (c.x - a.x) / 6, y: b.y + (c.y - a.y) / 6 };
+      var k2 = { x: c.x - (e.x - b.x) / 6, y: c.y - (e.y - b.y) / 6 };
+      d += ' C ' + f(k1.x) + ' ' + f(k1.y) + ' ' + f(k2.x) + ' ' + f(k2.y) + ' ' + f(c.x) + ' ' + f(c.y);
+      c2 = k2;
+    }
+    last = p[p.length - 1];
+    // Tangente en fin de cubique = (point final − dernier point de contrôle).
+    var dx = last.x - c2.x, dy = last.y - c2.y;
+    if (dx * dx + dy * dy < 1e-4) { dx = last.x - p[p.length - 2].x; dy = last.y - p[p.length - 2].y; }
+    return { d: d, ang: Math.atan2(dy, dx) };
+  }
+
+  function headPath(x, y, ang, hl, hw) {
+    var cx = Math.cos(ang), sy = Math.sin(ang);
+    var bx = x - hl * cx, by = y - hl * sy;
+    return 'M ' + f(x) + ' ' + f(y)
+      + ' L ' + f(bx - hw * sy) + ' ' + f(by + hw * cx)
+      + ' L ' + f(bx + hw * sy) + ' ' + f(by - hw * cx) + ' Z';
+  }
+
+  function arrowMarkup(a) {
+    var cls = 'arw ' + (tokById(a.from).side === 'atk' ? 'atk' : 'def') + ' ' + a.kind;
+    var wp = '', v = a.via || [], i;
+    for (i = 0; i < v.length; i++)
+      wp += '<circle class="wp" data-arw="' + a.id + '" data-i="' + i + '" cx="' + f(v[i].x) + '" cy="' + f(v[i].y) + '" r="' + f(PR * 0.3) + '"/>';
+    return '<g class="' + cls + '" data-id="' + a.id + '">'
+      + '<path class="hit" d=""/><path class="body" d=""/><path class="head" d=""/>' + wp + '</g>';
+  }
+
+  function drawArrows() {
+    var list = sch().arw, html = '', i;
+    for (i = 0; i < list.length; i++) if (arwVisible(list[i])) html += arrowMarkup(list[i]);
+    layA.innerHTML = html;
+    arwEl = {};
+    var gs = layA.querySelectorAll('.arw');
+    for (i = 0; i < gs.length; i++) {
+      var g = gs[i], id = g.getAttribute('data-id');
+      arwEl[id] = { g: g, body: g.querySelector('.body'), hit: g.querySelector('.hit'), head: g.querySelector('.head') };
+      updateArrow(id);
+      attachArrowPointer(g, id);
+    }
+    var wps = layA.querySelectorAll('.wp');
+    for (i = 0; i < wps.length; i++) attachWaypointDrag(wps[i]);
+  }
+
+  // Recalcule le d= d'UNE flèche. C'est le seul travail fait pendant un drag,
+  // et uniquement pour les flèches réellement attachées au jeton déplacé.
+  function updateArrow(id) {
+    var el = arwEl[id];
+    if (!el) return;
+    var a = null, list = sch().arw, i;
+    for (i = 0; i < list.length; i++) if (list[i].id === id) { a = list[i]; break; }
+    if (!a) return;
+    var p = rawPts(a);
+    if (!p) return;
+    shrink(p, 0, PR + 0.8);
+    shrink(p, p.length - 1, typeof a.to === 'string' ? PR + 1.2 : 0);
+    var r  = buildPath(p);
+    var hl = PR * (a.kind === 'pass' ? 0.72 : 0.8);
+    var hw = PR * (a.kind === 'pass' ? 0.34 : 0.4);
+    el.body.setAttribute('d', r.d);
+    el.hit.setAttribute('d', r.d);
+    el.head.setAttribute('d', headPath(p[p.length - 1].x, p[p.length - 1].y, r.ang, hl, hw));
+  }
+
+  function arrowsOf(tokId) {
+    var out = [], list = sch().arw, i;
+    for (i = 0; i < list.length; i++)
+      if (list[i].from === tokId || list[i].to === tokId) out.push(list[i].id);
+    return out;
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // 4. DRAG — PointerEvents (iPhone + desktop, même chemin de code)
+  // 4. COORDONNÉES ÉCRAN → TERRAIN
   // ─────────────────────────────────────────────────────────────────────
-  // Écran → coordonnées SVG via getScreenCTM().inverse() : exact quelle que
-  // soit la mise à l'échelle du viewBox, le zoom ou la rotation de l'écran.
-  function toScene(clientX, clientY) {
+  // getScreenCTM().inverse() : exact quelle que soit la mise à l'échelle du
+  // viewBox, le zoom ou la rotation de l'écran.
+  function toCourt(clientX, clientY) {
     var ctm = svg.getScreenCTM();
     if (!ctm) return null;
     var p = svg.createSVGPoint();
     p.x = clientX; p.y = clientY;
-    return p.matrixTransform(ctm.inverse());
-  }
-  // …puis scène → terrain, via la vue courante.
-  function toCourt(clientX, clientY) {
-    var s = toScene(clientX, clientY);
-    return s ? VIEWS[view].unproject(s) : null;
+    var s = p.matrixTransform(ctm.inverse());
+    return VIEWS[view].unproject(s);   // scène → terrain (identité en 2D)
   }
 
-  function attachDrag(g) {
-    var dragging = false;
-    var off = { x: 0, y: 0 };     // écart doigt ↔ centre au moment du grab
-    var pending = null;           // dernier pointermove non encore rendu
-    var raf = 0;
+  // Le jeton peut aller jusqu'au bord du viewBox (donc dans la marge de
+  // remise en touche) mais jamais au-delà : le disque reste entièrement
+  // visible.
+  function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+  function clampPt(p, pad) {
+    var c = MODES[mode];
+    return { x: clamp(p.x, pad, c.w - pad), y: clamp(p.y, pad, c.h - pad) };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // 5. DRAG — PointerEvents (iPhone + desktop, même chemin de code)
+  // ─────────────────────────────────────────────────────────────────────
+  // Moteur générique : il ne sait rien des jetons ni des waypoints, il reçoit
+  // « lis la position », « écris la position », « et voilà un tap ».
+  function makeDrag(el, opts) {
+    var on = false, off = { x: 0, y: 0 }, moved = 0;
+    var pending2 = null, raf = 0;
 
     // On ne rend QU'UNE fois par frame : les pointermove arrivent souvent
     // plus vite que 60 Hz sur iPhone (jusqu'à 120 Hz), inutile de recalculer
     // le CTM à chaque événement.
     function flush() {
       raf = 0;
-      var e = pending; pending = null;
+      var e = pending2; pending2 = null;
       if (!e) return;
       var p = toCourt(e.clientX, e.clientY);
       if (!p) return;
-      setPos(p.x + off.x, p.y + off.y);
+      opts.set(clampPt({ x: p.x + off.x, y: p.y + off.y }, opts.pad()));
       fpsTick();
     }
 
-    g.addEventListener('pointerdown', function (e) {
+    el.addEventListener('pointerdown', function (e) {
+      e.stopPropagation();
       if (!VIEWS[view].editable) return;   // la 3D sera en lecture seule
+      if (opts.down && opts.down(e) === false) return;
       e.preventDefault();
       var p = toCourt(e.clientX, e.clientY);
       if (!p) return;
-      dragging = true;
-      off.x = pos.x - p.x;
-      off.y = pos.y - p.y;
+      var cur = opts.get();
+      on = true; moved = 0;
+      off.x = cur.x - p.x; off.y = cur.y - p.y;
       // Capture : le doigt garde le jeton même s'il sort du <g> (et on reçoit
       // toujours le pointerup, y compris hors de l'élément).
-      try { g.setPointerCapture(e.pointerId); } catch (_) {}
-      g.classList.add('drag');
+      try { el.setPointerCapture(e.pointerId); } catch (_) {}
+      el.classList.add('drag');
       fpsReset();
     }, { passive: false });
 
-    g.addEventListener('pointermove', function (e) {
-      if (!dragging) return;
-      e.preventDefault();
-      pending = e;
+    el.addEventListener('pointermove', function (e) {
+      if (!on) return;
+      e.preventDefault(); e.stopPropagation();
+      moved++;
+      pending2 = e;
       if (!raf) raf = requestAnimationFrame(flush);
     }, { passive: false });
 
     function end(e) {
-      if (!dragging) return;
-      dragging = false;
-      if (pending) { if (raf) cancelAnimationFrame(raf); raf = 0; flush(); }
-      try { g.releasePointerCapture(e.pointerId); } catch (_) {}
-      g.classList.remove('drag');
+      if (!on) return;
+      on = false;
+      if (pending2) { if (raf) cancelAnimationFrame(raf); raf = 0; flush(); }
+      try { el.releasePointerCapture(e.pointerId); } catch (_) {}
+      el.classList.remove('drag');
       elFps.textContent = '—';
+      // Un geste de moins de 3 frames de mouvement = un tap, pas un drag.
+      if (moved < 3 && opts.tap) opts.tap();
     }
-    g.addEventListener('pointerup', end);
-    g.addEventListener('pointercancel', end);
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointercancel', end);
     // Filet iOS : un geste système (swipe bord d'écran) peut avaler le pointer.
-    g.addEventListener('lostpointercapture', function () { g.classList.remove('drag'); });
+    el.addEventListener('lostpointercapture', function () { el.classList.remove('drag'); on = false; });
+  }
+
+  function attachTokenPointer(g, id) {
+    makeDrag(g, {
+      // Hors mode sélection, le jeton ne se déplace pas : il sert de cible aux
+      // outils flèche / gomme. On refuse le drag mais on garde le tap.
+      down: function (e) {
+        if (tool !== 'select') { e.preventDefault(); onTokenClick(id); return false; }
+        return true;
+      },
+      pad: function () { return PR; },
+      get: function () { var t = tokById(id); return { x: t.x, y: t.y }; },
+      set: function (p) {
+        var t = tokById(id);
+        t.x = p.x; t.y = p.y;
+        placeToken(t);
+        var ids = arrowsOf(id), i;
+        for (i = 0; i < ids.length; i++) updateArrow(ids[i]);
+      },
+      tap: function () { onTokenClick(id); }
+    });
+  }
+
+  function attachWaypointDrag(el) {
+    var aid = el.getAttribute('data-arw'), idx = +el.getAttribute('data-i');
+    makeDrag(el, {
+      down: function () { return tool === 'select'; },
+      pad: function () { return 1; },
+      get: function () { return findArw(aid).via[idx]; },
+      set: function (p) {
+        var v = findArw(aid).via[idx];
+        v.x = p.x; v.y = p.y;
+        el.setAttribute('cx', f(p.x)); el.setAttribute('cy', f(p.y));
+        updateArrow(aid);
+      }
+    });
+  }
+
+  function findArw(id) {
+    var l = sch().arw, i;
+    for (i = 0; i < l.length; i++) if (l[i].id === id) return l[i];
+    return null;
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // 5. COMPTEUR FPS (mesure la fluidité réelle du drag sur l'appareil)
+  // 6. OUTILS — machine à états des clics
   // ─────────────────────────────────────────────────────────────────────
+  function onTokenClick(id) {
+    if (tool === 'select') {
+      active = (active === id) ? null : id;
+      pending = null;
+      syncSelection(); setHint();
+      return;
+    }
+    if (tool === 'erase') return;   // la gomme ne touche qu'aux flèches
+    if (!pending) { pending = id; syncSelection(); setHint(); return; }
+    if (pending === id) { pending = null; syncSelection(); setHint(); return; }
+    if (tool === 'pass') { addArrow('pass', pending, id); pending = null; syncSelection(); return; }
+    // Mode déplacement : cliquer un autre jeton vaut « va à cet endroit ».
+    var t = tokById(id);
+    addArrow('move', pending, { x: t.x, y: t.y });
+    pending = null; syncSelection();
+  }
+
+  function onCourtClick(p) {
+    if (tool === 'move' && pending) {
+      addArrow('move', pending, clampPt(p, 1));
+      pending = null; syncSelection();
+      return;
+    }
+    // Un clic dans le vide annule la sélection / le tracé en cours.
+    if (pending || active) { pending = null; active = null; syncSelection(); setHint(); }
+  }
+
+  function addArrow(kind, from, to) {
+    sch().arw.push({ id: 'w' + (++seq), kind: kind, from: from, to: to, via: [] });
+    drawArrows(); syncInfo(); setHint();
+  }
+
+  function removeArrow(id) {
+    var l = sch().arw, i;
+    for (i = 0; i < l.length; i++) if (l[i].id === id) { l.splice(i, 1); break; }
+    drawArrows(); syncInfo();
+  }
+
+  // Distance d'un point à un segment — sert à savoir DANS QUEL segment de la
+  // flèche insérer un waypoint (sinon un point ajouté en fin de course
+  // atterrirait au mauvais rang et la courbe ferait un aller-retour).
+  function distSeg(p, a, b) {
+    var dx = b.x - a.x, dy = b.y - a.y, L = dx * dx + dy * dy;
+    var t = L ? ((p.x - a.x) * dx + (p.y - a.y) * dy) / L : 0;
+    t = clamp(t, 0, 1);
+    var qx = a.x + t * dx - p.x, qy = a.y + t * dy - p.y;
+    return Math.sqrt(qx * qx + qy * qy);
+  }
+
+  function addWaypoint(id, p) {
+    var a = findArw(id);
+    if (!a) return;
+    var pts = rawPts(a);
+    if (!pts) return;
+    var best = 0, bd = Infinity, i;
+    for (i = 0; i < pts.length - 1; i++) {
+      var d = distSeg(p, pts[i], pts[i + 1]);
+      if (d < bd) { bd = d; best = i; }
+    }
+    a.via.splice(best, 0, clampPt(p, 1));
+    drawArrows();
+  }
+
+  function attachArrowPointer(g, id) {
+    // Double-tap maison plutôt que dblclick : sur iPhone, dblclick n'est pas
+    // fiable sur un <path> et arrive trop tard. On mesure nous-mêmes.
+    var lastT = 0, lastP = null;
+    g.addEventListener('pointerdown', function (e) {
+      e.stopPropagation();
+      if (!VIEWS[view].editable) return;
+      e.preventDefault();
+      if (tool === 'erase') { removeArrow(id); return; }
+      if (tool !== 'select') return;
+      var p = toCourt(e.clientX, e.clientY);
+      if (!p) return;
+      var now = performance.now();
+      if (lastP && now - lastT < 400 && Math.abs(p.x - lastP.x) < 6 && Math.abs(p.y - lastP.y) < 6) {
+        lastT = 0; lastP = null;
+        addWaypoint(id, p);
+        return;
+      }
+      lastT = now; lastP = p;
+    }, { passive: false });
+  }
+
+  // Clic sur le fond (terrain ou hors-jeu) : les jetons et les flèches
+  // stoppent la propagation, donc tout ce qui arrive ici est bien du vide.
+  svg.addEventListener('pointerdown', function (e) {
+    if (!VIEWS[view].editable) return;
+    var p = toCourt(e.clientX, e.clientY);
+    if (p) onCourtClick(p);
+  }, { passive: true });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // 7. ENCART D'INFO + FPS
+  // ─────────────────────────────────────────────────────────────────────
+  function syncInfo() {
+    var n = 0, l = sch().arw, i;
+    for (i = 0; i < l.length; i++) if (arwVisible(l[i])) n++;
+    elTok.textContent = defOn ? '10' : '5';
+    elArw.textContent = String(n);
+    var b = tokById(sch().ballStart);
+    elBal.textContent = (b && visible(b)) ? (b.side === 'atk' ? '#' + b.n : 'X' + b.n) : '—';
+  }
+
   var fpsN = 0, fpsT = 0;
   function fpsReset() { fpsN = 0; fpsT = performance.now(); elFps.textContent = '…'; }
   function fpsTick() {
@@ -459,17 +911,70 @@
     }
   }
 
+  var HINTS = {
+    select: 'Glisse les jetons. <b>Tape</b> une joueuse pour la sélectionner, puis <b>🏀 Balle</b> pour lui donner le ballon.<br><b>Double-tape une flèche</b> pour lui ajouter un point de passage (chemin courbe).',
+    move:   'Tape la joueuse qui se déplace, <b>puis l\'endroit où elle va</b>. Flèche pleine.',
+    pass:   'Tape la <b>passeuse</b>, puis la <b>réceptionneuse</b>. Flèche pointillée.',
+    erase:  'Tape une flèche pour la <b>supprimer</b>. Les jetons ne bougent pas dans ce mode.'
+  };
+  function setHint() {
+    var h = HINTS[tool];
+    if (pending) {
+      var t = tokById(pending);
+      h = 'Source : <b>' + (t.side === 'atk' ? t.n : 'X' + t.n) + '</b> — '
+        + (tool === 'pass' ? 'tape maintenant la réceptionneuse.' : 'tape maintenant la destination.')
+        + ' (tape dans le vide pour annuler)';
+    }
+    elHint.innerHTML = h;
+  }
+
   // ─────────────────────────────────────────────────────────────────────
-  // 6. UI
+  // 8. UI
   // ─────────────────────────────────────────────────────────────────────
+  var TOOLS = ['select', 'move', 'pass', 'erase'];
+  function setTool(t) {
+    tool = t;
+    pending = null;
+    if (t !== 'select') active = null;
+    document.body.setAttribute('data-tool', t);
+    TOOLS.forEach(function (k) { document.getElementById('t-' + k).classList.toggle('on', k === t); });
+    syncSelection(); setHint();
+  }
+  TOOLS.forEach(function (k) {
+    document.getElementById('t-' + k).addEventListener('click', function () { setTool(k); });
+  });
+
+  // Ballon : un seul porteur. Re-cliquer sur la porteuse le retire (il faut
+  // pouvoir dessiner une situation sans ballon, ex. un écran hors ballon).
+  document.getElementById('b-ball').addEventListener('click', function () {
+    if (!active) return;
+    sch().ballStart = (sch().ballStart === active) ? null : active;
+    syncBall(); syncInfo();
+  });
+
+  // La défense n'est jamais détruite (cf. section 2) : on ne fait que la
+  // montrer ou la cacher, positions et flèches comprises.
+  document.getElementById('b-def').addEventListener('click', function () {
+    defOn = !defOn;
+    this.classList.toggle('on', defOn);
+    if (!defOn && active && tokById(active).side === 'def') active = null;
+    if (!defOn && pending && tokById(pending).side === 'def') pending = null;
+    drawTokens(); drawArrows(); syncInfo(); setHint();
+  });
+
+  document.getElementById('b-reset').addEventListener('click', function () {
+    S[mode] = makeSchema(mode);
+    active = null; pending = null;
+    drawAll(); setHint();
+  });
+
   function setMode(m) {
     if (m === mode) return;
     mode = m;
     document.getElementById('m-half').classList.toggle('on', m === 'half');
     document.getElementById('m-full').classList.toggle('on', m === 'full');
-    pos.x = MODES[m].start.x;
-    pos.y = MODES[m].start.y;
-    draw();
+    active = null; pending = null;
+    drawAll(); setHint();
   }
   document.getElementById('m-half').addEventListener('click', function () { setMode('half'); });
   document.getElementById('m-full').addEventListener('click', function () { setMode('full'); });
@@ -482,7 +987,7 @@
     view = v;
     document.getElementById('v-2d').classList.toggle('on', v === '2d');
     document.getElementById('v-3d').classList.toggle('on', v === '3d');
-    draw();
+    drawAll();
   }
   document.getElementById('v-2d').addEventListener('click', function () { setView('2d'); });
   document.getElementById('v-3d').addEventListener('click', function () { setView('3d'); });
@@ -495,11 +1000,21 @@
     else document.documentElement.removeAttribute('data-theme');
   });
 
-  // Le CTM est relu à chaque frame de drag : rien à invalider ici, on garde
-  // seulement le jeton dans les clous après une rotation d'écran.
-  window.addEventListener('resize', function () { setPos(pos.x, pos.y); });
+  // Le CTM est relu à chaque frame de drag : rien à invalider ici, on remet
+  // seulement les jetons dans les clous après une rotation d'écran.
+  window.addEventListener('resize', function () {
+    var t = sch().tok, i;
+    for (i = 0; i < t.length; i++) {
+      if (!visible(t[i])) continue;
+      var c = clampPt(t[i], PR);
+      t[i].x = c.x; t[i].y = c.y;
+      placeToken(t[i]);
+    }
+    for (i = 0; i < sch().arw.length; i++) updateArrow(sch().arw[i].id);
+  });
 
-  draw();
+  drawAll();
+  setHint();
 })();
 </script>
 </body>
