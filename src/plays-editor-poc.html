@@ -5,49 +5,72 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1,user-scalable=no">
 <meta name="color-scheme" content="light dark">
 <meta name="robots" content="noindex">
-<title>Éditeur de plays — POC (jalon 2)</title>
+<title>Éditeur de plays — POC (jalon 3)</title>
 <!--
   ══════════════════════════════════════════════════════════════════════════
-  JALON 2 — POC éditeur de plays : 5 attaquantes + défense + flèches + ballon
+  JALON 3 — temps (steps) · lecture animée · persistance · import/export
   ══════════════════════════════════════════════════════════════════════════
-  Fichier TOTALEMENT ISOLÉ de l'app (index.html) : aucun import, aucun état
-  partagé, aucune écriture en base, aucune persistance. Objectif du jalon 2 :
-  pouvoir REPRODUIRE À LA MAIN un play existant (ex. atk-zone : 5 joueuses +
-  ~17 flèches) et vérifier que le rendu tient la route sur iPhone.
+  Fichier toujours ISOLÉ de l'app (index.html) : aucun import de son code,
+  aucun état partagé, aucune entité PbSync. Ce que le jalon 3 ajoute par
+  rapport au jalon 2 :
 
-  Ce qui reste pour le JALON 3 : les temps (steps), l'aperçu animé,
-  l'import/export JSON et la persistance en plays_v2. Ici tout est STATIQUE :
-  rien n'est sauvegardé, un reload repart de zéro. C'est volontaire.
+    · les TEMPS (steps) — un play n'est plus une photo mais une suite de
+      photos, chacune avec ses flèches ;
+    · la LECTURE animée de ces temps (rAF, jamais setInterval) ;
+    · la PERSISTANCE — brouillon local toutes les 5 s + publication dans la
+      table `plays_v2` (migration 20260823_001) ;
+    · l'IMPORT / EXPORT JSON, format d'échange atk-zone.
 
-  UNITÉS — 1 unité SVG = 10 cm. Toutes les cotes viennent des dimensions
-  officielles FIBA :
-    terrain 28,00 × 15,00 m · raquette 4,90 m de large · ligne des lancers
-    francs à 5,80 m de la ligne de fond · cercle des LF r = 1,80 m ·
-    arc à 3 pts r = 6,75 m depuis l'axe du cercle · corners droits à 0,90 m
-    des lignes de touche · cercle (panier) à 1,575 m du fond, r = 0,225 m ·
-    planche à 1,20 m du fond, largeur 1,80 m · zone de non-charge r = 1,25 m.
+  ── UN TEMPS = UNE PHOTO + CE QUI SE PASSE PENDANT ────────────────────────
+  Chaque temps porte SES PROPRES positions (`pos`) plutôt que de les dériver
+  du temps précédent à la volée. C'est un choix, et il est motivé :
+
+    · dériver imposerait de recalculer toute la suite à chaque geste, donc de
+      reconstruire la scène pendant un drag — exactement ce que le jalon 2
+      s'interdit pour tenir la fluidité sur iPhone ;
+    · le coach range souvent un temps « à la main » sans vouloir qu'il découle
+      mécaniquement du précédent (repositionner tout le monde après un rebond,
+      par exemple). Une photo indépendante dit ça sans détour.
+
+  Le prix : un temps peut DIVERGER de ce que produit le temps d'avant. On ne
+  le cache pas — la vignette porte alors un point orange, et le bouton 🔄
+  recale la photo sur la sortie du temps précédent. Un décalage visible et
+  réparable vaut mieux qu'un recalcul silencieux qui écrase le travail.
+
+  ── UNITÉS ────────────────────────────────────────────────────────────────
+  1 unité SVG = 10 cm. Toutes les cotes viennent des dimensions officielles
+  FIBA : terrain 28,00 × 15,00 m · raquette 4,90 m de large · ligne des
+  lancers francs à 5,80 m de la ligne de fond · cercle des LF r = 1,80 m ·
+  arc à 3 pts r = 6,75 m depuis l'axe du cercle · corners droits à 0,90 m des
+  lignes de touche · cercle (panier) à 1,575 m du fond, r = 0,225 m · planche
+  à 1,20 m du fond, largeur 1,80 m · zone de non-charge r = 1,25 m.
 
   MARGE — 12 unités (1,20 m) tout autour de l'aire de jeu : c'est l'espace
-  hors terrain où se place la joueuse qui fait la remise en touche. Le clamp
-  des jetons autorise cette zone (sinon impossible de dessiner une touche).
+  hors terrain où se place la joueuse qui fait la remise en touche.
 
-  MODÈLE vs VUE — cf. sections 0 et 2. Le modèle ne connaît QUE des
-  coordonnées terrain ; une vue n'est qu'une projection (project/unproject)
-  plus un dessin de terrain. La 2D top-down est l'identité, la 3D (lecture
-  seule, jalon 4+) se branchera dans le même registre sans toucher au moteur
-  d'édition. L'ÉDITION reste 2D : viser un jeton en perspective avec un doigt
-  est frustrant sur iPhone.
+  ── MODÈLE vs VUE ─────────────────────────────────────────────────────────
+  Le modèle ne connaît QUE des coordonnées terrain ; une vue n'est qu'une
+  projection (project/unproject) plus un dessin de terrain. La 2D top-down est
+  l'identité, la 3D (lecture seule, jalon 4+) se branchera dans le même
+  registre sans toucher au moteur d'édition. L'ÉDITION reste 2D : viser un
+  jeton en perspective avec un doigt est frustrant sur iPhone.
 
   UN MODÈLE PAR MODE (demi / plein) — les deux terrains n'ont pas le même
-  repère : au lieu de re-projeter (et de déformer) un schéma dessiné en demi
-  quand on passe en plein, chaque mode garde SON schéma. Basculer ne détruit
-  donc jamais le travail en cours.
+  repère : chaque mode garde SON jeu de temps. Basculer ne détruit jamais le
+  travail en cours. C'est le mode ACTIF qui est publié / exporté.
 
-  PERF iPhone — le drag ne reconstruit RIEN : il écrit un transform sur le
-  <g> du jeton et réécrit le d= des seules flèches qui touchent ce jeton, une
-  fois par frame (rAF). Les reconstructions de scène (innerHTML) n'arrivent
-  qu'aux changements de structure : mode, défense, ajout/suppression de
-  flèche — jamais pendant un geste.
+  ── PERF iPhone ───────────────────────────────────────────────────────────
+  Le drag ne reconstruit RIEN : il écrit un transform sur le <g> du jeton et
+  réécrit le d= des seules flèches qui touchent ce jeton, une fois par frame
+  (rAF). La LECTURE suit la même règle : elle prépare ses éléments une fois en
+  entrant dans un temps, puis ne fait qu'écrire des attributs par frame. Aucun
+  setInterval nulle part — un timer qui dérive ferait glisser l'animation dès
+  que Safari met l'onglet en veille.
+
+  ── SÉCURITÉ ──────────────────────────────────────────────────────────────
+  La clé Supabase ci-dessous est la clé PUBLISHABLE, déjà publique dans
+  index.html : elle est faite pour vivre dans du JS servi au navigateur. Aucun
+  secret de service n'est présent dans ce fichier.
 -->
 <style>
   /* ── Thème : suit le système, surchargeable par le bouton 🌓 ─────────
@@ -55,7 +78,7 @@
      plays), accent secondaire violet #7B2FFF (défense + contrôles actifs). */
   :root{
     --bg:#F1F3F7; --panel:#FFFFFF; --ink:#0F131A; --ink-2:#5A6472;
-    --border:#DCE1E9; --btn:#FFFFFF;
+    --border:#DCE1E9; --btn:#FFFFFF; --field:#F6F8FB;
     --accent-2:#7B2FFF; --accent-2-ink:#FFFFFF;
     --out-hi:#EDF0F5; --out-lo:#E1E6EE;    /* zone hors-jeu (remises en touche) */
     --court-hi:#F6EAD4; --court-lo:#E8D6B6; /* parquet, dégradé vertical */
@@ -63,14 +86,15 @@
     --hoop:#E4572E;
     --player:#22D3EE; --player-hi:#7BE7F7; --player-ink:#04252E;
     --def:#7B2FFF; --def-hi:#A87CFF; --def-ink:#FFFFFF; --def-line:#3D1180;
-    --arw-atk:#0E9BB8; --arw-def:#7B2FFF;
+    --arw-atk:#0E9BB8; --arw-def:#7B2FFF; --arw-shot:#E4572E;
     --ball:#F97316; --ball-line:#7C2D12;
-    --sheen:#FFFFFF;
+    --warn:#D97706; --ok:#0E9F6E; --err:#DC2626;
+    --sheen:#FFFFFF; --scrim:rgba(9,12,18,.42);
   }
   @media (prefers-color-scheme: dark){
     :root{
       --bg:#080B10; --panel:#121821; --ink:#E9EFF7; --ink-2:#8592A4;
-      --border:#212936; --btn:#19212C;
+      --border:#212936; --btn:#19212C; --field:#0D131B;
       --accent-2:#9B5CFF; --accent-2-ink:#0B0616;
       --out-hi:#141B25; --out-lo:#0D1219;
       --court-hi:#222B37; --court-lo:#161D26;
@@ -78,26 +102,33 @@
       --hoop:#F2703F;
       --player:#22D3EE; --player-hi:#8FEEFB; --player-ink:#04252E;
       --def:#8B4CFF; --def-hi:#B78EFF; --def-ink:#FFFFFF; --def-line:#2B0A5E;
-      --arw-atk:#38D9F0; --arw-def:#A87CFF;
+      --arw-atk:#38D9F0; --arw-def:#A87CFF; --arw-shot:#F2703F;
       --ball:#FB923C; --ball-line:#431407;
-      --sheen:#FFFFFF;
+      --warn:#F59E0B; --ok:#34D399; --err:#F87171;
+      --sheen:#FFFFFF; --scrim:rgba(0,0,0,.6);
     }
   }
   html[data-theme="light"]{
     --bg:#F1F3F7; --panel:#FFFFFF; --ink:#0F131A; --ink-2:#5A6472;
-    --border:#DCE1E9; --btn:#FFFFFF; --accent-2:#7B2FFF; --accent-2-ink:#FFFFFF;
+    --border:#DCE1E9; --btn:#FFFFFF; --field:#F6F8FB;
+    --accent-2:#7B2FFF; --accent-2-ink:#FFFFFF;
     --out-hi:#EDF0F5; --out-lo:#E1E6EE; --court-hi:#F6EAD4; --court-lo:#E8D6B6;
     --line:#A98F66; --line-strong:#8A7048; --hoop:#E4572E; --player-hi:#7BE7F7;
     --def:#7B2FFF; --def-hi:#A87CFF; --def-ink:#FFFFFF; --def-line:#3D1180;
-    --arw-atk:#0E9BB8; --arw-def:#7B2FFF; --ball:#F97316; --ball-line:#7C2D12;
+    --arw-atk:#0E9BB8; --arw-def:#7B2FFF; --arw-shot:#E4572E;
+    --ball:#F97316; --ball-line:#7C2D12;
+    --warn:#D97706; --ok:#0E9F6E; --err:#DC2626; --scrim:rgba(9,12,18,.42);
   }
   html[data-theme="dark"]{
     --bg:#080B10; --panel:#121821; --ink:#E9EFF7; --ink-2:#8592A4;
-    --border:#212936; --btn:#19212C; --accent-2:#9B5CFF; --accent-2-ink:#0B0616;
+    --border:#212936; --btn:#19212C; --field:#0D131B;
+    --accent-2:#9B5CFF; --accent-2-ink:#0B0616;
     --out-hi:#141B25; --out-lo:#0D1219; --court-hi:#222B37; --court-lo:#161D26;
     --line:#55647A; --line-strong:#70819A; --hoop:#F2703F; --player-hi:#8FEEFB;
     --def:#8B4CFF; --def-hi:#B78EFF; --def-ink:#FFFFFF; --def-line:#2B0A5E;
-    --arw-atk:#38D9F0; --arw-def:#A87CFF; --ball:#FB923C; --ball-line:#431407;
+    --arw-atk:#38D9F0; --arw-def:#A87CFF; --arw-shot:#F2703F;
+    --ball:#FB923C; --ball-line:#431407;
+    --warn:#F59E0B; --ok:#34D399; --err:#F87171; --scrim:rgba(0,0,0,.6);
   }
 
   *{box-sizing:border-box}
@@ -114,16 +145,18 @@
     padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
   }
   header{
-    display:flex; align-items:center; gap:10px; padding:9px 12px;
+    display:flex; align-items:center; gap:8px; padding:8px 10px;
     background:var(--panel); border-bottom:1px solid var(--border); flex:none;
   }
-  header .title{font-size:13px; font-weight:700; letter-spacing:.02em; flex:1}
+  header .title{font-size:13px; font-weight:700; letter-spacing:.02em; flex:1; min-width:0;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
   header .sub{font-size:10px; color:var(--ink-2); font-weight:500}
   .btn{
     appearance:none; border:1px solid var(--border); background:var(--btn);
     color:var(--ink); border-radius:10px; padding:0 12px; min-height:38px;
     font-size:13px; font-weight:600; cursor:pointer; touch-action:manipulation;
     transition:background .12s ease, border-color .12s ease, color .12s ease;
+    white-space:nowrap;
   }
   .btn.on{
     background:var(--accent-2); color:var(--accent-2-ink);
@@ -131,22 +164,24 @@
   }
   .btn:disabled{opacity:.35; cursor:default; box-shadow:none}
   .btn.sm{min-height:34px; padding:0 9px; font-size:12px}
+  .btn.xs{min-height:30px; padding:0 8px; font-size:11px; border-radius:8px}
+  .btn.wide{width:100%; justify-content:center; text-align:left; padding:0 14px}
+  .btn.danger{color:var(--err)}
   .bar{
-    display:flex; align-items:center; gap:7px; padding:7px 10px; flex:none;
+    display:flex; align-items:center; gap:6px; padding:6px 8px; flex:none;
     flex-wrap:wrap; border-bottom:1px solid var(--border); background:var(--panel);
   }
-  .bar+.bar{padding-top:0; border-bottom:1px solid var(--border)}
-  .seg{display:flex; gap:5px}
-  .sep{width:1px; align-self:stretch; background:var(--border); margin:2px 2px}
-  /* Encart d'info : compteurs du schéma + FPS mesuré pendant le drag. */
+  .seg{display:flex; gap:4px}
+  .sep{width:1px; align-self:stretch; background:var(--border); margin:2px 1px}
+  /* Encart d'info : compteurs du schéma + FPS mesuré pendant le drag/lecture. */
   .badge{
-    margin-left:auto; display:flex; gap:9px; align-items:center;
+    margin-left:auto; display:flex; gap:8px; align-items:center;
     font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px;
     color:var(--ink-2); white-space:nowrap;
   }
   .badge b{color:var(--ink); font-weight:700}
-  .stage{flex:1; min-height:0; padding:6px 8px; display:flex}
-  svg{
+  .stage{flex:1; min-height:0; padding:5px 8px; display:flex}
+  svg#court{
     width:100%; height:100%; display:block;
     /* CLÉ iPhone : coupe scroll, pinch et double-tap-zoom sur toute la
        surface du terrain, sinon Safari « vole » le geste au 1er mouvement. */
@@ -182,16 +217,27 @@
   .arw .hit{fill:none; stroke:transparent; stroke-width:9; pointer-events:stroke; cursor:pointer}
   .arw.atk .body, .arw.atk .head{stroke:var(--arw-atk); fill:var(--arw-atk)}
   .arw.def .body, .arw.def .head{stroke:var(--arw-def); fill:var(--arw-def)}
+  .arw.shot .body, .arw.shot .head{stroke:var(--arw-shot); fill:var(--arw-shot)}
   .arw .body{stroke-width:1.45}
   /* Passe = trait pointillé (convention basket). Le tiret est exprimé en
      unités terrain, donc il garde la même densité dans les deux modes. */
   .arw.pass .body{stroke-width:1.25; stroke-dasharray:3.4 2.8}
-  .arw .wp{fill:var(--panel); stroke:var(--ink-2); stroke-width:.5; cursor:grab}
+  .arw.shot .body{stroke-width:1.35; stroke-dasharray:5.5 3}
+  .arw .wp{fill:var(--panel); stroke:var(--ink-2); stroke-width:.5; pointer-events:none}
+  /* Zone de saisie du waypoint : le disque dessiné est petit, la cible ne
+     doit pas l'être (même raison que .hit sur le tracé). */
+  .arw .wphit{fill:transparent; pointer-events:all; cursor:grab}
   /* En mode gomme, on annonce la cible au survol/au doigt. */
   body[data-tool="erase"] .arw .body{opacity:.9}
   body[data-tool="erase"] .arw:hover .body{stroke:var(--hoop)}
   body[data-tool="erase"] .arw:hover .head{fill:var(--hoop)}
-  body:not([data-tool="select"]) .arw .wp{display:none}
+  body[data-tool="erase"] .arw .wp{stroke:var(--hoop); stroke-width:.9}
+  /* Les waypoints ne sont manipulables qu'en sélection et en gomme (poser,
+     déplacer, retirer) — pendant un tracé de flèche ils ne feraient que gêner. */
+  body[data-tool="move"] .arw .wp, body[data-tool="pass"] .arw .wp,
+  body[data-tool="shot"] .arw .wp{display:none}
+  body[data-tool="move"] .arw .wphit, body[data-tool="pass"] .arw .wphit,
+  body[data-tool="shot"] .arw .wphit{display:none}
 
   .token{cursor:grab}
   /* Ombre PEINTE (ellipse en dégradé radial) plutôt qu'un filter CSS : un
@@ -228,44 +274,178 @@
   .token.pending .halo{opacity:.95; animation:pulse .9s ease-in-out infinite}
   @keyframes pulse{50%{opacity:.35}}
 
+  /* ── Couche de LECTURE ──────────────────────────────────────────────── */
+  body.playing .token{cursor:default}
+  body.playing #lay-arw{display:none}
+  #lay-play{pointer-events:none}
+  #lay-play .trail{fill:none; stroke:var(--arw-atk); stroke-width:1.1; opacity:.35;
+    stroke-linecap:round; pointer-events:none}
+  #lay-play .trail.def{stroke:var(--arw-def)}
+  #lay-play .pline{fill:none; stroke:var(--arw-atk); stroke-width:1.25;
+    stroke-dasharray:3.4 2.8; stroke-linecap:round; pointer-events:none}
+  #lay-play .sline{fill:none; stroke:var(--arw-shot); stroke-width:1.35;
+    stroke-dasharray:5.5 3; stroke-linecap:round; pointer-events:none}
+  #lay-play .spulse{fill:none; stroke:var(--arw-shot); stroke-width:1.5; pointer-events:none}
+  #lay-play .fb .b{fill:url(#gBall); stroke:var(--ball-line); stroke-width:.4}
+  #lay-play .fb .s{fill:none; stroke:var(--ball-line); stroke-width:.35; stroke-linecap:round}
+
+  /* ── Timeline des temps ─────────────────────────────────────────────── */
+  .tl{
+    flex:none; display:flex; align-items:center; gap:6px; padding:5px 8px;
+    background:var(--panel); border-top:1px solid var(--border);
+  }
+  .tl-scroll{
+    flex:1; min-width:0; display:flex; gap:6px; overflow-x:auto; overflow-y:hidden;
+    padding:2px; scrollbar-width:none; -webkit-overflow-scrolling:touch;
+    touch-action:pan-x;
+  }
+  .tl-scroll::-webkit-scrollbar{display:none}
+  .chip{
+    position:relative; flex:none; width:46px; height:42px; border-radius:10px;
+    border:1px solid var(--border); background:var(--btn); color:var(--ink-2);
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    font-size:14px; font-weight:800; cursor:pointer; touch-action:none;
+    transition:background .12s ease, border-color .12s ease, color .12s ease;
+  }
+  .chip .mini{font-size:8px; font-weight:600; letter-spacing:.04em; opacity:.75;
+    line-height:1.1; margin-top:1px}
+  .chip.on{background:var(--accent-2); color:var(--accent-2-ink); border-color:var(--accent-2)}
+  .chip.grab{opacity:.55; transform:scale(1.06); z-index:2}
+  /* Point orange : la photo de ce temps ne découle pas du temps précédent
+     (cf. en-tête). Ce n'est pas une erreur, juste une information. */
+  .chip.desync::after{
+    content:''; position:absolute; top:3px; left:3px; width:6px; height:6px;
+    border-radius:50%; background:var(--warn);
+  }
+  .chip .x{
+    position:absolute; top:-6px; right:-6px; width:20px; height:20px; display:none;
+    border-radius:50%; border:1px solid var(--border); background:var(--panel);
+    color:var(--err); font-size:12px; font-weight:800; line-height:1;
+    align-items:center; justify-content:center; padding:0; cursor:pointer;
+  }
+  .chip.on .x{display:flex}
+
+  /* ── Barre de lecture ───────────────────────────────────────────────── */
+  .pb{border-top:1px solid var(--border); border-bottom:none; padding:5px 8px; gap:5px}
+  .prog{
+    flex:1; min-width:60px; height:22px; display:flex; align-items:center;
+    cursor:pointer; touch-action:none;
+  }
+  .prog .track{width:100%; height:5px; border-radius:3px; background:var(--field);
+    border:1px solid var(--border); overflow:hidden}
+  .prog .fill{height:100%; width:0; background:var(--accent-2); border-radius:3px}
+  select.sel{
+    appearance:none; border:1px solid var(--border); background:var(--btn);
+    color:var(--ink); border-radius:9px; min-height:34px; font-size:12px;
+    font-weight:600; padding:0 22px 0 8px; cursor:pointer;
+    background-image:linear-gradient(45deg,transparent 50%,var(--ink-2) 50%),
+                     linear-gradient(135deg,var(--ink-2) 50%,transparent 50%);
+    background-position:calc(100% - 12px) 50%, calc(100% - 8px) 50%;
+    background-size:4px 4px, 4px 4px; background-repeat:no-repeat;
+  }
+
   .hint{
-    flex:none; margin:0; padding:5px 12px 9px; font-size:11px; line-height:1.5;
-    color:var(--ink-2); text-align:center; min-height:34px;
+    flex:none; margin:0; padding:4px 12px 7px; font-size:11px; line-height:1.45;
+    color:var(--ink-2); text-align:center; min-height:28px;
+    background:var(--panel); border-top:1px solid var(--border);
   }
   .hint b{color:var(--ink)}
+
+  /* ── Bandeau brouillon ──────────────────────────────────────────────── */
+  .draft{
+    flex:none; display:none; align-items:center; gap:8px; padding:8px 10px;
+    background:var(--field); border-bottom:1px solid var(--border); font-size:12px;
+  }
+  .draft.show{display:flex}
+  .draft span{flex:1; min-width:0}
+
+  /* ── Feuilles (métadonnées, plays, menu) ────────────────────────────── */
+  .scrim{
+    position:fixed; inset:0; background:var(--scrim); z-index:40; display:none;
+    -webkit-backdrop-filter:blur(2px); backdrop-filter:blur(2px);
+  }
+  .scrim.show{display:block}
+  .sheet{
+    position:fixed; left:0; right:0; bottom:0; z-index:41; display:none;
+    background:var(--panel); border-top:1px solid var(--border);
+    border-radius:16px 16px 0 0; padding:12px 12px calc(12px + env(safe-area-inset-bottom));
+    max-height:82dvh; overflow-y:auto; -webkit-overflow-scrolling:touch;
+    box-shadow:0 -8px 30px -12px rgba(0,0,0,.4);
+  }
+  .sheet.show{display:block}
+  .sheet h2{margin:2px 0 10px; font-size:14px; font-weight:800}
+  .sheet .row{display:flex; gap:6px; margin-bottom:8px}
+  .sheet .row .btn{flex:1}
+  .fld{margin-bottom:9px}
+  .fld label{display:block; font-size:11px; font-weight:700; color:var(--ink-2); margin-bottom:3px}
+  .fld input, .fld textarea, .fld select{
+    width:100%; background:var(--field); border:1px solid var(--border);
+    color:var(--ink); border-radius:9px; padding:9px 10px; font-size:13px;
+    font-family:inherit; -webkit-user-select:text; user-select:text; outline:none;
+  }
+  .fld textarea{resize:vertical; min-height:64px; line-height:1.5}
+  .fld .note{font-size:10px; color:var(--ink-2); margin-top:3px}
+  .fld input:focus, .fld textarea:focus, .fld select:focus{border-color:var(--accent-2)}
+  .plist{display:flex; flex-direction:column; gap:6px}
+  .pitem{
+    display:flex; align-items:center; gap:9px; padding:9px 10px; cursor:pointer;
+    border:1px solid var(--border); background:var(--btn); border-radius:10px;
+  }
+  .pitem .dot{width:9px; height:9px; border-radius:50%; flex:none; background:var(--player)}
+  .pitem .t{flex:1; min-width:0}
+  .pitem .t b{display:block; font-size:13px; font-weight:700;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .pitem .t small{font-size:10px; color:var(--ink-2)}
+  .empty{padding:18px 8px; text-align:center; font-size:12px; color:var(--ink-2)}
+
+  /* ── Toast ──────────────────────────────────────────────────────────── */
+  .toast{
+    position:fixed; left:50%; bottom:calc(18px + env(safe-area-inset-bottom));
+    transform:translateX(-50%) translateY(14px); z-index:50; opacity:0;
+    background:var(--panel); border:1px solid var(--border); border-radius:11px;
+    padding:9px 14px; font-size:12px; font-weight:600; pointer-events:none;
+    box-shadow:0 8px 26px -12px rgba(0,0,0,.5); max-width:88vw; text-align:center;
+    transition:opacity .18s ease, transform .18s ease;
+  }
+  .toast.show{opacity:1; transform:translateX(-50%) translateY(0)}
+  .toast.ok{color:var(--ok)} .toast.err{color:var(--err)}
 </style>
 </head>
 <body data-tool="select">
 
 <header>
-  <button class="btn" onclick="location.href='/'">←</button>
-  <div class="title">Éditeur de plays <span class="sub">· POC jalon 2</span></div>
-  <button class="btn" id="theme" title="Thème">🌓</button>
+  <button class="btn sm" onclick="location.href='/'">←</button>
+  <div class="title" id="doc-title">Sans titre <span class="sub">· POC jalon 3</span></div>
+  <button class="btn sm" id="b-meta" title="Informations du play">⚙️</button>
+  <button class="btn sm" id="b-menu" title="Plays, publication, JSON">⋯</button>
 </header>
 
-<!-- Barre 1 — OUTILS -->
+<!-- Bandeau brouillon : proposé au démarrage si un travail non publié traîne. -->
+<div class="draft" id="draft-bar">
+  <span id="draft-txt">📝 Brouillon récupéré</span>
+  <button class="btn xs" id="d-resume">Reprendre</button>
+  <button class="btn xs" id="d-new">Nouveau</button>
+</div>
+
+<!-- Barre unique — OUTILS · TERRAIN · VUE · INFOS -->
 <div class="bar">
   <div class="seg">
     <button class="btn sm on" id="t-select" title="Sélection / déplacement">👆</button>
     <button class="btn sm"    id="t-move"   title="Flèche de déplacement">→</button>
     <button class="btn sm"    id="t-pass"   title="Flèche de passe">⇢</button>
-    <button class="btn sm"    id="t-erase"  title="Supprimer une flèche">🚫</button>
+    <button class="btn sm"    id="t-shot"   title="Tir">🎯</button>
+    <button class="btn sm"    id="t-erase"  title="Supprimer flèche / point de passage">🚫</button>
   </div>
   <div class="sep"></div>
   <div class="seg">
-    <button class="btn sm" id="b-ball" disabled title="Donner le ballon à la joueuse active">🏀 Balle</button>
-    <button class="btn sm" id="b-def"  title="Afficher / masquer la défense">🛡️ Déf</button>
+    <button class="btn sm" id="b-ball" disabled title="Donner le ballon à la joueuse active">🏀</button>
+    <button class="btn sm" id="b-def"  title="Afficher / masquer la défense">🛡️</button>
     <button class="btn sm" id="b-reset" title="Repartir de la disposition de départ">↺</button>
   </div>
-</div>
-
-<!-- Barre 2 — TERRAIN, VUE, INFOS -->
-<div class="bar">
+  <div class="sep"></div>
   <div class="seg">
-    <button class="btn sm on" id="m-half">🏀 Demi</button>
-    <button class="btn sm"    id="m-full">🏀 Plein</button>
-  </div>
-  <div class="seg">
+    <button class="btn sm on" id="m-half" title="Demi-terrain">½</button>
+    <button class="btn sm"    id="m-full" title="Terrain complet">▭</button>
     <button class="btn sm on" id="v-2d" title="Vue d'édition">2D</button>
     <button class="btn sm"    id="v-3d" disabled title="Vue de lecture 3D — jalon 4">3D</button>
   </div>
@@ -279,7 +459,92 @@
 
 <div class="stage"><svg id="court" xmlns="http://www.w3.org/2000/svg"></svg></div>
 
+<!-- Timeline des temps -->
+<div class="tl">
+  <div class="tl-scroll" id="tl-strip"></div>
+  <button class="btn sm" id="s-sync" title="Recaler ce temps sur la sortie du précédent">🔄</button>
+  <button class="btn sm" id="s-add" title="Ajouter un temps">＋</button>
+</div>
+
+<!-- Barre de lecture -->
+<div class="bar pb">
+  <button class="btn sm" id="p-first" title="Premier temps">⏮</button>
+  <button class="btn sm" id="p-play"  title="Lire">▶</button>
+  <button class="btn sm" id="p-last"  title="Dernier temps">⏭</button>
+  <div class="prog" id="prog" title="Glisse pour te déplacer dans le play">
+    <div class="track"><div class="fill" id="prog-fill"></div></div>
+  </div>
+  <select class="sel" id="p-speed" title="Vitesse de lecture">
+    <option value="4000">Lent</option>
+    <option value="2000" selected>Normal</option>
+    <option value="1000">Rapide</option>
+  </select>
+</div>
+
 <p class="hint" id="hint"></p>
+
+<!-- ── Feuilles ────────────────────────────────────────────────────────── -->
+<div class="scrim" id="scrim"></div>
+
+<div class="sheet" id="sh-meta">
+  <h2>⚙️ Informations du play</h2>
+  <div class="fld">
+    <label for="f-title">Titre <span style="color:var(--err)">*</span></label>
+    <input type="text" id="f-title" placeholder="Ex. Attaque zone 2-3" maxlength="80">
+  </div>
+  <div class="fld">
+    <label for="f-tag">Tag</label>
+    <input type="text" id="f-tag" placeholder="Ex. ATTAQUE ZONE" maxlength="40">
+  </div>
+  <div class="fld">
+    <label for="f-side">Côté</label>
+    <select id="f-side">
+      <option value="attaque">Attaque</option>
+      <option value="defense">Défense</option>
+      <option value="transition">Transition</option>
+      <option value="remise">Remise en jeu</option>
+    </select>
+  </div>
+  <div class="fld">
+    <label for="f-color">Couleur</label>
+    <input type="text" id="f-color" placeholder="#22D3EE" maxlength="9">
+    <div class="note">Sert de pastille dans la liste des plays.</div>
+  </div>
+  <div class="fld">
+    <label for="f-desc">Description</label>
+    <textarea id="f-desc" placeholder="À quoi sert ce play, quand le sortir…"></textarea>
+  </div>
+  <div class="fld">
+    <label for="f-points">Points clés</label>
+    <textarea id="f-points" rows="5" placeholder="Un point clé par ligne (4 idéalement)"></textarea>
+    <div class="note">Une ligne = un point. Les 4 premières lignes sont mises en avant.</div>
+  </div>
+  <div class="row"><button class="btn wide" id="f-done">Fermer</button></div>
+</div>
+
+<div class="sheet" id="sh-menu">
+  <h2>⋯ Play</h2>
+  <div class="row"><button class="btn wide" id="a-plays">📚 Plays publiés</button></div>
+  <div class="row"><button class="btn wide" id="a-publish">💾 Publier</button></div>
+  <div class="row"><button class="btn wide" id="a-export">📤 Exporter en JSON</button></div>
+  <div class="row"><button class="btn wide" id="a-import">📥 Importer un JSON</button></div>
+  <div class="row"><button class="btn wide" id="a-newdoc">✨ Nouveau play</button></div>
+  <div class="row"><button class="btn wide danger" id="a-delete">🗑 Supprimer ce play</button></div>
+  <div class="row"><button class="btn wide" id="a-theme">🌓 Thème</button></div>
+  <div class="fld" style="margin-top:6px">
+    <label for="f-author">Signé</label>
+    <input type="text" id="f-author" placeholder="Ton nom (facultatif)" maxlength="40">
+  </div>
+</div>
+
+<div class="sheet" id="sh-plays">
+  <h2>📚 Plays publiés</h2>
+  <div class="plist" id="plays-list"><div class="empty">Chargement…</div></div>
+  <div class="row" style="margin-top:10px"><button class="btn wide" id="pl-reload">↻ Rafraîchir</button></div>
+</div>
+
+<input type="file" id="f-import" accept="application/json,.json" style="display:none">
+<div class="toast" id="toast"></div>
 
 <script>
 (function () {
@@ -297,12 +562,9 @@
   //   unproject(p) coordonnées de la scène → coordonnées terrain (drag)
   //
   // En 2D top-down les deux sont l'identité, mais TOUT le code d'édition
-  // (drag, clamp, tracé des flèches, pose du ballon) passe déjà par elles :
-  // brancher une 3D au jalon 4 ne touchera pas au moteur d'édition.
-  //
-  // editable:false sur la 3D = choix assumé. Viser un jeton en perspective
-  // avec un doigt sur iPhone est frustrant ; la 3D sera une vue de LECTURE
-  // (déroulé des temps du play), l'édition restera top-down.
+  // (drag, clamp, tracé des flèches, pose du ballon) et TOUTE la lecture
+  // animée passent déjà par elles : brancher une 3D au jalon 4 ne touchera pas
+  // au moteur d'édition.
   var VIEWS = {
     '2d': {
       label: '2D', ready: true, editable: true,
@@ -327,9 +589,9 @@
 
   var MODES = {
     // Demi-terrain vertical (panier en haut) — orientation naturelle sur iPhone.
-    half: { vb: '0 0 174 164', w: 174, h: 164 },
+    half: { vb: '0 0 174 164', w: 174, h: 164, hoop: { x: 87, y: 27.75 } },
     // Terrain complet horizontal (deux paniers, on attaque à droite).
-    full: { vb: '0 0 304 174', w: 304, h: 174 }
+    full: { vb: '0 0 304 174', w: 304, h: 174, hoop: { x: 276.25, y: 87 } }
   };
 
   // Dispositions de départ. Attaque en 2-1-2 face au panier, défense en
@@ -350,6 +612,17 @@
       def: [ {x:174,y:87}, {x:202,y:24}, {x:202,y:150}, {x:262,y:48},  {x:262,y:126} ]
     }
   };
+
+  // Les 10 jetons sont FIXES et communs à tous les temps : seule leur position
+  // change d'un temps à l'autre. Les garder statiques permet à une flèche de
+  // référencer une joueuse par son id sans se soucier du temps courant.
+  var TOKENS = (function () {
+    var t = [], i;
+    for (i = 1; i <= 5; i++) t.push({ id: 'a' + i, side: 'atk', n: i });
+    for (i = 1; i <= 5; i++) t.push({ id: 'd' + i, side: 'def', n: i });
+    return t;
+  })();
+  var TOKMAP = (function () { var m = {}, i; for (i = 0; i < TOKENS.length; i++) m[TOKENS[i].id] = TOKENS[i]; return m; })();
 
   function defs() {
     return '<defs>'
@@ -419,20 +692,49 @@
   // ─────────────────────────────────────────────────────────────────────
   // 2. MODÈLE
   // ─────────────────────────────────────────────────────────────────────
-  // Un schéma par mode de terrain (cf. en-tête). Un schéma =
-  //   tok[]       jetons {id, side:'atk'|'def', n:1..5, x, y}  (coords terrain)
-  //   arw[]       flèches {id, kind:'move'|'pass', from:<idJeton>,
-  //                        to:<idJeton>|{x,y}, via:[{x,y}…]}
-  //   ballStart   id du jeton porteur (un seul), ou null
+  // doc = le play complet.
+  //   métadonnées   id, title, tag, side, color, description, points, author
+  //   ballStart     id du jeton porteur au temps 0 (un seul), ou null
+  //   defOn         la défense est-elle montrée ?
+  //   mode          'half' | 'full' — le mode ACTIF, celui qui sera publié
+  //   half / full   { steps: [ … ] } — un jeu de temps par mode (cf. en-tête)
+  //
+  // Un TEMPS =
+  //   pos   { idJeton : {x,y} }  la photo au DÉBUT du temps
+  //   arw   [ {id, kind:'move'|'pass', from:<idJeton>,
+  //            to:<idJeton>|{x,y}, via:[{x,y}…]} ]
+  //   shot  <idJeton> | null     qui tire à la fin du temps
+  //   note  texte libre
+  //
   // La défense EXISTE toujours dans le modèle : le toggle ne fait que la
   // montrer ou la cacher, donc couper puis rallumer la défense ne perd ni les
   // positions ni les flèches qui la touchent.
-  function makeSchema(m) {
-    var t = [], i;
-    for (i = 0; i < 5; i++) t.push({ id: 'a' + (i+1), side: 'atk', n: i+1, x: LAYOUT[m].atk[i].x, y: LAYOUT[m].atk[i].y });
-    for (i = 0; i < 5; i++) t.push({ id: 'd' + (i+1), side: 'def', n: i+1, x: LAYOUT[m].def[i].x, y: LAYOUT[m].def[i].y });
-    return { tok: t, arw: [], ballStart: 'a1' };
+  var seq = 0;               // compteur d'ids (flèches, temps) unique par session
+
+  function uid(p) { return p + (++seq) + '-' + Math.random().toString(36).slice(2, 6); }
+
+  function startPos(m) {
+    var p = {}, i;
+    for (i = 0; i < 5; i++) { p['a' + (i+1)] = { x: LAYOUT[m].atk[i].x, y: LAYOUT[m].atk[i].y }; }
+    for (i = 0; i < 5; i++) { p['d' + (i+1)] = { x: LAYOUT[m].def[i].x, y: LAYOUT[m].def[i].y }; }
+    return p;
   }
+  function clonePos(p) { var o = {}, k; for (k in p) o[k] = { x: p[k].x, y: p[k].y }; return o; }
+
+  function makeStep(pos) { return { id: uid('s'), pos: pos, arw: [], shot: null, note: '' }; }
+
+  function makeDoc() {
+    return {
+      id: null, title: '', tag: '', side: 'attaque', color: '#22D3EE',
+      description: '', points: '', author: '',
+      ballStart: 'a1', defOn: false, mode: 'half',
+      half: { steps: [ makeStep(startPos('half')) ] },
+      full: { steps: [ makeStep(startPos('full')) ] }
+    };
+  }
+
+  var doc = makeDoc();
+  var cur = 0;               // index du temps en cours d'édition
 
   var svg   = document.getElementById('court');
   var elArw = document.getElementById('i-arw');
@@ -441,26 +743,31 @@
   var elFps = document.getElementById('fps');
   var elHint= document.getElementById('hint');
 
-  var mode  = 'half';
-  var S     = { half: makeSchema('half'), full: makeSchema('full') };
-  var defOn = false;         // la défense est optionnelle, masquée par défaut
   var tool  = 'select';
   var active  = null;        // id du jeton sélectionné (halo violet)
   var pending = null;        // id du jeton source d'une flèche en cours
-  var seq = 0;               // compteur d'ids de flèches (unique par session)
 
   var PR = 0;                // rayon du jeton en unités terrain
-  var layC = null, layA = null, layT = null;   // couches SVG
-  var tokEl = {};            // id jeton  → { g, ... }
+  var layC = null, layA = null, layT = null, layP = null, layM = null;
+  var tokEl = {};            // id jeton  → <g>
   var arwEl = {};            // id flèche → { g, body, hit, head }
 
-  function sch() { return S[mode]; }
-  function tokById(id) {
-    var t = sch().tok, i;
-    for (i = 0; i < t.length; i++) if (t[i].id === id) return t[i];
-    return null;
+  function mode() { return doc.mode; }
+  function steps() { return doc[doc.mode].steps; }
+  function step() { return steps()[cur] || steps()[0]; }
+  function pos() { return step().pos; }
+  function hoop() { return MODES[mode()].hoop; }
+
+  // Un jeton « live » : identité statique + position du temps courant. Les
+  // écritures passent TOUJOURS par pos()[id], jamais par cet objet jetable.
+  function tokById(id, p) {
+    var t = TOKMAP[id];
+    if (!t) return null;
+    var q = (p || pos())[id];
+    if (!q) return null;
+    return { id: t.id, side: t.side, n: t.n, x: q.x, y: q.y };
   }
-  function visible(t) { return t && (t.side === 'atk' || defOn); }
+  function visible(t) { return !!t && (t.side === 'atk' || doc.defOn); }
   // Une flèche n'est rendue (ni comptée) que si ses deux extrémités le sont.
   function arwVisible(a) {
     if (!visible(tokById(a.from))) return false;
@@ -473,21 +780,66 @@
   // toujours mis à l'échelle sur la largeur disponible).
   function radiusFor(m) { return MODES[m].w / 19; }
 
+  // Sortie d'un temps = sa photo à laquelle on applique ses déplacements.
+  // Sert à fabriquer le temps suivant et à détecter les décalages.
+  function endPos(st) {
+    var p = clonePos(st.pos), i, a;
+    for (i = 0; i < st.arw.length; i++) {
+      a = st.arw[i];
+      if (a.kind !== 'move') continue;
+      var d = typeof a.to === 'string' ? p[a.to] : a.to;
+      if (d && p[a.from]) p[a.from] = { x: d.x, y: d.y };
+    }
+    return p;
+  }
+  function samePos(p, q) {
+    var k;
+    for (k in p) { if (!q[k]) return false; if (Math.abs(p[k].x - q[k].x) > 0.5 || Math.abs(p[k].y - q[k].y) > 0.5) return false; }
+    return true;
+  }
+  function desynced(i) { return i > 0 && !samePos(steps()[i].pos, endPos(steps()[i - 1])); }
+
+  // Porteuse du ballon au DÉBUT du temps i : on repart de doc.ballStart et on
+  // suit les passes. Dérivé, jamais stocké — une passe supprimée se répercute
+  // donc immédiatement sur tous les temps qui suivent.
+  function holderAt(i) {
+    var h = doc.ballStart, k, j, st;
+    for (k = 0; k < i && k < steps().length; k++) {
+      st = steps()[k];
+      for (j = 0; j < st.arw.length; j++)
+        if (st.arw[j].kind === 'pass' && typeof st.arw[j].to === 'string') h = st.arw[j].to;
+      if (st.shot) h = null;   // après un tir, plus personne ne tient la balle
+    }
+    return h;
+  }
+  function passOf(st) {
+    var j;
+    for (j = 0; j < st.arw.length; j++) if (st.arw[j].kind === 'pass') return st.arw[j];
+    return null;
+  }
+
   // ─────────────────────────────────────────────────────────────────────
-  // 3. RENDU — trois couches, reconstruites séparément
+  // 3. RENDU — couches reconstruites séparément
   // ─────────────────────────────────────────────────────────────────────
-  // terrain (jamais retouché hors changement de mode/vue) · flèches ·
-  // jetons. Le drag n'écrit que des attributs, il ne reconstruit rien.
+  // terrain (jamais retouché hors changement de mode/vue) · flèches · jetons ·
+  // lecture. Le drag n'écrit que des attributs, il ne reconstruit rien.
   function drawAll() {
-    PR = radiusFor(mode);
-    svg.setAttribute('viewBox', MODES[mode].vb);
+    PR = radiusFor(mode());
+    svg.setAttribute('viewBox', MODES[mode()].vb);
     svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
     svg.innerHTML = defs()
-      + '<g id="lay-court">' + VIEWS[view].court(mode) + '</g>'
-      + '<g id="lay-arw"></g><g id="lay-tok"></g>';
+      + '<g id="lay-court">' + VIEWS[view].court(mode()) + '</g>'
+      + '<g id="lay-arw"></g><g id="lay-tok"></g><g id="lay-play"></g>'
+      // Couche de MESURE : des <path> jamais peints, uniquement là pour que
+      // getPointAtLength() nous donne la position d'une joueuse le long de sa
+      // courbe pendant la lecture. Native, exacte, et ça évite de ré-implémenter
+      // l'échantillonnage d'une Catmull-Rom à la main.
+      + '<g id="lay-meas" style="display:none"></g>';
     layC = document.getElementById('lay-court');
     layA = document.getElementById('lay-arw');
     layT = document.getElementById('lay-tok');
+    layP = document.getElementById('lay-play');
+    layM = document.getElementById('lay-meas');
     drawTokens();
     drawArrows();
     syncInfo();
@@ -513,25 +865,30 @@
   }
 
   function drawTokens() {
-    var t = sch().tok, html = '', i;
-    for (i = 0; i < t.length; i++) if (visible(t[i])) html += tokenMarkup(t[i]);
+    var html = '', i, t;
+    for (i = 0; i < TOKENS.length; i++) {
+      t = tokById(TOKENS[i].id);
+      if (visible(t)) html += tokenMarkup(t);
+    }
     layT.innerHTML = html;
     tokEl = {};
     var gs = layT.querySelectorAll('.token');
     for (i = 0; i < gs.length; i++) {
       var g = gs[i], id = g.getAttribute('data-id');
       tokEl[id] = g;
-      placeToken(tokById(id));
+      placeToken(id);
       attachTokenPointer(g, id);
     }
     syncSelection();
     syncBall();
   }
 
-  function placeToken(t) {
-    var g = tokEl[t.id];
+  function placeToken(id, p) {
+    var g = tokEl[id];
     if (!g) return;
-    var s = VIEWS[view].project(t);   // terrain → scène (identité en 2D)
+    var q = p || pos()[id];
+    if (!q) return;
+    var s = VIEWS[view].project(q);   // terrain → scène (identité en 2D)
     // transform (composité) plutôt que cx/cy : moins de recalcul par frame,
     // et l'ombre peinte suit le jeton sans travail supplémentaire.
     g.setAttribute('transform', 'translate(' + f(s.x) + ' ' + f(s.y) + ')');
@@ -544,25 +901,27 @@
       tokEl[id].classList.toggle('pending', id === pending);
     }
     if (layT) layT.classList.toggle('has-active', !!(active && tokEl[active]));
-    document.getElementById('b-ball').disabled = !(active && tokEl[active]);
+    document.getElementById('b-ball').disabled = !(active && tokEl[active]) || playing;
   }
 
+  // Le porteur affiché dépend du TEMPS COURANT : au temps 3 c'est la dernière
+  // réceptionneuse, pas la porteuse du temps 0.
   function syncBall() {
-    var id;
-    for (id in tokEl) tokEl[id].classList.toggle('has-ball', id === sch().ballStart);
+    var h = holderAt(cur), id;
+    for (id in tokEl) tokEl[id].classList.toggle('has-ball', id === h);
   }
 
   // ── Flèches ──────────────────────────────────────────────────────────
   // Points du modèle (source → waypoints → cible), en coordonnées terrain.
-  function rawPts(a) {
-    var src = tokById(a.from);
+  function rawPts(a, p) {
+    var src = tokById(a.from, p);
     if (!src) return null;
-    var p = [{ x: src.x, y: src.y }], i, v = a.via || [];
-    for (i = 0; i < v.length; i++) p.push({ x: v[i].x, y: v[i].y });
-    var dst = typeof a.to === 'string' ? tokById(a.to) : a.to;
+    var out = [{ x: src.x, y: src.y }], i, v = a.via || [];
+    for (i = 0; i < v.length; i++) out.push({ x: v[i].x, y: v[i].y });
+    var dst = typeof a.to === 'string' ? tokById(a.to, p) : a.to;
     if (!dst) return null;
-    p.push({ x: dst.x, y: dst.y });
-    return p;
+    out.push({ x: dst.x, y: dst.y });
+    return out;
   }
 
   // Rogne l'extrémité i vers son voisin : le trait part du BORD du jeton et
@@ -579,7 +938,9 @@
 
   // Tracé + angle de la pointe. Sans waypoint : segment droit. Avec : une
   // Catmull-Rom convertie en cubiques — le chemin passe EXACTEMENT par les
-  // points posés par le coach, ce qu'une quadratique de contrôle ne fait pas.
+  // points posés par le coach, ce qu'une quadratique de contrôle ne fait pas
+  // (avec une quadratique, le point posé au doigt ne serait qu'un point de
+  // CONTRÔLE : la courbe passerait à côté, et le coach corrigerait à l'aveugle).
   function buildPath(p) {
     var i, d, last;
     if (p.length === 2) {
@@ -613,17 +974,29 @@
   }
 
   function arrowMarkup(a) {
-    var cls = 'arw ' + (tokById(a.from).side === 'atk' ? 'atk' : 'def') + ' ' + a.kind;
+    var t = tokById(a.from);
+    var cls = 'arw ' + (t && t.side === 'atk' ? 'atk' : 'def') + ' ' + a.kind;
     var wp = '', v = a.via || [], i;
     for (i = 0; i < v.length; i++)
-      wp += '<circle class="wp" data-arw="' + a.id + '" data-i="' + i + '" cx="' + f(v[i].x) + '" cy="' + f(v[i].y) + '" r="' + f(PR * 0.3) + '"/>';
+      wp += '<circle class="wphit" data-arw="' + a.id + '" data-i="' + i + '" cx="' + f(v[i].x) + '" cy="' + f(v[i].y) + '" r="' + f(PR * 0.85) + '"/>'
+          + '<circle class="wp" data-arw="' + a.id + '" data-i="' + i + '" cx="' + f(v[i].x) + '" cy="' + f(v[i].y) + '" r="' + f(PR * 0.3) + '"/>';
     return '<g class="' + cls + '" data-id="' + a.id + '">'
       + '<path class="hit" d=""/><path class="body" d=""/><path class="head" d=""/>' + wp + '</g>';
   }
 
+  // Le tir n'est pas une flèche du modèle mais un drapeau sur le temps : on le
+  // DESSINE comme une flèche (vers le cercle) sans l'y stocker, pour que
+  // supprimer la tireuse du terrain ne laisse jamais de flèche orpheline.
+  function shotMarkup() {
+    return '<g class="arw shot" data-id="__shot">'
+      + '<path class="hit" d=""/><path class="body" d=""/><path class="head" d=""/></g>';
+  }
+
   function drawArrows() {
-    var list = sch().arw, html = '', i;
+    var list = step().arw, html = '', i;
     for (i = 0; i < list.length; i++) if (arwVisible(list[i])) html += arrowMarkup(list[i]);
+    var sh = step().shot;
+    if (sh && visible(tokById(sh))) html += shotMarkup();
     layA.innerHTML = html;
     arwEl = {};
     var gs = layA.querySelectorAll('.arw');
@@ -633,8 +1006,8 @@
       updateArrow(id);
       attachArrowPointer(g, id);
     }
-    var wps = layA.querySelectorAll('.wp');
-    for (i = 0; i < wps.length; i++) attachWaypointDrag(wps[i]);
+    var wps = layA.querySelectorAll('.wphit');
+    for (i = 0; i < wps.length; i++) attachWaypointPointer(wps[i]);
   }
 
   // Recalcule le d= d'UNE flèche. C'est le seul travail fait pendant un drag,
@@ -642,26 +1015,44 @@
   function updateArrow(id) {
     var el = arwEl[id];
     if (!el) return;
-    var a = null, list = sch().arw, i;
-    for (i = 0; i < list.length; i++) if (list[i].id === id) { a = list[i]; break; }
-    if (!a) return;
-    var p = rawPts(a);
-    if (!p) return;
+    var a, p, endPad;
+    if (id === '__shot') {
+      var s = tokById(step().shot);
+      if (!s) return;
+      var h = hoop();
+      a = { kind: 'shot', to: null };
+      p = [{ x: s.x, y: s.y }, { x: h.x, y: h.y }];
+      endPad = 2.6;
+    } else {
+      a = findArw(id);
+      if (!a) return;
+      p = rawPts(a);
+      if (!p) return;
+      endPad = typeof a.to === 'string' ? PR + 1.2 : 0;
+    }
     shrink(p, 0, PR + 0.8);
-    shrink(p, p.length - 1, typeof a.to === 'string' ? PR + 1.2 : 0);
+    shrink(p, p.length - 1, endPad);
     var r  = buildPath(p);
-    var hl = PR * (a.kind === 'pass' ? 0.72 : 0.8);
-    var hw = PR * (a.kind === 'pass' ? 0.34 : 0.4);
+    var k  = a.kind;
+    var hl = PR * (k === 'move' ? 0.8 : 0.72);
+    var hw = PR * (k === 'move' ? 0.4 : 0.34);
     el.body.setAttribute('d', r.d);
     el.hit.setAttribute('d', r.d);
     el.head.setAttribute('d', headPath(p[p.length - 1].x, p[p.length - 1].y, r.ang, hl, hw));
   }
 
   function arrowsOf(tokId) {
-    var out = [], list = sch().arw, i;
+    var out = [], list = step().arw, i;
     for (i = 0; i < list.length; i++)
       if (list[i].from === tokId || list[i].to === tokId) out.push(list[i].id);
+    if (step().shot === tokId) out.push('__shot');
     return out;
+  }
+
+  function findArw(id) {
+    var l = step().arw, i;
+    for (i = 0; i < l.length; i++) if (l[i].id === id) return l[i];
+    return null;
   }
 
   // ─────────────────────────────────────────────────────────────────────
@@ -683,7 +1074,7 @@
   // visible.
   function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
   function clampPt(p, pad) {
-    var c = MODES[mode];
+    var c = MODES[mode()];
     return { x: clamp(p.x, pad, c.w - pad), y: clamp(p.y, pad, c.h - pad) };
   }
 
@@ -694,14 +1085,14 @@
   // « lis la position », « écris la position », « et voilà un tap ».
   function makeDrag(el, opts) {
     var on = false, off = { x: 0, y: 0 }, moved = 0;
-    var pending2 = null, raf = 0;
+    var queued = null, raf = 0;
 
     // On ne rend QU'UNE fois par frame : les pointermove arrivent souvent
     // plus vite que 60 Hz sur iPhone (jusqu'à 120 Hz), inutile de recalculer
     // le CTM à chaque événement.
     function flush() {
       raf = 0;
-      var e = pending2; pending2 = null;
+      var e = queued; queued = null;
       if (!e) return;
       var p = toCourt(e.clientX, e.clientY);
       if (!p) return;
@@ -711,14 +1102,15 @@
 
     el.addEventListener('pointerdown', function (e) {
       e.stopPropagation();
-      if (!VIEWS[view].editable) return;   // la 3D sera en lecture seule
+      if (!VIEWS[view].editable || playing) return;
       if (opts.down && opts.down(e) === false) return;
       e.preventDefault();
       var p = toCourt(e.clientX, e.clientY);
       if (!p) return;
-      var cur = opts.get();
+      var c = opts.get();
+      if (!c) return;
       on = true; moved = 0;
-      off.x = cur.x - p.x; off.y = cur.y - p.y;
+      off.x = c.x - p.x; off.y = c.y - p.y;
       // Capture : le doigt garde le jeton même s'il sort du <g> (et on reçoit
       // toujours le pointerup, y compris hors de l'élément).
       try { el.setPointerCapture(e.pointerId); } catch (_) {}
@@ -730,19 +1122,20 @@
       if (!on) return;
       e.preventDefault(); e.stopPropagation();
       moved++;
-      pending2 = e;
+      queued = e;
       if (!raf) raf = requestAnimationFrame(flush);
     }, { passive: false });
 
     function end(e) {
       if (!on) return;
       on = false;
-      if (pending2) { if (raf) cancelAnimationFrame(raf); raf = 0; flush(); }
+      if (queued) { if (raf) cancelAnimationFrame(raf); raf = 0; flush(); }
       try { el.releasePointerCapture(e.pointerId); } catch (_) {}
       el.classList.remove('drag');
       elFps.textContent = '—';
       // Un geste de moins de 3 frames de mouvement = un tap, pas un drag.
       if (moved < 3 && opts.tap) opts.tap();
+      else if (moved >= 3) touch();
     }
     el.addEventListener('pointerup', end);
     el.addEventListener('pointercancel', end);
@@ -753,17 +1146,17 @@
   function attachTokenPointer(g, id) {
     makeDrag(g, {
       // Hors mode sélection, le jeton ne se déplace pas : il sert de cible aux
-      // outils flèche / gomme. On refuse le drag mais on garde le tap.
+      // outils flèche / gomme / tir. On refuse le drag mais on garde le tap.
       down: function (e) {
         if (tool !== 'select') { e.preventDefault(); onTokenClick(id); return false; }
         return true;
       },
       pad: function () { return PR; },
-      get: function () { var t = tokById(id); return { x: t.x, y: t.y }; },
+      get: function () { var q = pos()[id]; return q ? { x: q.x, y: q.y } : null; },
       set: function (p) {
-        var t = tokById(id);
-        t.x = p.x; t.y = p.y;
-        placeToken(t);
+        var q = pos()[id];
+        q.x = p.x; q.y = p.y;
+        placeToken(id);
         var ids = arrowsOf(id), i;
         for (i = 0; i < ids.length; i++) updateArrow(ids[i]);
       },
@@ -771,31 +1164,34 @@
     });
   }
 
-  function attachWaypointDrag(el) {
+  function attachWaypointPointer(el) {
     var aid = el.getAttribute('data-arw'), idx = +el.getAttribute('data-i');
+    var dot = layA.querySelector('.wp[data-arw="' + aid + '"][data-i="' + idx + '"]');
     makeDrag(el, {
-      down: function () { return tool === 'select'; },
+      down: function () {
+        // Mode gomme : un simple tap RETIRE le point de passage. Le chemin
+        // redevient droit (ou repasse par les points restants).
+        if (tool === 'erase') { removeWaypoint(aid, idx); return false; }
+        return tool === 'select';
+      },
       pad: function () { return 1; },
-      get: function () { return findArw(aid).via[idx]; },
+      get: function () { var a = findArw(aid); return a && a.via[idx] ? a.via[idx] : null; },
       set: function (p) {
-        var v = findArw(aid).via[idx];
-        v.x = p.x; v.y = p.y;
+        var a = findArw(aid);
+        if (!a || !a.via[idx]) return;
+        a.via[idx].x = p.x; a.via[idx].y = p.y;
         el.setAttribute('cx', f(p.x)); el.setAttribute('cy', f(p.y));
+        if (dot) { dot.setAttribute('cx', f(p.x)); dot.setAttribute('cy', f(p.y)); }
         updateArrow(aid);
       }
     });
-  }
-
-  function findArw(id) {
-    var l = sch().arw, i;
-    for (i = 0; i < l.length; i++) if (l[i].id === id) return l[i];
-    return null;
   }
 
   // ─────────────────────────────────────────────────────────────────────
   // 6. OUTILS — machine à états des clics
   // ─────────────────────────────────────────────────────────────────────
   function onTokenClick(id) {
+    if (playing) return;
     if (tool === 'select') {
       active = (active === id) ? null : id;
       pending = null;
@@ -803,6 +1199,12 @@
       return;
     }
     if (tool === 'erase') return;   // la gomme ne touche qu'aux flèches
+    if (tool === 'shot') {
+      // Un seul tir par temps : re-taper la tireuse annule le tir.
+      step().shot = (step().shot === id) ? null : id;
+      drawArrows(); syncInfo(); syncBall(); renderTimeline(); touch(); setHint();
+      return;
+    }
     if (!pending) { pending = id; syncSelection(); setHint(); return; }
     if (pending === id) { pending = null; syncSelection(); setHint(); return; }
     if (tool === 'pass') { addArrow('pass', pending, id); pending = null; syncSelection(); return; }
@@ -813,6 +1215,7 @@
   }
 
   function onCourtClick(p) {
+    if (playing) return;
     if (tool === 'move' && pending) {
       addArrow('move', pending, clampPt(p, 1));
       pending = null; syncSelection();
@@ -823,14 +1226,31 @@
   }
 
   function addArrow(kind, from, to) {
-    sch().arw.push({ id: 'w' + (++seq), kind: kind, from: from, to: to, via: [] });
-    drawArrows(); syncInfo(); setHint();
+    // Une seule flèche de déplacement par joueuse et par temps : deux
+    // destinations pour la même joueuse au même moment ne veut rien dire, et
+    // l'animation devrait en choisir une au hasard. La nouvelle remplace.
+    var l = step().arw, i;
+    if (kind === 'move') {
+      for (i = l.length - 1; i >= 0; i--) if (l[i].kind === 'move' && l[i].from === from) l.splice(i, 1);
+    }
+    l.push({ id: uid('w'), kind: kind, from: from, to: to, via: [] });
+    drawArrows(); syncInfo(); renderTimeline(); touch(); setHint();
   }
 
   function removeArrow(id) {
-    var l = sch().arw, i;
-    for (i = 0; i < l.length; i++) if (l[i].id === id) { l.splice(i, 1); break; }
-    drawArrows(); syncInfo();
+    if (id === '__shot') { step().shot = null; }
+    else {
+      var l = step().arw, i;
+      for (i = 0; i < l.length; i++) if (l[i].id === id) { l.splice(i, 1); break; }
+    }
+    drawArrows(); syncInfo(); syncBall(); renderTimeline(); touch();
+  }
+
+  function removeWaypoint(aid, idx) {
+    var a = findArw(aid);
+    if (!a || !a.via[idx]) return;
+    a.via.splice(idx, 1);
+    drawArrows(); touch();
   }
 
   // Distance d'un point à un segment — sert à savoir DANS QUEL segment de la
@@ -855,7 +1275,7 @@
       if (d < bd) { bd = d; best = i; }
     }
     a.via.splice(best, 0, clampPt(p, 1));
-    drawArrows();
+    drawArrows(); touch();
   }
 
   function attachArrowPointer(g, id) {
@@ -864,10 +1284,10 @@
     var lastT = 0, lastP = null;
     g.addEventListener('pointerdown', function (e) {
       e.stopPropagation();
-      if (!VIEWS[view].editable) return;
+      if (!VIEWS[view].editable || playing) return;
       e.preventDefault();
       if (tool === 'erase') { removeArrow(id); return; }
-      if (tool !== 'select') return;
+      if (tool !== 'select' || id === '__shot') return;   // pas de waypoint sur un tir
       var p = toCourt(e.clientX, e.clientY);
       if (!p) return;
       var now = performance.now();
@@ -883,20 +1303,467 @@
   // Clic sur le fond (terrain ou hors-jeu) : les jetons et les flèches
   // stoppent la propagation, donc tout ce qui arrive ici est bien du vide.
   svg.addEventListener('pointerdown', function (e) {
-    if (!VIEWS[view].editable) return;
+    if (!VIEWS[view].editable || playing) return;
     var p = toCourt(e.clientX, e.clientY);
     if (p) onCourtClick(p);
   }, { passive: true });
 
   // ─────────────────────────────────────────────────────────────────────
-  // 7. ENCART D'INFO + FPS
+  // 7. TEMPS (steps) — timeline
+  // ─────────────────────────────────────────────────────────────────────
+  var strip = document.getElementById('tl-strip');
+
+  function stepSummary(st) {
+    var mv = 0, ps = 0, i;
+    for (i = 0; i < st.arw.length; i++) { if (st.arw[i].kind === 'move') mv++; else ps++; }
+    var out = [];
+    if (mv) out.push(mv + '→');
+    if (ps) out.push(ps + '⇢');
+    if (st.shot) out.push('🎯');
+    return out.join(' ') || '·';
+  }
+
+  function renderTimeline() {
+    var l = steps(), html = '', i;
+    for (i = 0; i < l.length; i++) {
+      html += '<div class="chip' + (i === cur ? ' on' : '') + (desynced(i) ? ' desync' : '') + '" data-i="' + i + '">'
+        + (i + 1)
+        + '<span class="mini">' + stepSummary(l[i]) + '</span>'
+        + '<button class="x" data-del="' + i + '" title="Supprimer ce temps">×</button>'
+        + '</div>';
+    }
+    strip.innerHTML = html;
+    var chips = strip.querySelectorAll('.chip');
+    for (i = 0; i < chips.length; i++) attachChip(chips[i]);
+    document.getElementById('s-sync').disabled = (cur === 0) || playing;
+    updateProgress();
+  }
+
+  function gotoStep(i, keepTool) {
+    if (i < 0 || i >= steps().length) return;
+    cur = i;
+    active = null; pending = null;
+    if (!keepTool) { /* l'outil courant reste actif d'un temps à l'autre */ }
+    drawTokens(); drawArrows(); renderTimeline(); syncInfo(); setHint();
+  }
+
+  function addStep() {
+    var src = steps()[steps().length - 1];
+    steps().push(makeStep(endPos(src)));
+    gotoStep(steps().length - 1);
+    touch();
+  }
+
+  function delStep(i) {
+    if (steps().length <= 1) { toast('Un play garde au moins un temps.', 'err'); return; }
+    if (!confirm('Supprimer le temps ' + (i + 1) + ' ?\nSes flèches et sa disposition sont perdues.')) return;
+    steps().splice(i, 1);
+    if (cur >= steps().length) cur = steps().length - 1;
+    gotoStep(cur); touch();
+  }
+
+  // Recale la photo du temps courant sur la SORTIE du temps précédent, sans
+  // toucher à ses flèches (cf. l'en-tête : on répare, on n'écrase pas en douce).
+  function syncStep() {
+    if (cur === 0) return;
+    steps()[cur].pos = endPos(steps()[cur - 1]);
+    gotoStep(cur); touch();
+    toast('Temps ' + (cur + 1) + ' recalé.', 'ok');
+  }
+
+  // Réordonnancement au doigt. Un seuil de 6 px sépare le tap (sélection) du
+  // glissé (déplacement) : sur iPhone, un doigt bouge toujours un peu.
+  function attachChip(el) {
+    var i0 = +el.getAttribute('data-i');
+    var down = false, x0 = 0, dragging = false;
+
+    el.addEventListener('pointerdown', function (e) {
+      if (e.target && e.target.getAttribute('data-del') !== null) return;
+      if (playing) return;
+      down = true; dragging = false; x0 = e.clientX;
+      try { el.setPointerCapture(e.pointerId); } catch (_) {}
+    });
+    el.addEventListener('pointermove', function (e) {
+      if (!down) return;
+      var dx = e.clientX - x0;
+      if (!dragging && Math.abs(dx) > 6) { dragging = true; el.classList.add('grab'); }
+      if (dragging) { e.preventDefault(); el.style.transform = 'translateX(' + dx + 'px) scale(1.06)'; }
+    }, { passive: false });
+    function up(e) {
+      if (!down) return;
+      down = false;
+      try { el.releasePointerCapture(e.pointerId); } catch (_) {}
+      el.style.transform = '';
+      el.classList.remove('grab');
+      if (!dragging) { gotoStep(i0); return; }
+      // Où lâche-t-on ? On compare le centre du doigt aux centres des chips.
+      var chips = strip.querySelectorAll('.chip'), j, target = i0;
+      for (j = 0; j < chips.length; j++) {
+        var r = chips[j].getBoundingClientRect();
+        if (e.clientX > r.left + r.width / 2) target = j;
+        else break;
+      }
+      if (target !== i0) {
+        var l = steps(), moved = l.splice(i0, 1)[0];
+        l.splice(target, 0, moved);
+        cur = target;
+        touch();
+      } else cur = i0;
+      gotoStep(cur);
+    }
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', up);
+  }
+
+  strip.addEventListener('click', function (e) {
+    var d = e.target && e.target.getAttribute && e.target.getAttribute('data-del');
+    if (d === null || d === undefined) return;
+    e.stopPropagation();
+    delStep(+d);
+  });
+  document.getElementById('s-add').addEventListener('click', addStep);
+  document.getElementById('s-sync').addEventListener('click', syncStep);
+
+  // ─────────────────────────────────────────────────────────────────────
+  // 8. LECTURE ANIMÉE
+  // ─────────────────────────────────────────────────────────────────────
+  // Découpage d'un temps, en fraction u ∈ [0,1] de sa durée :
+  //   déplacements   u ∈ [0   , 0.65]   les joueuses glissent le long de leur
+  //                                     courbe (easing doux aux deux bouts)
+  //   passe          u ∈ [0.45, 0.90]   le trait pointillé se révèle, le
+  //                                     ballon voyage dessus
+  //   tir            u ∈ [0.70, 1.00]   halo qui pulse sur la tireuse, puis
+  //                                     trajectoire jusqu'au cercle
+  // Les fenêtres se CHEVAUCHENT volontairement : dans la réalité la passe part
+  // avant que tout le monde ait fini de bouger. Un enchaînement strictement
+  // séquentiel donne une animation hachée et beaucoup plus longue.
+  var PLAY = { move: [0, 0.65], pass: [0.45, 0.90], shot: [0.70, 1.00] };
+
+  var playing = false;       // lecture en cours (≠ « une frame est affichée »)
+  var pRaf = 0, pT0 = 0, pStep = 0, pU = 0, pPrepared = -1, pPaths = null;
+  var elPlay = document.getElementById('p-play');
+  var elProg = document.getElementById('prog');
+  var elFill = document.getElementById('prog-fill');
+  var elSpeed = document.getElementById('p-speed');
+
+  function stepMs() { return +elSpeed.value || 2000; }
+  function ease(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+  function win(u, w) { return clamp((u - w[0]) / (w[1] - w[0]), 0, 1); }
+
+  // Prépare les <path> de mesure du temps k. Fait UNE fois par temps, jamais
+  // par frame : getTotalLength() force un layout, c'est cher.
+  function prepare(k) {
+    if (pPrepared === k) return;
+    pPrepared = k;
+    layM.innerHTML = '';
+    layP.innerHTML = '';
+    pPaths = { moves: [], pass: null, shot: null };
+    var st = steps()[k];
+    if (!st) return;
+    var p0 = st.pos, i;
+
+    for (i = 0; i < st.arw.length; i++) {
+      var a = st.arw[i];
+      if (a.kind !== 'move') continue;
+      var t = tokById(a.from, p0);
+      if (!visible(t)) continue;
+      var pts = rawPts(a, p0);
+      if (!pts) continue;
+      var d = buildPath(pts).d;
+      var el = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      el.setAttribute('d', d);
+      layM.appendChild(el);
+      var trail = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      trail.setAttribute('class', 'trail' + (t.side === 'def' ? ' def' : ''));
+      trail.setAttribute('d', d);
+      var L = 0;
+      try { L = el.getTotalLength(); } catch (_) { L = 0; }
+      trail.setAttribute('stroke-dasharray', f(L) + ' ' + f(L));
+      trail.setAttribute('stroke-dashoffset', f(L));
+      layP.appendChild(trail);
+      pPaths.moves.push({ id: a.from, el: el, len: L, trail: trail });
+    }
+
+    var ps = passOf(st);
+    if (ps && arwVisibleIn(ps, p0)) {
+      var g = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      g.setAttribute('class', 'pline');
+      layP.appendChild(g);
+      pPaths.pass = { arw: ps, el: g, ball: flyingBall() };
+    }
+    if (st.shot && visible(tokById(st.shot, p0))) {
+      var sl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      sl.setAttribute('class', 'sline');
+      var pu = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      pu.setAttribute('class', 'spulse');
+      layP.appendChild(sl); layP.appendChild(pu);
+      pPaths.shot = { id: st.shot, el: sl, pulse: pu, ball: flyingBall() };
+    }
+  }
+
+  function arwVisibleIn(a, p) {
+    if (!visible(tokById(a.from, p))) return false;
+    if (typeof a.to === 'string' && !visible(tokById(a.to, p))) return false;
+    return true;
+  }
+
+  function flyingBall() {
+    var br = PR * 0.5;
+    var g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    g.setAttribute('class', 'fb');
+    g.innerHTML = '<circle class="b" cx="0" cy="0" r="' + f(br) + '"/>'
+      + '<line class="s" x1="' + f(-br) + '" y1="0" x2="' + f(br) + '" y2="0"/>'
+      + '<line class="s" x1="0" y1="' + f(-br) + '" x2="0" y2="' + f(br) + '"/>';
+    g.style.display = 'none';
+    layP.appendChild(g);
+    return g;
+  }
+
+  // Rend la frame (temps k, fraction u). Écrit UNIQUEMENT des attributs.
+  function renderFrame(k, u) {
+    var st = steps()[k];
+    if (!st) return;
+    prepare(k);
+    var p0 = st.pos, id, i;
+
+    // 1) positions — la joueuse suit sa courbe, les autres restent en place
+    var live = {};
+    for (id in p0) live[id] = { x: p0[id].x, y: p0[id].y };
+    var mu = ease(win(u, PLAY.move));
+    for (i = 0; i < pPaths.moves.length; i++) {
+      var m = pPaths.moves[i];
+      if (m.len > 0.01) {
+        var q = m.el.getPointAtLength(m.len * mu);
+        live[m.id] = { x: q.x, y: q.y };
+      }
+      m.trail.setAttribute('stroke-dashoffset', f(m.len * (1 - mu)));
+    }
+    for (id in tokEl) placeToken(id, live[id]);
+
+    // 2) porteuse — masquée pendant qu'un ballon vole
+    var holder = holderAt(k);
+    var flying = false;
+    var pf = 0, ps = pPaths.pass;
+    if (ps) {
+      pf = win(u, PLAY.pass);
+      var A = live[ps.arw.from], B = typeof ps.arw.to === 'string' ? live[ps.arw.to] : ps.arw.to;
+      if (A && B) {
+        var pp = [{ x: A.x, y: A.y }].concat((ps.arw.via || []).map(function (v) { return { x: v.x, y: v.y }; }), [{ x: B.x, y: B.y }]);
+        shrink(pp, 0, PR + 0.8); shrink(pp, pp.length - 1, PR + 1.2);
+        ps.el.setAttribute('d', buildPath(pp).d);
+        // Apparition puis effacement : le trait ne doit pas rester à l'écran,
+        // sinon on ne distingue plus la passe de ce temps de celle du suivant.
+        ps.el.setAttribute('opacity', f(pf <= 0 ? 0 : (pf < 0.15 ? pf / 0.15 : (pf > 0.9 ? (1 - pf) / 0.1 : 1))));
+        if (pf > 0 && pf < 1) {
+          flying = true;
+          var bp = lerpPts(pp, pf);
+          ps.ball.style.display = 'block';
+          ps.ball.setAttribute('transform', 'translate(' + f(bp.x) + ' ' + f(bp.y) + ')');
+        } else ps.ball.style.display = 'none';
+        if (pf >= 1 && typeof ps.arw.to === 'string') holder = ps.arw.to;
+      }
+    }
+
+    // 3) tir
+    var sh = pPaths.shot;
+    if (sh) {
+      var sf = win(u, PLAY.shot), S = live[sh.id], H = hoop();
+      if (S) {
+        // Halo qui respire sur la tireuse pendant la première moitié.
+        var pulseT = clamp(sf / 0.45, 0, 1);
+        sh.pulse.setAttribute('cx', f(S.x)); sh.pulse.setAttribute('cy', f(S.y));
+        sh.pulse.setAttribute('r', f(PR * (1.15 + 0.55 * Math.sin(pulseT * Math.PI))));
+        sh.pulse.setAttribute('opacity', f(sf <= 0 ? 0 : (1 - pulseT) * 0.9));
+        // Trajectoire : une cloche, pas une corde — un tir monte.
+        var arc = shotArc(S, H);
+        sh.el.setAttribute('d', arc.d);
+        var rf = clamp((sf - 0.4) / 0.6, 0, 1);
+        sh.el.setAttribute('stroke-dasharray', f(arc.len * rf) + ' ' + f(arc.len));
+        sh.el.setAttribute('opacity', rf > 0 ? 1 : 0);
+        if (rf > 0 && rf < 1) {
+          flying = true;
+          var q2 = quadAt(S, arc.c, H, rf);
+          sh.ball.style.display = 'block';
+          sh.ball.setAttribute('transform', 'translate(' + f(q2.x) + ' ' + f(q2.y) + ')');
+        } else sh.ball.style.display = 'none';
+        if (rf > 0) holder = null;
+      }
+    }
+
+    for (id in tokEl) tokEl[id].classList.toggle('has-ball', !flying && id === holder);
+    updateProgress(k, u);
+  }
+
+  // Position à la fraction t d'une polyligne (utilisée pour le ballon d'une
+  // passe : le trait est court, l'approximation linéaire suffit et évite un
+  // getPointAtLength par frame).
+  function lerpPts(p, t) {
+    var seg = [], total = 0, i;
+    for (i = 0; i < p.length - 1; i++) {
+      var d = Math.sqrt(Math.pow(p[i+1].x - p[i].x, 2) + Math.pow(p[i+1].y - p[i].y, 2));
+      seg.push(d); total += d;
+    }
+    if (total < 0.01) return { x: p[0].x, y: p[0].y };
+    var want = total * t, acc = 0;
+    for (i = 0; i < seg.length; i++) {
+      if (acc + seg[i] >= want) {
+        var u = seg[i] ? (want - acc) / seg[i] : 0;
+        return { x: p[i].x + (p[i+1].x - p[i].x) * u, y: p[i].y + (p[i+1].y - p[i].y) * u };
+      }
+      acc += seg[i];
+    }
+    return { x: p[p.length-1].x, y: p[p.length-1].y };
+  }
+
+  // Cloche du tir : point de contrôle décalé perpendiculairement au segment
+  // tireuse→cercle, d'un quart de sa longueur. Simple, lisible, et ça donne la
+  // même silhouette quel que soit l'endroit du terrain.
+  function shotArc(S, H) {
+    var dx = H.x - S.x, dy = H.y - S.y, L = Math.sqrt(dx * dx + dy * dy) || 1;
+    var mx = (S.x + H.x) / 2, my = (S.y + H.y) / 2;
+    var c = { x: mx - dy / L * (L * 0.22), y: my + dx / L * (L * 0.22) };
+    return {
+      d: 'M ' + f(S.x) + ' ' + f(S.y) + ' Q ' + f(c.x) + ' ' + f(c.y) + ' ' + f(H.x) + ' ' + f(H.y),
+      len: L * 1.08, c: c
+    };
+  }
+  function quadAt(a, c, b, t) {
+    var m = 1 - t;
+    return { x: m*m*a.x + 2*m*t*c.x + t*t*b.x, y: m*m*a.y + 2*m*t*c.y + t*t*b.y };
+  }
+
+  function updateProgress(k, u) {
+    var n = steps().length;
+    if (k === undefined) { k = cur; u = 0; }
+    elFill.style.width = f(clamp((k + u) / n, 0, 1) * 100) + '%';
+  }
+
+  function enterPlay() {
+    document.body.classList.add('playing');
+    active = null; pending = null;
+    syncSelection();
+    pPrepared = -1;
+  }
+  function exitPlay() {
+    document.body.classList.remove('playing');
+    playing = false;
+    if (pRaf) cancelAnimationFrame(pRaf);
+    pRaf = 0;
+    elPlay.textContent = '▶';
+    elPlay.classList.remove('on');
+    layP.innerHTML = ''; layM.innerHTML = '';
+    pPrepared = -1; pPaths = null;
+    elFps.textContent = '—';
+    document.getElementById('s-sync').disabled = (cur === 0);
+    // On retombe sur la PHOTO du temps où on s'est arrêté : l'éditeur reprend
+    // exactement là, sans avoir à deviner un état intermédiaire.
+    gotoStep(pStep);
+  }
+
+  function play() {
+    if (playing) { pause(); return; }
+    if (pU >= 1 && pStep >= steps().length - 1) { pStep = 0; pU = 0; }
+    playing = true;
+    enterPlay();
+    elPlay.textContent = '⏸';
+    elPlay.classList.add('on');
+    fpsReset();
+    pT0 = performance.now() - pU * stepMs();
+    pRaf = requestAnimationFrame(tick);
+  }
+  function pause() {
+    if (!playing) return;
+    playing = false;
+    if (pRaf) cancelAnimationFrame(pRaf);
+    pRaf = 0;
+    elPlay.textContent = '▶';
+    elPlay.classList.remove('on');
+    elFps.textContent = '—';
+  }
+
+  function tick(now) {
+    if (!playing) return;
+    var d = stepMs();
+    var u = (now - pT0) / d;
+    while (u >= 1) {
+      if (pStep >= steps().length - 1) {
+        pU = 1;
+        renderFrame(pStep, 1);
+        pause();
+        return;
+      }
+      pStep++; u -= 1; pT0 += d;
+    }
+    pU = u;
+    renderFrame(pStep, u);
+    if (Math.floor(u * 1000) % 1000 === 0 || u < 0.02) setHint();
+    fpsTick();
+    pRaf = requestAnimationFrame(tick);
+  }
+
+  // Se placer n'importe où dans le play, lecture en cours ou non.
+  function seek(r) {
+    var n = steps().length;
+    var g = clamp(r, 0, 0.9999) * n;
+    pStep = Math.min(n - 1, Math.floor(g));
+    pU = g - pStep;
+    if (!document.body.classList.contains('playing')) enterPlay();
+    renderFrame(pStep, pU);
+    setHint();
+    if (playing) pT0 = performance.now() - pU * stepMs();
+  }
+
+  elPlay.addEventListener('click', play);
+  document.getElementById('p-first').addEventListener('click', function () {
+    if (playing) pause();
+    if (document.body.classList.contains('playing')) { pStep = 0; pU = 0; exitPlay(); }
+    else gotoStep(0);
+    pStep = cur; pU = 0; updateProgress();
+  });
+  document.getElementById('p-last').addEventListener('click', function () {
+    if (playing) pause();
+    if (document.body.classList.contains('playing')) { pStep = steps().length - 1; pU = 0; exitPlay(); }
+    else gotoStep(steps().length - 1);
+    pStep = cur; pU = 0; updateProgress();
+  });
+  elSpeed.addEventListener('change', function () {
+    if (playing) pT0 = performance.now() - pU * stepMs();
+  });
+
+  (function scrub() {
+    var on = false;
+    function at(e) {
+      var r = elProg.getBoundingClientRect();
+      seek((e.clientX - r.left) / (r.width || 1));
+    }
+    elProg.addEventListener('pointerdown', function (e) {
+      e.preventDefault();
+      on = true;
+      try { elProg.setPointerCapture(e.pointerId); } catch (_) {}
+      at(e);
+    }, { passive: false });
+    elProg.addEventListener('pointermove', function (e) { if (on) { e.preventDefault(); at(e); } }, { passive: false });
+    function up(e) {
+      if (!on) return;
+      on = false;
+      try { elProg.releasePointerCapture(e.pointerId); } catch (_) {}
+      // Relâcher hors lecture = on adopte le temps visé comme temps d'édition.
+      if (!playing) exitPlay();
+    }
+    elProg.addEventListener('pointerup', up);
+    elProg.addEventListener('pointercancel', up);
+  })();
+
+  // ─────────────────────────────────────────────────────────────────────
+  // 9. ENCART D'INFO + FPS
   // ─────────────────────────────────────────────────────────────────────
   function syncInfo() {
-    var n = 0, l = sch().arw, i;
+    var n = 0, l = step().arw, i;
     for (i = 0; i < l.length; i++) if (arwVisible(l[i])) n++;
-    elTok.textContent = defOn ? '10' : '5';
+    if (step().shot && visible(tokById(step().shot))) n++;
+    elTok.textContent = doc.defOn ? '10' : '5';
     elArw.textContent = String(n);
-    var b = tokById(sch().ballStart);
+    var b = tokById(holderAt(cur));
     elBal.textContent = (b && visible(b)) ? (b.side === 'atk' ? '#' + b.n : 'X' + b.n) : '—';
   }
 
@@ -912,27 +1779,35 @@
   }
 
   var HINTS = {
-    select: 'Glisse les jetons. <b>Tape</b> une joueuse pour la sélectionner, puis <b>🏀 Balle</b> pour lui donner le ballon.<br><b>Double-tape une flèche</b> pour lui ajouter un point de passage (chemin courbe).',
+    select: 'Glisse les jetons. <b>Tape</b> une joueuse puis <b>🏀</b> pour lui donner le ballon.<br><b>Double-tape une flèche</b> pour lui ajouter un point de passage.',
     move:   'Tape la joueuse qui se déplace, <b>puis l\'endroit où elle va</b>. Flèche pleine.',
     pass:   'Tape la <b>passeuse</b>, puis la <b>réceptionneuse</b>. Flèche pointillée.',
-    erase:  'Tape une flèche pour la <b>supprimer</b>. Les jetons ne bougent pas dans ce mode.'
+    shot:   'Tape la joueuse qui <b>tire</b> à la fin de ce temps. Re-tape pour annuler.',
+    erase:  'Tape une flèche pour la <b>supprimer</b>, un point de passage pour le <b>retirer</b>.'
   };
   function setHint() {
     var h = HINTS[tool];
+    if (playing || document.body.classList.contains('playing')) {
+      elHint.innerHTML = 'Lecture — temps <b>' + (pStep + 1) + '</b> / ' + steps().length + '. Glisse la barre pour te déplacer.';
+      return;
+    }
     if (pending) {
       var t = tokById(pending);
       h = 'Source : <b>' + (t.side === 'atk' ? t.n : 'X' + t.n) + '</b> — '
         + (tool === 'pass' ? 'tape maintenant la réceptionneuse.' : 'tape maintenant la destination.')
         + ' (tape dans le vide pour annuler)';
+    } else {
+      h = '<b>Temps ' + (cur + 1) + '/' + steps().length + '</b> · ' + h;
     }
     elHint.innerHTML = h;
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // 8. UI
+  // 10. UI — outils, terrain, vue
   // ─────────────────────────────────────────────────────────────────────
-  var TOOLS = ['select', 'move', 'pass', 'erase'];
+  var TOOLS = ['select', 'move', 'pass', 'shot', 'erase'];
   function setTool(t) {
+    if (playing || document.body.classList.contains('playing')) exitPlay();
     tool = t;
     pending = null;
     if (t !== 'select') active = null;
@@ -944,37 +1819,43 @@
     document.getElementById('t-' + k).addEventListener('click', function () { setTool(k); });
   });
 
-  // Ballon : un seul porteur. Re-cliquer sur la porteuse le retire (il faut
-  // pouvoir dessiner une situation sans ballon, ex. un écran hors ballon).
+  // Ballon : un seul porteur AU TEMPS 0. Re-cliquer sur la porteuse le retire
+  // (il faut pouvoir dessiner une situation sans ballon, ex. un écran hors
+  // ballon). Aux temps suivants, la porteuse est DÉRIVÉE des passes : la
+  // changer à la main n'aurait pas de sens, on renvoie donc au temps 0.
   document.getElementById('b-ball').addEventListener('click', function () {
     if (!active) return;
-    sch().ballStart = (sch().ballStart === active) ? null : active;
-    syncBall(); syncInfo();
+    if (cur !== 0) { toast('La porteuse se règle au temps 1 ; ensuite elle suit les passes.', 'err'); return; }
+    doc.ballStart = (doc.ballStart === active) ? null : active;
+    syncBall(); syncInfo(); touch();
   });
 
   // La défense n'est jamais détruite (cf. section 2) : on ne fait que la
   // montrer ou la cacher, positions et flèches comprises.
   document.getElementById('b-def').addEventListener('click', function () {
-    defOn = !defOn;
-    this.classList.toggle('on', defOn);
-    if (!defOn && active && tokById(active).side === 'def') active = null;
-    if (!defOn && pending && tokById(pending).side === 'def') pending = null;
-    drawTokens(); drawArrows(); syncInfo(); setHint();
+    doc.defOn = !doc.defOn;
+    this.classList.toggle('on', doc.defOn);
+    if (!doc.defOn && active && TOKMAP[active].side === 'def') active = null;
+    if (!doc.defOn && pending && TOKMAP[pending].side === 'def') pending = null;
+    drawTokens(); drawArrows(); syncInfo(); setHint(); touch();
   });
 
   document.getElementById('b-reset').addEventListener('click', function () {
-    S[mode] = makeSchema(mode);
-    active = null; pending = null;
-    drawAll(); setHint();
+    if (!confirm('Repartir de la disposition de départ ?\nTous les temps de ce terrain sont perdus.')) return;
+    doc[doc.mode] = { steps: [ makeStep(startPos(doc.mode)) ] };
+    cur = 0; active = null; pending = null;
+    drawAll(); renderTimeline(); setHint(); touch();
   });
 
   function setMode(m) {
-    if (m === mode) return;
-    mode = m;
+    if (m === mode()) return;
+    if (document.body.classList.contains('playing')) exitPlay();
+    doc.mode = m;
     document.getElementById('m-half').classList.toggle('on', m === 'half');
     document.getElementById('m-full').classList.toggle('on', m === 'full');
-    active = null; pending = null;
-    drawAll(); setHint();
+    cur = 0; active = null; pending = null;
+    pStep = 0; pU = 0;
+    drawAll(); renderTimeline(); setHint(); touch();
   }
   document.getElementById('m-half').addEventListener('click', function () { setMode('half'); });
   document.getElementById('m-full').addEventListener('click', function () { setMode('full'); });
@@ -993,28 +1874,535 @@
   document.getElementById('v-3d').addEventListener('click', function () { setView('3d'); });
   document.getElementById('v-3d').disabled = !VIEWS['3d'].ready;
 
-  document.getElementById('theme').addEventListener('click', function () {
-    var cur = document.documentElement.getAttribute('data-theme');
-    var next = cur === 'dark' ? 'light' : (cur === 'light' ? '' : 'dark');
-    if (next) document.documentElement.setAttribute('data-theme', next);
+  function toggleTheme() {
+    var c = document.documentElement.getAttribute('data-theme');
+    var n = c === 'dark' ? 'light' : (c === 'light' ? '' : 'dark');
+    if (n) document.documentElement.setAttribute('data-theme', n);
     else document.documentElement.removeAttribute('data-theme');
-  });
+  }
+  document.getElementById('a-theme').addEventListener('click', function () { toggleTheme(); closeSheets(); });
 
   // Le CTM est relu à chaque frame de drag : rien à invalider ici, on remet
   // seulement les jetons dans les clous après une rotation d'écran.
   window.addEventListener('resize', function () {
-    var t = sch().tok, i;
-    for (i = 0; i < t.length; i++) {
-      if (!visible(t[i])) continue;
-      var c = clampPt(t[i], PR);
-      t[i].x = c.x; t[i].y = c.y;
-      placeToken(t[i]);
+    if (document.body.classList.contains('playing')) return;
+    var p = pos(), id;
+    for (id in p) {
+      var t = tokById(id);
+      if (!visible(t)) continue;
+      var c = clampPt(p[id], PR);
+      p[id].x = c.x; p[id].y = c.y;
+      placeToken(id);
     }
-    for (i = 0; i < sch().arw.length; i++) updateArrow(sch().arw[i].id);
+    var l = step().arw, i;
+    for (i = 0; i < l.length; i++) updateArrow(l[i].id);
+    updateArrow('__shot');
   });
 
+  // ─────────────────────────────────────────────────────────────────────
+  // 11. FEUILLES (métadonnées, menu, plays)
+  // ─────────────────────────────────────────────────────────────────────
+  var scrim = document.getElementById('scrim');
+  var SHEETS = ['sh-meta', 'sh-menu', 'sh-plays'];
+  function closeSheets() {
+    SHEETS.forEach(function (k) { document.getElementById(k).classList.remove('show'); });
+    scrim.classList.remove('show');
+  }
+  function openSheet(k) {
+    closeSheets();
+    document.getElementById(k).classList.add('show');
+    scrim.classList.add('show');
+  }
+  scrim.addEventListener('click', closeSheets);
+
+  var F = {
+    title: document.getElementById('f-title'), tag: document.getElementById('f-tag'),
+    side: document.getElementById('f-side'),   color: document.getElementById('f-color'),
+    desc: document.getElementById('f-desc'),   points: document.getElementById('f-points'),
+    author: document.getElementById('f-author')
+  };
+  function metaToForm() {
+    F.title.value = doc.title || ''; F.tag.value = doc.tag || '';
+    F.side.value = doc.side || 'attaque'; F.color.value = doc.color || '#22D3EE';
+    F.desc.value = doc.description || ''; F.points.value = doc.points || '';
+    F.author.value = doc.author || '';
+  }
+  function formToMeta() {
+    doc.title = F.title.value.trim(); doc.tag = F.tag.value.trim();
+    doc.side = F.side.value; doc.color = F.color.value.trim() || '#22D3EE';
+    doc.description = F.desc.value; doc.points = F.points.value;
+    doc.author = F.author.value.trim();
+    syncTitle(); touch();
+  }
+  ['title','tag','side','color','desc','points','author'].forEach(function (k) {
+    F[k].addEventListener('input', formToMeta);
+    F[k].addEventListener('change', formToMeta);
+  });
+  function syncTitle() {
+    document.getElementById('doc-title').innerHTML =
+      esc(doc.title || 'Sans titre') + ' <span class="sub">· POC jalon 3</span>';
+  }
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  document.getElementById('b-meta').addEventListener('click', function () { metaToForm(); openSheet('sh-meta'); });
+  document.getElementById('b-menu').addEventListener('click', function () { metaToForm(); openSheet('sh-menu'); });
+  document.getElementById('f-done').addEventListener('click', closeSheets);
+
+  var elToast = document.getElementById('toast');
+  var toastT = 0;
+  function toast(msg, kind) {
+    elToast.textContent = msg;
+    elToast.className = 'toast show ' + (kind || '');
+    if (toastT) clearTimeout(toastT);
+    toastT = setTimeout(function () { elToast.className = 'toast ' + (kind || ''); }, 2600);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // 12. FORMAT D'ÉCHANGE — export / import JSON
+  // ─────────────────────────────────────────────────────────────────────
+  // Numéro SIGNÉ : +n = attaquante n, −n = défenseure n. Un seul entier suffit
+  // donc à désigner n'importe qui, ce qui garde `ball_start` et `shot` dans un
+  // `int` en base et évite un objet {side,n} partout dans le JSON.
+  function numOf(id) { var t = TOKMAP[id]; return t ? (t.side === 'atk' ? t.n : -t.n) : null; }
+  function idOfNum(v) {
+    v = Number(v);
+    if (!v || !isFinite(v)) return null;
+    var id = v > 0 ? 'a' + v : 'd' + (-v);
+    return TOKMAP[id] ? id : null;
+  }
+  function pt(p) { return { x: f(p.x), y: f(p.y) }; }
+
+  function toJSON() {
+    var st = steps(), i, j;
+    var players = [], id;
+    for (i = 0; i < TOKENS.length; i++) {
+      id = TOKENS[i].id;
+      var q = st[0].pos[id];
+      if (!q) continue;
+      players.push({ id: id, side: TOKENS[i].side, n: TOKENS[i].n, x: f(q.x), y: f(q.y) });
+    }
+    var outSteps = [], flat = [];
+    for (i = 0; i < st.length; i++) {
+      var s = st[i], moves = [], passes = [];
+      for (j = 0; j < s.arw.length; j++) {
+        var a = s.arw[j];
+        var via = (a.via || []).map(pt);
+        if (a.kind === 'move') {
+          var d = typeof a.to === 'string' ? s.pos[a.to] : a.to;
+          if (!d) continue;
+          moves.push({ player: numOf(a.from), to: pt(d), via: via });
+          flat.push({ step: i, kind: 'move', from: numOf(a.from), to: pt(d), via: via });
+        } else {
+          passes.push({ from: numOf(a.from), to: typeof a.to === 'string' ? numOf(a.to) : pt(a.to), via: via });
+          flat.push({ step: i, kind: 'pass', from: numOf(a.from), to: typeof a.to === 'string' ? numOf(a.to) : pt(a.to), via: via });
+        }
+      }
+      var positions = {};
+      for (id in s.pos) positions[id] = pt(s.pos[id]);
+      if (s.shot) flat.push({ step: i, kind: 'shot', from: numOf(s.shot) });
+      outSteps.push({
+        n: i + 1, note: s.note || '',
+        moves: moves,
+        // `pass` (singulier) duplique passes[0] : c'est la clé du format
+        // d'échange atk-zone. `passes` porte le cas — rare mais réel — de deux
+        // passes dans le même temps.
+        pass: passes.length ? passes[0] : null,
+        passes: passes,
+        shot: s.shot ? numOf(s.shot) : null,
+        positions: positions
+      });
+    }
+    return {
+      format: 'pb-play/2',
+      id: doc.id || slug(doc.title) || 'play',
+      title: doc.title || 'Sans titre',
+      tag: doc.tag || null,
+      side: doc.side || 'attaque',
+      color: doc.color || '#22D3EE',
+      description: doc.description || '',
+      points_md: doc.points || '',
+      court_type: doc.mode,
+      defense_enabled: !!doc.defOn,
+      ball_start: doc.ballStart ? numOf(doc.ballStart) : null,
+      created_by: doc.author || null,
+      players: players,
+      arrows: flat,
+      steps: outSteps
+    };
+  }
+
+  // Import TOLÉRANT : le fichier peut venir d'ailleurs (atk-zone.json de
+  // référence, export d'un autre outil). On accepte les deux conventions de
+  // nommage vues dans la nature (snake_case et camelCase) et les deux façons
+  // de désigner une joueuse (numéro signé, ou {side,n}, ou id 'a3'). Ce qu'on
+  // n'accepte pas : un fichier sans les clés obligatoires — on refuse alors
+  // proprement plutôt que de charger un demi-play silencieusement cassé.
+  function pick(o) {
+    var i;
+    for (i = 1; i < arguments.length; i++) if (o[arguments[i]] !== undefined && o[arguments[i]] !== null) return o[arguments[i]];
+    return undefined;
+  }
+  function refId(v) {
+    if (v === null || v === undefined) return null;
+    if (typeof v === 'number') return idOfNum(v);
+    if (typeof v === 'string') {
+      if (TOKMAP[v]) return v;
+      var n = Number(v);
+      return isFinite(n) ? idOfNum(n) : null;
+    }
+    if (typeof v === 'object') {
+      if (v.id && TOKMAP[v.id]) return v.id;
+      if (v.n !== undefined) return (v.side === 'def' || v.side === 'defense') ? idOfNum(-Math.abs(v.n)) : idOfNum(Math.abs(v.n));
+      if (v.x !== undefined && v.y !== undefined) return null;   // c'est un point, pas une joueuse
+    }
+    return null;
+  }
+  function refPoint(v) {
+    if (v && typeof v === 'object' && v.x !== undefined && v.y !== undefined) return { x: +v.x, y: +v.y };
+    return null;
+  }
+
+  function fromJSON(o) {
+    if (!o || typeof o !== 'object') throw new Error('Ce fichier n\'est pas un objet JSON.');
+    var miss = [];
+    if (!o.id) miss.push('id');
+    if (!o.title) miss.push('title');
+    if (!Array.isArray(o.players)) miss.push('players');
+    if (!Array.isArray(o.steps)) miss.push('steps');
+    if (miss.length) throw new Error('Clés manquantes ou invalides : ' + miss.join(', ') + '.');
+
+    var m = (pick(o, 'court_type', 'courtType') === 'full') ? 'full' : 'half';
+    var d = makeDoc();
+    d.id = String(o.id);
+    d.title = String(o.title);
+    d.tag = pick(o, 'tag') || '';
+    d.side = pick(o, 'side') || 'attaque';
+    if (['attaque','defense','transition','remise'].indexOf(d.side) < 0) d.side = 'attaque';
+    d.color = pick(o, 'color') || '#22D3EE';
+    d.description = pick(o, 'description') || '';
+    d.points = pick(o, 'points_md', 'pointsMd', 'points') || '';
+    if (Array.isArray(d.points)) d.points = d.points.join('\n');
+    d.author = pick(o, 'created_by', 'createdBy', 'author') || '';
+    d.mode = m;
+    d.defOn = !!pick(o, 'defense_enabled', 'defenseEnabled');
+    d.ballStart = refId(pick(o, 'ball_start', 'ballStart'));
+
+    // Positions de départ : ce que `players` dit, complété par la disposition
+    // par défaut pour tout jeton absent (un fichier à 5 joueuses reste valide,
+    // la défense prend alors ses places de départ et reste masquée).
+    var p0 = startPos(m), i, j;
+    for (i = 0; i < o.players.length; i++) {
+      var pl = o.players[i];
+      var id = refId(pl);
+      if (!id || !isFinite(+pl.x) || !isFinite(+pl.y)) continue;
+      p0[id] = { x: +pl.x, y: +pl.y };
+    }
+
+    var out = [], prev = p0;
+    for (i = 0; i < o.steps.length; i++) {
+      var s = o.steps[i] || {};
+      // `positions` si le fichier la porte (round-trip exact), sinon on dérive
+      // du temps précédent — c'est la seule information disponible.
+      var sp = clonePos(prev);
+      var given = pick(s, 'positions', 'pos');
+      if (given && typeof given === 'object') {
+        for (var k in given) {
+          var kid = refId(k) || (TOKMAP[k] ? k : null);
+          var q = refPoint(given[k]);
+          if (kid && q) sp[kid] = q;
+        }
+      }
+      var st = makeStep(sp);
+      st.note = s.note || '';
+      var moves = Array.isArray(s.moves) ? s.moves : [];
+      for (j = 0; j < moves.length; j++) {
+        var mv = moves[j];
+        var from = refId(pick(mv, 'player', 'p', 'from', 'id'));
+        var to = refPoint(pick(mv, 'to', 'dest', 'end'));
+        if (!from || !to) continue;
+        st.arw.push({ id: uid('w'), kind: 'move', from: from, to: to, via: (Array.isArray(mv.via) ? mv.via : []).map(refPoint).filter(Boolean) });
+      }
+      var ps = Array.isArray(s.passes) ? s.passes : (s.pass ? [s.pass] : []);
+      for (j = 0; j < ps.length; j++) {
+        var pa = ps[j];
+        if (!pa) continue;
+        var pf = refId(pick(pa, 'from', 'passer'));
+        var ptTo = refId(pick(pa, 'to', 'receiver')) || refPoint(pick(pa, 'to'));
+        if (!pf || !ptTo) continue;
+        st.arw.push({ id: uid('w'), kind: 'pass', from: pf, to: ptTo, via: (Array.isArray(pa.via) ? pa.via : []).map(refPoint).filter(Boolean) });
+      }
+      st.shot = refId(s.shot);
+      out.push(st);
+      prev = endPos(st);
+    }
+    if (!out.length) out.push(makeStep(p0));
+    d[m] = { steps: out };
+    return d;
+  }
+
+  function slug(s) {
+    return String(s || '').toLowerCase()
+      .normalize('NFD').replace(/[̀-ͯ]/g, '')
+      .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+  }
+
+  function loadDoc(d) {
+    if (document.body.classList.contains('playing')) exitPlay();
+    doc = d;
+    cur = 0; pStep = 0; pU = 0; active = null; pending = null;
+    document.getElementById('m-half').classList.toggle('on', doc.mode === 'half');
+    document.getElementById('m-full').classList.toggle('on', doc.mode === 'full');
+    document.getElementById('b-def').classList.toggle('on', !!doc.defOn);
+    metaToForm(); syncTitle();
+    drawAll(); renderTimeline(); setHint();
+  }
+
+  // ── Export ───────────────────────────────────────────────────────────
+  document.getElementById('a-export').addEventListener('click', function () {
+    closeSheets();
+    var o = toJSON();
+    var blob = new Blob([JSON.stringify(o, null, 2)], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = (o.id || 'play') + '.json';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1500);
+    toast('Exporté : ' + a.download, 'ok');
+  });
+
+  // ── Import ───────────────────────────────────────────────────────────
+  var fileIn = document.getElementById('f-import');
+  document.getElementById('a-import').addEventListener('click', function () {
+    closeSheets();
+    if (dirty && !confirm('Un play est en cours d\'édition.\nL\'import va le remplacer. Continuer ?')) return;
+    fileIn.value = '';
+    fileIn.click();
+  });
+  fileIn.addEventListener('change', function () {
+    var file = this.files && this.files[0];
+    if (!file) return;
+    var rd = new FileReader();
+    rd.onload = function () {
+      var o;
+      try { o = JSON.parse(String(rd.result)); }
+      catch (e) { toast('JSON illisible : ' + e.message, 'err'); return; }
+      var d;
+      try { d = fromJSON(o); }
+      catch (e) { toast('Import refusé — ' + e.message, 'err'); return; }
+      loadDoc(d); saveDraft();
+      toast('Importé : ' + d.title + ' (' + d[d.mode].steps.length + ' temps)', 'ok');
+    };
+    rd.onerror = function () { toast('Lecture du fichier impossible.', 'err'); };
+    rd.readAsText(file);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // 13. PERSISTANCE — brouillon local + publication Supabase
+  // ─────────────────────────────────────────────────────────────────────
+  // Clé publishable, déjà publique dans index.html (cf. en-tête du fichier).
+  var SB_URL = 'https://orertxlsvkdqayybgwaq.supabase.co';
+  var SB_KEY = 'sb_publishable_pJwgqWwDDhhST6xh9IbzbA_a0ANDwUt';
+  var DRAFT_KEY = 'pb_editor_v2_draft';
+
+  function sbFetch(path, opts) {
+    opts = opts || {};
+    var h = {
+      'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY,
+      'Content-Type': 'application/json', 'Accept': 'application/json'
+    };
+    if (opts.prefer) h['Prefer'] = opts.prefer;
+    return fetch(SB_URL + '/rest/v1/' + path, {
+      method: opts.method || 'GET', headers: h,
+      body: opts.body ? JSON.stringify(opts.body) : undefined
+    }).then(function (r) {
+      if (!r.ok) return r.text().then(function (t) { throw new Error('HTTP ' + r.status + ' — ' + t.slice(0, 180)); });
+      if (r.status === 204) return null;
+      return r.text().then(function (t) { return t ? JSON.parse(t) : null; });
+    });
+  }
+
+  // `dirty` = du travail non publié existe. On ne réécrit le brouillon que
+  // s'il a changé : un setInterval qui sérialise 10 temps toutes les 5 s pour
+  // rien réveille le CPU de l'iPhone sans raison.
+  var dirty = false, lastSaved = '';
+  function touch() { dirty = true; renderTimelineSoon(); }
+
+  var tlRaf = 0;
+  function renderTimelineSoon() {
+    if (tlRaf) return;
+    tlRaf = requestAnimationFrame(function () { tlRaf = 0; renderTimeline(); });
+  }
+
+  function draftPayload() {
+    return JSON.stringify({ v: 2, at: new Date().toISOString(), doc: doc, cur: cur });
+  }
+  function saveDraft() {
+    try {
+      var s = draftPayload();
+      if (s === lastSaved) return;
+      localStorage.setItem(DRAFT_KEY, s);
+      lastSaved = s;
+    } catch (e) { /* quota plein / mode privé : le brouillon est un confort, pas une garantie */ }
+  }
+  // Toutes les 5 s, et à chaque fois que l'app passe en arrière-plan (sur
+  // iPhone, `pagehide` est le seul signal fiable avant que Safari gèle
+  // l'onglet — `beforeunload` n'y est pas garanti).
+  setInterval(function () { if (dirty) saveDraft(); }, 5000);
+  window.addEventListener('pagehide', saveDraft);
+  document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') saveDraft(); });
+
+  var draftBar = document.getElementById('draft-bar');
+  function offerDraft() {
+    var raw;
+    try { raw = localStorage.getItem(DRAFT_KEY); } catch (e) { return; }
+    if (!raw) return;
+    var o;
+    try { o = JSON.parse(raw); } catch (e) { return; }
+    if (!o || !o.doc || !o.doc.half) return;
+    var when = '';
+    try { when = new Date(o.at).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }); } catch (e) {}
+    document.getElementById('draft-txt').textContent =
+      '📝 Brouillon récupéré — ' + (o.doc.title || 'sans titre') + (when ? ' · ' + when : '');
+    draftBar.classList.add('show');
+    document.getElementById('d-resume').onclick = function () {
+      draftBar.classList.remove('show');
+      loadDoc(reviveDoc(o.doc));
+      cur = Math.min(o.cur || 0, steps().length - 1);
+      gotoStep(cur);
+      dirty = true;
+      toast('Brouillon repris.', 'ok');
+    };
+    document.getElementById('d-new').onclick = function () {
+      draftBar.classList.remove('show');
+      try { localStorage.removeItem(DRAFT_KEY); } catch (e) {}
+      lastSaved = '';
+    };
+  }
+
+  // Un brouillon relu est du JSON nu : on le remet dans la forme attendue et
+  // on rebouche ce qui manquerait (version antérieure du POC, champ ajouté
+  // depuis). Mieux vaut un play amputé d'un champ qu'un écran blanc.
+  function reviveDoc(d) {
+    var base = makeDoc(), k;
+    for (k in base) if (d[k] === undefined) d[k] = base[k];
+    ['half', 'full'].forEach(function (m) {
+      if (!d[m] || !Array.isArray(d[m].steps) || !d[m].steps.length) d[m] = { steps: [ makeStep(startPos(m)) ] };
+      d[m].steps.forEach(function (s) {
+        if (!s.pos) s.pos = startPos(m);
+        if (!Array.isArray(s.arw)) s.arw = [];
+        if (s.shot === undefined) s.shot = null;
+        s.arw.forEach(function (a) { if (!Array.isArray(a.via)) a.via = []; });
+      });
+    });
+    if (d.mode !== 'full') d.mode = 'half';
+    return d;
+  }
+
+  // ── Publier ──────────────────────────────────────────────────────────
+  document.getElementById('a-publish').addEventListener('click', function () {
+    closeSheets();
+    if (!doc.title.trim()) { metaToForm(); openSheet('sh-meta'); toast('Un titre est obligatoire pour publier.', 'err'); F.title.focus(); return; }
+    if (!doc.id) doc.id = (slug(doc.title) || 'play') + '-' + Math.random().toString(36).slice(2, 7);
+    var o = toJSON();
+    var row = {
+      id: doc.id, title: o.title, tag: o.tag, side: o.side, color: o.color,
+      description: o.description, points_md: o.points_md, ball_start: o.ball_start,
+      players: o.players, arrows: o.arrows, steps: o.steps,
+      defense_enabled: o.defense_enabled, court_type: o.court_type,
+      created_by: o.created_by, updated_at: new Date().toISOString(), deleted_at: null
+    };
+    toast('Publication…');
+    sbFetch('plays_v2', { method: 'POST', body: row, prefer: 'resolution=merge-duplicates,return=minimal' })
+      .then(function () {
+        dirty = false; saveDraft();
+        toast('Publié : ' + o.title, 'ok');
+      })
+      .catch(function (e) {
+        // Le cas le plus probable au premier essai : la migration n'a pas
+        // encore été appliquée. On le dit, plutôt que de laisser un code HTTP.
+        var m = /HTTP 40[04]/.test(e.message) ? 'table plays_v2 absente — applique la migration 20260823_001.' : e.message;
+        toast('Échec de la publication — ' + m, 'err');
+      });
+  });
+
+  // ── Supprimer (soft-delete) ──────────────────────────────────────────
+  document.getElementById('a-delete').addEventListener('click', function () {
+    closeSheets();
+    if (!doc.id) { toast('Ce play n\'a jamais été publié.', 'err'); return; }
+    if (!confirm('Supprimer « ' + (doc.title || doc.id) + ' » de la liste publiée ?')) return;
+    sbFetch('plays_v2?id=eq.' + encodeURIComponent(doc.id),
+      { method: 'PATCH', body: { deleted_at: new Date().toISOString() }, prefer: 'return=minimal' })
+      .then(function () { toast('Supprimé.', 'ok'); doc.id = null; touch(); })
+      .catch(function (e) { toast('Échec de la suppression — ' + e.message, 'err'); });
+  });
+
+  // ── Liste des plays publiés ──────────────────────────────────────────
+  var plist = document.getElementById('plays-list');
+  function loadPlays() {
+    plist.innerHTML = '<div class="empty">Chargement…</div>';
+    sbFetch('plays_v2?deleted_at=is.null&select=id,title,tag,side,color,court_type,steps,updated_at&order=updated_at.desc&limit=100')
+      .then(function (rows) {
+        if (!rows || !rows.length) { plist.innerHTML = '<div class="empty">Aucun play publié pour l\'instant.</div>'; return; }
+        var html = '', i;
+        for (i = 0; i < rows.length; i++) {
+          var r = rows[i];
+          var nst = Array.isArray(r.steps) ? r.steps.length : 0;
+          html += '<div class="pitem" data-id="' + esc(r.id) + '">'
+            + '<span class="dot" style="background:' + esc(/^#[0-9a-f]{3,8}$/i.test(r.color || '') ? r.color : '#22D3EE') + '"></span>'
+            + '<span class="t"><b>' + esc(r.title) + '</b><small>'
+            + esc(r.tag || r.side || '') + ' · ' + nst + ' temps · '
+            + esc(r.court_type === 'full' ? 'terrain complet' : 'demi-terrain') + '</small></span>'
+            + '<span style="font-size:16px;color:var(--ink-2)">›</span></div>';
+        }
+        plist.innerHTML = html;
+      })
+      .catch(function (e) {
+        var m = /HTTP 40[04]/.test(e.message) ? 'table plays_v2 absente — applique la migration 20260823_001.' : e.message;
+        plist.innerHTML = '<div class="empty">Impossible de charger — ' + esc(m) + '</div>';
+      });
+  }
+  plist.addEventListener('click', function (e) {
+    var it = e.target && e.target.closest ? e.target.closest('.pitem') : null;
+    if (!it) return;
+    var id = it.getAttribute('data-id');
+    if (dirty && !confirm('Un play est en cours d\'édition.\nL\'ouvrir va le remplacer. Continuer ?')) return;
+    sbFetch('plays_v2?id=eq.' + encodeURIComponent(id) + '&select=*&limit=1')
+      .then(function (rows) {
+        if (!rows || !rows.length) throw new Error('play introuvable');
+        var d = fromJSON(rows[0]);
+        closeSheets();
+        loadDoc(d);
+        dirty = false; saveDraft();
+        toast('Ouvert : ' + d.title, 'ok');
+      })
+      .catch(function (err) { toast('Ouverture impossible — ' + err.message, 'err'); });
+  });
+  document.getElementById('a-plays').addEventListener('click', function () { openSheet('sh-plays'); loadPlays(); });
+  document.getElementById('pl-reload').addEventListener('click', loadPlays);
+
+  document.getElementById('a-newdoc').addEventListener('click', function () {
+    closeSheets();
+    if (dirty && !confirm('Un play est en cours d\'édition. Le remplacer par un play vierge ?')) return;
+    loadDoc(makeDoc());
+    dirty = false;
+    try { localStorage.removeItem(DRAFT_KEY); } catch (e) {}
+    lastSaved = '';
+    toast('Nouveau play.', 'ok');
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // 14. DÉMARRAGE
+  // ─────────────────────────────────────────────────────────────────────
+  syncTitle();
+  metaToForm();
   drawAll();
+  renderTimeline();
   setHint();
+  offerDraft();
 })();
 </script>
 </body>
