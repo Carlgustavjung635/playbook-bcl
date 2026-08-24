@@ -9142,13 +9142,35 @@ function computeAutoScoresFromSource(fromISO, toISO) {
           // APPEL FAIT : présente = validée sur la feuille. Point. Aucune présence
           // par défaut, aucune présence déduite d'un RSVP.
           if (arrivals) { if (arrivals[p.id]) bump(type, sid, p.id, 1); return; }
-          // PAS D'APPEL (instance seulement clôturée) : AUCUNE présence par
-          // défaut. Sans feuille, personne n'a observé qui était là — seule une
-          // présence explicitement déclarée compte. Une joueuse convoquée qui
-          // n'a rien répondu n'est PAS créditée : c'est exactement ce qui faisait
-          // apparaître une indisponible de longue durée à chaque séance.
+          // PAS D'APPEL (instance seulement clôturée). La v.150 ne créditait plus
+          // ici que les RSVP 'present' explicites — et c'est ce qui a produit le
+          // symptôme v.163 : l'entraînement du 21 août 2026 a été CLÔTURÉ sans
+          // que l'appel soit fait (`arrivals` vide, aucun RSVP saisi). Toutes les
+          // joueuses venues ce soir-là ont donc été créditées ZÉRO, en silence :
+          // Joséphine, Charlotte et Hortense affichaient 1 présence pour 2 réelles.
+          //
+          // La v.150 visait juste, mais avec le mauvais discriminant. Le vrai
+          // problème qu'elle corrigeait n'était pas « pas d'appel » : c'était une
+          // joueuse INDISPONIBLE de longue durée (grossesse, blessure) créditée à
+          // chaque séance alors qu'elle n'a jamais mis les pieds au gymnase. Cette
+          // joueuse-là se reconnaît à son indisponibilité, pas à l'absence de
+          // feuille d'appel. On restaure donc la présomption favorable — clôturer
+          // une séance, c'est attester qu'elle a eu lieu avec son effectif — en la
+          // bornant au seul cas que la v.150 devait exclure.
+          //
+          // Trois portes, dans cet ordre :
+          //   1. RSVP explicite → il fait foi, dans les deux sens ;
+          //   2. indisponible à CETTE date (`_unavailEffectiveOn`, qui interroge
+          //      les périodes saisies ET le statut médical) → jamais créditée ;
+          //   3. sinon → présente. C'est le comportement d'avant la v.150.
+          // Le gisement médical est volontairement borné à aujourd'hui côté
+          // `_medicalUnavailOn` (un statut courant ne réécrit pas le passé) : sur
+          // une date passée, seules les périodes datées tranchent. C'est voulu.
           const _r = (inst.responses || {})[p.id];
-          if (_r && _r.status === 'present') bump(type, sid, p.id, 1);
+          if (_r && _r.status) { if (_r.status === 'present') bump(type, sid, p.id, 1); return; }
+          const _indispo = (typeof _unavailEffectiveOn === 'function')
+            ? _unavailEffectiveOn(p.id, date) : null;
+          if (!_indispo) bump(type, sid, p.id, 1);
         });
       }
       if (arrivals) {
@@ -52076,7 +52098,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.162';
+const APP_VERSION = '2026-08-19.163';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
