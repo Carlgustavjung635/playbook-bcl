@@ -16537,23 +16537,224 @@ function _animTokens(anim) {
   }).filter(t => t && (t.side === 'atk' || defOn));
 }
 
-// Les images-clés de la boucle : la photo de chaque temps, plus la SORTIE du
-// dernier temps (que le format ne stocke pas — elle se déduit des `to` des
-// déplacements). Sans elle, la boucle se figerait sur l'avant-dernier geste.
+// Le format d'échange désigne une joueuse tantôt par un numéro SIGNÉ (+3 / −3),
+// tantôt par un identifiant déjà résolu ('a3' / 'd3'), tantôt par un objet qui
+// porte l'un des deux. Une seule porte d'entrée pour les trois : sans elle, la
+// moitié des flèches d'un fichier valide pointait dans le vide.
+function _animKey(ref) {
+  if (ref == null) return null;
+  if (typeof ref === 'object')
+    return _animKey(ref.player != null ? ref.player : (ref.id != null ? ref.id : ref.n));
+  const s = String(ref).trim();
+  if (/^[ad]\d+$/i.test(s)) return s.toLowerCase();
+  const n = Number(s);
+  return (n && isFinite(n)) ? (n < 0 ? 'd' : 'a') + Math.abs(n) : null;
+}
+function _animPt(v) {
+  if (!v || typeof v !== 'object') return null;
+  const x = +v.x, y = +v.y;
+  return (isFinite(x) && isFinite(y)) ? { x: x, y: y } : null;
+}
+function _animBasePos(anim) {
+  const o = {};
+  _animTokens(anim).forEach(t => { if (isFinite(t.x) && isFinite(t.y)) o[t.id] = { x: t.x, y: t.y }; });
+  return o;
+}
+// Déplacements ET écrans : même géométrie (une joueuse va quelque part), seule
+// la pointe diffère. Les regrouper évite deux boucles jumelles partout.
+function _animMovesOf(s) {
+  return (Array.isArray(s && s.moves) ? s.moves : []).map(m => ({ kind: 'move', m: m }))
+    .concat((Array.isArray(s && s.screens) ? s.screens : []).map(m => ({ kind: 'screen', m: m })));
+}
+function _animPassesOf(s) {
+  return Array.isArray(s && s.passes) ? s.passes : ((s && s.pass) ? [s.pass] : []);
+}
+
+// Les images-clés de la boucle : une carte COMPLÈTE des positions à chaque
+// temps. Le format n'oblige pas `positions` à décrire tout le monde (un temps
+// peut ne citer que les jetons qui bougent) : on CUMULE donc depuis les
+// positions de départ, sinon un jeton absent d'un temps sortait de
+// l'interpolation. On ajoute la SORTIE du dernier temps (déduite des `to`),
+// sans laquelle la boucle se figerait sur l'avant-dernier geste.
 function _animFrames(anim) {
-  const steps = Array.isArray(anim.steps) ? anim.steps : [];
-  const frames = steps.map(s => s.positions || {});
-  if (steps.length) {
-    const last = steps[steps.length - 1];
-    const end = Object.assign({}, last.positions || {});
-    (last.moves || []).concat(last.screens || []).forEach(m => {
-      const n = Number(m && m.player);
-      if (!n || !m.to) return;
-      end[(n < 0 ? 'd' : 'a') + Math.abs(n)] = { x: +m.to.x, y: +m.to.y };
+  const steps = Array.isArray(anim && anim.steps) ? anim.steps : [];
+  const frames = [];
+  let cur = _animBasePos(anim);
+  steps.forEach(s => {
+    const p = Object.assign({}, cur);
+    const given = (s && (s.positions || s.pos)) || {};
+    for (const k in given) {
+      const q = _animPt(given[k]), id = _animKey(k);
+      if (q && id) p[id] = q;
+    }
+    frames.push(p);
+    const end = Object.assign({}, p);
+    _animMovesOf(s).forEach(o => {
+      const id = _animKey(o.m.player != null ? o.m.player : o.m.from);
+      const q = _animPt(o.m.to || o.m.dest || o.m.end);
+      if (id && q) end[id] = q;
     });
-    frames.push(end);
-  }
+    cur = end;
+  });
+  frames.push(cur);
   return frames;
+}
+
+// Porteuse du ballon temps par temps : `ball_start`, puis chaque passe change
+// de main. Le ballon est ainsi TRANSPORTÉ (il suit la porteuse) et VOYAGE
+// (pendant la passe, l'interpolation le fait glisser d'une joueuse à l'autre)
+// sans qu'aucune trajectoire n'ait besoin d'être stockée.
+function _animHolders(anim, frames) {
+  const steps = Array.isArray(anim && anim.steps) ? anim.steps : [];
+  const p0 = frames[0] || {};
+  let h = _animKey(anim.ball_start || anim.ballStart);
+  if (!h || !p0[h]) h = Object.keys(p0).filter(k => k.charAt(0) === 'a').sort()[0] || null;
+  const out = [];
+  steps.forEach(s => {
+    out.push(h);
+    _animPassesOf(s).forEach(p => {
+      const t = _animKey(p && (p.to != null ? p.to : p.receiver));
+      if (t) h = t;
+    });
+  });
+  out.push(h);
+  return out;
+}
+
+// Le cercle visé par un tir. En terrain complet, celui du côté où se trouve la
+// tireuse : viser l'autre panier dessinerait une flèche qui traverse tout le
+// terrain.
+function _animHoop(full, from) {
+  if (!full) return { x: 87, y: 27.75 };
+  return (from && from.x > 152) ? { x: 276.25, y: 87 } : { x: 27.75, y: 87 };
+}
+
+const _animF = n => Math.round(n * 100) / 100;
+
+// Rogne l'extrémité i vers son voisin : le trait part du BORD du jeton, jamais
+// de son centre (sinon la flèche sort de sous le numéro et la vignette est
+// illisible à 120 px de large).
+function _animShrink(p, i, pad) {
+  if (pad <= 0 || p.length < 2) return;
+  const j = i === 0 ? 1 : i - 1;
+  const dx = p[j].x - p[i].x, dy = p[j].y - p[i].y;
+  const L = Math.sqrt(dx * dx + dy * dy);
+  if (L < 0.01) return;
+  if (L < pad + 0.6) pad = Math.max(0, L - 0.6);
+  p[i] = { x: p[i].x + dx / L * pad, y: p[i].y + dy / L * pad };
+}
+
+// Même tracé que l'éditeur : segment droit sans waypoint, Catmull-Rom convertie
+// en cubiques dès qu'il y en a — la courbe passe EXACTEMENT par les points
+// posés par le coach. Une quadratique passerait à côté et la vignette ne
+// montrerait plus le geste dessiné.
+function _animPath(p) {
+  const f = _animF;
+  if (p.length < 2) return '';
+  if (p.length === 2) return `M ${f(p[0].x)} ${f(p[0].y)} L ${f(p[1].x)} ${f(p[1].y)}`;
+  let d = `M ${f(p[0].x)} ${f(p[0].y)}`;
+  for (let i = 0; i < p.length - 1; i++) {
+    const a = p[i - 1] || p[i], b = p[i], c = p[i + 1], e = p[i + 2] || p[i + 1];
+    d += ` C ${f(b.x + (c.x - a.x) / 6)} ${f(b.y + (c.y - a.y) / 6)}`
+      + ` ${f(c.x - (e.x - b.x) / 6)} ${f(c.y - (e.y - b.y) / 6)} ${f(c.x)} ${f(c.y)}`;
+  }
+  return d;
+}
+
+// Pointes de flèche en `userSpaceOnUse` : elles suivent la taille des jetons,
+// comme dans l'éditeur. Les ids sont préfixés par un uid propre à la vignette —
+// deux aperçus sur la même fiche partageraient sinon leurs markers, et le
+// second volerait la couleur du premier.
+function _animMarkers(uid, R, col) {
+  const f = _animF;
+  const tri = (id, len, wid, fill) =>
+    `<marker id="${uid}${id}" markerUnits="userSpaceOnUse" orient="auto" overflow="visible"`
+    + ` markerWidth="${f(len)}" markerHeight="${f(wid * 2)}" viewBox="0 0 ${f(len)} ${f(wid * 2)}"`
+    + ` refX="0" refY="${f(wid)}"><path d="M 0 0 L ${f(len)} ${f(wid)} L 0 ${f(wid * 2)} Z" fill="${fill}"/></marker>`;
+  // Écran = la flèche de déplacement PLUS le mur à l'arrivée, dans un seul
+  // marker (SVG n'accepte qu'un `marker-end`, et les deux formes doivent
+  // tourner ensemble).
+  const scr = (id, fill) => {
+    const hl = R * 0.8, hw = R * 0.4, half = R * 0.55, th = R * 0.16;
+    const H = Math.max(hw, half) * 2, W = hl + th, cy = H / 2;
+    return `<marker id="${uid}${id}" markerUnits="userSpaceOnUse" orient="auto" overflow="visible"`
+      + ` markerWidth="${f(W)}" markerHeight="${f(H)}" viewBox="0 0 ${f(W)} ${f(H)}" refX="0" refY="${f(cy)}">`
+      + `<path d="M 0 ${f(cy - hw)} L ${f(hl)} ${f(cy)} L 0 ${f(cy + hw)} Z" fill="${fill}"/>`
+      + `<rect x="${f(hl)}" y="${f(cy - half)}" width="${f(th)}" height="${f(half * 2)}" rx="${f(th / 2)}" fill="${fill}"/>`
+      + `</marker>`;
+  };
+  return '<defs>'
+    + tri('mv', R * 0.8, R * 0.4, col) + tri('mvd', R * 0.8, R * 0.4, '#8A93A3')
+    + tri('pass', R * 0.72, R * 0.34, col) + tri('passd', R * 0.72, R * 0.34, '#8A93A3')
+    + tri('shot', R * 0.72, R * 0.34, col)
+    + scr('scr', col) + scr('scrd', '#8A93A3')
+    + '</defs>';
+}
+
+// TOUT ce qu'un temps porte : déplacements, écrans, passes, tir, waypoints.
+// C'est le manque de cette fonction qui rendait l'aperçu inutile — on ne
+// voyait que des jetons posés, jamais le play.
+function _animArrowsSvg(anim, s, pos, R, col, full) {
+  const f = _animF;
+  let out = '';
+  const draw = (pts, kind, side, via) => {
+    const p = pts.map(q => ({ x: q.x, y: q.y }));
+    _animShrink(p, 0, R * 1.05);
+    _animShrink(p, p.length - 1, kind === 'pass' ? R * 1.15 : R * 0.1);
+    const stroke = side === 'def' ? '#8A93A3' : col;
+    const mk = kind === 'screen' ? (side === 'def' ? 'scrd' : 'scr')
+      : kind === 'pass' ? (side === 'def' ? 'passd' : 'pass')
+        : (side === 'def' ? 'mvd' : 'mv');
+    const dash = kind === 'pass' ? ` stroke-dasharray="${f(R * 0.55)} ${f(R * 0.45)}"` : '';
+    out += `<path d="${_animPath(p)}" fill="none" stroke="${stroke}" stroke-opacity="0.92"`
+      + ` stroke-width="${f(R * 0.26)}" stroke-linecap="round" stroke-linejoin="round"${dash}`
+      + ` marker-end="url(#${_ANIM_MK}${mk})"/>`;
+    // Les points posés par le coach : discrets, mais ils disent que la courbe
+    // est VOULUE et pas un artefact de rendu.
+    (via || []).forEach(v => {
+      out += `<circle cx="${f(v.x)}" cy="${f(v.y)}" r="${f(R * 0.2)}" fill="${stroke}" fill-opacity="0.7"/>`;
+    });
+  };
+  _animMovesOf(s).forEach(o => {
+    const id = _animKey(o.m.player != null ? o.m.player : o.m.from);
+    const src = id && pos[id], dst = _animPt(o.m.to || o.m.dest || o.m.end);
+    if (!src || !dst) return;
+    const via = (Array.isArray(o.m.via) ? o.m.via : []).map(_animPt).filter(Boolean);
+    draw([src].concat(via, [dst]), o.kind, id.charAt(0) === 'd' ? 'def' : 'atk', via);
+  });
+  _animPassesOf(s).forEach(pa => {
+    const from = _animKey(pa && (pa.from != null ? pa.from : pa.passer));
+    const src = from && pos[from];
+    if (!src) return;
+    const toId = _animKey(pa.to != null ? pa.to : pa.receiver);
+    const dst = (toId && pos[toId]) || _animPt(pa.to);
+    if (!dst) return;
+    const via = (Array.isArray(pa.via) ? pa.via : []).map(_animPt).filter(Boolean);
+    draw([src].concat(via, [dst]), 'pass', from.charAt(0) === 'd' ? 'def' : 'atk', via);
+  });
+  const sh = _animKey(s && s.shot);
+  const shp = sh && pos[sh];
+  if (shp) {
+    const h = _animHoop(full, shp);
+    const p = [{ x: shp.x, y: shp.y }, { x: h.x, y: h.y }];
+    _animShrink(p, 0, R * 1.05);
+    _animShrink(p, 1, R * 0.6);
+    out += `<path d="${_animPath(p)}" fill="none" stroke="${col}" stroke-opacity="0.9"`
+      + ` stroke-width="${f(R * 0.22)}" stroke-linecap="round"`
+      + ` stroke-dasharray="${f(R * 0.16)} ${f(R * 0.42)}" marker-end="url(#${_ANIM_MK}shot)"/>`;
+  }
+  return out;
+}
+
+// Le ballon : dessiné À CÔTÉ du jeton porteur (décalage figé dans le groupe
+// interne), pour que la boucle n'ait qu'à déplacer le groupe extérieur sur la
+// position interpolée de la porteuse.
+function _animBallSvg(R) {
+  const f = _animF, r = R * 0.4;
+  return `<g data-ball transform="translate(0,0)"><g transform="translate(${f(R * 0.95)},${f(-R * 0.5)})">`
+    + `<circle r="${f(r)}" fill="#E8833A" stroke="#0B1016" stroke-width="${f(r * 0.16)}"/>`
+    + `<path d="M ${f(-r)} 0 L ${f(r)} 0 M 0 ${f(-r)} L 0 ${f(r)}" stroke="#0B1016"`
+    + ` stroke-width="${f(r * 0.14)}" fill="none" stroke-opacity="0.8"/></g></g>`;
 }
 
 function _animBranchCount(anim) {
@@ -16571,18 +16772,31 @@ function _animThumbSvg(anim) {
   const vb = full ? '0 0 304 174' : '0 0 174 164';
   const R = (full ? 304 : 174) / 19 * (+anim.players_size === 0.75 || +anim.players_size === 1.25 ? +anim.players_size : 1);
   const col = /^#[0-9a-f]{3,8}$/i.test(anim.color || '') ? anim.color : '#22D3EE';
-  const p0 = (Array.isArray(anim.steps) && anim.steps[0] && anim.steps[0].positions) || {};
+  // Préfixe de markers propre à CETTE vignette (cf. _animMarkers).
+  _ANIM_MK = 'am' + (++_ANIM_UID) + '-';
+  const steps = Array.isArray(anim.steps) ? anim.steps : [];
+  const frames = _animFrames(anim);
+  const holders = _animHolders(anim, frames);
+  const p0 = frames[0] || {};
   const letters = anim.player_label_style === 'letters';
   const toks = _animTokens(anim).map(t => {
     const q = p0[t.id] || { x: t.x, y: t.y };
-    const lab = t.side === 'def' ? 'X' + t.n : (letters ? 'ABCDE'[t.n - 1] : String(t.n));
+    const lab = t.side === 'def' ? 'X' + t.n : (letters ? ('ABCDE'[t.n - 1] || t.n) : String(t.n));
     return `<g data-tok="${t.id}" transform="translate(${(+q.x).toFixed(2)},${(+q.y).toFixed(2)})">
       <circle r="${R.toFixed(2)}" fill="${t.side === 'def' ? '#8A93A3' : esc(col)}" fill-opacity="${t.side === 'def' ? 0.55 : 0.92}"/>
       <text y="${(R * 0.36).toFixed(2)}" text-anchor="middle" font-size="${(R * 1.05).toFixed(2)}"
         font-family="'JetBrains Mono',monospace" font-weight="700" fill="#0B1016">${lab}</text></g>`;
   }).join('');
+  // Les gestes de TOUS les temps sont dessinés d'avance, un groupe par temps,
+  // et seul celui du temps courant est visible : la boucle n'a plus qu'à
+  // basculer un `display`, jamais à reconstruire du SVG dans un rAF.
+  const arrows = steps.map((s, i) =>
+    `<g data-arw-step="${i}"${i ? ' style="display:none"' : ''}>${_animArrowsSvg(anim, s, frames[i] || p0, R, col, full)}</g>`
+  ).join('');
+  const b0 = holders[0] ? p0[holders[0]] : null;
+  const ball = b0 ? _animBallSvg(R).replace('translate(0,0)', `translate(${_animF(b0.x)},${_animF(b0.y)})`) : '';
   return `<svg viewBox="${vb}" style="display:block;width:100%;height:auto;color:var(--ink-3)"
-    preserveAspectRatio="xMidYMid meet" aria-hidden="true">${_animCourt(full)}${toks}</svg>`;
+    preserveAspectRatio="xMidYMid meet" aria-hidden="true">${_animMarkers(_ANIM_MK, R, col)}${_animCourt(full)}${arrows}${toks}${ball}</svg>`;
 }
 
 // Auto-play PARESSEUX : la vignette ne s'anime que si elle est réellement à
@@ -16601,17 +16815,40 @@ function _animPreviewsMount() {
   window._animPrevObs = obs;
 }
 
+// Préfixe courant des markers d'une vignette. Déclaré ici, utilisé plus haut :
+// tout se joue à l'exécution (le script entier est évalué avant le premier
+// rendu), et le garder près de son compteur évite qu'un futur ajout ne le
+// duplique.
+let _ANIM_MK = 'am-', _ANIM_UID = 0;
+
+function _animPrevPlace(el, pos, holder, stepIdx) {
+  el.querySelectorAll('[data-tok]').forEach(g => {
+    const q = pos[g.getAttribute('data-tok')];
+    if (q) g.setAttribute('transform', `translate(${_animF(q.x)},${_animF(q.y)})`);
+  });
+  const ball = el.querySelector('[data-ball]');
+  const bp = holder ? pos[holder] : null;
+  if (ball && bp) ball.setAttribute('transform', `translate(${_animF(bp.x)},${_animF(bp.y)})`);
+  el.querySelectorAll('[data-arw-step]').forEach(g => {
+    g.style.display = (+g.getAttribute('data-arw-step') === stepIdx) ? '' : 'none';
+  });
+}
+
 function _animPrevStart(el) {
   if (el._raf) return;
   const play = state.plays.find(x => x.id === el.getAttribute('data-play-id'));
   const anim = play && (Array.isArray(play.animations) ? play.animations : []).find(a => a && a.id === el.getAttribute('data-anim-id'));
   if (!anim) return;
   const frames = el._frames || (el._frames = _animFrames(anim));
+  const holders = el._holders || (el._holders = _animHolders(anim, frames));
   if (frames.length < 2) return;
   const toks = {};
   el.querySelectorAll('[data-tok]').forEach(g => { toks[g.getAttribute('data-tok')] = g; });
+  const ball = el.querySelector('[data-ball]');
+  const arws = {};
+  el.querySelectorAll('[data-arw-step]').forEach(g => { arws[+g.getAttribute('data-arw-step')] = g; });
   const DUR = 900, total = (frames.length - 1) * DUR;
-  let t0 = 0;
+  let t0 = 0, shown = -1;
   const tick = now => {
     if (!t0) t0 = now;
     const u = ((now - t0) % total) / DUR;
@@ -16624,6 +16861,20 @@ function _animPrevStart(el) {
       toks[id].setAttribute('transform',
         `translate(${(a.x + (b.x - a.x) * e).toFixed(2)},${(a.y + (b.y - a.y) * e).toFixed(2)})`);
     }
+    // Le ballon glisse de la porteuse du temps k à celle du temps k+1 : quand
+    // les deux diffèrent, la passe se VOIT, sans trajectoire stockée.
+    if (ball) {
+      const ha = holders[k], hb = holders[k + 1] || ha;
+      const a = ha && (A[ha] || B[ha]), b = (hb && (B[hb] || A[hb])) || a;
+      if (a && b) ball.setAttribute('transform',
+        `translate(${(a.x + (b.x - a.x) * e).toFixed(2)},${(a.y + (b.y - a.y) * e).toFixed(2)})`);
+    }
+    // Un seul `display` bascule par changement de temps : le rAF ne touche
+    // jamais au DOM des flèches, seulement à leur visibilité.
+    if (k !== shown) {
+      for (const i in arws) arws[i].style.display = (+i === k) ? '' : 'none';
+      shown = k;
+    }
     el._raf = requestAnimationFrame(tick);
   };
   el._raf = requestAnimationFrame(tick);
@@ -16634,10 +16885,7 @@ function _animPrevStop(el) {
   el._raf = 0;
   const f = el._frames && el._frames[0];
   if (!f) return;
-  el.querySelectorAll('[data-tok]').forEach(g => {
-    const q = f[g.getAttribute('data-tok')];
-    if (q) g.setAttribute('transform', `translate(${(+q.x).toFixed(2)},${(+q.y).toFixed(2)})`);
-  });
+  _animPrevPlace(el, f, (el._holders || [])[0], 0);
 }
 
 // Suppression d'une animation depuis la fiche play — read-modify-write sur
@@ -52510,7 +52758,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.183';
+const APP_VERSION = '2026-08-19.184';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
