@@ -1249,14 +1249,19 @@
     var t = tokById(a.from);
     var cls = 'arw ' + (t && t.side === 'atk' ? 'atk' : 'def') + ' ' + a.kind;
     var wp = '', v = a.via || [], i;
+    // Poignee d'extremite : SEULEMENT la ou la cible est un point LIBRE.
+    // Une passe relie deux joueuses : ses deux bouts sont deja tenus par les
+    // jetons, il n'y a rien a repositionner (on la refait en mode Passe :
+    // joueuse A -> joueuse B). Le deplacement et l'ecran, eux, visent une
+    // PLACE sur le terrain — c'est cette place que la poignee regle.
+    var tip = a.kind === 'pass' ? ''
+      : '<circle class="tiphit" data-arw="' + a.id + '" cx="0" cy="0" r="' + f(PR * 0.85) + '"/>'
+      + '<circle class="tip" data-arw="' + a.id + '" cx="0" cy="0" r="' + f(PR * 0.32) + '"/>';
     for (i = 0; i < v.length; i++)
       wp += '<circle class="wphit" data-arw="' + a.id + '" data-i="' + i + '" cx="' + f(v[i].x) + '" cy="' + f(v[i].y) + '" r="' + f(PR * 0.85) + '"/>'
           + '<circle class="wp" data-arw="' + a.id + '" data-i="' + i + '" cx="' + f(v[i].x) + '" cy="' + f(v[i].y) + '" r="' + f(PR * 0.3) + '"/>';
     return '<g class="' + cls + '" data-id="' + a.id + '">'
-      + '<path class="hit" d=""/><path class="body" d=""/>' + wp
-      + '<circle class="tiphit" data-arw="' + a.id + '" cx="0" cy="0" r="' + f(PR * 0.85) + '"/>'
-      + '<circle class="tip" data-arw="' + a.id + '" cx="0" cy="0" r="' + f(PR * 0.32) + '"/>'
-      + '</g>';
+      + '<path class="hit" d=""/><path class="body" d=""/>' + wp + tip + '</g>';
   }
 
   // Le tir n'est pas une flèche du modèle mais un drapeau sur le temps : on le
@@ -1486,23 +1491,9 @@
   // est un marker posé sur le dernier point du tracé, donc son angle est la
   // tangente — elle pivote toute seule vers la nouvelle direction, et le T de
   // l'écran, qui est dans le même marker, se réoriente avec elle.
-  // Une passe (ou un écran) qui passe à moins de TIP_SNAP d'une joueuse se
-  // RACCROCHE à elle : c'est ça, rebrancher une passe. Un déplacement, lui,
-  // garde un point libre — sa cible est une place sur le terrain, pas une
-  // coéquipière.
-  var TIP_SNAP = 5;
-
-  function snapTok(p, exceptId) {
-    var best = null, bd = TIP_SNAP, id, t, d;
-    for (id in TOKMAP) {
-      if (id === exceptId) continue;
-      t = tokById(id);
-      if (!t || !visible(t)) continue;
-      d = Math.sqrt((t.x - p.x) * (t.x - p.x) + (t.y - p.y) * (t.y - p.y));
-      if (d < bd) { bd = d; best = t; }
-    }
-    return best;
-  }
+  // Elle ne vit que sur un déplacement ou un écran, dont la cible est un point
+  // LIBRE : la déplacer ne débranche donc jamais rien. Pas de snap sur une
+  // joueuse — accrocher un déplacement à un jeton en ferait une poursuite.
 
   function attachTipPointer(el) {
     var aid = el.getAttribute('data-arw');
@@ -1522,8 +1513,7 @@
       set: function (p) {
         var a = findArw(aid);
         if (!a) return;
-        var t = a.kind === 'move' ? null : snapTok(p, a.from);
-        a.to = t ? t.id : { x: p.x, y: p.y };
+        a.to = { x: p.x, y: p.y };
         updateArrow(aid);
       }
     });
