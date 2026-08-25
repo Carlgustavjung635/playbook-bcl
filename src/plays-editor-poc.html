@@ -4432,6 +4432,12 @@
   var playId = Q.get('play') || null;      // le play auquel on est rattaché
   var wantAnim = Q.get('anim') || null;    // l'animation à ouvrir, s'il y en a
   var wantView = Q.get('mode') === 'view'; // ouvrir directement en lecture
+  // JALON 4.5 — mode « exo d'un plan d'entraînement ». Même éditeur, autre
+  // hôte : l'animation vit alors dans training_plans.plan.exercises[].animation
+  // (jsonb déjà existant, aucune migration). Un exo porte AU PLUS une
+  // animation : il n'y a donc pas d'`anim=` à viser dans ce mode.
+  var planId = Q.get('plan') || null;      // "<convocId>::<date>"
+  var exoId  = Q.get('exo') || null;       // l'exercice du plan
   var playTitle = '';
 
   function sbFetch(path, opts) {
@@ -4456,11 +4462,24 @@
   function sbMsg(e) {
     if (/animations/.test(e.message) && /column|colonne/i.test(e.message))
       return 'colonne plays.animations absente — applique la migration 20260823_002.';
+    if (planId && /HTTP 40[04]/.test(e.message)) return 'plan d\'entraînement introuvable — enregistre le plan avant d\'y ajouter une animation.';
     if (/HTTP 40[04]/.test(e.message)) return 'play introuvable ou colonne animations absente (migration 20260823_002).';
     return e.message;
   }
 
   function fetchAnims() {
+    if (planId && exoId) {
+      return sbFetch('training_plans?id=eq.' + encodeURIComponent(planId) + '&select=id,plan&limit=1')
+        .then(function (rows) {
+          if (!rows || !rows.length) throw new Error('plan d\'entraînement introuvable');
+          var p = rows[0].plan || {}, xs = Array.isArray(p.exercises) ? p.exercises : [], i;
+          for (i = 0; i < xs.length; i++) if (xs[i] && String(xs[i].id) === String(exoId)) {
+            playTitle = xs[i].title || 'exercice';
+            return xs[i].animation ? [xs[i].animation] : [];
+          }
+          throw new Error('exercice introuvable dans ce plan');
+        });
+    }
     if (!playId) return Promise.resolve([]);
     return sbFetch('plays?id=eq.' + encodeURIComponent(playId) + '&select=id,title,animations&limit=1')
       .then(function (rows) {
@@ -4471,6 +4490,26 @@
   }
 
   function writeAnims(list) {
+    // MODE EXO — read-modify-write sur le blob ENTIER. `plan` porte tout le
+    // travail du coach (exos, groupes, notes, alternatives) : un PATCH aveugle
+    // l'écraserait. On relit, on ne remplace que `exercises[i].animation`, et
+    // on bump `updated_at` pour que le realtime des autres appareils morde.
+    if (planId && exoId) {
+      return sbFetch('training_plans?id=eq.' + encodeURIComponent(planId) + '&select=id,plan&limit=1')
+        .then(function (rows) {
+          if (!rows || !rows.length) throw new Error('plan d\'entraînement introuvable');
+          var p = rows[0].plan || {}, xs = Array.isArray(p.exercises) ? p.exercises : [], i, hit = -1;
+          for (i = 0; i < xs.length; i++) if (xs[i] && String(xs[i].id) === String(exoId)) hit = i;
+          if (hit < 0) throw new Error('exercice introuvable dans ce plan');
+          // `list` vient du même merge que pour un play : la dernière entrée est
+          // toujours le document courant (remplacé sur place ou poussé au bout).
+          var last = (list && list.length) ? list[list.length - 1] : null;
+          if (last) xs[hit].animation = last; else delete xs[hit].animation;
+          p.exercises = xs;
+          return sbFetch('training_plans?id=eq.' + encodeURIComponent(planId),
+            { method: 'PATCH', body: { plan: p, updated_at: new Date().toISOString() }, prefer: 'return=minimal' });
+        });
+    }
     return sbFetch('plays?id=eq.' + encodeURIComponent(playId),
       { method: 'PATCH', body: { animations: list }, prefer: 'return=minimal' });
   }
@@ -4588,7 +4627,7 @@
   // ── Publier ──────────────────────────────────────────────────────────
   document.getElementById('a-publish').addEventListener('click', function () {
     closeSheets();
-    if (!playId) { toast('Bac à sable : ouvre l\'éditeur depuis un play pour publier.', 'err'); return; }
+    if (!playId && !planId) { toast('Bac à sable : ouvre l\'éditeur depuis un play ou un exo pour publier.', 'err'); return; }
     if (!doc.title.trim()) { metaToForm(); openSheet('sh-meta'); toast('Un titre est obligatoire pour publier.', 'err'); F.title.focus(); return; }
     if (!doc.id) doc.id = (slug(doc.title) || 'anim') + '-' + Math.random().toString(36).slice(2, 7);
     var o = toJSON();
@@ -4611,8 +4650,8 @@
   // ── Supprimer une animation du play ──────────────────────────────────
   document.getElementById('a-delete').addEventListener('click', function () {
     closeSheets();
-    if (!playId || !doc.id) { toast('Cette animation n\'a jamais été publiée.', 'err'); return; }
-    if (!confirm('Retirer « ' + (doc.title || doc.id) + ' » des animations de ce play ?')) return;
+    if ((!playId && !planId) || !doc.id) { toast('Cette animation n\'a jamais été publiée.', 'err'); return; }
+    if (!confirm('Retirer « ' + (doc.title || doc.id) + ' » de ' + (planId ? 'cet exercice' : 'ce play') + ' ?')) return;
     var gone = doc.id;
     fetchAnims()
       .then(function (list) {
@@ -4625,7 +4664,7 @@
   // ── Liste des animations du play ─────────────────────────────────────
   var plist = document.getElementById('plays-list');
   function loadPlays() {
-    if (!playId) {
+    if (!playId && !planId) {
       plist.innerHTML = '<div class="empty">Bac à sable — cet éditeur n\'est rattaché à aucun play.<br>'
         + 'Ouvre-le depuis la fiche d\'un play pour publier une animation.</div>';
       return;
@@ -5310,21 +5349,23 @@
   renderTimeline();
   setHint();
 
-  if (!playId) {
+  if (!playId && !planId) {
     setContext('bac à sable');
     offerDraft();
   } else {
-    setContext('chargement du play…');
+    setContext(planId ? 'chargement de l\'exercice…' : 'chargement du play…');
     // mode=view : on masque l'éditeur AVANT le fetch. Sinon la joueuse voit la
     // barre d'outils clignoter le temps du chargement — et surtout elle peut
     // la toucher.
     if (wantView) document.body.classList.add('viewer');
     fetchAnims()
       .then(function (list) {
-        setContext(playTitle ? '↳ ' + playTitle : '↳ play');
-        if (!wantAnim) { offerDraft(); return; }
-        var found = null, i;
-        for (i = 0; i < list.length; i++) if (list[i] && list[i].id === wantAnim) found = list[i];
+        setContext(playTitle ? '↳ ' + playTitle : (planId ? '↳ exercice' : '↳ play'));
+        // Mode exo : pas d'`anim=` a viser — c'est l'unique animation, ou rien.
+        if (planId) { if (!list.length) { offerDraft(); return; } }
+        else if (!wantAnim) { offerDraft(); return; }
+        var found = planId ? list[0] : null, i;
+        for (i = 0; !found && i < list.length; i++) if (list[i] && list[i].id === wantAnim) found = list[i];
         if (!found) { toast('Animation introuvable — on repart d\'une page blanche.', 'err'); offerDraft(); return; }
         loadDoc(fromJSON(found));
         dirty = false;
@@ -5332,8 +5373,8 @@
         if (wantView) setTimeout(function () { document.body.classList.remove('viewer'); enterViewer('url'); }, 120);
       })
       .catch(function (e) {
-        setContext('play injoignable');
-        toast('Play injoignable — ' + sbMsg(e), 'err');
+        setContext(planId ? 'exercice injoignable' : 'play injoignable');
+        toast((planId ? 'Exercice injoignable — ' : 'Play injoignable — ') + sbMsg(e), 'err');
         offerDraft();
       });
   }

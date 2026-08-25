@@ -16303,6 +16303,33 @@ function openPbEditorV2(playId, animId, mode) {
   if (playId) q.push('play=' + encodeURIComponent(playId));
   if (animId) q.push('anim=' + encodeURIComponent(animId));
   if (mode) q.push('mode=' + encodeURIComponent(mode));
+  _pbEditorThemeParams(q);
+  location.href = '/src/plays-editor-poc.html' + (q.length ? '?' + q.join('&') : '');
+}
+// JALON 4.5 — même éditeur, autre hôte : un EXO d'un plan d'entraînement.
+// L'animation vit dans training_plans.plan.exercises[].animation (jsonb libre,
+// aucune migration). On pousse le plan local AVANT de partir : le POC fait un
+// read-modify-write SERVEUR, il ne verra jamais ce qui dort encore en local.
+function openExoAnimEditor(planId, exoId, mode) {
+  const q = ['plan=' + encodeURIComponent(planId), 'exo=' + encodeURIComponent(exoId)];
+  if (mode) q.push('mode=' + encodeURIComponent(mode));
+  _pbEditorThemeParams(q);
+  const go = () => { location.href = '/src/plays-editor-poc.html?' + q.join('&'); };
+  // La ligne du plan peut n'avoir JAMAIS ete poussee (plan tout juste cree) :
+  // partir avant la fin du flush ferait repondre « plan introuvable » au POC.
+  // On attend donc le flush — et on part quand meme s'il ne rend pas la main.
+  if (!_tcnIsCoach()) return go();
+  let done = false; const once = () => { if (!done) { done = true; go(); } };
+  setTimeout(once, 2500);
+  try {
+    persist();
+    const r = (window.PbSync && PbSync.flushNow) ? PbSync.flushNow(state) : null;
+    if (r && typeof r.then === 'function') r.then(once, once); else setTimeout(once, 700);
+  } catch (e) { once(); }
+}
+// Tokens de thème résolus, passés au POC (page à part : elle n'hérite d'aucune
+// variable CSS de l'app). Extrait de openPbEditorV2 pour être partagé.
+function _pbEditorThemeParams(q) {
   // THÈME (v.186) — le POC est une PAGE à part : ses variables CSS ne peuvent
   // pas hériter de celles de l'app. On lui passe donc les tokens RÉSOLUS du
   // thème actif (fond, panneau, texte, bordure, accent) + le schéma clair/sombre.
@@ -16329,7 +16356,6 @@ function openPbEditorV2(playId, animId, mode) {
       q.push('scheme=' + (L > 0.5 ? 'light' : 'dark'));
     }
   } catch (_) {}
-  location.href = '/src/plays-editor-poc.html' + (q.length ? '?' + q.join('&') : '');
 }
 function _pbEditorV2Row() {
   const on = pbEditorV2Enabled();
@@ -16887,10 +16913,18 @@ function _animPrevPlace(el, pos, holder, stepIdx) {
   });
 }
 
+// Une vignette peut vivre sur DEUX hôtes : un play (data-play-id) ou un exo de
+// plan d'entraînement (data-plan-id + data-exo-id). Une seule porte de
+// résolution — sinon la boucle rAF marcherait ici et pas là.
+function _animResolveEl(el) {
+  const exo = el.getAttribute('data-exo-id');
+  if (exo) return _exoAnimGet(el.getAttribute('data-plan-id'), exo);
+  const play = state.plays.find(x => x.id === el.getAttribute('data-play-id'));
+  return (play && (Array.isArray(play.animations) ? play.animations : []).find(a => a && a.id === el.getAttribute('data-anim-id'))) || null;
+}
 function _animPrevStart(el) {
   if (el._raf) return;
-  const play = state.plays.find(x => x.id === el.getAttribute('data-play-id'));
-  const anim = play && (Array.isArray(play.animations) ? play.animations : []).find(a => a && a.id === el.getAttribute('data-anim-id'));
+  const anim = _animResolveEl(el);
   if (!anim) return;
   const frames = el._frames || (el._frames = _animFrames(anim));
   const holders = el._holders || (el._holders = _animHolders(anim, frames));
@@ -40538,6 +40572,86 @@ function _altValidateCustom() {
   closeModal(); state._altBuf = null; setTimeout(() => renderTrainingPlanEditor(), 50);
 }
 
+// ============================================================
+// 🎬 ANIMATION D'UN EXO DE PLAN (jalon 4.5)
+// ------------------------------------------------------------
+// Aucune table, aucune migration : l'animation est un MÉDIA de l'exo, rangé
+// dans training_plans.plan.exercises[].animation — exactement le raisonnement
+// de plays.animations. Même schéma d'échange, donc le viewer joueuse, la
+// vignette et l'éditeur marchent sans une ligne de conversion.
+// Rétrocompat : un exo sans `animation` se rend comme avant — tout part de
+// _exoAnimGet, qui renvoie null et fait disparaître le bloc.
+function _exoAnimSplit(planId) { const s = String(planId || ''), i = s.indexOf('::'); return i < 0 ? null : { convocId: s.slice(0, i), date: s.slice(i + 2) }; }
+// Le coach édite une COPIE VIVANTE (c.trainingPlan) que trainingPlans ne reçoit
+// qu'au persist : lire getTrainingPlan d'abord ferait clignoter la vignette
+// d'un exo tout juste ajouté. On préfère donc la copie en cours d'édition.
+function _exoAnimPlan(planId) {
+  const k = _exoAnimSplit(planId); if (!k) return null;
+  const et = state._editingTraining;
+  if (et && et.convocId === k.convocId && et.dateStr === k.date) {
+    const c = (state.convocations || []).find(x => x && x.id === k.convocId);
+    if (c && c.trainingPlan) return c.trainingPlan;
+  }
+  try { return getTrainingPlan(k.convocId, k.date); } catch (e) { return null; }
+}
+function _exoAnimExo(planId, exoId) {
+  const p = _exoAnimPlan(planId);
+  return (p && (p.exercises || []).find(e => e && String(e.id) === String(exoId))) || null;
+}
+function _exoAnimGet(planId, exoId) {
+  const ex = _exoAnimExo(planId, exoId);
+  const a = ex && ex.animation;
+  return (a && Array.isArray(a.steps) && a.steps.length) ? a : null;
+}
+// Le montage des vignettes est global et paresseux (IntersectionObserver) : on
+// le redemande une fois le HTML posé, débouncé — plans et modales se rendent
+// en rafale, et un observer par exo chaufferait l'iPhone pour rien.
+function _exoAnimMountSoon() {
+  clearTimeout(window._exoAnimMt);
+  window._exoAnimMt = setTimeout(() => { try { _animPreviewsMount(); } catch (e) {} }, 90);
+}
+function _exoAnimBlock(planId, exoId) {
+  const a = _exoAnimGet(planId, exoId); if (!a) return '';
+  const n = Array.isArray(a.steps) ? a.steps.length : 0;
+  const nb = (typeof _animBranchCount === 'function') ? _animBranchCount(a) : 0;
+  _exoAnimMountSoon();
+  return `
+    <div class="anim-thumb" data-anim-id="${esc(a.id || 'x')}" data-plan-id="${esc(planId)}" data-exo-id="${esc(exoId)}"
+         style="position:relative;padding:6px 6px 0;border:1px solid var(--border);border-radius:10px;overflow:hidden;cursor:pointer;margin-top:8px"
+         onclick="event.stopPropagation();openExoAnimEditor('${esc(planId)}','${esc(exoId)}','view')" title="Voir l'animation">
+      ${_animThumbSvg(a)}
+      <span style="position:absolute;left:12px;bottom:10px;background:rgba(0,0,0,0.62);color:#fff;font-family:'JetBrains Mono';font-size:10px;padding:3px 8px;border-radius:999px">▶ ${n} temps${nb ? ` · ${nb} branche${nb > 1 ? 's' : ''}` : ''}</span>
+    </div>`;
+}
+// Bloc coach = vignette + commandes. Jamais rendu côté joueuse.
+function _exoAnimCoachBlock(planId, exoId) {
+  if (!planId || !exoId || !_tcnIsCoach()) return '';
+  const has = !!_exoAnimGet(planId, exoId);
+  return `
+    <div style="padding:0 12px 10px" onclick="event.stopPropagation()">
+      ${_exoAnimBlock(planId, exoId)}
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <button class="btn btn-secondary" style="flex:1;font-size:10px" onclick="openExoAnimEditor('${esc(planId)}','${esc(exoId)}')">${has ? '🎬 ✎ Voir / éditer l&#39;animation' : '🎬 Ajouter une animation'}</button>
+        ${has ? `<button class="btn btn-danger" style="font-size:10px" onclick="deleteExoAnimation('${esc(planId)}','${esc(exoId)}')" title="Retirer l&#39;animation">🗑</button>` : ''}
+      </div>
+    </div>`;
+}
+// Suppression côté app (et non dans le POC) : trainingPlans EST une entité
+// PbSync qui pousse `plan`. Retirer la clé en local puis flusher suffit — et
+// évite d'ouvrir l'éditeur juste pour supprimer.
+function deleteExoAnimation(planId, exoId) {
+  if (!_tcnIsCoach()) return;
+  const k = _exoAnimSplit(planId); if (!k) return;
+  const ex = _exoAnimExo(planId, exoId); if (!ex || !ex.animation) return;
+  if (!confirm('Retirer l\'animation de « ' + (ex.title || 'cet exercice') + ' » ?')) return;
+  delete ex.animation;
+  const tp = (state.trainingPlans || []).find(t => t && t.convocationId === k.convocId && t.instanceDate === k.date);
+  if (tp) tp.updatedAt = Date.now();
+  persist();
+  if (window.PbSync && PbSync.flushNow) { try { PbSync.flushNow(state); } catch (e) {} }
+  try { toast('Animation retirée de l\'exercice.'); } catch (e) {}
+  if (state._editingTraining && typeof renderTrainingPlanEditor === 'function') renderTrainingPlanEditor(); else render();
+}
 function trainingExerciseRow(ex, idx, totalCount, startTime, endTime) {
   // ex.source === 'play' → on tire les images/desc depuis le play lié, sinon depuis l'exo lui-même (custom)
   const linkedPlay = ex.source === 'play' && ex.playId ? state.plays.find(p => p.id === ex.playId) : null;
@@ -40547,6 +40661,9 @@ function trainingExerciseRow(ex, idx, totalCount, startTime, endTime) {
   const totalGroupPlayers = (ex.groups || []).reduce((acc, g) => acc + (g.players || []).length, 0);
   const hasGroups = (ex.groups || []).length > 1;
   const isPlaceholder = !firstImg;
+  // Hôte de l'animation : l'instance de plan en cours d'édition (jalon 4.5).
+  const _et = state._editingTraining || {};
+  const _planId = (_et.convocId && ex && ex.id != null) ? _tcnKey(_et.convocId, _et.dateStr) : '';
 
   return `
     <div class="training-exo-row" data-idx="${idx}" draggable="true" style="flex-direction:column;align-items:stretch;padding:0;overflow:hidden">
@@ -40590,6 +40707,7 @@ function trainingExerciseRow(ex, idx, totalCount, startTime, endTime) {
           ${idx < totalCount - 1 ? `<button class="btn btn-icon" onclick="moveTrainingExercise(${idx},1)" style="width:24px;height:20px;font-size:9px;padding:0">▼</button>` : ''}
         </div>
       </div>
+      ${_planId ? _exoAnimCoachBlock(_planId, ex.id) : ''}
       ${altRowHtml(ex, idx)}
     </div>
   `;
@@ -42114,6 +42232,7 @@ function openMyTrainingPlan(convocId, dateStr) {
                     ⏱ ${ex.duration || '?'}min${myGroup ? ' · 👥 ' + esc(myGroup.name) : ''}${allImages.length ? ' · 📷 ' + allImages.length : ''}${hasVideo ? ' · 🎬' : ''}${allAttachments.length ? ' · 📎 ' + allAttachments.length : ''}
                   </div>
                   ${ex.description ? `<div class="md-content" style="font-size:12px;color:var(--ink-2);margin-top:6px">${pbRenderMdWithMentions(ex.description)}</div>` : ''}
+                  ${_exoAnimBlock(_tcnKey(convocId, _idate), ex.id)}
 
                   ${linkedPlay && linkedPlay.concepts && linkedPlay.concepts.length > 0 ? `
                     <div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:8px" onclick="event.stopPropagation()">
@@ -52814,7 +52933,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.194';
+const APP_VERSION = '2026-08-19.195';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
