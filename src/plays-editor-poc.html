@@ -2314,6 +2314,20 @@
     var d = stepMs();
     var u = (now - pT0) / d;
     while (u >= 1) {
+      // Le temps courant vient de s ACHEVER. C est ICI qu on propose ses
+      // variantes : une branche naît sur la SORTIE de son temps (cf.
+      // addBranchHere), donc le temps de bifurcation appartient AUX DEUX
+      // chemins et doit etre joue en entier avant qu on choisisse. Demander a
+      // l ENTREE du temps, comme on le faisait, le sautait purement et
+      // simplement des qu une variante etait prise — d ou le « il manque un
+      // temps » sur un chemin imbrique : le temps de bifurcation etait perdu a
+      // CHAQUE niveau.
+      if (vwOn && vwLoop >= 1 && !vwAsked && vwBranchesAt(pStep)) {
+        pU = 1; renderFrame(pStep, 1);
+        vwOpenMenu(pStep);
+        return;
+      }
+      vwAsked = false;
       if (pStep >= steps().length - 1) {
         // Côté joueuse : jamais de fin. On reboucle (et on remonte à la ligne
         // principale si on sortait d'une branche qui y revient).
@@ -2324,12 +2338,8 @@
         return;
       }
       pStep++; u -= 1; pT0 += d;
-      if (vwOn) { vwStepChanged(); if (vwHalt) break; }
+      if (vwOn) vwStepChanged();
     }
-    // Pause automatique sur une bifurcation : on rend la photo du temps
-    // atteint et on sort SANS replanifier — pause() a deja annule pRaf, et
-    // replanifier ici ferait tourner deux boucles a la reprise.
-    if (vwHalt) { vwHalt = false; pU = 0; renderFrame(pStep, 0); return; }
     pU = u;
     renderFrame(pStep, u);
     if (Math.floor(u * 1000) % 1000 === 0 || u < 0.02) setHint();
@@ -4039,7 +4049,7 @@
   // Compteur de lectures de la ligne principale. 0 = premiere lecture, on ne
   // coupe JAMAIS (la joueuse decouvre le play en entier, comme une video) ;
   // des la deuxieme, chaque temps qui bifurque attend son choix.
-  var vwLoop = 0, vwToldLoop = false, vwHalt = false;
+  var vwLoop = 0, vwToldLoop = false, vwHalt = false, vwAsked = false;
   // Un reglage que la joueuse a touche elle-meme n est plus jamais ecrase par
   // les defauts de la 2e lecture.
   var vwUserSpeed = false, vwUserSize = false;
@@ -4054,7 +4064,7 @@
     document.getElementById('vw-crumb').textContent = names.join(' → ');
   }
 
-  function vwStepChanged(force, ask) {
+  function vwStepChanged(force) {
     var st = steps()[pStep];
     var n = (st && Array.isArray(st.branches)) ? st.branches.length : 0;
     if (force || n !== vwBadge) {
@@ -4066,13 +4076,11 @@
       b.style.display = vwHasBranches() ? '' : 'none';
       b.textContent = n ? ('🔀 ' + n + (n > 1 ? ' variantes' : ' variante')) : '🔀';
     }
-    // Par defaut on ne questionne que sur un changement de temps NATUREL ;
-    // les changements de chemin passent leur tour, sauf quand l appelant le
-    // demande explicitement (reboucle : le temps 1 peut bifurquer, et sans ca
-    // sa variante n etait JAMAIS proposee — il n y a pas de `pStep++` qui y
-    // mene).
-    if (ask === undefined) ask = !force;
-    if (ask && n && vwLoop >= 1 && playing) vwOpenMenu(pStep);
+  }
+
+  function vwBranchesAt(ix) {
+    var st = steps()[ix];
+    return (st && Array.isArray(st.branches)) ? st.branches.length : 0;
   }
 
   function vwHasBranches() {
@@ -4081,12 +4089,12 @@
     return false;
   }
 
-  function vwGoPath(p, now, ask) {
+  function vwGoPath(p, now) {
     bpath = p;
-    cur = 0; pStep = 0; pU = 0; pPrepared = -1;
+    cur = 0; pStep = 0; pU = 0; pPrepared = -1; vwAsked = false;
     vwCrumb();
     renderFrame(0, 0);
-    vwStepChanged(true, ask);
+    vwStepChanged(true);
     pT0 = now || performance.now();
   }
 
@@ -4099,8 +4107,6 @@
       if (!bpath.length) {
         vwLoop++;
         if (vwLoop === 1) vwSecondRead();
-        vwGoPath(bpath, now, true);
-        return;
       }
       vwGoPath(bpath, now);
     }
@@ -4154,7 +4160,7 @@
     vwBar = elPlay.parentNode;
     if (vwBar) vwBar.style.display = 'none';
     bpath = []; cur = 0; pStep = 0; pU = 0;
-    vwLoop = 0; vwToldLoop = false; vwHalt = false; vwBadge = -1;
+    vwLoop = 0; vwToldLoop = false; vwHalt = false; vwAsked = false; vwBadge = -1;
     vwUserSpeed = false; vwUserSize = false;
     vwCrumb();
     drawAll();
@@ -4214,10 +4220,17 @@
   function vwOpenMenu(ix) {
     var st = steps()[ix];
     if (!st || !Array.isArray(st.branches) || !st.branches.length) return;
-    if (ix !== pStep) { pStep = ix; pU = 0; pPrepared = -1; renderFrame(pStep, 0); vwStepChanged(true); }
+    // Toujours sur la PHOTO DE SORTIE du temps de bifurcation : c est l etat
+    // d ou repartent la suite principale ET chaque variante.
+    if (ix !== pStep || pU < 1) {
+      pStep = ix; pU = 1; pPrepared = -1;
+      renderFrame(pStep, 1);
+      vwStepChanged(true);
+    }
     if (playing) { pause(); vwSyncButtons(); }
+    vwAsked = true;   // a la reprise on enchaine, sans reposer la question
     vwHalt = true;
-    var html = '<div style="font-size:12px;font-weight:700;margin-bottom:8px">Temps ' + (ix + 1) + ' — quelle suite ?</div>'
+    var html = '<div style="font-size:12px;font-weight:700;margin-bottom:8px">Apres le temps ' + (ix + 1) + ' — quelle suite ?</div>'
       + '<div class="row"><button class="btn wide" data-b="">▶ Ligne principale</button></div>';
     st.branches.forEach(function (b) {
       html += '<div class="row"><button class="btn wide" data-b="' + esc(b.id) + '">🔀 ' + esc(b.name)
