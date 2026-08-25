@@ -2779,7 +2779,23 @@
       trail.setAttribute('stroke-dasharray', f(L) + ' ' + f(L));
       trail.setAttribute('stroke-dashoffset', f(L));
       layP.appendChild(trail);
-      pPaths.moves.push({ id: a.from, el: el, len: L, trail: trail });
+      // v.192 — PRÉFIGURATION. Le tracé complet est posé DÈS le début du temps
+      // en opacité faible (« fantôme »), et la pointe — flèche simple ou mur
+      // d'écran — vit sur le `trail`, donc elle est lisible dès u=0 alors que
+      // le trait, lui, se révèle au fil du déplacement. La joueuse voit ce qui
+      // VA se passer (et surtout : écran ou simple déplacement ?) avant que le
+      // mouvement ne l'ait consommé.
+      var isDef = (t.side === 'def');
+      var ghost = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      ghost.setAttribute('class', 'trail ghost' + (isDef ? ' def' : ''));
+      ghost.setAttribute('d', d);
+      ghost.style.opacity = f(REDUCED_MOTION ? TRAIL_OP_MAX : TRAIL_OP_MIN);
+      layP.insertBefore(ghost, trail);
+      trail.setAttribute('marker-end', 'url(#' + (a.kind === 'screen'
+        ? (isDef ? 'mkScrDef' : 'mkScrAtk')
+        : (isDef ? 'mkDef' : 'mkAtk')) + ')');
+      trail.style.opacity = f(REDUCED_MOTION ? TRAIL_OP_MAX : TRAIL_OP_MIN);
+      pPaths.moves.push({ id: a.from, el: el, len: L, trail: trail, ghost: ghost });
     }
 
     var ps = passOf(st);
@@ -2817,6 +2833,11 @@
     return g;
   }
 
+  // Opacités du tracé : préfiguration (u=0) → tracé consolidé (u=1). En
+  // « mouvement réduit », pas d'effet : le tracé est net dès la première frame.
+  var TRAIL_OP_MIN = 0.25, TRAIL_OP_MAX = 0.9;
+  var REDUCED_MOTION = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
   // Rend la frame (temps k, fraction u). Écrit UNIQUEMENT des attributs.
   function renderFrame(k, u) {
     var st = steps()[k];
@@ -2835,6 +2856,9 @@
         live[m.id] = { x: q.x, y: q.y };
       }
       m.trail.setAttribute('stroke-dashoffset', f(m.len * (1 - mu)));
+      // Le trait se colore au rythme du déplacement : 0.25 → 0.9 (linéaire).
+      if (!REDUCED_MOTION)
+        m.trail.style.opacity = f(TRAIL_OP_MIN + (TRAIL_OP_MAX - TRAIL_OP_MIN) * mu);
     }
     for (id in tokEl) placeToken(id, live[id]);
 
