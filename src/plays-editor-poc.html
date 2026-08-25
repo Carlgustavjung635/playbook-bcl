@@ -981,7 +981,9 @@
     <button class="btn sm" id="vw-close" title="Fermer">✕</button>
   </div>
   <div class="bot">
+    <button class="btn sm" id="vw-prev" title="Temps précédent">⏮</button>
     <button class="btn sm" id="vw-play" title="Lecture / pause">⏸</button>
+    <button class="btn sm" id="vw-next" title="Temps suivant">⏭</button>
     <button class="btn sm" id="vw-speed" title="Vitesse de lecture">🐢</button>
     <button class="btn sm" id="vw-size" title="Taille des pions">⤢</button>
     <button class="btn sm" id="vw-mirror" title="Inverser gauche / droite">↔</button>
@@ -989,7 +991,7 @@
   </div>
 </div>
 <div class="vwexpl" id="vw-expl"></div>
-<div class="vwhint" id="vw-hint">Tap pour avancer • ▶ pour reprendre</div>
+<div class="vwhint" id="vw-hint">⏮ ⏭ temps par temps • ▶ pour reprendre</div>
 <div class="vwleg" id="vw-leg"></div>
 <div class="vwmenu" id="vw-menu"><div class="card" id="vw-menu-card"></div></div>
 
@@ -3338,6 +3340,20 @@
     if (document.body.classList.contains('playing') && !vwOn) exitPlay();
     var W = MODES[mode()].w;
     function mx(p) { if (p && typeof p.x === 'number') p.x = f(W - p.x); }
+    // v.200 - Le miroir emporte les ZONES peintes : sans ça elles restaient du
+    // côté d'où le play vient de partir. Symétrie horizontale = x miroité +
+    // rotation opposée ; une forme symétrique ne bouge donc pas visuellement.
+    // Les zones vivent PAR LIGNE (v.198) : la racine sur doc, les autres sur
+    // leur branche — d'où le mzl() posé aux deux endroits du même walk.
+    function mzl(o) {
+      var l = (o && Array.isArray(o.zones)) ? o.zones : [], i, z;
+      for (i = 0; i < l.length; i++) {
+        z = l[i]; if (!z) continue;
+        if (typeof z.x === 'number') z.x = f(W - z.x);
+        if (z.rot) z.rot = f(-(+z.rot || 0));
+      }
+    }
+    mzl(doc);
     (function walk(l) {
       var i, j, k;
       for (i = 0; i < l.length; i++) {
@@ -3347,14 +3363,14 @@
           if (a.to && typeof a.to === 'object') mx(a.to);
           (a.via || []).forEach(mx);
         }
-        if (Array.isArray(l[i].branches)) for (j = 0; j < l[i].branches.length; j++) walk(l[i].branches[j].steps);
+        if (Array.isArray(l[i].branches)) for (j = 0; j < l[i].branches.length; j++) { mzl(l[i].branches[j]); walk(l[i].branches[j].steps); }
       }
     })(rootSteps());
     active = null; pending = null;
     // Côté joueuse le miroir est un CONFORT de lecture : il ne salit pas le
     // document (pas de touch(), donc pas de brouillon, pas de publication).
-    if (vwOn) { vwRedraw(); return; }
-    drawAll(); renderTimeline(); setHint(); touch();
+    if (vwOn) { drawZones(); vwRedraw(); vwLegendSync(); return; }
+    drawZones(); drawAll(); renderTimeline(); setHint(); touch();
     toast(mode() === 'half' ? 'Play basculé sur l\'autre demi-terrain.' : 'Play basculé sur l\'autre panier.', 'ok');
   }
   document.getElementById('b-mirror').addEventListener('click', mirrorMode);
@@ -5324,6 +5340,34 @@
     if (html) host.classList.add('show'); else host.classList.remove('show');
   }
 
+  // v.200 - Y a-t-il un VRAI choix a faire ? Une seule ligne = pas d arbre.
+  function vwHasBranches() { return vwTreeRows(rootSteps(), [], 0, []).length > 0; }
+
+  // v.200 - Recul d UN temps. Au premier temps d une branche on ne reste pas
+  // coince : on remonte dans le segment du dessus, sur SON temps de
+  // bifurcation - le meme temps charniere que tick() joue avant de descendre.
+  // Au tout premier temps de la route, il n y a rien derriere : on ne bouge pas.
+  function vwStepBack() {
+    if (!vwOn) return;
+    if (!vwRoute.length) { vwShowTree(); return; }
+    if (playing) pause();
+    var seg = vwRoute[vwSegIx];
+    if (!seg) { vwRouteEnd(); return; }
+    if (pStep > seg.from) { pStep--; pU = 0; vwSoloRun(); return; }
+    if (vwSegIx > 0) {
+      vwSegIx--;
+      vwGoSeg(vwSegIx);
+      pStep = vwRoute[vwSegIx].to; pU = 0;
+      vwSoloRun();
+      return;
+    }
+    pU = 0;
+    pPrepared = -1;
+    renderFrame(pStep, 0);
+    vwExplSync(true);
+    vwSyncButtons();
+  }
+
   function vwStepForward() {
     if (!vwOn) return;
     if (!vwRoute.length) { vwShowTree(); return; }
@@ -5352,9 +5396,11 @@
     stg.addEventListener('click', function () {
       if (!vwOn) return;
       if (elExp.classList.contains('show') || vwMenu.classList.contains('show')) return;
+      // v.200 - Le tap terrain ne fait plus QU UNE chose : mettre en pause. En
+      // pause il ne fait RIEN. La logique v.190 « tap = +1 temps » est retiree
+      // en entier : l avance temps par temps appartient a ⏮ / ⏭, seuls.
       if (!vwRoute.length) { vwShowTree(); return; }
-      if (playing) { pause(); vwSyncButtons(); return; }
-      vwStepForward();
+      if (playing) { pause(); vwSyncButtons(); }
     });
   })();
 
@@ -5391,8 +5437,12 @@
     drawAll();
     renderFrame(0, 0);
     vwSyncButtons();
-    // AUCUNE lecture ne démarre toute seule : l'accueil, c'est l'arbre.
-    vwShowTree();
+    // v.200 - L'arbre n'est l'accueil que s'il y a vraiment un choix a faire.
+    // Un play sans aucune variante activee n'a qu'un chemin : on le joue, au
+    // lieu d'imposer un menu a une seule entree (et le 🌳 disparait avec lui).
+    var hasBr = vwHasBranches();
+    document.getElementById('vw-home').style.display = hasBr ? '' : 'none';
+    if (hasBr) vwShowTree(); else vwPlayPath([]);
   }
 
   function exitViewer() {
@@ -5410,6 +5460,8 @@
   }
 
   document.getElementById('vw-play').addEventListener('click', function () { play(); vwSyncButtons(); });
+  document.getElementById('vw-prev').addEventListener('click', vwStepBack);
+  document.getElementById('vw-next').addEventListener('click', vwStepForward);
   document.getElementById('vw-speed').addEventListener('click', function () {
     vwUserSpeed = true;
     vwSpeedIx = (vwSpeedIx + 1) % VW_SPEEDS.length;
