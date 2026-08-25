@@ -594,6 +594,47 @@
   }
   .vwmenu .card .row{display:flex; gap:6px; margin-bottom:6px}
   .vwmenu .card .row .btn{flex:1}
+
+  /* ── v.188 · fil d'ariane cliquable, 🏠, panneau « Explorer » ───────── */
+  .vw .crumb{display:flex; align-items:center; gap:2px; padding:3px 6px}
+  .vw .crumb .cr{
+    pointer-events:auto; border:0; background:none; padding:2px 6px; border-radius:999px;
+    font:inherit; font-size:11px; font-weight:700; color:var(--ink-2); cursor:pointer;
+    max-width:38vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  .vw .crumb .cr:last-child{color:var(--ink)}
+  .vw .crumb .cr:active,
+  .vw .crumb .cr:focus-visible{background:var(--field); color:var(--ink); outline:none}
+  .vw .crumb .sep{flex:none; opacity:.45}
+  #vw-exp-btn{opacity:.6; font-weight:600}
+  /* Le panneau monte en `transform` SEUL (couche composée) : animer sa
+     hauteur ou son `bottom` relayouterait le terrain à chaque frame alors que
+     la lecture tourne encore derrière — sur iPhone ça se voit tout de suite. */
+  .vwexp{
+    position:fixed; left:0; right:0; bottom:0; z-index:72; display:flex; flex-direction:column;
+    max-height:56dvh; background:var(--panel); border-top:1px solid var(--border);
+    border-radius:17px 17px 0 0; box-shadow:0 -14px 44px -18px rgba(0,0,0,.6);
+    padding:8px 11px calc(11px + env(safe-area-inset-bottom));
+    transform:translateY(101%); transition:transform .22s ease; will-change:transform;
+  }
+  .vwexp.show{transform:none}
+  .vwexp .grab{flex:none; width:38px; height:4px; border-radius:999px; background:var(--border); margin:0 auto 8px}
+  .vwexp .hd{display:flex; align-items:center; gap:8px; margin-bottom:6px}
+  .vwexp .hd h3{flex:1; margin:0; font-size:12px}
+  .vwexp .scroll{flex:1; min-height:0; overflow:auto; -webkit-overflow-scrolling:touch}
+  .xnode{
+    display:flex; align-items:center; gap:7px; padding:9px 8px; margin-bottom:3px;
+    border:1px solid transparent; border-radius:10px; cursor:pointer; font-size:12px;
+  }
+  .xnode:active{background:var(--field)}
+  .xnode.on{border-color:var(--accent-2); background:var(--field)}
+  .xnode .nm{flex:1; min-width:0; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .xnode .ct{flex:none; font-size:10px; color:var(--ink-2); font-weight:600}
+  .vwexpbk{position:fixed; inset:0; z-index:71; display:none; background:var(--scrim)}
+  .vwexpbk.show{display:block}
+  /* Branche désactivée : gardée dans l'arbre du coach (grisée, éditable),
+     invisible côté joueuse. */
+  .tnode.off .nm{opacity:.4; text-decoration:line-through}
 </style>
 <!-- THÈME HÔTE (v.186) — en mode viewer (?mode=view), l'app passe les tokens
      résolus de son thème perso : fond, panneau, texte, bordure, accent. On les
@@ -802,7 +843,8 @@
      choix d'une variante. -->
 <div class="vw" id="vw">
   <div class="top">
-    <span class="crumb" id="vw-crumb">Ligne principale</span>
+    <span class="crumb" id="vw-crumb"><button class="cr" data-cp="">Principale</button></span>
+    <button class="btn sm" id="vw-home" title="Retour à la ligne principale" style="display:none">🏠</button>
     <button class="btn sm" id="vw-close" title="Fermer">✕</button>
   </div>
   <div class="bot">
@@ -811,9 +853,21 @@
     <button class="btn sm" id="vw-size" title="Taille des pions">⤢</button>
     <button class="btn sm" id="vw-mirror" title="Inverser gauche / droite">↔</button>
     <button class="btn sm" id="vw-br" title="Variantes" style="display:none">🔀</button>
+    <button class="btn sm" id="vw-exp-btn" title="Explorer le play">⬆️ Explorer</button>
   </div>
 </div>
 <div class="vwmenu" id="vw-menu"><div class="card" id="vw-menu-card"></div></div>
+
+<!-- ══ v.188 · PANNEAU « EXPLORER » ═══════════════════════════════════════
+     L'arbre du play côté joueuse. Il ne montre QUE les variantes activées :
+     une branche désactivée par le coach reste dans l'arbre de l'éditeur mais
+     n'existe nulle part ici. -->
+<div class="vwexpbk" id="vw-exp-bk"></div>
+<div class="vwexp" id="vw-exp">
+  <div class="grab"></div>
+  <div class="hd"><h3>🌳 Explorer le play</h3><button class="btn sm" id="vw-exp-x" title="Fermer">✕</button></div>
+  <div class="scroll" id="vw-exp-list"></div>
+</div>
 
 <div class="toast" id="toast"></div>
 
@@ -1125,6 +1179,18 @@
   var BR_DEPTH_MAX = 3;   // branche → sous-branche → sous-sous-branche
   var BR_PER_STEP  = 5;
   var bpath = [];
+
+  // Une branche peut être DÉSACTIVÉE par le coach (v.188) : elle reste dans
+  // l'arbre de l'éditeur — grisée, éditable, ses temps intacts — mais elle
+  // disparaît de tout ce que voit la joueuse (menu des variantes, badge 🔀,
+  // panneau « Explorer »). Champ ABSENT = activée : les plays écrits avant la
+  // v.188 restent jouables tels quels, il n'y a rien à migrer.
+  function brOn(b) { return !!b && b.enabled !== false; }
+  // ⚠️ à n'appeler QUE depuis le viewer : l'éditeur, lui, doit continuer de
+  // voir et de parcourir les branches désactivées.
+  function brVisible(st) {
+    return ((st && Array.isArray(st.branches)) ? st.branches : []).filter(brOn);
+  }
 
   function rootSteps() { return doc[doc.mode].steps; }
   function branchIn(list, si, bid) {
@@ -2924,6 +2990,7 @@
         o.branches = s.branches.slice(0, BR_PER_STEP).map(function (b) {
           return {
             id: b.id, name: b.name || 'Variante', description: b.description || '',
+            enabled: b.enabled !== false,
             returns_to_main: b.returns_to_main !== false,
             steps: encSteps(b.steps || [], null, depth + 1)
           };
@@ -3113,6 +3180,7 @@
             name: String(b.name || 'Variante').slice(0, 60),
             description: String(b.description || pick(b, 'desc') || '').slice(0, 160),
             returns_to_main: pick(b, 'returns_to_main', 'returnsToMain') !== false,
+            enabled: pick(b, 'enabled') !== false,
             steps: ks
           });
         }
@@ -3789,6 +3857,7 @@
           s.branches.forEach(function (b) {
             if (!b.name) b.name = 'Variante';
             if (b.returns_to_main === undefined) b.returns_to_main = true;
+            if (b.enabled === undefined) b.enabled = true;
             fix(b.steps, depth + 1);
           });
         });
@@ -3995,6 +4064,20 @@
     toast('Variante renommée.', 'ok');
   }
 
+  // Activer / désactiver une variante (v.188) — un DRAPEAU, pas une
+  // suppression : « pas encore travaillée » n'est pas « à jeter ». La branche
+  // garde ses temps et ses sous-branches, le coach continue de les éditer, et
+  // la joueuse ne la voit plus du tout. Réversible d'un tap.
+  function toggleBranchPath(path) {
+    var b = branchAt(path);
+    if (!b) return;
+    b.enabled = (b.enabled === false);
+    touch();
+    renderTree(); renderTimeline();
+    toast(b.enabled ? '👁 « ' + b.name + ' » de nouveau visible côté joueuse.'
+                    : '🚫 « ' + b.name + ' » masquée côté joueuse.', 'ok');
+  }
+
   // ── Arbre + pistes ───────────────────────────────────────────────────
   var elTree = document.getElementById('tree');
   var elTreeList = document.getElementById('tree-list');
@@ -4006,7 +4089,7 @@
       bs = Array.isArray(list[i].branches) ? list[i].branches : [];
       for (j = 0; j < bs.length; j++) {
         p = path.concat([{ si: i, bid: bs[j].id }]);
-        out.push({ path: p, depth: depth, name: bs[j].name, from: i, n: bs[j].steps.length, ret: bs[j].returns_to_main !== false });
+        out.push({ path: p, depth: depth, name: bs[j].name, from: i, n: bs[j].steps.length, ret: bs[j].returns_to_main !== false, on: brOn(bs[j]) });
         treeRows(bs[j].steps, p, depth + 1, out);
       }
     }
@@ -4028,10 +4111,11 @@
       + '<span class="ct">' + rootSteps().length + ' temps</span></div>';
     rows.forEach(function (r) {
       var k = pathKey(r.path);
-      html += '<div class="tnode' + (k === here ? ' on' : '') + '" data-p="' + esc(k) + '"'
+      html += '<div class="tnode' + (k === here ? ' on' : '') + (r.on ? '' : ' off') + '" data-p="' + esc(k) + '"'
         + ' style="margin-left:' + ((r.depth + 1) * 11) + 'px">'
         + '<span class="nm" title="' + esc(r.name) + '">🔀 ' + esc(r.name) + '</span>'
         + '<span class="ct">T' + (r.from + 1) + ' · ' + r.n + '</span>'
+        + '<button class="del" data-en="' + esc(k) + '" title="' + (r.on ? 'Masquer' : 'Rendre visible') + ' cette variante côté joueuse">' + (r.on ? '👁' : '🚫') + '</button>'
         + '<button class="del" data-ren="' + esc(k) + '" title="Renommer cette branche">✎</button>'
         + '<button class="del" data-del="' + esc(k) + '" title="Supprimer cette branche">🗑</button></div>';
     });
@@ -4057,6 +4141,8 @@
   elTree.addEventListener('click', function (e) {
     var t = e.target;
     if (!t || !t.getAttribute) return;
+    var en = t.getAttribute('data-en');
+    if (en !== null) { e.stopPropagation(); toggleBranchPath(pathFromKey(en)); return; }
     var ren = t.getAttribute('data-ren');
     if (ren !== null) { e.stopPropagation(); renameBranchPath(pathFromKey(ren)); return; }
     var del = t.getAttribute('data-del');
@@ -4095,19 +4181,27 @@
   // les defauts de la 2e lecture.
   var vwUserSpeed = false, vwUserSize = false;
 
+  // Fil d'ariane CLIQUABLE (v.188) : chaque segment est une porte vers le
+  // début de sa ligne. En lecture seule, il fallait finir la branche (ou
+  // rouvrir le menu des variantes) pour revenir en arrière.
   function vwCrumb() {
-    var names = ['Principale'], l = rootSteps(), i, b;
+    var l = rootSteps(), i, b, p = [], html = '<button class="cr" data-cp="">Principale</button>';
     for (i = 0; i < bpath.length; i++) {
       b = branchIn(l, bpath[i].si, bpath[i].bid);
       if (!b) break;
-      names.push(b.name); l = b.steps;
+      p = p.concat([bpath[i]]);
+      html += '<span class="sep">→</span><button class="cr" data-cp="' + esc(pathKey(p)) + '">' + esc(b.name) + '</button>';
+      l = b.steps;
     }
-    document.getElementById('vw-crumb').textContent = names.join(' → ');
+    document.getElementById('vw-crumb').innerHTML = html;
+    // 🏠 n'a rien à proposer sur la ligne principale : on y est déjà.
+    document.getElementById('vw-home').style.display = bpath.length ? '' : 'none';
+    if (elExp && elExp.classList.contains('show')) vwExpRender();
   }
 
   function vwStepChanged(force) {
     var st = steps()[pStep];
-    var n = (st && Array.isArray(st.branches)) ? st.branches.length : 0;
+    var n = brVisible(st).length;
     if (force || n !== vwBadge) {
       vwBadge = n;
       var b = document.getElementById('vw-br');
@@ -4121,7 +4215,7 @@
 
   function vwBranchesAt(ix) {
     var st = steps()[ix];
-    return (st && Array.isArray(st.branches)) ? st.branches.length : 0;
+    return brVisible(st).length;
   }
 
   // La question posee vaut pour UN temps D UN chemin : un drapeau global
@@ -4170,7 +4264,7 @@
     return (function scan(l) {
       var i, j, bs;
       for (i = 0; i < l.length; i++) {
-        bs = Array.isArray(l[i].branches) ? l[i].branches : [];
+        bs = brVisible(l[i]);
         if (bs.length) return true;
         for (j = 0; j < bs.length; j++) if (scan(bs[j].steps || [])) return true;
       }
@@ -4274,6 +4368,7 @@
     VIEWS['2d'].editable = true;
     if (vwBar) vwBar.style.display = '';
     document.getElementById('vw-menu').classList.remove('show');
+    vwCloseExp();
     if (playing) pause();
     exitPlay();
     goPath([]);
@@ -4308,7 +4403,7 @@
     var l = steps(), n = l.length, i, k, ix = -1;
     for (i = 0; i < n; i++) {
       k = (pStep + i) % n;
-      if (Array.isArray(l[k].branches) && l[k].branches.length) { ix = k; break; }
+      if (brVisible(l[k]).length) { ix = k; break; }
     }
     if (ix >= 0) vwOpenMenu(ix);
   });
@@ -4318,7 +4413,8 @@
   function vwOpenMenu(ix) {
     vwCancelHold();
     var st = steps()[ix];
-    if (!st || !Array.isArray(st.branches) || !st.branches.length) return;
+    var bs = brVisible(st);
+    if (!bs.length) return;
     // Toujours sur la PHOTO DE SORTIE du temps de bifurcation : c est l etat
     // d ou repartent la suite principale ET chaque variante.
     if (ix !== pStep || pU < 1) {
@@ -4331,7 +4427,7 @@
     vwHalt = true;
     var html = '<div style="font-size:12px;font-weight:700;margin-bottom:8px">Apres le temps ' + (ix + 1) + ' — quelle suite ?</div>'
       + '<div class="row"><button class="btn wide" data-b="">▶ Ligne principale</button></div>';
-    st.branches.forEach(function (b) {
+    bs.forEach(function (b) {
       html += '<div class="row"><button class="btn wide" data-b="' + esc(b.id) + '">🔀 ' + esc(b.name)
         + (b.description ? '<br><small style="opacity:.65;font-weight:400">' + esc(b.description) + '</small>' : '')
         + '</button></div>';
@@ -4356,6 +4452,117 @@
     if (!playing) { play(); }
     vwSyncButtons();
   });
+
+  // ── Sauts manuels (fil d'ariane, 🏠, panneau « Explorer ») ───────────
+  // Même règle que le choix d'une variante : sauter MET FIN à la lecture-
+  // découverte (vwLoop ≥ 1). Sans ça, une joueuse qui explore dès la 1re
+  // lecture resterait à vwLoop = 0 et plus aucune sous-branche ne lui serait
+  // proposée. On repart toujours au temps 1 du nœud visé, lecture relancée.
+  function vwJump(p) {
+    if (!vwOn) return;
+    vwCloseExp();
+    if (vwMenu) vwMenu.classList.remove('show');
+    if (vwLoop < 1) vwLoop = 1;
+    vwGoPath(p);
+    if (!playing) play();
+    vwSyncButtons();
+  }
+  document.getElementById('vw-crumb').addEventListener('click', function (e) {
+    var b = e.target && e.target.closest ? e.target.closest('[data-cp]') : null;
+    if (!b) return;
+    var k = b.getAttribute('data-cp');
+    if (k === pathKey(bpath)) return;   // on est déjà là : ne pas rembobiner
+    vwJump(pathFromKey(k));
+  });
+  document.getElementById('vw-home').addEventListener('click', function () { vwJump([]); });
+
+  // ── Panneau « Explorer » (v.188) ─────────────────────────────────────
+  // L'arbre du play côté joueuse : ligne principale + variantes ACTIVÉES,
+  // indentées comme dans le tiroir du coach, chacune cliquable. Il n'est
+  // construit qu'à l'ouverture — pendant la lecture rien ne le redessine, la
+  // boucle rAF reste seule à travailler.
+  var elExp = document.getElementById('vw-exp');
+  var elExpBk = document.getElementById('vw-exp-bk');
+
+  function vwExpRows(list, path, depth, out) {
+    var i, j, bs, p;
+    for (i = 0; i < list.length; i++) {
+      bs = brVisible(list[i]);
+      for (j = 0; j < bs.length; j++) {
+        p = path.concat([{ si: i, bid: bs[j].id }]);
+        out.push({ path: p, depth: depth, name: bs[j].name, from: i, n: (bs[j].steps || []).length });
+        vwExpRows(bs[j].steps || [], p, depth + 1, out);
+      }
+    }
+    return out;
+  }
+
+  function vwExpRender() {
+    var here = pathKey(bpath);
+    var rows = vwExpRows(rootSteps(), [], 0, []);
+    var html = '<div class="xnode' + (here === '' ? ' on' : '') + '" data-xp="">'
+      + '<span class="nm">' + (here === '' ? '📍 ' : '▶ ') + 'Ligne principale</span>'
+      + '<span class="ct">' + rootSteps().length + ' temps</span></div>';
+    rows.forEach(function (r) {
+      var k = pathKey(r.path);
+      html += '<div class="xnode' + (k === here ? ' on' : '') + '" data-xp="' + esc(k) + '"'
+        + ' style="margin-left:' + ((r.depth + 1) * 12) + 'px">'
+        + '<span class="nm">' + (k === here ? '📍 ' : '🔀 ') + esc(r.name) + '</span>'
+        + '<span class="ct">T' + (r.from + 1) + ' · ' + r.n + ' temps</span></div>';
+    });
+    if (!rows.length) html += '<div class="xnode" style="opacity:.6;cursor:default"><span class="nm">Pas de variante sur ce play.</span></div>';
+    document.getElementById('vw-exp-list').innerHTML = html;
+  }
+
+  function vwOpenExp() {
+    if (!vwOn) return;
+    vwCancelHold();
+    vwExpRender();
+    elExpBk.classList.add('show');
+    elExp.classList.add('show');
+  }
+  function vwCloseExp() {
+    if (!elExp) return;
+    elExp.classList.remove('show');
+    elExpBk.classList.remove('show');
+    elExp.style.transform = '';
+  }
+  document.getElementById('vw-exp-btn').addEventListener('click', vwOpenExp);
+  document.getElementById('vw-exp-x').addEventListener('click', vwCloseExp);
+  elExpBk.addEventListener('click', vwCloseExp);
+  elExp.addEventListener('click', function (e) {
+    var n = e.target && e.target.closest ? e.target.closest('[data-xp]') : null;
+    if (!n) return;
+    vwJump(pathFromKey(n.getAttribute('data-xp')));
+  });
+
+  // Swipe down pour fermer. Le doigt tient le panneau en `transform` — jamais
+  // en hauteur : le terrain joue encore derrière, un relayout par frame le
+  // ferait tomber sous les 60 fps. Un doigt qui scrolle la liste (scrollTop > 0)
+  // n'est pas un doigt qui referme.
+  (function () {
+    var y0 = 0, dy = 0, on = false;
+    elExp.addEventListener('touchstart', function (e) {
+      if (!e.touches || e.touches.length !== 1) return;
+      var sc = document.getElementById('vw-exp-list');
+      if (sc && sc.contains(e.target) && sc.scrollTop > 0) return;
+      on = true; y0 = e.touches[0].clientY; dy = 0;
+      elExp.style.transition = 'none';
+    }, { passive: true });
+    elExp.addEventListener('touchmove', function (e) {
+      if (!on) return;
+      dy = Math.max(0, e.touches[0].clientY - y0);
+      elExp.style.transform = 'translateY(' + dy + 'px)';
+    }, { passive: true });
+    elExp.addEventListener('touchend', function () {
+      if (!on) return;
+      on = false;
+      elExp.style.transition = '';
+      elExp.style.transform = '';
+      if (dy > 64) vwCloseExp();
+    });
+  })();
+
 
   // Aperçu joueuse depuis l'éditeur — ajouté au menu ⋯ en JS pour garder le
   // balisage du jalon 3 intact.
