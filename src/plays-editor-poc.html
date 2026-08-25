@@ -3972,6 +3972,29 @@
     toast('Branche supprimée.', 'ok');
   }
 
+  // Renommer une variante — son nom est la SEULE chose qui la designe pour la
+  // joueuse (menu du viewer, fil d'ariane) : on le corrige la ou on la voit,
+  // plutot que de supprimer la branche et de la refaire. Meme regle qu'a la
+  // creation : un nom vide est refuse, on ne replie pas sur « Variante ».
+  //
+  // Un SEUL champ porte le nom. L'arbre, les pistes, le fil d'ariane du viewer
+  // et le menu des variantes le relisent tous a l'affichage : il n'y a rien a
+  // propager, seulement a redessiner.
+  function renameBranchPath(path) {
+    var b = branchAt(path);
+    if (!b) return;
+    var name = prompt('Nom de la variante (obligatoire)', b.name || '');
+    if (name === null) return;   // Echap / Annuler : rien ne bouge
+    name = String(name).trim();
+    if (!name) { toast('Nom obligatoire : une variante sans nom ne se retrouve pas.', 'err'); return; }
+    if (name === b.name) return;
+    b.name = name.slice(0, 60);
+    touch();
+    renderTree(); renderTimeline();
+    if (vwOn) vwCrumb();
+    toast('Variante renommée.', 'ok');
+  }
+
   // ── Arbre + pistes ───────────────────────────────────────────────────
   var elTree = document.getElementById('tree');
   var elTreeList = document.getElementById('tree-list');
@@ -4009,6 +4032,7 @@
         + ' style="margin-left:' + ((r.depth + 1) * 11) + 'px">'
         + '<span class="nm" title="' + esc(r.name) + '">🔀 ' + esc(r.name) + '</span>'
         + '<span class="ct">T' + (r.from + 1) + ' · ' + r.n + '</span>'
+        + '<button class="del" data-ren="' + esc(k) + '" title="Renommer cette branche">✎</button>'
         + '<button class="del" data-del="' + esc(k) + '" title="Supprimer cette branche">🗑</button></div>';
     });
     elTreeList.innerHTML = html;
@@ -4033,6 +4057,8 @@
   elTree.addEventListener('click', function (e) {
     var t = e.target;
     if (!t || !t.getAttribute) return;
+    var ren = t.getAttribute('data-ren');
+    if (ren !== null) { e.stopPropagation(); renameBranchPath(pathFromKey(ren)); return; }
     var del = t.getAttribute('data-del');
     if (del !== null) { e.stopPropagation(); delBranchPath(pathFromKey(del)); return; }
     var node = t.closest ? t.closest('[data-p]') : null;
