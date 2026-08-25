@@ -1314,7 +1314,7 @@
   // Une animation SANS branche n'a aucune clé `branches` : bpath reste vide,
   // steps() renvoie exactement ce qu'il renvoyait avant, et rien ne change.
   var BR_DEPTH_MAX = 3;   // branche → sous-branche → sous-sous-branche
-  var BR_PER_STEP  = 5;
+  var BR_PER_STEP  = 10;
   var bpath = [];
 
   // Une branche peut être DÉSACTIVÉE par le coach (v.188) : elle reste dans
@@ -4878,7 +4878,7 @@
     if (playing || vwOn) return;
     if (bpath.length >= BR_DEPTH_MAX) { toast('Profondeur maximale atteinte : ' + BR_DEPTH_MAX + ' niveaux de branches.', 'err'); return; }
     var st = step(), bs = Array.isArray(st.branches) ? st.branches : [];
-    if (bs.length >= BR_PER_STEP) { toast('Cinq branches au maximum sur un temps.', 'err'); return; }
+    if (bs.length >= BR_PER_STEP) { toast('Maximum ' + BR_PER_STEP + ' variantes par temps atteint.', 'err'); return; }
     // Nommage OBLIGATOIRE : une variante « Branche 2 » ne se retrouve pas
     // dans l'arbre trois semaines plus tard, et surtout elle ne dit rien à la
     // joueuse dans le menu du viewer. On refuse plutôt que de replier sur un
