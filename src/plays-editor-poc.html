@@ -55,20 +55,24 @@
       jeton, l'encart d'info et le fil d'aide.
 
   ── UN TEMPS = UNE PHOTO + CE QUI SE PASSE PENDANT ────────────────────────
-  Chaque temps porte SES PROPRES positions (`pos`) plutôt que de les dériver
-  du temps précédent à la volée. C'est un choix, et il est motivé :
+  Chaque temps porte ses positions (`pos`), mais elles ne sont PAS un îlot :
+  depuis la v.179 elles DÉCOULENT du temps précédent. C'est l'hérédité qui
+  compte — un play est une suite continue, pas une pile de photos.
 
-    · dériver imposerait de recalculer toute la suite à chaque geste, donc de
-      reconstruire la scène pendant un drag — exactement ce que le jalon 2
-      s'interdit pour tenir la fluidité sur iPhone ;
-    · le coach range souvent un temps « à la main » sans vouloir qu'il découle
-      mécaniquement du précédent (repositionner tout le monde après un rebond,
-      par exemple). Une photo indépendante dit ça sans détour.
+    · éditer le temps N (déplacer une joueuse, rallonger une flèche) recalcule
+      l'entrée de N+1, N+2 … jusqu'au dernier temps : plus personne ne se
+      téléporte entre la fin d'un temps et le début du suivant ;
+    · le temps que le coach est en train d'éditer, LUI, n'est jamais recalculé
+      sous ses doigts : la cascade part toujours de N+1 (cf. touch()). Sans ce
+      décalage d'un cran, poser une joueuse serait immédiatement annulé par la
+      cascade et le terrain deviendrait inéditable ;
+    · la contrepartie est assumée : retoucher un temps AMONT écrase ce qui avait
+      été rangé à la main en aval. On édite donc dans l'ordre chronologique.
 
-  Le prix : un temps peut DIVERGER de ce que produit le temps d'avant. On ne
-  le cache pas — la vignette porte alors un point orange, et le bouton 🔄
-  recale la photo sur la sortie du temps précédent. Un décalage visible et
-  réparable vaut mieux qu'un recalcul silencieux qui écrase le travail.
+  Le stockage reste une photo par temps (et non un calcul à la volée) pour la
+  raison du jalon 2 : pendant un drag on n'écrit que des attributs, on ne
+  reconstruit pas la scène. La cascade coûte 0,03 ms pour 20 temps × 10 jetons,
+  elle tourne donc à chaque édition sans cache à invalider.
 
   ── UNITÉS ────────────────────────────────────────────────────────────────
   1 unité SVG = 10 cm. Toutes les cotes viennent des dimensions officielles
@@ -290,6 +294,13 @@
   /* Zone de saisie du waypoint : le disque dessiné est petit, la cible ne
      doit pas l'être (même raison que .hit sur le tracé). */
   .arw .wphit{fill:transparent; pointer-events:all; cursor:grab}
+  /* Poignée d'extrémité (jalon 3.6) : même disque que le waypoint, mais elle
+     ne vit qu'en mode Sélection — c'est le seul mode où l'on retouche une
+     flèche déjà posée. touch-action:none, sinon iOS lit le geste en scroll. */
+  .arw .tip{fill:var(--panel); stroke:var(--ink-2); stroke-width:.6; pointer-events:none}
+  .arw .tiphit{fill:transparent; pointer-events:all; cursor:grab; touch-action:none}
+  body:not([data-tool="select"]) .arw .tip,
+  body:not([data-tool="select"]) .arw .tiphit{display:none}
   /* En mode gomme, on annonce la cible au survol/au doigt. */
   body[data-tool="erase"] .arw .body{opacity:.9}
   body[data-tool="erase"] .arw:hover .body{stroke:var(--hoop)}
@@ -371,26 +382,41 @@
     position:relative; flex:none; width:46px; height:42px; border-radius:10px;
     border:1px solid var(--border); background:var(--btn); color:var(--ink-2);
     display:flex; flex-direction:column; align-items:center; justify-content:center;
-    font-size:14px; font-weight:800; cursor:pointer; touch-action:none;
+    font-size:14px; font-weight:800; cursor:pointer; touch-action:manipulation;
     transition:background .12s ease, border-color .12s ease, color .12s ease;
   }
   .chip .mini{font-size:8px; font-weight:600; letter-spacing:.04em; opacity:.75;
     line-height:1.1; margin-top:1px}
   .chip.on{background:var(--accent-2); color:var(--accent-2-ink); border-color:var(--accent-2)}
-  .chip.grab{opacity:.55; transform:scale(1.06); z-index:2}
+  /* Le temps qui vient d'être inséré se signale une seconde : sans ça, une
+     insertion au milieu de 8 chips passe totalement inaperçue. */
+  @keyframes chip-pop{
+    0%{transform:scale(.6); opacity:0}
+    60%{transform:scale(1.08); opacity:1}
+    100%{transform:scale(1); opacity:1}
+  }
+  .chip.pop{animation:chip-pop .22s ease-out}
+  /* Point d'insertion entre deux temps. Discret par défaut (pointillé, très
+     transparent) : la timeline reste lisible même avec 20 temps. Il ne prend
+     sa couleur d'accent qu'au survol / focus / appui. */
+  .ins{
+    flex:none; align-self:center; width:16px; height:16px; margin:0 -4px; padding:0;
+    border-radius:50%; border:1px dashed var(--border); background:transparent;
+    color:var(--ink-2); font-size:11px; font-weight:800; line-height:1;
+    display:flex; align-items:center; justify-content:center; cursor:pointer;
+    opacity:.35; touch-action:manipulation;
+    transition:opacity .12s ease, border-color .12s ease, color .12s ease, transform .12s ease;
+  }
+  .ins:hover, .ins:focus-visible, .ins:active{
+    opacity:1; transform:scale(1.15); border-style:solid;
+    border-color:var(--accent-2); color:var(--accent-2);
+  }
   /* Point orange : la photo de ce temps ne découle pas du temps précédent
      (cf. en-tête). Ce n'est pas une erreur, juste une information. */
   .chip.desync::after{
     content:''; position:absolute; top:3px; left:3px; width:6px; height:6px;
     border-radius:50%; background:var(--warn);
   }
-  /* 📌 : cette position a été posée à la main dans ce temps, elle ne suit
-     plus la cascade du temps précédent (cf. recomputeStepPositions). */
-  .token .pin{display:none}
-  .token.ovr .pin{display:block}
-  .token .pin .h{fill:#000; fill-opacity:.001}
-  .token .pin .i{paint-order:stroke; pointer-events:none}
-
   .chip .x{
     position:absolute; top:-6px; right:-6px; width:20px; height:20px; display:none;
     border-radius:50%; border:1px solid var(--border); background:var(--panel);
@@ -603,11 +629,6 @@
     <label for="f-points">Points clés</label>
     <textarea id="f-points" rows="5" placeholder="Un point clé par ligne (4 idéalement)"></textarea>
     <div class="note">Une ligne = un point. Les 4 premières lignes sont mises en avant.</div>
-  </div>
-  <div class="fld">
-    <label>Cascade des temps</label>
-    <div class="row"><button class="btn wide" id="f-cascade">🔄 Activer la cascade</button></div>
-    <div class="note" id="f-cascade-note"></div>
   </div>
   <div class="row"><button class="btn wide" id="f-done">Fermer</button></div>
 </div>
@@ -902,18 +923,7 @@
     for (i = 0; i < 5; i++) { p['d' + (i+1)] = { x: LAYOUT[m].def[i].x, y: LAYOUT[m].def[i].y }; }
     return p;
   }
-  function clonePos(p) { var o = {}, k; for (k in p) o[k] = { x: p[k].x, y: p[k].y, ovr: p[k].ovr }; return o; }
-  // ── CASCADE (v.176) ───────────────────────────────────────────────
-  // Une position porte un 3e champ : `ovr`.
-  //   ovr === false  → héritée du temps précédent, la cascade la recalcule
-  //   ovr === true   → posée À LA MAIN dans ce temps, intouchable (📌)
-  //   ovr undefined  → donnée d'AVANT la v.176 : on la traite comme un
-  //                    override. Un play ancien garde donc EXACTEMENT le
-  //                    rendu qu'il avait, et c'est le coach qui décide de
-  //                    basculer en cascade (bouton dans ⚙️).
-  function isOvr(q) { return !q || q.ovr !== false; }
-  // Photo héritée : mêmes points, tous marqués « suit la cascade ».
-  function inheritPos(p) { var o = {}, k; for (k in p) o[k] = { x: p[k].x, y: p[k].y, ovr: false }; return o; }
+  function clonePos(p) { var o = {}, k; for (k in p) o[k] = { x: p[k].x, y: p[k].y }; return o; }
 
   function makeStep(pos) { return { id: uid('s'), pos: pos, arw: [], shot: null, note: '' }; }
 
@@ -1029,20 +1039,20 @@
   }
   function desynced(i) { return i > 0 && !samePos(steps()[i].pos, endPos(steps()[i - 1])); }
 
-  // ── PROPAGATION EN CASCADE (v.176) ────────────────────────────────
-  // Le coach édite le temps N (il déplace une joueuse, il rallonge une
-  // flèche) : la SORTIE du temps N change, donc l'entrée de N+1 doit
-  // suivre, et ainsi de suite jusqu'au dernier temps. Sans ça la joueuse
-  // se téléportait entre la fin de N et le début de N+1.
+  // ── PROPAGATION EN CASCADE (v.179) ────────────────────────────────
+  // Le coach édite le temps N : la SORTIE du temps N change, donc l'entrée
+  // de N+1 doit suivre, et ainsi de suite jusqu'au dernier temps. Sinon la
+  // joueuse se téléporte entre la fin de N et le début de N+1.
   //
-  // Seules les positions marquées `ovr === false` sont recalculées : une
-  // position posée à la main est une DÉCISION du coach, la cascade ne la
-  // touche jamais (elle porte un 📌, tapable pour la relâcher).
+  // AUCUNE exception : il n'existe pas de position « épinglée ». Une v.176
+  // avait tenté de préserver les positions posées à la main en aval ; c'est
+  // l'hérédité qui compte, et deux règles concurrentes sur la même donnée
+  // finissent toujours par se contredire à l'écran.
   //
-  // Coût : un endPos() (≈ 10 points clonés + les flèches du temps) par
-  // temps. 20 temps × 10 jetons ≈ 200 écritures — très en dessous des
-  // 16 ms d'une frame iPhone, donc on peut l'appeler à chaque édition
-  // plutôt que d'entretenir un cache à invalider.
+  // Coût : un endPos() (≈ 10 points clonés + les flèches du temps) par temps.
+  // Mesuré à 0,03 ms pour 20 temps × 10 jetons — très en dessous des 16 ms
+  // d'une frame iPhone, donc on appelle à chaque édition plutôt que
+  // d'entretenir un cache à invalider.
   function recomputeList(l, from, curIdx) {
     var i, k, prev, p, q, hit = 0;
     if (!(from > 1)) from = 1;
@@ -1051,7 +1061,7 @@
       p = l[i].pos;
       for (k in prev) {
         q = p[k];
-        if (isOvr(q)) continue;         // 📌 : le coach a tranché
+        if (!q) { p[k] = { x: prev[k].x, y: prev[k].y }; if (i === curIdx) hit++; continue; }
         if (Math.abs(q.x - prev[k].x) < 0.001 && Math.abs(q.y - prev[k].y) < 0.001) continue;
         q.x = prev[k].x; q.y = prev[k].y;
         if (i === curIdx) hit++;        // le temps affiché a bougé
@@ -1118,12 +1128,7 @@
     var lbl = labelOf(t.id);
     var fs  = t.side === 'atk' ? PR * 1.05 : PR * 0.82;
     var br  = PR * 0.44, bx = PR * 0.82, by = -PR * 0.78;
-    // 📌 en haut à GAUCHE (le ballon occupe déjà la droite). Toujours
-    // écrit, montré par CSS via .ovr : le drag peut donc l'allumer sans
-    // reconstruire le jeton.
-    var px = -PR * 0.82, py = -PR * 0.80;
-    var pinned = cur > 0 && pos()[t.id] && pos()[t.id].ovr === true;
-    return '<g class="token ' + t.side + (pinned ? ' ovr' : '') + '" data-id="' + t.id + '">'
+    return '<g class="token ' + t.side + '" data-id="' + t.id + '">'
       + '<ellipse class="sh" cx="0" cy="' + f(PR * 0.46) + '" rx="' + f(PR * 1.02) + '" ry="' + f(PR * 0.52) + '"/>'
       + '<circle class="disc" cx="0" cy="0" r="' + f(PR) + '"/>'
       + '<circle class="halo" cx="0" cy="0" r="' + f(PR + 1.6) + '"/>'
@@ -1135,10 +1140,7 @@
       +   '<line class="s" x1="' + f(bx - br) + '" y1="' + f(by) + '" x2="' + f(bx + br) + '" y2="' + f(by) + '"/>'
       +   '<line class="s" x1="' + f(bx) + '" y1="' + f(by - br) + '" x2="' + f(bx) + '" y2="' + f(by + br) + '"/>'
       + '</g>'
-      + '<g class="pin">'
-      +   '<circle class="h" cx="' + f(px) + '" cy="' + f(py) + '" r="' + f(PR * 0.62) + '"/>'
-      +   '<text class="i" x="' + f(px) + '" y="' + f(py) + '" dy="0.35em" text-anchor="middle" font-size="' + f(PR * 0.86) + '">\uD83D\uDCCC</text>'
-      + '</g>'
+
       + '</g>';
   }
 
@@ -1156,7 +1158,6 @@
       tokEl[id] = g;
       placeToken(id);
       attachTokenPointer(g, id);
-      attachPinPointer(g, id);
     }
     syncSelection();
     syncBall();
@@ -1252,7 +1253,10 @@
       wp += '<circle class="wphit" data-arw="' + a.id + '" data-i="' + i + '" cx="' + f(v[i].x) + '" cy="' + f(v[i].y) + '" r="' + f(PR * 0.85) + '"/>'
           + '<circle class="wp" data-arw="' + a.id + '" data-i="' + i + '" cx="' + f(v[i].x) + '" cy="' + f(v[i].y) + '" r="' + f(PR * 0.3) + '"/>';
     return '<g class="' + cls + '" data-id="' + a.id + '">'
-      + '<path class="hit" d=""/><path class="body" d=""/>' + wp + '</g>';
+      + '<path class="hit" d=""/><path class="body" d=""/>' + wp
+      + '<circle class="tiphit" data-arw="' + a.id + '" cx="0" cy="0" r="' + f(PR * 0.85) + '"/>'
+      + '<circle class="tip" data-arw="' + a.id + '" cx="0" cy="0" r="' + f(PR * 0.32) + '"/>'
+      + '</g>';
   }
 
   // Le tir n'est pas une flèche du modèle mais un drapeau sur le temps : on le
@@ -1273,12 +1277,15 @@
     var gs = layA.querySelectorAll('.arw');
     for (i = 0; i < gs.length; i++) {
       var g = gs[i], id = g.getAttribute('data-id');
-      arwEl[id] = { g: g, body: g.querySelector('.body'), hit: g.querySelector('.hit') };
+      arwEl[id] = { g: g, body: g.querySelector('.body'), hit: g.querySelector('.hit'),
+                    tip: g.querySelector('.tip'), tiphit: g.querySelector('.tiphit') };
       updateArrow(id);
       attachArrowPointer(g, id);
     }
     var wps = layA.querySelectorAll('.wphit');
     for (i = 0; i < wps.length; i++) attachWaypointPointer(wps[i]);
+    var tps = layA.querySelectorAll('.tiphit');
+    for (i = 0; i < tps.length; i++) attachTipPointer(tps[i]);
   }
 
   // Recalcule le d= d'UNE flèche. C'est le seul travail fait pendant un drag,
@@ -1315,6 +1322,15 @@
     var r = buildPath(p);
     el.body.setAttribute('d', r.d);
     el.hit.setAttribute('d', r.d);
+    // La poignée se pose sur la pointe VUE (base du marker + sa longueur), pas
+    // sur le point du modèle : sinon, quand la flèche vise une joueuse, elle
+    // s'enfouirait sous le jeton et deviendrait impossible à attraper.
+    if (el.tip) {
+      var lp = p[p.length - 1];
+      var tx = lp.x + Math.cos(r.ang) * hl, ty = lp.y + Math.sin(r.ang) * hl;
+      el.tip.setAttribute('cx', f(tx)); el.tip.setAttribute('cy', f(ty));
+      el.tiphit.setAttribute('cx', f(tx)); el.tiphit.setAttribute('cy', f(ty));
+    }
   }
 
   function arrowsOf(tokId) {
@@ -1432,44 +1448,14 @@
       set: function (p) {
         var q = pos()[id];
         q.x = p.x; q.y = p.y;
-        // Déplacer une joueuse dans un temps, c'est décider de sa place :
-        // elle sort de la cascade (📌) et ne bougera plus quand le temps
-        // précédent sera retouché.
-        if (q.ovr !== true) { q.ovr = true; if (cur > 0) { var gg = tokEl[id]; if (gg) gg.classList.add('ovr'); pinTip(); } }
+        // Ce que le coach pose ici définit CE temps ; les temps suivants
+        // seront recalculés à la fin du geste, par touch().
         placeToken(id);
         var ids = arrowsOf(id), i;
         for (i = 0; i < ids.length; i++) updateArrow(ids[i]);
       },
       tap: function () { onTokenClick(id); }
     });
-  }
-
-  // Tap sur le 📌 : la joueuse revient dans la cascade. On intercepte en
-  // pointerdown AVANT le drag du jeton (stopPropagation), sinon le geste
-  // serait avalé par makeDrag.
-  function attachPinPointer(g, id) {
-    var pin = g.querySelector('.pin');
-    if (!pin) return;
-    pin.addEventListener('pointerdown', function (e) {
-      if (playing || cur === 0 || tool !== 'select') return;
-      if (!g.classList.contains('ovr')) return;
-      e.preventDefault(); e.stopPropagation();
-      if (!confirm('\uD83D\uDCCC ' + labelOf(id) + ' est fixée à cette position.' + '\n\n' + '\uD83D\uDD04 La faire suivre la cascade ? Elle reprendra la position de sortie du temps précédent.')) return;
-      var q = pos()[id];
-      if (!q) return;
-      q.ovr = false;
-      recomputeStepPositions(cur);
-      drawTokens(); drawArrows(); renderTimeline(); syncInfo(); touch();
-      toast('\uD83D\uDD04 ' + labelOf(id) + ' suit à nouveau la cascade.', 'ok');
-    });
-  }
-  // Une seule fois par appareil : le 📌 est discret, il mérite sa phrase.
-  function pinTip() {
-    try {
-      if (localStorage.getItem('pb_plays_pin_tip')) return;
-      localStorage.setItem('pb_plays_pin_tip', '1');
-    } catch (_) {}
-    toast('\uD83D\uDCCC Cette joueuse est fixée à cette position et ne suit plus les modifications du temps précédent.', 'ok');
   }
 
   function attachWaypointPointer(el) {
@@ -1492,6 +1478,63 @@
         if (dot) { dot.setAttribute('cx', f(p.x)); dot.setAttribute('cy', f(p.y)); }
         updateArrow(aid);
       }
+    });
+  }
+
+  // ── Poignée d'extrémité (jalon 3.6) ────────────────────────────────────
+  // On repositionne UNIQUEMENT la cible. Aucun handle de rotation : la tête
+  // est un marker posé sur le dernier point du tracé, donc son angle est la
+  // tangente — elle pivote toute seule vers la nouvelle direction, et le T de
+  // l'écran, qui est dans le même marker, se réoriente avec elle.
+  // Une passe (ou un écran) qui passe à moins de TIP_SNAP d'une joueuse se
+  // RACCROCHE à elle : c'est ça, rebrancher une passe. Un déplacement, lui,
+  // garde un point libre — sa cible est une place sur le terrain, pas une
+  // coéquipière.
+  var TIP_SNAP = 5;
+
+  function snapTok(p, exceptId) {
+    var best = null, bd = TIP_SNAP, id, t, d;
+    for (id in TOKMAP) {
+      if (id === exceptId) continue;
+      t = tokById(id);
+      if (!t || !visible(t)) continue;
+      d = Math.sqrt((t.x - p.x) * (t.x - p.x) + (t.y - p.y) * (t.y - p.y));
+      if (d < bd) { bd = d; best = t; }
+    }
+    return best;
+  }
+
+  function attachTipPointer(el) {
+    var aid = el.getAttribute('data-arw');
+    makeDrag(el, {
+      down: function () { return tool === 'select'; },
+      // clampPt de makeDrag : l'extrémité ne peut pas sortir du terrain.
+      pad: function () { return 1; },
+      // On part du point du MODÈLE (centre du jeton visé ou point libre) :
+      // makeDrag mémorise l'écart doigt↔point, donc rien ne saute au premier
+      // contact, alors même que la poignée est dessinée en avant, sur la pointe.
+      get: function () {
+        var a = findArw(aid);
+        if (!a) return null;
+        var d = typeof a.to === 'string' ? tokById(a.to) : a.to;
+        return d ? { x: d.x, y: d.y } : null;
+      },
+      set: function (p) {
+        var a = findArw(aid);
+        if (!a) return;
+        var t = a.kind === 'move' ? null : snapTok(p, a.from);
+        a.to = t ? t.id : { x: p.x, y: p.y };
+        updateArrow(aid);
+      }
+    });
+    // Posé APRÈS makeDrag, donc exécuté après lui : sa capture est relâchée
+    // quand on redessine. Déplacer une extrémité change la course de la
+    // joueuse : la cascade des temps suivants se rejoue, exactement comme
+    // après un drag de jeton.
+    el.addEventListener('pointerup', function () {
+      if (tool !== 'select' || playing) return;
+      if (recomputeStepPositions(cur)) drawTokens();
+      drawArrows(); syncInfo(); renderTimeline();
     });
   }
 
@@ -1639,6 +1682,9 @@
   function renderTimeline() {
     var l = steps(), html = '', i;
     for (i = 0; i < l.length; i++) {
+      // Un point d'insertion AVANT chaque temps (celui d'après le dernier,
+      // c'est le ＋ de la barre). Insérer en tête est donc possible aussi.
+      html += '<button class="ins" data-ins="' + i + '" title="Insérer un temps ici">+</button>';
       html += '<div class="chip' + (i === cur ? ' on' : '') + (desynced(i) ? ' desync' : '') + '" data-i="' + i + '">'
         + (i + 1)
         + '<span class="mini">' + stepSummary(l[i]) + '</span>'
@@ -1646,8 +1692,6 @@
         + '</div>';
     }
     strip.innerHTML = html;
-    var chips = strip.querySelectorAll('.chip');
-    for (i = 0; i < chips.length; i++) attachChip(chips[i]);
     document.getElementById('s-sync').disabled = (cur === 0) || playing;
     updateProgress();
   }
@@ -1662,7 +1706,7 @@
 
   function addStep() {
     var src = steps()[steps().length - 1];
-    steps().push(makeStep(inheritPos(endPos(src))));
+    steps().push(makeStep(endPos(src)));
     gotoStep(steps().length - 1);
     touch();
   }
@@ -1672,68 +1716,63 @@
     if (!confirm('Supprimer le temps ' + (i + 1) + ' ?\nSes flèches et sa disposition sont perdues.')) return;
     steps().splice(i, 1);
     if (cur >= steps().length) cur = steps().length - 1;
-    gotoStep(cur); touch();
+    // Le temps qui prend la place du supprimé doit hériter de son nouveau
+    // prédécesseur : la cascade repart de i, pas de cur + 1.
+    gotoStep(cur); touch(i);
   }
 
   // Recale la photo du temps courant sur la SORTIE du temps précédent, sans
   // toucher à ses flèches (cf. l'en-tête : on répare, on n'écrase pas en douce).
   function syncStep() {
     if (cur === 0) return;
-    steps()[cur].pos = inheritPos(endPos(steps()[cur - 1]));
-    recomputeStepPositions(cur + 1);   // les temps suivants suivent
+    steps()[cur].pos = endPos(steps()[cur - 1]);
     gotoStep(cur); touch();
     toast('Temps ' + (cur + 1) + ' recalé.', 'ok');
   }
 
-  // Réordonnancement au doigt. Un seuil de 6 px sépare le tap (sélection) du
-  // glissé (déplacement) : sur iPhone, un doigt bouge toujours un peu.
-  function attachChip(el) {
-    var i0 = +el.getAttribute('data-i');
-    var down = false, x0 = 0, dragging = false;
+  // INSERTION entre deux temps (v.178). Remplace le réordonnancement au
+  // doigt du jalon 2 : glisser un temps d'une place à l'autre cassait la
+  // cascade (le temps déplacé héritait soudain d'une AUTRE sortie, et tous
+  // les temps entre les deux places suivaient). L'ordre est désormais figé
+  // par l'ordre d'ajout / d'insertion, et les chips ne servent plus qu'à
+  // naviguer.
+  //
+  // Le temps inséré en position i :
+  //   entrée  = la photo du temps qui était à cette place (ou, en queue, la
+  //             SORTIE du dernier temps) ;
+  //   sortie  = son entrée, puisqu'il naît sans aucune flèche → le temps
+  //             suivant garde EXACTEMENT sa photo et la cascade ne bouge rien.
+  // Reprendre la photo du SUIVANT plutôt que la sortie du précédent, c'est ce
+  // qui rend l'insertion neutre même sur un temps que le coach avait rangé à
+  // la main : la divergence, s'il y en a une, passe au temps inséré.
+  function insertStep(i) {
+    var l = steps();
+    if (playing || i < 0 || i > l.length) return;
+    var nxt = l[i] || null;
+    var st = makeStep(nxt ? clonePos(nxt.pos) : endPos(l[l.length - 1]));
 
-    el.addEventListener('pointerdown', function (e) {
-      if (e.target && e.target.getAttribute('data-del') !== null) return;
-      if (playing) return;
-      down = true; dragging = false; x0 = e.clientX;
-      try { el.setPointerCapture(e.pointerId); } catch (_) {}
-    });
-    el.addEventListener('pointermove', function (e) {
-      if (!down) return;
-      var dx = e.clientX - x0;
-      if (!dragging && Math.abs(dx) > 6) { dragging = true; el.classList.add('grab'); }
-      if (dragging) { e.preventDefault(); el.style.transform = 'translateX(' + dx + 'px) scale(1.06)'; }
-    }, { passive: false });
-    function up(e) {
-      if (!down) return;
-      down = false;
-      try { el.releasePointerCapture(e.pointerId); } catch (_) {}
-      el.style.transform = '';
-      el.classList.remove('grab');
-      if (!dragging) { gotoStep(i0); return; }
-      // Où lâche-t-on ? On compare le centre du doigt aux centres des chips.
-      var chips = strip.querySelectorAll('.chip'), j, target = i0;
-      for (j = 0; j < chips.length; j++) {
-        var r = chips[j].getBoundingClientRect();
-        if (e.clientX > r.left + r.width / 2) target = j;
-        else break;
-      }
-      if (target !== i0) {
-        var l = steps(), moved = l.splice(i0, 1)[0];
-        l.splice(target, 0, moved);
-        cur = target;
-        touch();
-      } else cur = i0;
-      gotoStep(cur);
-    }
-    el.addEventListener('pointerup', up);
-    el.addEventListener('pointercancel', up);
+    l.splice(i, 0, st);
+    recomputeStepPositions(i + 1);   // no-op attendu : c'est le but du miroir
+    cur = i;
+    gotoStep(cur); touch();
+    var chip = strip.querySelector('.chip[data-i="' + i + '"]');
+    if (chip) chip.classList.add('pop');
+    toast('Temps ' + (i + 1) + ' inséré.', 'ok');
   }
 
+  // Une seule délégation pour toute la bande : supprimer, insérer, naviguer.
+  // Plus aucun pointerdown sur les chips — donc plus rien qui puisse avaler
+  // le pan-x du scroll horizontal.
   strip.addEventListener('click', function (e) {
-    var d = e.target && e.target.getAttribute && e.target.getAttribute('data-del');
-    if (d === null || d === undefined) return;
-    e.stopPropagation();
-    delStep(+d);
+    var t = e.target;
+    if (!t || !t.getAttribute) return;
+    var d = t.getAttribute('data-del');
+    if (d !== null && d !== undefined) { e.stopPropagation(); delStep(+d); return; }
+    var ins = t.getAttribute('data-ins');
+    if (ins !== null && ins !== undefined) { e.stopPropagation(); insertStep(+ins); return; }
+    if (playing) return;
+    var chip = t.closest ? t.closest('.chip') : null;
+    if (chip) gotoStep(+chip.getAttribute('data-i'));
   });
   document.getElementById('s-add').addEventListener('click', addStep);
   document.getElementById('s-sync').addEventListener('click', syncStep);
@@ -2485,47 +2524,6 @@
 
   document.getElementById('b-meta').addEventListener('click', function () { metaToForm(); openSheet('sh-meta'); });
 
-  // ── Cascade : état + bascule d'un play ancien ─────────────────────
-  // On compte sur les DEUX modes : basculer half puis découvrir que full
-  // est resté figé serait le genre d'incohérence qu'on vient de corriger.
-  function cascadeTally() {
-    var t = { pin: 0, legacy: 0 }, ms = ['half', 'full'], j, i, k, l;
-    for (j = 0; j < ms.length; j++) {
-      l = doc[ms[j]].steps;
-      for (i = 1; i < l.length; i++) for (k in l[i].pos) {
-        if (l[i].pos[k].ovr === true) t.pin++;
-        else if (l[i].pos[k].ovr === undefined) t.legacy++;
-      }
-    }
-    return t;
-  }
-  function syncCascadeNote() {
-    var t = cascadeTally(), el = document.getElementById('f-cascade-note');
-    var b = document.getElementById('f-cascade');
-    if (t.legacy) {
-      el.textContent = 'Ce play est en mode figé (format d\u2019avant la cascade) : chaque temps garde ses positions. Activer la cascade fera suivre automatiquement les temps suivants quand vous retoucherez un temps.';
-      b.disabled = false;
-    } else {
-      el.textContent = 'Cascade active. ' + (t.pin ? t.pin + ' position(s) \uD83D\uDCCC posée(s) à la main, préservée(s).' : 'Aucune position épinglée.');
-      b.disabled = !t.pin;
-      b.textContent = t.pin ? '\uD83D\uDD04 Tout remettre dans la cascade' : '\uD83D\uDD04 Cascade active';
-    }
-  }
-  document.getElementById('b-meta').addEventListener('click', syncCascadeNote);
-  document.getElementById('f-cascade').addEventListener('click', function () {
-    var t = cascadeTally();
-    if (!t.legacy && !t.pin) return;
-    if (!confirm('Tous les temps repartiront de la sortie du temps précédent.' + '\n\n' + 'Les positions posées à la main seront recalées. Vous pourrez en r\u00e9\u00e9pingler ensuite en d\u00e9pla\u00e7ant une joueuse.')) return;
-    var ms = ['half', 'full'], j, i, k, l;
-    for (j = 0; j < ms.length; j++) {
-      l = doc[ms[j]].steps;
-      for (i = 1; i < l.length; i++) for (k in l[i].pos) l[i].pos[k].ovr = false;
-      recomputeList(l, 1, -1);
-    }
-    drawTokens(); drawArrows(); renderTimeline(); syncInfo(); touch();
-    syncCascadeNote();
-    toast('\uD83D\uDD04 Cascade activée sur tout le play.', 'ok');
-  });
   document.getElementById('b-menu').addEventListener('click', function () { metaToForm(); openSheet('sh-menu'); });
   document.getElementById('f-done').addEventListener('click', closeSheets);
 
@@ -2584,10 +2582,7 @@
         }
       }
       var positions = {};
-      // `override` est écrit EXPLICITEMENT : un lecteur qui ne le connaît
-      // pas l'ignore, et à la relecture son absence signifie « ancien
-      // fichier » — donc override, donc aucun recalcul surprise.
-      for (id in s.pos) { positions[id] = pt(s.pos[id]); positions[id].override = (s.pos[id].ovr !== false); }
+      for (id in s.pos) positions[id] = pt(s.pos[id]);
       if (s.shot) flat.push({ step: i, kind: 'shot', from: numOf(s.shot) });
       outSteps.push({
         n: i + 1, note: s.note || '',
@@ -2702,13 +2697,13 @@
       var s = o.steps[i] || {};
       // `positions` si le fichier la porte (round-trip exact), sinon on dérive
       // du temps précédent — c'est la seule information disponible.
-      var sp = i === 0 ? clonePos(prev) : inheritPos(prev);
+      var sp = clonePos(prev);
       var given = pick(s, 'positions', 'pos');
       if (given && typeof given === 'object') {
         for (var k in given) {
           var kid = refId(k) || (TOKMAP[k] ? k : null);
           var q = refPoint(given[k]);
-          if (kid && q) { q.ovr = (given[k] && given[k].override === false) ? false : true; sp[kid] = q; }
+          if (kid && q) sp[kid] = q;
         }
       }
       var st = makeStep(sp);
@@ -3315,11 +3310,16 @@
   // rien réveille le CPU de l'iPhone sans raison.
   var dirty = false, lastSaved = '';
   // TOUTE édition passe par touch() : c'est donc LE point unique d'où la
-  // cascade repart. Un seul appel plutôt qu'un rappel dispersé dans les
-  // douze fonctions d'édition (ajout de flèche, gomme, tir, réordonnancement
-  // des temps, miroir…) — c'est exactement l'erreur qu'on refait sinon :
-  // une porte oubliée, et le play redevient incohérent en silence.
-  function touch() { dirty = true; cascade(1); renderTimelineSoon(); }
+  // cascade repart. Un seul appel plutôt qu'un rappel dispersé dans les douze
+  // fonctions d'édition (ajout de flèche, gomme, tir, miroir…) — c'est
+  // exactement l'erreur qu'on refait sinon : une porte oubliée, et le play
+  // redevient incohérent en silence.
+  //
+  // Par défaut on repart de cur + 1 : le temps que le coach vient d'éditer
+  // est la NOUVELLE référence, ce sont les suivants qui doivent le rejoindre.
+  // Les gestes qui déplacent la frontière (supprimer, réordonner un temps)
+  // passent l'index de départ explicitement.
+  function touch(from) { dirty = true; cascade(from === undefined ? cur + 1 : from); renderTimelineSoon(); }
 
   var tlRaf = 0;
   function renderTimelineSoon() {
