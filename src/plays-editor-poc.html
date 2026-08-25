@@ -3502,9 +3502,9 @@
   // 11. FEUILLES (métadonnées, menu, plays)
   // ─────────────────────────────────────────────────────────────────────
   var scrim = document.getElementById('scrim');
-  var SHEETS = ['sh-meta', 'sh-menu', 'sh-plays'];
+  var SHEETS = ['sh-meta', 'sh-menu', 'sh-plays', 'sh-note', 'sh-zone'];
   function closeSheets() {
-    SHEETS.forEach(function (k) { document.getElementById(k).classList.remove('show'); });
+    SHEETS.forEach(function (k) { var el = document.getElementById(k); if (el) el.classList.remove('show'); });
     scrim.classList.remove('show');
   }
   function openSheet(k) {
