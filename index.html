@@ -16307,11 +16307,14 @@ function openPbEditorV2(playId, animId, mode) {
   location.href = '/src/plays-editor-poc.html' + (q.length ? '?' + q.join('&') : '');
 }
 // JALON 4.5 — même éditeur, autre hôte : un EXO d'un plan d'entraînement.
-// L'animation vit dans training_plans.plan.exercises[].animation (jsonb libre,
-// aucune migration). On pousse le plan local AVANT de partir : le POC fait un
+// Les animations vivent dans training_plans.plan.exercises[].animations[] (jsonb
+// libre, aucune migration). On pousse le plan local AVANT de partir : le POC fait
 // read-modify-write SERVEUR, il ne verra jamais ce qui dort encore en local.
-function openExoAnimEditor(planId, exoId, mode) {
+function openExoAnimEditor(planId, exoId, mode, animId) {
   const q = ['plan=' + encodeURIComponent(planId), 'exo=' + encodeURIComponent(exoId)];
+  // Sans `anim=`, l'éditeur ouvre une page blanche : c'est ainsi qu'on ajoute
+  // la 2e, la 3e… animation d'un même exo.
+  if (animId) q.push('anim=' + encodeURIComponent(animId));
   if (mode) q.push('mode=' + encodeURIComponent(mode));
   _pbEditorThemeParams(q);
   const go = () => { location.href = '/src/plays-editor-poc.html?' + q.join('&'); };
@@ -16918,7 +16921,7 @@ function _animPrevPlace(el, pos, holder, stepIdx) {
 // résolution — sinon la boucle rAF marcherait ici et pas là.
 function _animResolveEl(el) {
   const exo = el.getAttribute('data-exo-id');
-  if (exo) return _exoAnimGet(el.getAttribute('data-plan-id'), exo);
+  if (exo) return _exoAnimGet(el.getAttribute('data-plan-id'), exo, el.getAttribute('data-anim-id'));
   const play = state.plays.find(x => x.id === el.getAttribute('data-play-id'));
   return (play && (Array.isArray(play.animations) ? play.animations : []).find(a => a && a.id === el.getAttribute('data-anim-id'))) || null;
 }
@@ -40576,11 +40579,11 @@ function _altValidateCustom() {
 // 🎬 ANIMATION D'UN EXO DE PLAN (jalon 4.5)
 // ------------------------------------------------------------
 // Aucune table, aucune migration : l'animation est un MÉDIA de l'exo, rangé
-// dans training_plans.plan.exercises[].animation — exactement le raisonnement
+// dans training_plans.plan.exercises[].animations[] — exactement le raisonnement
 // de plays.animations. Même schéma d'échange, donc le viewer joueuse, la
 // vignette et l'éditeur marchent sans une ligne de conversion.
-// Rétrocompat : un exo sans `animation` se rend comme avant — tout part de
-// _exoAnimGet, qui renvoie null et fait disparaître le bloc.
+// Rétrocompat : un exo sans animation se rend comme avant — tout part de
+// _exoAnimList, qui renvoie [] et fait disparaître la section.
 function _exoAnimSplit(planId) { const s = String(planId || ''), i = s.indexOf('::'); return i < 0 ? null : { convocId: s.slice(0, i), date: s.slice(i + 2) }; }
 // Le coach édite une COPIE VIVANTE (c.trainingPlan) que trainingPlans ne reçoit
 // qu'au persist : lire getTrainingPlan d'abord ferait clignoter la vignette
@@ -40598,10 +40601,16 @@ function _exoAnimExo(planId, exoId) {
   const p = _exoAnimPlan(planId);
   return (p && (p.exercises || []).find(e => e && String(e.id) === String(exoId))) || null;
 }
-function _exoAnimGet(planId, exoId) {
-  const ex = _exoAnimExo(planId, exoId);
-  const a = ex && ex.animation;
-  return (a && Array.isArray(a.steps) && a.steps.length) ? a : null;
+// PORTE UNIQUE de lecture. Un exo porte un TABLEAU depuis v.196 ; la clé
+// singulière `animation` (v.195) est encore lue ici, et nulle part ailleurs,
+// pour que les exos publiés entre-temps ne disparaissent pas de l'écran.
+function _exoAnimList(planId, exoId) {
+  const ex = _exoAnimExo(planId, exoId); if (!ex) return [];
+  const raw = Array.isArray(ex.animations) ? ex.animations : (ex.animation ? [ex.animation] : []);
+  return raw.filter(a => a && Array.isArray(a.steps) && a.steps.length);
+}
+function _exoAnimGet(planId, exoId, animId) {
+  return _exoAnimList(planId, exoId).find(a => a && String(a.id) === String(animId)) || null;
 }
 // Le montage des vignettes est global et paresseux (IntersectionObserver) : on
 // le redemande une fois le HTML posé, débouncé — plans et modales se rendent
@@ -40610,41 +40619,76 @@ function _exoAnimMountSoon() {
   clearTimeout(window._exoAnimMt);
   window._exoAnimMt = setTimeout(() => { try { _animPreviewsMount(); } catch (e) {} }, 90);
 }
-function _exoAnimBlock(planId, exoId) {
-  const a = _exoAnimGet(planId, exoId); if (!a) return '';
+// Le TAP d'une vignette ouvre toujours le viewer, coach comme joueuse :
+// l'édition passe par ✎. Un même geste ne doit pas mener à deux écrans.
+function _exoAnimThumb(planId, exoId, a) {
   const n = Array.isArray(a.steps) ? a.steps.length : 0;
   const nb = (typeof _animBranchCount === 'function') ? _animBranchCount(a) : 0;
-  _exoAnimMountSoon();
   return `
     <div class="anim-thumb" data-anim-id="${esc(a.id || 'x')}" data-plan-id="${esc(planId)}" data-exo-id="${esc(exoId)}"
-         style="position:relative;padding:6px 6px 0;border:1px solid var(--border);border-radius:10px;overflow:hidden;cursor:pointer;margin-top:8px"
-         onclick="event.stopPropagation();openExoAnimEditor('${esc(planId)}','${esc(exoId)}','view')" title="Voir l'animation">
+         style="position:relative;padding:6px 6px 0;cursor:pointer"
+         onclick="event.stopPropagation();openExoAnimEditor('${esc(planId)}','${esc(exoId)}','view','${esc(a.id || '')}')" title="Voir en plein écran">
       ${_animThumbSvg(a)}
       <span style="position:absolute;left:12px;bottom:10px;background:rgba(0,0,0,0.62);color:#fff;font-family:'JetBrains Mono';font-size:10px;padding:3px 8px;border-radius:999px">▶ ${n} temps${nb ? ` · ${nb} branche${nb > 1 ? 's' : ''}` : ''}</span>
     </div>`;
 }
-// Bloc coach = vignette + commandes. Jamais rendu côté joueuse.
+// Une carte = vignette + identité (+ commandes coach). Volontairement le même
+// dessin que la section Animations d'une fiche play : un exo n'est qu'un hôte
+// de plus, la joueuse ne doit pas avoir à réapprendre l'objet.
+function _exoAnimCard(planId, exoId, a, coach) {
+  const dot = /^#[0-9a-f]{3,8}$/i.test(a.color || '') ? a.color : 'var(--orange)';
+  const aid = esc(a.id || '');
+  return `
+    <div style="border:1px solid var(--border);border-radius:10px;overflow:hidden">
+      ${_exoAnimThumb(planId, exoId, a)}
+      <div style="display:flex;align-items:center;gap:8px;padding:7px 9px">
+        <span style="width:8px;height:8px;border-radius:50%;flex:none;background:${dot}"></span>
+        <span style="flex:1;min-width:0">
+          <b style="display:block;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.title || 'Sans titre')}</b>
+          <small style="font-size:10px;color:var(--ink-3)">${esc(a.tag || a.side || '')} · ${a.court_type === 'full' ? 'terrain complet' : 'demi-terrain'}</small>
+        </span>
+        ${coach ? `
+          <button class="btn btn-secondary" style="font-size:10px" onclick="event.stopPropagation();openExoAnimEditor('${esc(planId)}','${esc(exoId)}','','${aid}')" title="Éditer l&#39;animation">✎</button>
+          <button class="btn btn-danger" style="font-size:10px" onclick="event.stopPropagation();deleteExoAnimation('${esc(planId)}','${esc(exoId)}','${aid}')" title="Supprimer l&#39;animation">🗑</button>` : ''}
+      </div>
+    </div>`;
+}
+function _exoAnimSection(planId, exoId, list, coach) {
+  _exoAnimMountSoon();
+  return `
+    <div style="font-size:9px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">🎬 Animations (${list.length})</div>
+    <div style="display:flex;flex-direction:column;gap:8px">${list.map(a => _exoAnimCard(planId, exoId, a, coach)).join('')}</div>`;
+}
+// Bloc joueuse : la liste seule, jamais une commande.
+function _exoAnimBlock(planId, exoId) {
+  const list = _exoAnimList(planId, exoId);
+  if (!list.length) return '';
+  return `<div style="margin-top:10px" onclick="event.stopPropagation()">${_exoAnimSection(planId, exoId, list, false)}</div>`;
+}
+// Bloc coach = la liste + le bouton de création, TOUJOURS offert : c'est lui
+// qui rend la 2e et la 3e animation possibles. Jamais rendu côté joueuse.
 function _exoAnimCoachBlock(planId, exoId) {
   if (!planId || !exoId || !_tcnIsCoach()) return '';
-  const has = !!_exoAnimGet(planId, exoId);
+  const list = _exoAnimList(planId, exoId);
   return `
     <div style="padding:0 12px 10px" onclick="event.stopPropagation()">
-      ${_exoAnimBlock(planId, exoId)}
-      <div style="display:flex;gap:6px;margin-top:8px">
-        <button class="btn btn-secondary" style="flex:1;font-size:10px" onclick="openExoAnimEditor('${esc(planId)}','${esc(exoId)}')">${has ? '🎬 ✎ Voir / éditer l&#39;animation' : '🎬 Ajouter une animation'}</button>
-        ${has ? `<button class="btn btn-danger" style="font-size:10px" onclick="deleteExoAnimation('${esc(planId)}','${esc(exoId)}')" title="Retirer l&#39;animation">🗑</button>` : ''}
-      </div>
+      ${list.length ? _exoAnimSection(planId, exoId, list, true) : ''}
+      <button class="btn btn-secondary btn-block" style="font-size:10px;margin-top:${list.length ? 8 : 0}px" onclick="openExoAnimEditor('${esc(planId)}','${esc(exoId)}')">🎬 Créer une animation</button>
     </div>`;
 }
 // Suppression côté app (et non dans le POC) : trainingPlans EST une entité
 // PbSync qui pousse `plan`. Retirer la clé en local puis flusher suffit — et
 // évite d'ouvrir l'éditeur juste pour supprimer.
-function deleteExoAnimation(planId, exoId) {
+function deleteExoAnimation(planId, exoId, animId) {
   if (!_tcnIsCoach()) return;
   const k = _exoAnimSplit(planId); if (!k) return;
-  const ex = _exoAnimExo(planId, exoId); if (!ex || !ex.animation) return;
-  if (!confirm('Retirer l\'animation de « ' + (ex.title || 'cet exercice') + ' » ?')) return;
-  delete ex.animation;
+  const ex = _exoAnimExo(planId, exoId); if (!ex) return;
+  const list = _exoAnimList(planId, exoId);
+  const gone = list.find(a => a && String(a.id) === String(animId));
+  if (!gone) return;
+  if (!confirm('Retirer « ' + (gone.title || 'cette animation') + ' » de « ' + (ex.title || 'cet exercice') + ' » ?')) return;
+  ex.animations = list.filter(a => a !== gone);
+  delete ex.animation;   // normalisation : une seule source à partir d'ici
   const tp = (state.trainingPlans || []).find(t => t && t.convocationId === k.convocId && t.instanceDate === k.date);
   if (tp) tp.updatedAt = Date.now();
   persist();
@@ -52933,7 +52977,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.195';
+const APP_VERSION = '2026-08-19.196';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.

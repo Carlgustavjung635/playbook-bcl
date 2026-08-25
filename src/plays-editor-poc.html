@@ -4434,8 +4434,8 @@
   var wantView = Q.get('mode') === 'view'; // ouvrir directement en lecture
   // JALON 4.5 — mode « exo d'un plan d'entraînement ». Même éditeur, autre
   // hôte : l'animation vit alors dans training_plans.plan.exercises[].animation
-  // (jsonb déjà existant, aucune migration). Un exo porte AU PLUS une
-  // animation : il n'y a donc pas d'`anim=` à viser dans ce mode.
+  // (jsonb déjà existant, aucune migration). Un exo porte N animations, et
+  // `anim=` désigne celle qu'on ouvre — sans lui, on en crée une nouvelle.
   var planId = Q.get('plan') || null;      // "<convocId>::<date>"
   var exoId  = Q.get('exo') || null;       // l'exercice du plan
   var playTitle = '';
@@ -4475,6 +4475,10 @@
           var p = rows[0].plan || {}, xs = Array.isArray(p.exercises) ? p.exercises : [], i;
           for (i = 0; i < xs.length; i++) if (xs[i] && String(xs[i].id) === String(exoId)) {
             playTitle = xs[i].title || 'exercice';
+            // TABLEAU depuis v.196, exactement comme un play. `animation`
+            // (singulier, v.195) reste LU pour les exos déjà publiés — il
+            // n'est plus jamais écrit : une seule source à la fois.
+            if (Array.isArray(xs[i].animations)) return xs[i].animations;
             return xs[i].animation ? [xs[i].animation] : [];
           }
           throw new Error('exercice introuvable dans ce plan');
@@ -4501,10 +4505,11 @@
           var p = rows[0].plan || {}, xs = Array.isArray(p.exercises) ? p.exercises : [], i, hit = -1;
           for (i = 0; i < xs.length; i++) if (xs[i] && String(xs[i].id) === String(exoId)) hit = i;
           if (hit < 0) throw new Error('exercice introuvable dans ce plan');
-          // `list` vient du même merge que pour un play : la dernière entrée est
-          // toujours le document courant (remplacé sur place ou poussé au bout).
-          var last = (list && list.length) ? list[list.length - 1] : null;
-          if (last) xs[hit].animation = last; else delete xs[hit].animation;
+          // On écrit la liste telle que le merge l'a produite — un exo porte N
+          // animations depuis v.196. La clé singulière est retirée au passage,
+          // sinon deux sources cohabiteraient et la lecture deviendrait un pari.
+          xs[hit].animations = (list || []).filter(function (a) { return a && a.id; });
+          delete xs[hit].animation;
           p.exercises = xs;
           return sbFetch('training_plans?id=eq.' + encodeURIComponent(planId),
             { method: 'PATCH', body: { plan: p, updated_at: new Date().toISOString() }, prefer: 'return=minimal' });
@@ -5361,11 +5366,10 @@
     fetchAnims()
       .then(function (list) {
         setContext(playTitle ? '↳ ' + playTitle : (planId ? '↳ exercice' : '↳ play'));
-        // Mode exo : pas d'`anim=` a viser — c'est l'unique animation, ou rien.
-        if (planId) { if (!list.length) { offerDraft(); return; } }
-        else if (!wantAnim) { offerDraft(); return; }
-        var found = planId ? list[0] : null, i;
-        for (i = 0; !found && i < list.length; i++) if (list[i] && list[i].id === wantAnim) found = list[i];
+        // Sans `anim=`, on CRÉE : play comme exo, une porte unique.
+        if (!wantAnim) { offerDraft(); return; }
+        var found = null, i;
+        for (i = 0; i < list.length; i++) if (list[i] && list[i].id === wantAnim) found = list[i];
         if (!found) { toast('Animation introuvable — on repart d\'une page blanche.', 'err'); offerDraft(); return; }
         loadDoc(fromJSON(found));
         dirty = false;
