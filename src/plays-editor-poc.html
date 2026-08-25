@@ -2289,6 +2289,7 @@
 
   function play() {
     if (playing) { pause(); return; }
+    vwCancelHold();
     if (pU >= 1 && pStep >= steps().length - 1) { pStep = 0; pU = 0; }
     vwHalt = false;
     playing = true;
@@ -2324,7 +2325,7 @@
       // CHAQUE niveau.
       if (vwOn && vwLoop >= 1 && vwAskKey !== vwAskKeyAt(pStep) && vwBranchesAt(pStep)) {
         pU = 1; renderFrame(pStep, 1);
-        vwOpenMenu(pStep);
+        vwAskAfterFrame(pStep);
         return;
       }
       vwAskKey = '';
@@ -4090,6 +4091,37 @@
     return bpath.map(function (h) { return h.si + '~' + h.bid; }).join('|') + '#' + ix;
   }
 
+  // Fin de temps = fin de GESTE. Un tir occupe la fenetre [0.70 ; 1.00] du
+  // temps (PLAY.shot) : ouvrir le menu pile a u = 1 posait la carte par-dessus
+  // le ballon a l instant meme ou il touchait le panier — la joueuse voyait
+  // son tir coupe. On TIENT donc la photo de sortie le temps que l oeil
+  // enregistre l arrivee, PUIS on demande. Le tenu suit la vitesse choisie :
+  // en 🐢 Lent le tir a droit a plus de temps qu en 🐇 Rapide.
+  var vwHold = 0;
+  function vwCancelHold() { if (vwHold) { clearTimeout(vwHold); vwHold = 0; } }
+  function vwHoldMs(ix) {
+    var st = steps()[ix];
+    if (st && st.shot) return clamp(Math.round(stepMs() * 0.40), 520, 1200);
+    if (st && passOf(st)) return 300;
+    return 200;
+  }
+  function vwAskAfterFrame(ix) {
+    vwCancelHold();
+    // Le rAF s arrete AVANT le tenu : sans ca le temps suivant demarrerait
+    // sous la carte pendant qu on attend.
+    if (playing) { pause(); vwSyncButtons(); }
+    vwHalt = true;
+    var k = vwAskKeyAt(ix);
+    vwHold = setTimeout(function () {
+      vwHold = 0;
+      // Tout ce qui a pu arriver pendant le tenu (▶, bouton 🔀, sortie du
+      // viewer) prime : on ne rouvre pas un menu perime.
+      if (!vwOn || playing || vwAskKeyAt(ix) !== k) return;
+      if (vwMenu && vwMenu.classList.contains('show')) return;
+      vwOpenMenu(ix);
+    }, vwHoldMs(ix));
+  }
+
   function vwHasBranches() {
     return (function scan(l) {
       var i, j, bs;
@@ -4103,6 +4135,7 @@
   }
 
   function vwGoPath(p, now) {
+    vwCancelHold();
     bpath = p;
     cur = 0; pStep = 0; pU = 0; pPrepared = -1; vwAskKey = '';
     vwCrumb();
@@ -4191,6 +4224,7 @@
 
   function exitViewer() {
     if (!vwOn) return;
+    vwCancelHold();
     vwOn = false;
     document.body.classList.remove('viewer');
     VIEWS['2d'].editable = true;
@@ -4238,6 +4272,7 @@
   // Pause + menu sur le temps `ix`. Meme mecanisme que le bouton ⏸ : aucun
   // cout supplementaire, la boucle rAF s'arrete vraiment.
   function vwOpenMenu(ix) {
+    vwCancelHold();
     var st = steps()[ix];
     if (!st || !Array.isArray(st.branches) || !st.branches.length) return;
     // Toujours sur la PHOTO DE SORTIE du temps de bifurcation : c est l etat
