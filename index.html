@@ -16793,6 +16793,33 @@ function _animBranchCount(anim) {
   return n;
 }
 
+// Zones peintes (v.191) : des formes statiques SOUS les jetons. Absentes du
+// JSON => chaine vide => vignette rigoureusement identique a avant.
+function _animZonesSvg(anim) {
+  const zs = Array.isArray(anim && anim.zones) ? anim.zones : [];
+  if (!zs.length) return '';
+  return zs.map(z => {
+    if (!z) return '';
+    const x = +z.x, y = +z.y;
+    if (!isFinite(x) || !isFinite(y)) return '';
+    const w = Math.max(4, +z.w || 0) || 20;
+    const free = z.shape === 'oval' || z.shape === 'rect';
+    const h = free ? (Math.max(4, +z.h || 0) || w) : w;
+    const rot = +(z.rotation != null ? z.rotation : z.rot) || 0;
+    const c = /^#[0-9a-f]{3,8}$/i.test(z.color || '') ? z.color : '#22D3EE';
+    const op = Math.min(0.7, Math.max(0.1, +z.opacity || 0.3));
+    let sh;
+    if (z.shape === 'oval') sh = `<ellipse cx="0" cy="0" rx="${_animF(w / 2)}" ry="${_animF(h / 2)}"/>`;
+    else if (z.shape === 'square' || z.shape === 'rect')
+      sh = `<rect x="${_animF(-w / 2)}" y="${_animF(-h / 2)}" width="${_animF(w)}" height="${_animF(h)}" rx="${_animF(Math.min(w, h) * 0.07)}"/>`;
+    else if (z.shape === 'triangle') {
+      const cy = w * Math.sqrt(3) / 2 / 3;
+      sh = `<polygon points="0,${_animF(-2 * cy)} ${_animF(-w / 2)},${_animF(cy)} ${_animF(w / 2)},${_animF(cy)}"/>`;
+    } else sh = `<circle cx="0" cy="0" r="${_animF(w / 2)}"/>`;
+    return `<g transform="translate(${_animF(x)},${_animF(y)}) rotate(${_animF(rot)})" fill="${esc(c)}" fill-opacity="${op}">${sh}</g>`;
+  }).join('');
+}
+
 function _animThumbSvg(anim) {
   const full = anim.court_type === 'full';
   const vb = full ? '0 0 304 174' : '0 0 174 164';
@@ -16822,7 +16849,7 @@ function _animThumbSvg(anim) {
   const b0 = holders[0] ? p0[holders[0]] : null;
   const ball = b0 ? _animBallSvg(R).replace('translate(0,0)', `translate(${_animF(b0.x)},${_animF(b0.y)})`) : '';
   return `<svg viewBox="${vb}" style="display:block;width:100%;height:auto;color:var(--ink-3)"
-    preserveAspectRatio="xMidYMid meet" aria-hidden="true">${_animMarkers(_ANIM_MK, R, col)}${_animCourt(full)}${arrows}${toks}${ball}</svg>`;
+    preserveAspectRatio="xMidYMid meet" aria-hidden="true">${_animMarkers(_ANIM_MK, R, col)}${_animCourt(full)}${_animZonesSvg(anim)}${arrows}${toks}${ball}</svg>`;
 }
 
 // Auto-play PARESSEUX : la vignette ne s'anime que si elle est réellement à
@@ -52787,7 +52814,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.190';
+const APP_VERSION = '2026-08-19.191';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.

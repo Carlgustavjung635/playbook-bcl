@@ -674,6 +674,35 @@
   .fld .src.own{color:var(--accent-2)}
   .wtp b{display:block; font-size:11px; margin-bottom:3px}
   .wtp span{color:var(--ink-2)}
+
+/* -- ZONES PEINTES (v.191) ------------------------------------------- */
+#lay-zone .zone { cursor: move; }
+#zbar {
+  position: fixed; left: 8px; right: 8px; bottom: 8px; z-index: 60; display: none;
+  gap: 8px; flex-wrap: wrap; align-items: center; padding: 8px 10px; border-radius: 14px;
+  background: var(--panel, var(--card, var(--bg2, #151A22))); color: inherit;
+  border: 1px solid rgba(128,140,160,.28); box-shadow: 0 10px 30px rgba(0,0,0,.42);
+}
+#zbar.show { display: flex; }
+#zbar .zrow { display: flex; gap: 6px; align-items: center; flex: 1 1 100%; }
+#zbar .zlbl { font-size: 11px; opacity: .68; white-space: nowrap; }
+#zbar input[type=range] { flex: 1; min-width: 90px; accent-color: var(--acc, #22D3EE); }
+#zbar input[type=text] {
+  flex: 1; min-width: 100px; padding: 5px 8px; border-radius: 8px; font: inherit; color: inherit;
+  border: 1px solid rgba(128,140,160,.32); background: rgba(128,140,160,.10);
+}
+.zsw {
+  width: 22px; height: 22px; border-radius: 50%; padding: 0; cursor: pointer;
+  border: 2px solid transparent; box-shadow: 0 0 0 1px rgba(128,140,160,.35);
+}
+.zsw.on { border-color: currentColor; }
+#sh-zone .zshapes, #sh-zone .zcols { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 12px; }
+#sh-zone .zshapes .btn { flex: 1 1 62px; }
+#sh-zone .zcols .zsw { width: 30px; height: 30px; }
+.zlegend { display: flex; flex-direction: column; gap: 6px; }
+.zlegend .li { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.zlegend .dot { width: 14px; height: 14px; border-radius: 4px; flex: none; }
+.zlegend .none { font-size: 12px; opacity: .6; }
 </style>
 <!-- THÈME HÔTE (v.186) — en mode viewer (?mode=view), l'app passe les tokens
      résolus de son thème perso : fond, panneau, texte, bordure, accent. On les
@@ -739,6 +768,7 @@
     <button class="btn sm" id="b-ball" disabled title="Donner le ballon à la joueuse active">🏀</button>
     <button class="btn sm" id="b-def"  title="Afficher / masquer la défense">🛡️</button>
     <button class="btn sm" id="b-reset" title="Repartir de la disposition de départ">↺</button>
+    <button class="btn sm" id="b-zone" title="Zones peintes sur le parquet">🎨</button>
   </div>
   <div class="sep"></div>
   <div class="seg">
@@ -795,7 +825,31 @@
 <p class="hint" id="hint"></p>
 
 <!-- ── Feuilles ────────────────────────────────────────────────────────── -->
+<div id="zbar">
+  <div class="zrow">
+    <span class="zlbl" id="z-what">Zone</span>
+    <input type="text" id="z-label" placeholder="Nom (ex. Rebond fort)" maxlength="28">
+    <button class="btn sm danger" id="z-del" title="Supprimer cette zone">🗑</button>
+    <button class="btn sm" id="z-ok" title="Terminé">✓</button>
+  </div>
+  <div class="zrow">
+    <span class="zlbl">Opacité</span>
+    <input type="range" id="z-opa" min="10" max="70" step="5">
+    <b class="zlbl" id="z-opav">30%</b>
+  </div>
+  <div class="zrow" id="z-cols"></div>
+</div>
+
 <div class="scrim" id="scrim"></div>
+
+<div class="sheet" id="sh-zone">
+  <h2>🎨 Zone peinte</h2>
+  <p class="zlbl">Couleur</p>
+  <div class="zcols" id="zn-cols"></div>
+  <p class="zlbl">Forme — la zone apparaît au centre du terrain</p>
+  <div class="zshapes" id="zn-shapes"></div>
+  <div class="row"><button class="btn wide" id="zn-close">Fermer</button></div>
+</div>
 
 <div class="sheet" id="sh-meta">
   <h2>⚙️ Informations du play</h2>
@@ -834,6 +888,10 @@
     <label for="f-points">Points clés</label>
     <textarea id="f-points" rows="5" placeholder="Un point clé par ligne (4 idéalement)"></textarea>
     <div class="note">Une ligne = un point. Les 4 premières lignes sont mises en avant.</div>
+  </div>
+  <div class="field">
+    <label>Légende des zones</label>
+    <div class="zlegend" id="f-legend"></div>
   </div>
   <div class="row"><button class="btn wide" id="f-done">Fermer</button></div>
 </div>
@@ -1198,6 +1256,7 @@
       id: null, title: '', tag: '', side: 'attaque', color: '#22D3EE',
       description: '', points: '', author: '',
       ballStart: 'a1', defOn: false, mode: 'half', tokenSize: 1, labelStyle: 'numbers',
+      zones: [],
       half: { steps: [ makeStep(startPos('half')) ] },
       full: { steps: [ makeStep(startPos('full')) ] }
     };
@@ -1537,6 +1596,368 @@
   // ─────────────────────────────────────────────────────────────────────
   // terrain (jamais retouché hors changement de mode/vue) · flèches · jetons ·
   // lecture. Le drag n'écrit que des attributs, il ne reconstruit rien.
+  // ---------------------------------------------------------------------
+  // ZONES PEINTES (v.191) — des formes colorées à même le parquet
+  // ---------------------------------------------------------------------
+  // Une zone ne décrit pas un GESTE mais le TERRAIN : « ici on prend le
+  // rebond », « là on ne tire pas ». Elle n'appartient donc à aucun temps et
+  // vit au niveau du document (doc.zones) — visible pendant toute la lecture,
+  // jamais touchée par la cascade des positions (v.176) : rien à recalculer
+  // quand un temps bouge, aucun risque de la voir clignoter d'un temps à
+  // l'autre. Un pouvoir « masquer la zone au temps N » viendrait plus tard,
+  // en ajoutant une clé sur le step, sans rien casser ici.
+  //
+  // Rendu : des <g> STATIQUES dans un calque à part, posé SOUS les flèches et
+  // les jetons. La boucle de lecture (rAF) ne touche jamais à ce calque —
+  // c'est ce qui garde le coût à zéro sur iPhone.
+  var ZCOLORS = ['#22D3EE', '#A78BFA', '#FB923C', '#FACC15', '#F87171', '#34D399', '#60A5FA'];
+  var ZSHAPES = [
+    { k: 'circle',   ic: '●', lb: 'Cercle' },
+    { k: 'oval',     ic: '⬭', lb: 'Ovale' },
+    { k: 'triangle', ic: '▲', lb: 'Triangle' },
+    { k: 'square',   ic: '■', lb: 'Carré' },
+    { k: 'rect',     ic: '▬', lb: 'Rectangle' }
+  ];
+  // Un cercle n'a pas d'orientation ; un carré si (on peut vouloir un losange).
+  var ZROT_OK = { oval: 1, triangle: 1, square: 1, rect: 1 };
+  // Les deux seules formes à DEUX dimensions indépendantes ; les autres restent
+  // équilatérales, sinon « cercle » finirait ovale au premier redimensionnement.
+  var ZFREE = { oval: 1, rect: 1 };
+  var ZVIEW = false;
+  try { ZVIEW = new URLSearchParams(location.search).get('mode') === 'view'; } catch (e) {}
+
+  var layZ = null;
+  var zSel = null;                 // id de la zone sélectionnée (éditeur seul)
+  var zNewColor = ZCOLORS[0];
+
+  function zList() { if (!Array.isArray(doc.zones)) doc.zones = []; return doc.zones; }
+  function zById(id) { var l = zList(), i; for (i = 0; i < l.length; i++) if (l[i] && l[i].id === id) return l[i]; return null; }
+  function zEsc(v) {
+    return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function zColor(c) { return /^#[0-9a-f]{3,8}$/i.test(c || '') ? c : ZCOLORS[0]; }
+  function zOpa(v) { v = +v; return (isFinite(v) && v > 0) ? Math.min(0.7, Math.max(0.1, v)) : 0.3; }
+  function zShapeOf(k) {
+    var i; for (i = 0; i < ZSHAPES.length; i++) if (ZSHAPES[i].k === k) return k;
+    return 'circle';
+  }
+  function zVb() {
+    var a = String(MODES[mode()].vb).split(/\s+/).map(Number);
+    return { x: a[0] || 0, y: a[1] || 0, w: a[2] || 100, h: a[3] || 100 };
+  }
+  // Normalisation À LA LECTURE, jamais à l'écriture : un fichier bricolé à la
+  // main (w négatif, opacité 12, forme inconnue) donne une zone correcte au
+  // lieu d'un SVG cassé, et l'original n'est pas réécrit dans son dos.
+  function zNorm(z) {
+    var sh = zShapeOf(z.shape);
+    var w = Math.max(4, +z.w || 0) || 20;
+    var h = ZFREE[sh] ? (Math.max(4, +z.h || 0) || w) : w;
+    return {
+      id: z.id, shape: sh, x: +z.x || 0, y: +z.y || 0, w: w, h: h,
+      rot: ZROT_OK[sh] ? (+z.rot || 0) : 0,
+      color: zColor(z.color), opacity: zOpa(z.opacity), label: String(z.label || '')
+    };
+  }
+  function zShapeSvg(z) {
+    if (z.shape === 'circle') return '<circle cx="0" cy="0" r="' + f(z.w / 2) + '"/>';
+    if (z.shape === 'oval') return '<ellipse cx="0" cy="0" rx="' + f(z.w / 2) + '" ry="' + f(z.h / 2) + '"/>';
+    if (z.shape === 'square' || z.shape === 'rect') {
+      var w = z.w, h = (z.shape === 'square') ? z.w : z.h;
+      return '<rect x="' + f(-w / 2) + '" y="' + f(-h / 2) + '" width="' + f(w) + '" height="' + f(h) +
+        '" rx="' + f(Math.min(w, h) * 0.07) + '"/>';
+    }
+    // Triangle équilatéral centré sur son CENTROÏDE (pas sur la boîte) : une
+    // rotation autour du centre le fait tourner sur lui-même, sans dérive.
+    var s = z.w, cy = s * Math.sqrt(3) / 2 / 3;
+    return '<polygon points="0,' + f(-2 * cy) + ' ' + f(-s / 2) + ',' + f(cy) + ' ' + f(s / 2) + ',' + f(cy) + '"/>';
+  }
+  function zBoxH(z) { return (ZFREE[z.shape] ? z.h : z.w) / 2; }
+  function zEditable() { return !ZVIEW && !playing && !!(VIEWS[view] && VIEWS[view].editable); }
+  function zClamp(z) {
+    var vb = zVb(), mx = Math.max(vb.w, vb.h) * 1.2;
+    z.x = Math.min(vb.x + vb.w, Math.max(vb.x, z.x));
+    z.y = Math.min(vb.y + vb.h, Math.max(vb.y, z.y));
+    z.w = Math.min(mx, Math.max(6, z.w));
+    z.h = Math.min(mx, Math.max(6, z.h));
+  }
+
+  function drawZones() {
+    if (!layZ) return;
+    var l = zList(), html = '', i, z, op;
+    for (i = 0; i < l.length; i++) {
+      if (!l[i]) continue;
+      z = zNorm(l[i]); op = z.opacity;
+      html += '<g class="zone" data-zone="' + zEsc(z.id) + '"'
+        + ' transform="translate(' + f(z.x) + ',' + f(z.y) + ') rotate(' + f(z.rot) + ')"'
+        + ' fill="' + zEsc(z.color) + '" fill-opacity="' + op + '"'
+        + ' stroke="' + zEsc(z.color) + '" stroke-opacity="' + f(Math.min(1, op + 0.22)) + '" stroke-width="0.45"'
+        + ' style="pointer-events:' + (zEditable() ? 'auto' : 'none') + '">'
+        + zShapeSvg(z) + '</g>';
+    }
+    layZ.innerHTML = html;
+    drawZoneChrome();
+  }
+
+  // Poignées (éditeur) et légende (viewer) partagent le calque du dessus : ce
+  // sont les deux seules choses liées aux zones qui doivent passer PAR-DESSUS
+  // les jetons.
+  function drawZoneChrome() {
+    var g = document.getElementById('lay-zh');
+    if (!g) return;
+    var z = zSel ? zById(zSel) : null, html = '';
+    if (z && zEditable()) {
+      z = zNorm(z);
+      var hw = z.w / 2, hh = zBoxH(z), r = Math.max(1.4, PR * 0.4);
+      html += '<g transform="translate(' + f(z.x) + ',' + f(z.y) + ') rotate(' + f(z.rot) + ')" fill="none">'
+        + '<rect x="' + f(-hw) + '" y="' + f(-hh) + '" width="' + f(z.w) + '" height="' + f(hh * 2) + '"'
+        + ' stroke="' + zEsc(z.color) + '" stroke-width="0.5" stroke-dasharray="2 1.6" stroke-opacity="0.95"/>'
+        + '<circle data-zh="size" cx="' + f(hw) + '" cy="' + f(hh) + '" r="' + f(r) + '"'
+        + ' fill="#FFFFFF" stroke="#0B1016" stroke-width="0.5" style="pointer-events:auto;cursor:nwse-resize"/>';
+      if (ZROT_OK[z.shape])
+        html += '<line x1="0" y1="' + f(-hh) + '" x2="0" y2="' + f(-hh - r * 2.4) + '" stroke="#FFFFFF" stroke-opacity="0.75" stroke-width="0.45"/>'
+          + '<circle data-zh="rot" cx="0" cy="' + f(-hh - r * 2.4) + '" r="' + f(r) + '"'
+          + ' fill="#FFFFFF" stroke="#0B1016" stroke-width="0.5" style="pointer-events:auto;cursor:grab"/>';
+      html += '</g>';
+    }
+    g.setAttribute('style', 'pointer-events:none');
+    g.innerHTML = html + zLegendSvg();
+  }
+
+  // Légende côté joueuse : dessinée DANS le SVG plutôt qu'en HTML flottant.
+  // Elle suit ainsi le terrain (miroir, plein écran, export photo) sans une
+  // ligne de CSS, et ne peut pas recouvrir les contrôles du viewer.
+  function zLegendSvg() {
+    if (!ZVIEW) return '';
+    var all = zList(), l = [], i;
+    for (i = 0; i < all.length; i++) if (all[i] && String(all[i].label || '').trim()) l.push(all[i]);
+    if (!l.length) return '';
+    var vb = zVb(), s = Math.max(3.2, vb.h * 0.034), pad = s * 0.55, w = 0;
+    for (i = 0; i < l.length; i++) w = Math.max(w, String(l[i].label).trim().length);
+    var bw = s * 1.1 + Math.min(22, w) * s * 0.5 + pad * 2, bh = l.length * s * 1.3 + pad * 1.6;
+    var out = '<g transform="translate(' + f(vb.x + pad) + ',' + f(vb.y + pad) + ')" pointer-events="none">'
+      + '<rect x="0" y="0" width="' + f(bw) + '" height="' + f(bh) + '" rx="' + f(s * 0.4) + '" fill="#0B1016" fill-opacity="0.44"/>';
+    for (i = 0; i < l.length; i++) {
+      var z = zNorm(l[i]), y = pad * 0.8 + i * s * 1.3 + s * 0.5;
+      out += '<rect x="' + f(pad) + '" y="' + f(y - s * 0.34) + '" width="' + f(s * 0.68) + '" height="' + f(s * 0.68) + '"'
+        + ' rx="' + f(s * 0.16) + '" fill="' + zEsc(z.color) + '" fill-opacity="0.9"/>'
+        + '<text x="' + f(pad + s * 1.02) + '" y="' + f(y + s * 0.24) + '" font-size="' + f(s * 0.7) + '"'
+        + ' fill="#F2F5F9" fill-opacity="0.94" font-family="system-ui,-apple-system,sans-serif">'
+        + zEsc(String(z.label).trim()) + '</text>';
+    }
+    return out + '</g>';
+  }
+
+  // -- Format d'échange -----------------------------------------------
+  // `rotation` en clair dans le JSON (et non `rot`) : c'est le nom lisible
+  // pour qui ouvre le fichier. Un lecteur qui ignore `zones` affiche le play
+  // exactement comme avant — rétrocompat des deux côtés.
+  function zEnc() {
+    var l = zList(), out = [], i, z;
+    for (i = 0; i < l.length; i++) {
+      if (!l[i]) continue;
+      z = zNorm(l[i]);
+      out.push({
+        id: z.id, shape: z.shape, x: f(z.x), y: f(z.y), w: f(z.w), h: f(z.h),
+        rotation: f(z.rot), color: z.color, opacity: z.opacity, label: z.label
+      });
+    }
+    return out;
+  }
+  function zDec(arr) {
+    var out = [], i, z, o;
+    if (!Array.isArray(arr)) return out;
+    for (i = 0; i < arr.length; i++) {
+      z = arr[i];
+      if (!z || typeof z !== 'object') continue;
+      o = zNorm({
+        id: z.id, shape: z.shape, x: z.x, y: z.y, w: z.w, h: z.h,
+        rot: (z.rotation != null ? z.rotation : z.rot),
+        color: z.color, opacity: z.opacity, label: z.label
+      });
+      if (!o.id) o.id = uid('z');
+      out.push(o);
+    }
+    return out;
+  }
+
+  // -- UX coach ---------------------------------------------------------
+  function zAdd(shape) {
+    var vb = zVb(), d = Math.round(Math.min(vb.w, vb.h) * 0.22);
+    var z = {
+      id: uid('z'), shape: zShapeOf(shape), x: f(vb.x + vb.w / 2), y: f(vb.y + vb.h / 2),
+      w: d, h: d, rot: 0, color: zNewColor, opacity: 0.3, label: ''
+    };
+    zList().push(z);
+    zSel = z.id; dirty = true;
+    if (tool !== 'select') setTool('select');
+    drawZones(); zBarSync(); zLegendSync();
+    toast('Zone ajoutée — glisse-la, puis règle-la en bas.', 'ok');
+  }
+  function zDelete() {
+    var l = zList(), i;
+    for (i = 0; i < l.length; i++) if (l[i] && l[i].id === zSel) { l.splice(i, 1); break; }
+    zSel = null; dirty = true;
+    drawZones(); zBarSync(); zLegendSync();
+  }
+
+  var zBar = null, zLab = null, zOpaEl = null, zOpaV = null, zWhat = null;
+  function zPaintSwatches(host, cur) {
+    var b = host.querySelectorAll('[data-c]'), i;
+    for (i = 0; i < b.length; i++) b[i].classList.toggle('on', b[i].getAttribute('data-c') === cur);
+  }
+  function zSwatches(host, get, set) {
+    var i, html = '';
+    for (i = 0; i < ZCOLORS.length; i++)
+      html += '<button class="zsw" data-c="' + ZCOLORS[i] + '" style="background:' + ZCOLORS[i] + '" title="' + ZCOLORS[i] + '"></button>';
+    host.innerHTML = html;
+    host.addEventListener('click', function (e) {
+      var b = e.target.closest ? e.target.closest('[data-c]') : null;
+      if (!b) return;
+      set(b.getAttribute('data-c'));
+      zPaintSwatches(host, get());
+    });
+    zPaintSwatches(host, get());
+  }
+  function zBarSync() {
+    if (!zBar) return;
+    var z = zSel ? zById(zSel) : null;
+    if (!z || !zEditable()) { zBar.classList.remove('show'); return; }
+    z = zNorm(z);
+    zBar.classList.add('show');
+    var i, sh = null;
+    for (i = 0; i < ZSHAPES.length; i++) if (ZSHAPES[i].k === z.shape) sh = ZSHAPES[i];
+    zWhat.textContent = sh ? (sh.ic + ' ' + sh.lb) : 'Zone';
+    if (document.activeElement !== zLab) zLab.value = z.label;
+    zOpaEl.value = Math.round(z.opacity * 100);
+    zOpaV.textContent = Math.round(z.opacity * 100) + '%';
+    zPaintSwatches(document.getElementById('z-cols'), z.color);
+  }
+  // La légende de la fiche est DÉRIVÉE des zones : le coach ne la saisit pas,
+  // il ne peut donc pas la laisser mentir. Rien ne l'empêche d'écrire la sienne
+  // en markdown dans les points-clés — les deux cohabitent.
+  function zLegendSync() {
+    var host = document.getElementById('f-legend');
+    if (!host) return;
+    var all = zList(), l = [], i, html = '';
+    for (i = 0; i < all.length; i++) if (all[i] && String(all[i].label || '').trim()) l.push(all[i]);
+    if (!l.length) {
+      host.innerHTML = '<div class="none">Aucune zone nommée. Ajoute une zone (🎨) et donne-lui un nom pour la voir ici et côté joueuse.</div>';
+      return;
+    }
+    for (i = 0; i < l.length; i++) {
+      var z = zNorm(l[i]);
+      html += '<div class="li"><span class="dot" style="background:' + zEsc(z.color)
+        + ';opacity:' + f(Math.min(1, z.opacity + 0.35)) + '"></span><span>'
+        + zEsc(String(z.label).trim()) + '</span></div>';
+    }
+    host.innerHTML = html;
+  }
+
+  function zBindUI() {
+    zBar = document.getElementById('zbar');
+    zLab = document.getElementById('z-label');
+    zOpaEl = document.getElementById('z-opa');
+    zOpaV = document.getElementById('z-opav');
+    zWhat = document.getElementById('z-what');
+    if (!zBar) return;
+
+    var i, sh = '';
+    for (i = 0; i < ZSHAPES.length; i++)
+      sh += '<button class="btn" data-sh="' + ZSHAPES[i].k + '" title="' + ZSHAPES[i].lb + '">'
+        + ZSHAPES[i].ic + ' ' + ZSHAPES[i].lb + '</button>';
+    var host = document.getElementById('zn-shapes');
+    host.innerHTML = sh;
+    host.addEventListener('click', function (e) {
+      var b = e.target.closest ? e.target.closest('[data-sh]') : null;
+      if (!b) return;
+      closeSheets(); zAdd(b.getAttribute('data-sh'));
+    });
+    zSwatches(document.getElementById('zn-cols'),
+      function () { return zNewColor; },
+      function (c) { zNewColor = c; });
+    zSwatches(document.getElementById('z-cols'),
+      function () { var z = zSel && zById(zSel); return z ? zColor(z.color) : zNewColor; },
+      function (c) {
+        var z = zSel && zById(zSel); if (!z) return;
+        z.color = c; zNewColor = c; dirty = true; drawZones(); zLegendSync();
+      });
+
+    document.getElementById('b-zone').addEventListener('click', function () { openSheet('sh-zone'); });
+    document.getElementById('zn-close').addEventListener('click', closeSheets);
+    document.getElementById('z-ok').addEventListener('click', function () {
+      zSel = null; drawZones(); zBarSync();
+    });
+    document.getElementById('z-del').addEventListener('click', function () {
+      if (zSel && confirm('Supprimer cette zone ?')) zDelete();
+    });
+    zLab.addEventListener('input', function () {
+      var z = zSel && zById(zSel); if (!z) return;
+      z.label = zLab.value.slice(0, 28); dirty = true; zLegendSync();
+    });
+    zOpaEl.addEventListener('input', function () {
+      var z = zSel && zById(zSel); if (!z) return;
+      z.opacity = zOpa((+zOpaEl.value || 30) / 100);
+      zOpaV.textContent = Math.round(z.opacity * 100) + '%';
+      dirty = true; drawZones(); zLegendSync();
+    });
+
+    // Un seul écouteur, en CAPTURE, sur le terrain : il ne se réveille que si
+    // le doigt a touché une zone ou une poignée, et coupe alors la
+    // propagation — l'éditeur de flèches (écouteur bulle du même <svg>) ne
+    // voit rien passer. Les jetons sont AU-DESSUS des zones : les glisser
+    // reste prioritaire, exactement comme avant.
+    svg.addEventListener('pointerdown', function (e) {
+      if (!zEditable() || tool !== 'select') return;
+      var t = e.target;
+      if (!t || !t.closest) return;
+      var hz = t.closest('[data-zh]'), zg = hz ? null : t.closest('[data-zone]');
+      if (!hz && !zg) return;
+      var z = zById(hz ? zSel : zg.getAttribute('data-zone'));
+      if (!z) return;
+      e.stopPropagation();
+      if (e.cancelable) e.preventDefault();
+      if (!hz && zSel !== z.id) { zSel = z.id; drawZones(); zBarSync(); }
+      var p0 = toCourt(e.clientX, e.clientY);
+      if (!p0) return;
+      var kind = hz ? hz.getAttribute('data-zh') : 'move';
+      var n0 = zNorm(z), moved = false;
+      // On repart de la forme NORMALISÉE : sans ça, un h absent sur une zone
+      // importée ferait un NaN dès la première poignée tirée.
+      z.shape = n0.shape; z.w = n0.w; z.h = n0.h; z.rot = n0.rot;
+      function mv(ev) {
+        var p = toCourt(ev.clientX, ev.clientY);
+        if (!p) return;
+        moved = true;
+        if (kind === 'move') { z.x = n0.x + (p.x - p0.x); z.y = n0.y + (p.y - p0.y); }
+        else if (kind === 'rot') { z.rot = Math.round(Math.atan2(p.y - z.y, p.x - z.x) * 180 / Math.PI + 90); }
+        else {
+          // Le pointeur est ramené dans le repère NON tourné de la zone :
+          // sans ça, redimensionner une forme pivotée la ferait fuir en biais.
+          var a = -(z.rot || 0) * Math.PI / 180, dx = p.x - z.x, dy = p.y - z.y;
+          var lx = dx * Math.cos(a) - dy * Math.sin(a), ly = dx * Math.sin(a) + dy * Math.cos(a);
+          var w = Math.abs(lx) * 2, h = Math.abs(ly) * 2;
+          if (ZFREE[z.shape]) { z.w = w; z.h = h; } else { z.w = Math.max(w, h); z.h = z.w; }
+        }
+        zClamp(z);
+        drawZones();
+      }
+      function up() {
+        window.removeEventListener('pointermove', mv);
+        window.removeEventListener('pointerup', up);
+        window.removeEventListener('pointercancel', up);
+        if (moved) dirty = true;
+      }
+      window.addEventListener('pointermove', mv);
+      window.addEventListener('pointerup', up);
+      window.addEventListener('pointercancel', up);
+    }, true);
+
+    zLegendSync();
+  }
+  zBindUI();
+
   function drawAll() {
     PR = radiusFor(mode());
     // Amplitude du rebond de dribble : en unités TERRAIN (px CSS sur du SVG
@@ -1546,7 +1967,11 @@
     svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
     svg.innerHTML = defs()
       + '<g id="lay-court">' + VIEWS[view].court(mode()) + '</g>'
+      + '<g id="lay-zone"></g>'
       + '<g id="lay-arw"></g><g id="lay-tok"></g><g id="lay-play"></g>'
+      // Poignées de zone ET légende du viewer : au-DESSUS de tout, sinon un
+      // jeton posé sur la poignée la rendrait impossible à attraper.
+      + '<g id="lay-zh"></g>'
       // Couche de MESURE : des <path> jamais peints, uniquement là pour que
       // getPointAtLength() nous donne la position d'une joueuse le long de sa
       // courbe pendant la lecture. Native, exacte, et ça évite de ré-implémenter
@@ -1557,6 +1982,8 @@
     layT = document.getElementById('lay-tok');
     layP = document.getElementById('lay-play');
     layM = document.getElementById('lay-meas');
+    layZ = document.getElementById('lay-zone');
+    drawZones();
     drawTokens();
     drawArrows();
     applyLogo();      // le terrain vient d'être reconstruit : on re-pose le logo
@@ -2078,6 +2505,7 @@
 
   function onCourtClick(p) {
     if (playing) return;
+    if (zSel && tool === 'select') { zSel = null; drawZones(); zBarSync(); }
     if (isMoveKind(tool) && pending) {
       addArrow(tool, pending, clampPt(p, 1));
       pending = null; syncSelection();
@@ -3070,6 +3498,7 @@
     author: document.getElementById('f-author')
   };
   function metaToForm() {
+    zLegendSync();
     F.title.value = doc.title || ''; F.tag.value = doc.tag || '';
     F.side.value = doc.side || 'attaque'; F.color.value = doc.color || '#22D3EE';
     F.desc.value = doc.description || ''; F.points.value = doc.points || '';
@@ -3274,6 +3703,7 @@
       ball_start: doc.ballStart ? numOf(doc.ballStart) : null,
       created_by: doc.author || null,
       players: players,
+      zones: zEnc(),
       arrows: flat,
       steps: outSteps
     };
@@ -3334,6 +3764,7 @@
     d.author = pick(o, 'created_by', 'createdBy', 'author') || '';
     d.mode = m;
     d.defOn = !!pick(o, 'defense_enabled', 'defenseEnabled');
+    d.zones = zDec(o.zones);
     // Taille des jetons : on n'accepte que les trois crans connus. Un fichier
     // qui dirait 3,7 étalerait des jetons plus larges que la raquette.
     var ts = +pick(o, 'players_size', 'playersSize', 'token_size');
@@ -3450,6 +3881,8 @@
   function loadDoc(d) {
     if (document.body.classList.contains('playing')) exitPlay();
     doc = d;
+    if (!Array.isArray(doc.zones)) doc.zones = [];
+    zSel = null; zBarSync();
     // bpath appartient au document PRÉCÉDENT : le garder ferait pointer un
     // saut vers une branche qui n'existe pas dans celui qu'on charge.
     bpath = [];
