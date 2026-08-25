@@ -606,7 +606,6 @@
   .vw .crumb .cr:active,
   .vw .crumb .cr:focus-visible{background:var(--field); color:var(--ink); outline:none}
   .vw .crumb .sep{flex:none; opacity:.45}
-  #vw-exp-btn{opacity:.6; font-weight:600}
   /* Le panneau monte en `transform` SEUL (couche composée) : animer sa
      hauteur ou son `bottom` relayouterait le terrain à chaque frame alors que
      la lecture tourne encore derrière — sur iPhone ça se voit tout de suite. */
@@ -635,6 +634,18 @@
   /* Branche désactivée : gardée dans l'arbre du coach (grisée, éditable),
      invisible côté joueuse. */
   .tnode.off .nm{opacity:.4; text-decoration:line-through}
+
+  /* Écran d'accueil du viewer = l'arborescence. Le même panneau que le
+     « Explorer » de la v.188, mais déployé sous la barre du haut : la porte de
+     sortie (✕) et le fil d'ariane restent atteignables par-dessus. */
+  body.vwtree .vwexp{top:calc(46px + env(safe-area-inset-top)); max-height:none; border-radius:17px 17px 0 0}
+  /* Le voile de l arbre (z 71) couvrirait la barre du haut, qui vit DANS .vw
+     (z 60, stacking context : un z-index sur l enfant ne l en sort pas). On
+     remonte donc .vw en entier — ✕ et 🌳 restent cliquables par-dessus. */
+  body.vwtree .vw{z-index:74}
+  body.vwtree .vw .bot{display:none}
+  .vwexp .sub{flex:none; font-size:10px; color:var(--ink-2); margin:0 0 7px; line-height:1.45}
+  .xnode .go{flex:none; font-size:11px; color:var(--ink-2); opacity:.7}
 </style>
 <!-- THÈME HÔTE (v.186) — en mode viewer (?mode=view), l'app passe les tokens
      résolus de son thème perso : fond, panneau, texte, bordure, accent. On les
@@ -844,7 +855,7 @@
 <div class="vw" id="vw">
   <div class="top">
     <span class="crumb" id="vw-crumb"><button class="cr" data-cp="">Principale</button></span>
-    <button class="btn sm" id="vw-home" title="Retour à la ligne principale" style="display:none">🏠</button>
+    <button class="btn sm" id="vw-home" title="Arborescence du play">🌳</button>
     <button class="btn sm" id="vw-close" title="Fermer">✕</button>
   </div>
   <div class="bot">
@@ -852,20 +863,19 @@
     <button class="btn sm" id="vw-speed" title="Vitesse de lecture">🐢</button>
     <button class="btn sm" id="vw-size" title="Taille des pions">⤢</button>
     <button class="btn sm" id="vw-mirror" title="Inverser gauche / droite">↔</button>
-    <button class="btn sm" id="vw-br" title="Variantes" style="display:none">🔀</button>
-    <button class="btn sm" id="vw-exp-btn" title="Explorer le play">⬆️ Explorer</button>
   </div>
 </div>
 <div class="vwmenu" id="vw-menu"><div class="card" id="vw-menu-card"></div></div>
 
-<!-- ══ v.188 · PANNEAU « EXPLORER » ═══════════════════════════════════════
-     L'arbre du play côté joueuse. Il ne montre QUE les variantes activées :
-     une branche désactivée par le coach reste dans l'arbre de l'éditeur mais
-     n'existe nulle part ici. -->
+<!-- ══ v.188 · ARBORESCENCE — ÉCRAN D'ACCUEIL DU VIEWER ══════════════════
+     L'arbre du play côté joueuse : c'est par LÀ qu'elle entre, avant toute
+     lecture. Il ne montre QUE les variantes activées — une branche désactivée
+     par le coach reste dans l'arbre de l'éditeur, jamais ici. -->
 <div class="vwexpbk" id="vw-exp-bk"></div>
 <div class="vwexp" id="vw-exp">
   <div class="grab"></div>
-  <div class="hd"><h3>🌳 Explorer le play</h3><button class="btn sm" id="vw-exp-x" title="Fermer">✕</button></div>
+  <div class="hd"><h3>🌳 Que veux-tu voir ?</h3><button class="btn sm" id="vw-exp-x" title="Reprendre la lecture" style="display:none">✕</button></div>
+  <p class="sub">Chaque chapitre se joue depuis le début du play, jusqu'à la variante choisie.</p>
   <div class="scroll" id="vw-exp-list"></div>
 </div>
 
@@ -2399,9 +2409,7 @@
 
   function play() {
     if (playing) { pause(); return; }
-    vwCancelHold();
     if (pU >= 1 && pStep >= steps().length - 1) { pStep = 0; pU = 0; }
-    vwHalt = false;
     playing = true;
     enterPlay();
     elPlay.textContent = '⏸';
@@ -2425,32 +2433,38 @@
     var d = stepMs();
     var u = (now - pT0) / d;
     while (u >= 1) {
-      // Le temps courant vient de s ACHEVER. C est ICI qu on propose ses
-      // variantes : une branche naît sur la SORTIE de son temps (cf.
-      // addBranchHere), donc le temps de bifurcation appartient AUX DEUX
-      // chemins et doit etre joue en entier avant qu on choisisse. Demander a
-      // l ENTREE du temps, comme on le faisait, le sautait purement et
-      // simplement des qu une variante etait prise — d ou le « il manque un
-      // temps » sur un chemin imbrique : le temps de bifurcation etait perdu a
-      // CHAQUE niveau.
-      if (vwOn && vwLoop >= 1 && vwAskKey !== vwAskKeyAt(pStep) && vwBranchesAt(pStep)) {
-        pU = 1; renderFrame(pStep, 1);
-        vwAskAfterFrame(pStep);
-        return;
+      // Le temps courant vient de s'ACHEVER.
+      if (vwOn) {
+        // Côté joueuse la lecture ne suit pas une ligne mais une ROUTE : à la
+        // fin d'un segment on descend dans le suivant. Le temps de bifurcation
+        // est le DERNIER du segment du dessus (to = si) : une branche naît sur
+        // la SORTIE de son temps (cf. addBranchHere), donc ce temps appartient
+        // aux deux lignes et se joue en entier avant qu'on bifurque.
+        if (!vwRoute[vwSegIx] || pStep >= vwRoute[vwSegIx].to) {
+          if (vwSegIx < vwRoute.length - 1) {
+            vwSegIx++;
+            vwGoSeg(vwSegIx);
+            u -= 1; pT0 += d;
+            continue;
+          }
+          // Fin de route : plus jamais de boucle infinie, on rend la main.
+          pU = 1;
+          renderFrame(pStep, 1);
+          vwRouteEnd();
+          return;
+        }
+        pStep++; u -= 1; pT0 += d;
+        continue;
       }
-      vwAskKey = '';
       if (pStep >= steps().length - 1) {
-        // Côté joueuse : jamais de fin. On reboucle (et on remonte à la ligne
-        // principale si on sortait d'une branche qui y revient).
-        if (vwOn) { vwLoopEnd(now); u = 0; break; }
         pU = 1;
         renderFrame(pStep, 1);
         pause();
         return;
       }
       pStep++; u -= 1; pT0 += d;
-      if (vwOn) vwStepChanged();
     }
+
     pU = u;
     renderFrame(pStep, u);
     if (Math.floor(u * 1000) % 1000 === 0 || u < 0.02) setHint();
@@ -4187,33 +4201,52 @@
   document.getElementById('s-branch').addEventListener('click', addBranchHere);
 
   // ─────────────────────────────────────────────────────────────────────
-  // 14 ter. VIEWER JOUEUSE (jalon 4)
+  // 14 ter. VIEWER JOUEUSE — NAVIGATEUR D'ARBORESCENCE (v.188)
   // ─────────────────────────────────────────────────────────────────────
-  // Le MÊME moteur que l'éditeur, sans aucune de ses portes : la lecture
-  // boucle à l'infini et les seuls boutons sont ceux du confort (vitesse,
-  // taille, miroir) plus le choix d'une variante. Rien n'écrit dans le
-  // document — miroir et taille passent par vwRedraw(), qui ne touche ni au
-  // brouillon ni à la publication.
+  // PIVOT : le viewer n'est plus un player linéaire qui boucle sur la ligne
+  // principale, c'est un MENU DE CHAPITRES. La joueuse arrive sur l'arbre du
+  // play, choisit un nœud, regarde le chemin complet qui y mène, et retombe
+  // sur l'arbre. Elle CHOISIT ce qu'elle regarde au lieu de le subir.
   //
-  // L'édition n'est pas seulement « cachée » : VIEWS['2d'].editable passe à
-  // false, donc les trois gardes du moteur (drag de jeton, drag de flèche,
-  // clic terrain) refusent le geste. Masquer la barre d'outils n'aurait pas
-  // suffi : à l'arrêt sur pause, un drag serait redevenu possible.
+  // UN SEUL MÉCANISME derrière tout : la ROUTE. Une route est une liste de
+  // segments { path, from, to } — « joue les temps [from..to] de la ligne
+  // `path`, puis passe au segment suivant ». Un nœud profond n'est rien
+  // d'autre qu'une route à plusieurs segments :
+  //
+  //   Principale T1..T2(fork) → Main à main T1..T2(fork) → Kick out T1..fin
+  //
+  // Le temps de bifurcation est joué DANS le segment du dessus (to = si,
+  // INCLUS) : une branche naît sur la SORTIE de son temps (cf. addBranchHere),
+  // donc ce temps appartient aux deux lignes et doit être vu avant qu'on
+  // bifurque. C'est la même règle que endPos() pour les positions et que
+  // holderEnter() pour le ballon — trois lectures d'un seul principe.
+  //
+  // Ce que le pivot SUPPRIME, volontairement :
+  //   · la boucle infinie et la « 2e lecture » (vwLoop, vwSecondRead) ;
+  //   · le badge 🔀 et le menu qui s'ouvrait en pleine lecture ;
+  //   · le retour automatique à la ligne principale en fin de branche.
+  // Le menu des variantes ne sert plus qu'à UNE chose : proposer la suite
+  // quand le chemin qu'on vient de jouer porte des sous-branches.
+  //
+  // L'édition reste verrouillée en profondeur : VIEWS['2d'].editable = false,
+  // donc les trois gardes du moteur refusent le geste même à l'arrêt.
   var VW_SPEEDS = [3200, 1900, 1050];
   var VW_LABEL  = ['🐢 Lent', '⏱ Normal', '🐇 Rapide'];
   var SIZE_KEYS = ['s', 'm', 'l'];
-  var vwOn = false, vwFrom = 'url', vwSpeedIx = 1, vwBar = null, vwBadge = -1;
-  // Compteur de lectures de la ligne principale. 0 = premiere lecture, on ne
-  // coupe JAMAIS (la joueuse decouvre le play en entier, comme une video) ;
-  // des la deuxieme, chaque temps qui bifurque attend son choix.
-  var vwLoop = 0, vwToldLoop = false, vwHalt = false, vwAskKey = '';
-  // Un reglage que la joueuse a touche elle-meme n est plus jamais ecrase par
-  // les defauts de la 2e lecture.
+  var vwOn = false, vwFrom = 'url', vwSpeedIx = 1, vwBar = null;
+  // La route en cours et le segment qu'on est en train de jouer. Volatiles :
+  // rien de tout ça n'est écrit dans le document.
+  var vwRoute = [], vwSegIx = 0;
+  // Un réglage que la joueuse a touché elle-même n'est jamais écrasé.
   var vwUserSpeed = false, vwUserSize = false;
+  var vwMenu = document.getElementById('vw-menu');
+  var elExp = document.getElementById('vw-exp');
+  var elExpBk = document.getElementById('vw-exp-bk');
 
-  // Fil d'ariane CLIQUABLE (v.188) : chaque segment est une porte vers le
-  // début de sa ligne. En lecture seule, il fallait finir la branche (ou
-  // rouvrir le menu des variantes) pour revenir en arrière.
+  // ── Fil d'ariane cliquable ───────────────────────────────────────────
+  // Chaque segment est une porte : il rejoue le chemin complet jusqu'à ce
+  // nœud. En lecture seule (jusqu'à la v.187) il fallait finir la branche
+  // pour revenir en arrière.
   function vwCrumb() {
     var l = rootSteps(), i, b, p = [], html = '<button class="cr" data-cp="">Principale</button>';
     for (i = 0; i < bpath.length; i++) {
@@ -4224,126 +4257,162 @@
       l = b.steps;
     }
     document.getElementById('vw-crumb').innerHTML = html;
-    // 🏠 n'a rien à proposer sur la ligne principale : on y est déjà.
-    document.getElementById('vw-home').style.display = bpath.length ? '' : 'none';
-    if (elExp && elExp.classList.contains('show')) vwExpRender();
+    if (elExp && elExp.classList.contains('show')) vwTreeRender();
   }
 
-  function vwStepChanged(force) {
-    var st = steps()[pStep];
-    var n = brVisible(st).length;
-    if (force || n !== vwBadge) {
-      vwBadge = n;
-      var b = document.getElementById('vw-br');
-      // Le bouton reste offert tant que la LIGNE bifurque quelque part : il
-      // amene alors au prochain temps a variantes. Sur un play sans branche
-      // il n'a rien a proposer, donc il disparait.
-      b.style.display = vwHasBranches() ? '' : 'none';
-      b.textContent = n ? ('🔀 ' + n + (n > 1 ? ' variantes' : ' variante')) : '🔀';
-    }
-  }
-
-  function vwBranchesAt(ix) {
-    var st = steps()[ix];
-    return brVisible(st).length;
-  }
-
-  // La question posee vaut pour UN temps D UN chemin : un drapeau global
-  // laissait un « deja demande » du niveau du dessus museler la question du
-  // niveau du dessous.
-  function vwAskKeyAt(ix) {
-    return bpath.map(function (h) { return h.si + '~' + h.bid; }).join('|') + '#' + ix;
-  }
-
-  // Fin de temps = fin de GESTE. Un tir occupe la fenetre [0.70 ; 1.00] du
-  // temps (PLAY.shot) : ouvrir le menu pile a u = 1 posait la carte par-dessus
-  // le ballon a l instant meme ou il touchait le panier — la joueuse voyait
-  // son tir coupe. On TIENT donc la photo de sortie le temps que l oeil
-  // enregistre l arrivee, PUIS on demande. Le tenu suit la vitesse choisie :
-  // en 🐢 Lent le tir a droit a plus de temps qu en 🐇 Rapide.
-  var vwHold = 0;
-  function vwCancelHold() { if (vwHold) { clearTimeout(vwHold); vwHold = 0; } }
-  function vwHoldMs(ix) {
-    var st = steps()[ix];
-    if (st && st.shot) return clamp(Math.round(stepMs() * 0.40), 520, 1200);
-    if (st && passOf(st)) return 300;
-    // Ni tir ni passe : les deplacements se bouclent a u = 0.65 (PLAY.move),
-    // mais la question se pose QUAND MEME — et apres un souffle, le temps que
-    // la position d arrivee se lise. Un dernier temps sans action finale n est
-    // pas une raison de sauter le menu.
-    return 380;
-  }
-  function vwAskAfterFrame(ix) {
-    vwCancelHold();
-    // Le rAF s arrete AVANT le tenu : sans ca le temps suivant demarrerait
-    // sous la carte pendant qu on attend.
-    if (playing) { pause(); vwSyncButtons(); }
-    vwHalt = true;
-    var k = vwAskKeyAt(ix);
-    vwHold = setTimeout(function () {
-      vwHold = 0;
-      // Tout ce qui a pu arriver pendant le tenu (▶, bouton 🔀, sortie du
-      // viewer) prime : on ne rouvre pas un menu perime.
-      if (!vwOn || playing || vwAskKeyAt(ix) !== k) return;
-      if (vwMenu && vwMenu.classList.contains('show')) return;
-      vwOpenMenu(ix);
-    }, vwHoldMs(ix));
-  }
-
-  function vwHasBranches() {
-    return (function scan(l) {
-      var i, j, bs;
-      for (i = 0; i < l.length; i++) {
-        bs = brVisible(l[i]);
-        if (bs.length) return true;
-        for (j = 0; j < bs.length; j++) if (scan(bs[j].steps || [])) return true;
+  // ── Écran d'arborescence (accueil) ───────────────────────────────────
+  // Ligne principale + variantes ACTIVÉES, indentées. Rien d'autre : une
+  // branche désactivée par le coach n'existe pas ici.
+  function vwTreeRows(list, path, depth, out) {
+    var i, j, bs, p;
+    for (i = 0; i < list.length; i++) {
+      bs = brVisible(list[i]);
+      for (j = 0; j < bs.length; j++) {
+        p = path.concat([{ si: i, bid: bs[j].id }]);
+        out.push({ path: p, depth: depth, name: bs[j].name, from: i, n: (bs[j].steps || []).length });
+        vwTreeRows(bs[j].steps || [], p, depth + 1, out);
       }
-      return false;
-    })(steps());
-  }
-
-  function vwGoPath(p, now) {
-    vwCancelHold();
-    bpath = p;
-    cur = 0; pStep = 0; pU = 0; pPrepared = -1; vwAskKey = '';
-    vwCrumb();
-    renderFrame(0, 0);
-    vwStepChanged(true);
-    pT0 = now || performance.now();
-  }
-
-  function vwLoopEnd(now) {
-    var b = branchAt(bpath);
-    // Une variante jouee en entier vaut lecture faite : le compteur ne doit
-    // jamais stagner a 0 parce qu on ne finit que des branches.
-    if (b && vwLoop < 1) vwLoop = 1;
-    if (b && b.returns_to_main !== false) {
-      vwGoPath([], now);
-      toast('↩ Retour à la ligne principale.');
-    } else {
-      if (!bpath.length) {
-        vwLoop++;
-        if (vwLoop === 1) vwSecondRead();
-      }
-      vwGoPath(bpath, now);
     }
+    return out;
   }
 
-  // Passage a la 2e lecture : on ralentit UNE seule fois. A partir de la, la
-  // lecture sert a comprendre les variantes, pas a faire joli. La taille des
-  // pions, elle, est deja en S depuis l entree dans le viewer. Un reglage
-  // deja touche a la main est respecte.
-  function vwSecondRead() {
-    var chg = [];
-    if (!vwUserSpeed && vwSpeedIx !== 0) { vwSpeedIx = 0; chg.push('lecture lente'); }
+  function vwTreeRender() {
+    var here = pathKey(bpath), rows = vwTreeRows(rootSteps(), [], 0, []);
+    var html = '<div class="xnode' + (here === '' ? ' on' : '') + '" data-xp="">'
+      + '<span class="nm">' + (here === '' ? '📍 ' : '▶ ') + 'Ligne principale</span>'
+      + '<span class="ct">' + rootSteps().length + ' temps</span></div>';
+    rows.forEach(function (r) {
+      var k = pathKey(r.path);
+      html += '<div class="xnode' + (k === here ? ' on' : '') + '" data-xp="' + esc(k) + '"'
+        + ' style="margin-left:' + ((r.depth + 1) * 12) + 'px">'
+        + '<span class="nm">' + (k === here ? '📍 ' : '🔀 ') + esc(r.name) + '</span>'
+        + '<span class="ct">T' + (r.from + 1) + ' · ' + r.n + ' temps</span></div>';
+    });
+    if (!rows.length) html += '<div class="xnode" style="opacity:.6;cursor:default"><span class="nm">Pas de variante — un seul chemin à voir.</span></div>';
+    document.getElementById('vw-exp-list').innerHTML = html;
+    // Le ✕ n'a de sens que s'il y a une lecture en cours à reprendre. À
+    // l'ouverture du viewer, l'arbre EST l'écran : il n'y a rien derrière.
+    document.getElementById('vw-exp-x').style.display = vwRoute.length ? '' : 'none';
+  }
+
+  function vwShowTree() {
+    if (!vwOn) return;
+    if (playing) pause();
+    vwMenu.classList.remove('show');
+    vwTreeRender();
+    document.body.classList.add('vwtree');
+    elExpBk.classList.add('show');
+    elExp.classList.add('show');
     vwSyncButtons();
-    if (vwToldLoop) return;
-    vwToldLoop = true;
-    if (vwHasBranches()) toast('🔀 Choisis tes variantes maintenant.');
-    else if (chg.length) toast('↻ 2e lecture — ' + chg.join(', ') + '.');
+  }
+  function vwHideTree() {
+    document.body.classList.remove('vwtree');
+    if (!elExp) return;
+    elExp.classList.remove('show');
+    elExpBk.classList.remove('show');
+    elExp.style.transform = '';
   }
 
-  // Redessin complet SANS quitter la lecture (miroir, taille des pions).
+  // ── Routes ───────────────────────────────────────────────────────────
+  // Le chemin complet vers un nœud : chaque ligne traversée donne un segment
+  // qui s'arrête à son temps de bifurcation, et le nœud visé se joue en
+  // entier. Une route vide ([]) = la ligne principale du début à la fin.
+  function vwBuildRoute(path) {
+    var segs = [], l = rootSteps(), i, b;
+    for (i = 0; i < path.length; i++) {
+      b = branchIn(l, path[i].si, path[i].bid);
+      if (!b) { path = path.slice(0, i); break; }   // chemin mort : on s'arrête là
+      segs.push({ path: path.slice(0, i), from: 0, to: Math.min(path[i].si, l.length - 1) });
+      l = b.steps;
+    }
+    segs.push({ path: path.slice(), from: 0, to: l.length - 1 });
+    return segs;
+  }
+
+  function vwStartRoute(segs) {
+    if (!vwOn) return;
+    segs.forEach(function (s) { if (s.to < 0) s.to = stepsAt(s.path).length - 1; });
+    vwRoute = segs.filter(function (s) { return s.to >= s.from; });
+    if (!vwRoute.length) { vwShowTree(); return; }
+    vwHideTree();
+    vwMenu.classList.remove('show');
+    vwSegIx = 0;
+    vwGoSeg(0);
+    if (!playing) play();
+    vwSyncButtons();
+  }
+  function vwPlayPath(path) { vwStartRoute(vwBuildRoute(path)); }
+
+  // Descente dans un segment. Comme un changement de ligne, mais SANS couper
+  // la lecture : tick() enchaîne dans la même frame.
+  function vwGoSeg(k) {
+    var s = vwRoute[k];
+    if (!s) return;
+    bpath = s.path.slice();
+    cur = s.from; pStep = s.from; pU = 0; pPrepared = -1;
+    vwCrumb();
+    renderFrame(pStep, 0);
+  }
+
+  // « La suite » choisie en fin de chemin. On ne rembobine PAS tout ce qu'elle
+  // vient de voir : on rejoue le seul temps de bifurcation — sans lui la
+  // variante démarrerait dans le vide — puis on descend dans la sous-branche.
+  function vwPlayFrom(path, si, bid) {
+    vwStartRoute([
+      { path: path.slice(), from: si, to: si },
+      { path: path.concat([{ si: si, bid: bid }]), from: 0, to: -1 }
+    ]);
+  }
+
+  // ── Fin de chemin ────────────────────────────────────────────────────
+  // Les suites possibles = les variantes activées qui partent de la ligne
+  // qu'on vient de jouer, avec le temps d'où elles partent.
+  function vwNextHops() {
+    var seg = vwRoute[vwRoute.length - 1];
+    if (!seg) return [];
+    var l = stepsAt(seg.path), out = [], i, j, bs;
+    for (i = 0; i < l.length; i++) {
+      bs = brVisible(l[i]);
+      for (j = 0; j < bs.length; j++) out.push({ si: i, b: bs[j] });
+    }
+    return out;
+  }
+
+  function vwRouteEnd() {
+    pause();
+    vwSyncButtons();
+    var nx = vwNextHops();
+    if (nx.length) { vwOpenMenu(nx); return; }
+    toast('✅ Chemin terminé.');
+    vwShowTree();
+  }
+
+  function vwOpenMenu(hops) {
+    var html = '<div style="font-size:12px;font-weight:700;margin-bottom:8px">Chemin terminé — et après ?</div>';
+    hops.forEach(function (h) {
+      html += '<div class="row"><button class="btn wide" data-hop="' + h.si + '~' + esc(h.b.id) + '">🔀 ' + esc(h.b.name)
+        + '<br><small style="opacity:.65;font-weight:400">depuis le temps ' + (h.si + 1)
+        + (h.b.description ? ' · ' + esc(h.b.description) : '') + '</small></button></div>';
+    });
+    html += '<div class="row"><button class="btn wide" data-hop="tree">🌳 Retour à l\'arborescence</button></div>';
+    document.getElementById('vw-menu-card').innerHTML = html;
+    vwMenu.classList.add('show');
+  }
+  vwMenu.addEventListener('click', function (e) {
+    // Pas de sortie par le fond : en fin de chemin il FAUT choisir, sinon on
+    // laisse la joueuse sur une photo figée sans rien lui proposer.
+    var btn = e.target && e.target.closest ? e.target.closest('[data-hop]') : null;
+    if (!btn) return;
+    var v = btn.getAttribute('data-hop');
+    vwMenu.classList.remove('show');
+    if (v === 'tree') { vwShowTree(); return; }
+    var a = v.split('~'), seg = vwRoute[vwRoute.length - 1];
+    if (seg) vwPlayFrom(seg.path, +a[0], a[1]);
+  });
+
+  // ── Confort de lecture ───────────────────────────────────────────────
+  // Redessin complet SANS quitter la lecture (miroir, taille des pions). Rien
+  // n'écrit dans le document ni dans le brouillon.
   function vwRedraw() {
     drawAll();
     pPrepared = -1;
@@ -4376,29 +4445,28 @@
     vwBar = elPlay.parentNode;
     if (vwBar) vwBar.style.display = 'none';
     bpath = []; cur = 0; pStep = 0; pU = 0;
-    vwLoop = 0; vwToldLoop = false; vwHalt = false; vwAskKey = ''; vwBadge = -1;
+    vwRoute = []; vwSegIx = 0;
     vwUserSpeed = false; vwUserSize = false;
-    // Pions S DES LA 1re lecture : cote joueuse c est la taille utile —
-    // discrete, tout le terrain lisible sur un petit ecran. vwOn est deja a
-    // true, donc setTokenSize passe par vwRedraw() : rien n est ecrit dans le
-    // document ni dans le brouillon.
+    // Pions S dès l'entrée : côté joueuse c'est la taille utile — discrète,
+    // tout le terrain lisible sur un petit écran.
     setTokenSize('s');
     vwCrumb();
     drawAll();
-    play();
-    vwStepChanged(true);
+    renderFrame(0, 0);
     vwSyncButtons();
+    // AUCUNE lecture ne démarre toute seule : l'accueil, c'est l'arbre.
+    vwShowTree();
   }
 
   function exitViewer() {
     if (!vwOn) return;
-    vwCancelHold();
     vwOn = false;
+    vwRoute = []; vwSegIx = 0;
+    vwHideTree();
     document.body.classList.remove('viewer');
     VIEWS['2d'].editable = true;
     if (vwBar) vwBar.style.display = '';
-    document.getElementById('vw-menu').classList.remove('show');
-    vwCloseExp();
+    vwMenu.classList.remove('show');
     if (playing) pause();
     exitPlay();
     goPath([]);
@@ -4424,156 +4492,34 @@
     if (history.length > 1) history.back(); else location.href = '/';
   });
 
-  // ── Menu des variantes ───────────────────────────────────────────────
-  var vwMenu = document.getElementById('vw-menu');
-  // Bouton manuel : le temps courant s'il bifurque, sinon le PROCHAIN qui
-  // bifurque (en repartant du debut si on est deja passe apres le dernier).
-  // Disponible a tout moment, y compris pendant la premiere lecture.
-  document.getElementById('vw-br').addEventListener('click', function () {
-    var l = steps(), n = l.length, i, k, ix = -1;
-    for (i = 0; i < n; i++) {
-      k = (pStep + i) % n;
-      if (brVisible(l[k]).length) { ix = k; break; }
-    }
-    if (ix >= 0) vwOpenMenu(ix);
-  });
-
-  // Pause + menu sur le temps `ix`. Meme mecanisme que le bouton ⏸ : aucun
-  // cout supplementaire, la boucle rAF s'arrete vraiment.
-  function vwOpenMenu(ix) {
-    vwCancelHold();
-    var st = steps()[ix];
-    var bs = brVisible(st);
-    if (!bs.length) return;
-    // Toujours sur la PHOTO DE SORTIE du temps de bifurcation : c est l etat
-    // d ou repartent la suite principale ET chaque variante.
-    if (ix !== pStep || pU < 1) {
-      pStep = ix; pU = 1; pPrepared = -1;
-      renderFrame(pStep, 1);
-      vwStepChanged(true);
-    }
-    if (playing) { pause(); vwSyncButtons(); }
-    vwAskKey = vwAskKeyAt(ix);   // a la reprise on enchaine, sans reposer la question
-    vwHalt = true;
-    var html = '<div style="font-size:12px;font-weight:700;margin-bottom:8px">Apres le temps ' + (ix + 1) + ' — quelle suite ?</div>'
-      + '<div class="row"><button class="btn wide" data-b="">▶ Ligne principale</button></div>';
-    bs.forEach(function (b) {
-      html += '<div class="row"><button class="btn wide" data-b="' + esc(b.id) + '">🔀 ' + esc(b.name)
-        + (b.description ? '<br><small style="opacity:.65;font-weight:400">' + esc(b.description) + '</small>' : '')
-        + '</button></div>';
-    });
-    document.getElementById('vw-menu-card').innerHTML = html;
-    vwMenu.classList.add('show');
-  }
-  vwMenu.addEventListener('click', function (e) {
-    var btn = e.target && e.target.closest ? e.target.closest('[data-b]') : null;
-    if (!btn) { if (e.target === vwMenu) vwMenu.classList.remove('show'); return; }
-    var id = btn.getAttribute('data-b');
-    vwMenu.classList.remove('show');
-    if (id) {
-      // Choisir une variante MET FIN a la lecture-decouverte. Sans ca, une
-      // joueuse qui bifurque des la 1re lecture reste bloquee a vwLoop = 0
-      // (le compteur ne monte qu a la fin de la LIGNE PRINCIPALE) et plus
-      // aucune sous-branche ne lui est proposee : le menu « Kick out » d une
-      // sous-branche n apparaissait jamais.
-      if (vwLoop < 1) vwLoop = 1;
-      vwGoPath(bpath.concat([{ si: pStep, bid: id }]));
-    }
-    if (!playing) { play(); }
-    vwSyncButtons();
-  });
-
-  // ── Sauts manuels (fil d'ariane, 🏠, panneau « Explorer ») ───────────
-  // Même règle que le choix d'une variante : sauter MET FIN à la lecture-
-  // découverte (vwLoop ≥ 1). Sans ça, une joueuse qui explore dès la 1re
-  // lecture resterait à vwLoop = 0 et plus aucune sous-branche ne lui serait
-  // proposée. On repart toujours au temps 1 du nœud visé, lecture relancée.
-  function vwJump(p) {
-    if (!vwOn) return;
-    vwCloseExp();
-    if (vwMenu) vwMenu.classList.remove('show');
-    if (vwLoop < 1) vwLoop = 1;
-    vwGoPath(p);
-    if (!playing) play();
-    vwSyncButtons();
-  }
+  // 🌳 — toujours visible : la porte de retour à l'arborescence, depuis
+  // n'importe où, lecture en cours ou non.
+  document.getElementById('vw-home').addEventListener('click', vwShowTree);
   document.getElementById('vw-crumb').addEventListener('click', function (e) {
     var b = e.target && e.target.closest ? e.target.closest('[data-cp]') : null;
     if (!b) return;
-    var k = b.getAttribute('data-cp');
-    if (k === pathKey(bpath)) return;   // on est déjà là : ne pas rembobiner
-    vwJump(pathFromKey(k));
+    vwPlayPath(pathFromKey(b.getAttribute('data-cp')));
   });
-  document.getElementById('vw-home').addEventListener('click', function () { vwJump([]); });
-
-  // ── Panneau « Explorer » (v.188) ─────────────────────────────────────
-  // L'arbre du play côté joueuse : ligne principale + variantes ACTIVÉES,
-  // indentées comme dans le tiroir du coach, chacune cliquable. Il n'est
-  // construit qu'à l'ouverture — pendant la lecture rien ne le redessine, la
-  // boucle rAF reste seule à travailler.
-  var elExp = document.getElementById('vw-exp');
-  var elExpBk = document.getElementById('vw-exp-bk');
-
-  function vwExpRows(list, path, depth, out) {
-    var i, j, bs, p;
-    for (i = 0; i < list.length; i++) {
-      bs = brVisible(list[i]);
-      for (j = 0; j < bs.length; j++) {
-        p = path.concat([{ si: i, bid: bs[j].id }]);
-        out.push({ path: p, depth: depth, name: bs[j].name, from: i, n: (bs[j].steps || []).length });
-        vwExpRows(bs[j].steps || [], p, depth + 1, out);
-      }
-    }
-    return out;
-  }
-
-  function vwExpRender() {
-    var here = pathKey(bpath);
-    var rows = vwExpRows(rootSteps(), [], 0, []);
-    var html = '<div class="xnode' + (here === '' ? ' on' : '') + '" data-xp="">'
-      + '<span class="nm">' + (here === '' ? '📍 ' : '▶ ') + 'Ligne principale</span>'
-      + '<span class="ct">' + rootSteps().length + ' temps</span></div>';
-    rows.forEach(function (r) {
-      var k = pathKey(r.path);
-      html += '<div class="xnode' + (k === here ? ' on' : '') + '" data-xp="' + esc(k) + '"'
-        + ' style="margin-left:' + ((r.depth + 1) * 12) + 'px">'
-        + '<span class="nm">' + (k === here ? '📍 ' : '🔀 ') + esc(r.name) + '</span>'
-        + '<span class="ct">T' + (r.from + 1) + ' · ' + r.n + ' temps</span></div>';
-    });
-    if (!rows.length) html += '<div class="xnode" style="opacity:.6;cursor:default"><span class="nm">Pas de variante sur ce play.</span></div>';
-    document.getElementById('vw-exp-list').innerHTML = html;
-  }
-
-  function vwOpenExp() {
-    if (!vwOn) return;
-    vwCancelHold();
-    vwExpRender();
-    elExpBk.classList.add('show');
-    elExp.classList.add('show');
-  }
-  function vwCloseExp() {
-    if (!elExp) return;
-    elExp.classList.remove('show');
-    elExpBk.classList.remove('show');
-    elExp.style.transform = '';
-  }
-  document.getElementById('vw-exp-btn').addEventListener('click', vwOpenExp);
-  document.getElementById('vw-exp-x').addEventListener('click', vwCloseExp);
-  elExpBk.addEventListener('click', vwCloseExp);
+  document.getElementById('vw-exp-x').addEventListener('click', function () {
+    if (vwRoute.length) vwHideTree();   // reprendre la lecture en cours
+  });
+  elExpBk.addEventListener('click', function () {
+    if (vwRoute.length) vwHideTree();
+  });
   elExp.addEventListener('click', function (e) {
     var n = e.target && e.target.closest ? e.target.closest('[data-xp]') : null;
     if (!n) return;
-    vwJump(pathFromKey(n.getAttribute('data-xp')));
+    vwPlayPath(pathFromKey(n.getAttribute('data-xp')));
   });
 
-  // Swipe down pour fermer. Le doigt tient le panneau en `transform` — jamais
-  // en hauteur : le terrain joue encore derrière, un relayout par frame le
-  // ferait tomber sous les 60 fps. Un doigt qui scrolle la liste (scrollTop > 0)
-  // n'est pas un doigt qui referme.
+  // Swipe down sur l'arbre — seulement quand il y a une lecture derrière à
+  // reprendre. Le doigt tient le panneau en `transform` : le terrain est encore
+  // dessiné dessous, un relayout par frame le ferait tomber sous les 60 fps.
+  // Un doigt qui scrolle la liste (scrollTop > 0) n'est pas un doigt qui ferme.
   (function () {
     var y0 = 0, dy = 0, on = false;
     elExp.addEventListener('touchstart', function (e) {
-      if (!e.touches || e.touches.length !== 1) return;
+      if (!vwRoute.length || !e.touches || e.touches.length !== 1) return;
       var sc = document.getElementById('vw-exp-list');
       if (sc && sc.contains(e.target) && sc.scrollTop > 0) return;
       on = true; y0 = e.touches[0].clientY; dy = 0;
@@ -4589,10 +4535,9 @@
       on = false;
       elExp.style.transition = '';
       elExp.style.transform = '';
-      if (dy > 64) vwCloseExp();
+      if (dy > 64) vwHideTree();
     });
   })();
-
 
   // Aperçu joueuse depuis l'éditeur — ajouté au menu ⋯ en JS pour garder le
   // balisage du jalon 3 intact.
