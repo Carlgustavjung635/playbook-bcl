@@ -1714,7 +1714,11 @@
       ghostDef: function () { return g.classList.contains('def'); },
       get: function () { var q = pos()[id]; return q ? { x: q.x, y: q.y } : null; },
       set: function (p) {
+        // Le temps a pu changer sous le geste (retour anime, cascade) : sans ce
+        // filet, l ecriture jetait une TypeError DANS un rAF et laissait le
+        // drag a moitie termine.
         var q = pos()[id];
+        if (!q) return;
         q.x = p.x; q.y = p.y;
         // Ce que le coach pose ici définit CE temps ; les temps suivants
         // seront recalculés à la fin du geste, par touch().
@@ -1813,8 +1817,18 @@
     if (pending === id) { pending = null; syncSelection(); setHint(); return; }
     if (tool === 'pass') { addArrow('pass', pending, id); pending = null; syncSelection(); return; }
     // Déplacement / écran : cliquer un autre jeton vaut « va à cet endroit ».
-    var t = tokById(id);
-    addArrow(tool, pending, { x: t.x, y: t.y });
+    // On s ARRETE AU CONTACT, jamais sur le centre de l autre : arriver
+    // exactement sur ses coordonnees superposait les deux disques et l une des
+    // deux joueuses semblait avoir disparu (elle etait dessous). Un ecran se
+    // pose de toute facon A COTE de la joueuse, pas dedans.
+    var t = tokById(id), s = tokById(pending), gap = PR * 2.1;
+    if (!t || !s) { pending = null; syncSelection(); return; }
+    var dx = t.x - s.x, dy = t.y - s.y, d = Math.sqrt(dx * dx + dy * dy);
+    if (d <= gap) {
+      toast('Elles sont déjà au contact — vise le terrain pour un déplacement.', 'err');
+      pending = null; syncSelection(); setHint(); return;
+    }
+    addArrow(tool, pending, clampPt({ x: t.x - dx / d * gap, y: t.y - dy / d * gap }, PR));
     pending = null; syncSelection();
   }
 

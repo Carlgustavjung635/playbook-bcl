@@ -16294,11 +16294,10 @@ function togglePbEditorV2(on) {
 // (et éventuellement l'animation à ouvrir) en paramètres d'URL, et écrit son
 // résultat dans plays.animations. Sans play, il s'ouvre en bac à sable.
 //
-// Le flag ne garde que la CRÉATION — ouvrir une animation déjà publiée doit
-// marcher pour tout le monde, y compris les joueuses, sinon le média serait
-// publié mais invisible.
+// Le flag ne garde plus rien (v.187) : il ne pilote que le raccourci « bac a
+// marche pour tout le monde selon son role, sinon le media serait publie mais
+// invisible — et le coach ne pourrait plus en ajouter une deuxieme.
 function openPbEditorV2(playId, animId, mode) {
-  if (!animId && !pbEditorV2Enabled()) return;
   const q = [];
   if (playId) q.push('play=' + encodeURIComponent(playId));
   if (animId) q.push('anim=' + encodeURIComponent(animId));
@@ -16949,7 +16948,12 @@ function renderPlayDetail() {
   const hasAnim = animations.length > 0;
   // Le flag ne garde plus que la CRÉATION : une animation déjà publiée se
   // regarde sans rien activer, sinon elle serait invisible pour l'équipe.
-  const canAddAnim = isCoach && canEditSharedLibrary() && pbEditorV2Enabled();
+  // L editeur d animations n est plus une beta (jalons 3 et 4 livres) : le
+  // bouton de CREATION doit etre la pour tout coach non scope, qu il y ait
+  // deja zero, une ou dix animations. Le flag localStorage restait vrai sur
+  // l appareil ou la beta avait ete cochee et faux partout ailleurs — d ou un
+  // bouton qui « disparaissait » sans que rien n ait ete supprime.
+  const canAddAnim = isCoach && canEditSharedLibrary();
   const hasGallery = images.length > 0;
   // Normalise videos[] avec backward compat sur videoUrl legacy
   const videos = (p.videos && p.videos.length) ? p.videos
