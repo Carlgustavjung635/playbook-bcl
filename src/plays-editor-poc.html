@@ -621,6 +621,10 @@
     <button class="btn" id="a-series">🎞 Série photos</button>
   </div>
   <div class="row">
+    <button class="btn" id="a-webm">🎞 Vidéo (WebM)</button>
+    <button class="btn" id="a-gif">🎨 GIF</button>
+  </div>
+  <div class="row">
     <button class="btn" id="a-export">📤 Exporter JSON</button>
     <button class="btn" id="a-import">📥 Importer JSON</button>
   </div>
@@ -2846,10 +2850,21 @@
 
   // Le PNG fait ~1800 px de large quel que soit le mode de terrain : assez pour
   // une impression A4 ou une projection, sans peser 4 Mo par temps.
-  function courtPng() {
+  //
+  // v.177 — le commentaire d'origine affirmait « aucune image externe dans la
+  // scène, le canvas ne peut donc pas être teinté ». La v.174 a posé le LOGO du
+  // club — un <image> raster — sur le parquet : l'affirmation est devenue
+  // fausse. Sur WebKit, rastériser un SVG qui embarque une image teinte le
+  // canvas, et le toBlob() partait alors en SecurityError DEPUIS le img.onload,
+  // c'est-à-dire hors de toute chaîne de promesse : ni res(), ni rej(). Le
+  // toast « Photo… » restait affiché pour l'éternité et aucun fichier ne
+  // descendait — d'où « l'export photo ne fonctionne pas ».
+  // On sonde donc la teinte tout de suite (getImageData d'un pixel), et on
+  // refait une passe SANS le logo plutôt que de ne rien rendre du tout.
+  function courtCanvas(px, noLogo) {
     return new Promise(function (res, rej) {
       var c0 = MODES[mode()];
-      var scale = 1800 / c0.w;
+      var scale = (px || 1800) / c0.w;
       var W = Math.round(c0.w * scale), H = Math.round(c0.h * scale);
       var clone = svg.cloneNode(true);
       // Inliner AVANT de retirer quoi que ce soit : les deux arbres sont
@@ -2864,25 +2879,70 @@
         e.style.removeProperty('display');
         e.style.removeProperty('visibility');
       });
-      var kill =[].slice.call(clone.querySelectorAll('#lay-meas, #lay-play, .hit, .wphit, .halo'));
+      var sel = '#lay-meas, #lay-play, .hit, .wphit, .halo';
+      if (noLogo) sel += ', #court-logo';
+      var kill =[].slice.call(clone.querySelectorAll(sel));
       kill.forEach(function (e) { if (e.parentNode) e.parentNode.removeChild(e); });
       clone.setAttribute('width', W);
       clone.setAttribute('height', H);
       clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
       var xml = new XMLSerializer().serializeToString(clone);
-      var img = new Image();
+      var img = new Image(), done = false;
+      // Un <img> qui ne charge JAMAIS ne déclenche ni onload ni onerror. Sans
+      // ce garde-fou, la promesse resterait pendante et le toast avec elle.
+      var to = setTimeout(function () {
+        if (done) return; done = true; rej(new Error('rendu trop long'));
+      }, 20000);
       img.onload = function () {
-        var cv = document.createElement('canvas');
-        cv.width = W; cv.height = H;
-        cv.getContext('2d').drawImage(img, 0, 0, W, H);
-        // Aucune image externe dans la scène (le terrain est 100 % vectoriel) :
-        // le canvas ne peut donc pas être teinté, toBlob passe toujours.
-        cv.toBlob(function (b) { b ? res(b) : rej(new Error('canvas vide')); }, 'image/png');
+        if (done) return; done = true; clearTimeout(to);
+        try {
+          var cv = document.createElement('canvas');
+          cv.width = W; cv.height = H;
+          var g = cv.getContext('2d');
+          g.drawImage(img, 0, 0, W, H);
+          // Sonde de teinte : lire UN pixel lève SecurityError si le canvas est
+          // teinté. On l'apprend ici, dans le try, pas dans un toBlob() dont
+          // l'exception se perdrait dans le vide.
+          g.getImageData(0, 0, 1, 1);
+          res(cv);
+        } catch (e) { rej(e); }
       };
-      img.onerror = function () { rej(new Error('SVG non rasterisable')); };
+      img.onerror = function () {
+        if (done) return; done = true; clearTimeout(to);
+        rej(new Error('SVG non rasterisable'));
+      };
       img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
     });
   }
+
+  // Une fois le logo identifié comme fautif, on ne retente plus avec lui : sur
+  // une série ou un GIF, ce serait deux rendus par image au lieu d'un.
+  var logoTaints = false;
+  function courtCanvasSafe(px) {
+    if (logoTaints) return courtCanvas(px, true);
+    return courtCanvas(px, false).catch(function (e) {
+      logoTaints = true;
+      return courtCanvas(px, true);
+    });
+  }
+
+  function canvasBlob(cv) {
+    return new Promise(function (res, rej) {
+      if (cv.toBlob) {
+        cv.toBlob(function (b) { b ? res(b) : rej(new Error('canvas vide')); }, 'image/png');
+        return;
+      }
+      // Vieux iOS : pas de toBlob. Le dataURL fait le même travail, en plus lourd.
+      try {
+        var d = cv.toDataURL('image/png'), bin = atob(d.slice(d.indexOf(',') + 1));
+        var u8 = new Uint8Array(bin.length), k;
+        for (k = 0; k < bin.length; k++) u8[k] = bin.charCodeAt(k);
+        res(new Blob([u8], { type: 'image/png' }));
+      } catch (e) { rej(e); }
+    });
+  }
+
+  function courtPng() { return courtCanvasSafe(1800).then(canvasBlob); }
 
   function dl(blob, name) {
     var url = URL.createObjectURL(blob);
@@ -2986,6 +3046,195 @@
         .catch(function (e) { gotoStep(back); toast('Série interrompue — ' + e.message, 'err'); });
     }
     next();
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // 13bis. EXPORT ANIMÉ — vidéo (WebM/MP4) et GIF
+  // ─────────────────────────────────────────────────────────────────────
+  // Même source que la photo : chaque image est un seek() dans la lecture,
+  // rastérisé en SVG→canvas. On NE capture PAS le terrain à l'écran — un
+  // captureStream() du <svg> vivant embarquerait les poignées d'édition et
+  // tournerait à la vitesse du rendu, pas à celle du play. Ici, la cadence est
+  // décidée par nous, pas subie.
+  var ANIM_FPS = 10;      // 10 img/s : un play se lit, il ne se regarde pas au ralenti
+  var VID_PX = 720;
+  var GIF_PX = 500;       // au-delà, un GIF de 8 temps dépasse allègrement 10 Mo
+
+  function animFrames() {
+    var total = steps().length * stepMs();
+    // Plafond dur : au-delà, la génération devient plus longue que la patience
+    // du coach, et le GIF plus lourd que ce qu'un SMS accepte.
+    return Math.max(2, Math.min(200, Math.round(total / 1000 * ANIM_FPS)));
+  }
+  function heavyWarn(what) {
+    if (steps().length > 10) toast(what + ' — cette génération peut prendre 20 à 30 s…');
+    else toast(what + '…');
+  }
+  // La génération déplace la tête de lecture : quoi qu'il arrive, on rend au
+  // coach le temps qu'il éditait.
+  function withPlayhead(run) {
+    var back = cur;
+    function restore() {
+      if (document.body.classList.contains('playing')) exitPlay();
+      gotoStep(back);
+    }
+    return run().then(
+      function (v) { restore(); return v; },
+      function (e) { restore(); throw e; }
+    );
+  }
+  function renderAt(k, n, px) {
+    seek(n > 1 ? k / (n - 1) : 0);
+    return courtCanvasSafe(px);
+  }
+
+  // ── Vidéo ────────────────────────────────────────────────────────────
+  document.getElementById('a-webm').addEventListener('click', function () {
+    closeSheets();
+    if (!window.MediaRecorder || !HTMLCanvasElement.prototype.captureStream) {
+      toast('Vidéo non supportée par ce navigateur — passez par le GIF.', 'err');
+      return;
+    }
+    // Safari n'encode pas le WebM : il ne sait faire que du MP4. On prend le
+    // premier format que le navigateur reconnaît vraiment.
+    var type = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm', 'video/mp4']
+      .filter(function (t) { return MediaRecorder.isTypeSupported(t); })[0];
+    var n = animFrames(), fMs = 1000 / ANIM_FPS;
+    heavyWarn('Vidéo');
+    withPlayhead(function () {
+      return courtCanvasSafe(VID_PX).then(function (first) {
+        var cv = document.createElement('canvas');
+        cv.width = first.width; cv.height = first.height;
+        var g = cv.getContext('2d');
+        g.drawImage(first, 0, 0);
+        var rec = new MediaRecorder(cv.captureStream(ANIM_FPS),
+          type ? { mimeType: type, videoBitsPerSecond: 4000000 } : undefined);
+        var chunks = [];
+        rec.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
+        return new Promise(function (res, rej) {
+          rec.onerror = function () { rej(new Error('enregistrement interrompu')); };
+          rec.onstop = function () {
+            res(new Blob(chunks, { type: (type || 'video/webm').split(';')[0] }));
+          };
+          rec.start();
+          // Horloge ABSOLUE : si une image met plus longtemps que prévu à se
+          // rastériser, on ne cumule pas le retard image après image.
+          var k = 0, next = performance.now();
+          function frame() {
+            if (k >= n) { setTimeout(function () { rec.stop(); }, fMs * 2); return; }
+            renderAt(k, n, VID_PX).then(function (c) {
+              g.clearRect(0, 0, cv.width, cv.height);
+              g.drawImage(c, 0, 0, cv.width, cv.height);
+              k++;
+              if (k % 5 === 0 || k === n) toast('Vidéo — ' + Math.round(k * 100 / n) + '%…');
+              next += fMs;
+              setTimeout(frame, Math.max(0, next - performance.now()));
+            }, rej);
+          }
+          frame();
+        });
+      });
+    }).then(function (b) {
+      dl(b, baseName() + (b.type.indexOf('mp4') >= 0 ? '.mp4' : '.webm'));
+      toast('Vidéo enregistrée.', 'ok');
+    }).catch(function (e) { toast('Vidéo impossible — ' + e.message, 'err'); });
+  });
+
+  // ── GIF ──────────────────────────────────────────────────────────────
+  // Encodeur maison, dans la doctrine du fichier : la série photos écrit déjà
+  // son ZIP à la main, un GIF89a n'est pas plus compliqué — une palette fixe et
+  // un LZW. Aucune lib, aucun worker, aucun CDN.
+  var GIF_PAL = null;
+  function gifPalette() {
+    if (GIF_PAL) return GIF_PAL;
+    var p = [], r, g, b;
+    // Cube 6×7×6 = 252 : un cran de plus sur le vert, où l'œil discrimine le mieux.
+    for (r = 0; r < 6; r++) for (g = 0; g < 7; g++) for (b = 0; b < 6; b++)
+      p.push(Math.round(r * 255 / 5), Math.round(g * 255 / 6), Math.round(b * 255 / 5));
+    // Les 4 dernières cases au gris : lignes du terrain et textes y gagnent.
+    for (r = 1; r <= 4; r++) { var v = r * 51; p.push(v, v, v); }
+    GIF_PAL = p; return p;
+  }
+  function gifIndex(r, g, b) {
+    var P = gifPalette();
+    var i = (Math.round(r * 5 / 255) * 7 + Math.round(g * 6 / 255)) * 6 + Math.round(b * 5 / 255);
+    var d = (P[i*3]-r)*(P[i*3]-r) + (P[i*3+1]-g)*(P[i*3+1]-g) + (P[i*3+2]-b)*(P[i*3+2]-b);
+    for (var k = 252; k < 256; k++) {
+      var dk = (P[k*3]-r)*(P[k*3]-r) + (P[k*3+1]-g)*(P[k*3+1]-g) + (P[k*3+2]-b)*(P[k*3+2]-b);
+      if (dk < d) { d = dk; i = k; }
+    }
+    return i;
+  }
+  function gifLzw(px) {
+    var CLEAR = 256, EOI = 257;
+    var dict = null, size = 9, next = 258;
+    var buf = 0, nbits = 0, bytes = [];
+    function emit(code) {
+      buf |= code << nbits; nbits += size;
+      while (nbits >= 8) { bytes.push(buf & 255); buf >>= 8; nbits -= 8; }
+    }
+    function reset() { dict = {}; size = 9; next = 258; }
+    reset(); emit(CLEAR);
+    var run = px[0], i, c, key;
+    for (i = 1; i < px.length; i++) {
+      c = px[i]; key = run + ',' + c;
+      if (dict[key] !== undefined) { run = dict[key]; continue; }
+      emit(run);
+      dict[key] = next++;
+      // 4096 = plus rien d'exprimable en 12 bits : on repart de zéro.
+      if (next === 4096) { emit(CLEAR); reset(); }
+      else if (next > (1 << size) && size < 12) size++;
+      run = c;
+    }
+    emit(run); emit(EOI);
+    if (nbits > 0) bytes.push(buf & 255);
+    return new Uint8Array(bytes);
+  }
+  function gifBlob(frames, W, H, delayCs) {
+    var out = [], enc = new TextEncoder(), i;
+    function push(a) { out.push(a instanceof Uint8Array ? a : new Uint8Array(a)); }
+    push(enc.encode('GIF89a'));
+    push([W & 255, W >> 8, H & 255, H >> 8, 0xF7, 0, 0]);   // 0xF7 : table globale de 256
+    push(new Uint8Array(gifPalette()));
+    push([0x21, 0xFF, 0x0B]); push(enc.encode('NETSCAPE2.0')); push([3, 1, 0, 0, 0]);
+    for (i = 0; i < frames.length; i++) {
+      push([0x21, 0xF9, 4, 0x04, delayCs & 255, delayCs >> 8, 0, 0]);  // disposal 1 : on garde
+      push([0x2C, 0, 0, 0, 0, W & 255, W >> 8, H & 255, H >> 8, 0]);
+      push([8]);
+      var data = gifLzw(frames[i]), p = 0;
+      while (p < data.length) {
+        var m = Math.min(255, data.length - p);
+        push([m]); push(data.subarray(p, p + m)); p += m;
+      }
+      push([0]);
+    }
+    push([0x3B]);
+    return new Blob(out, { type: 'image/gif' });
+  }
+
+  document.getElementById('a-gif').addEventListener('click', function () {
+    closeSheets();
+    var n = animFrames(), delay = Math.round(100 / ANIM_FPS), frames = [], W = 0, H = 0;
+    heavyWarn('GIF');
+    withPlayhead(function () {
+      return (function loop(k) {
+        if (k >= n) return Promise.resolve();
+        return renderAt(k, n, GIF_PX).then(function (cv) {
+          W = cv.width; H = cv.height;
+          var d = cv.getContext('2d').getImageData(0, 0, W, H).data;
+          var px = new Uint8Array(W * H), j;
+          for (j = 0; j < px.length; j++) px[j] = gifIndex(d[j*4], d[j*4+1], d[j*4+2]);
+          frames.push(px);
+          toast('GIF — ' + Math.round((k + 1) * 100 / n) + '%…');
+          return loop(k + 1);
+        });
+      })(0);
+    }).then(function () {
+      if (!frames.length) throw new Error('aucune image');
+      var b = gifBlob(frames, W, H, delay);
+      dl(b, baseName() + '.gif');
+      toast('GIF enregistré — ' + frames.length + ' images, ' + Math.round(b.size / 1024) + ' Ko.', 'ok');
+    }).catch(function (e) { toast('GIF impossible — ' + e.message, 'err'); });
   });
 
   // ─────────────────────────────────────────────────────────────────────
