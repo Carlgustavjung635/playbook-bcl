@@ -16303,6 +16303,32 @@ function openPbEditorV2(playId, animId, mode) {
   if (playId) q.push('play=' + encodeURIComponent(playId));
   if (animId) q.push('anim=' + encodeURIComponent(animId));
   if (mode) q.push('mode=' + encodeURIComponent(mode));
+  // THÈME (v.186) — le POC est une PAGE à part : ses variables CSS ne peuvent
+  // pas hériter de celles de l'app. On lui passe donc les tokens RÉSOLUS du
+  // thème actif (fond, panneau, texte, bordure, accent) + le schéma clair/sombre.
+  // Le POC les applique tels quels au boot en mode viewer : la lecture plein
+  // écran suit le thème perso sans dupliquer la palette d'un côté ni de l'autre.
+  try {
+    const cs = getComputedStyle(document.documentElement);
+    const pick = (...names) => { for (const n of names) { const v = (cs.getPropertyValue(n) || '').trim(); if (v) return v; } return ''; };
+    const triplet = pick('--accent-rgb');
+    const hex2 = n => ('0' + Math.max(0, Math.min(255, n)).toString(16)).slice(-2);
+    let accent = '';
+    const c = triplet.split(',').map(s => parseInt(s.trim(), 10));
+    if (c.length === 3 && c.every(n => n >= 0 && n <= 255)) { accent = '#' + hex2(c[0]) + hex2(c[1]) + hex2(c[2]); }
+    else { const o = pick('--orange', '--accent'); if (/^#[0-9a-f]{3,8}$/i.test(o)) accent = o; }
+    const tok = { bg: pick('--bg-1', '--bg'), panel: pick('--bg-2', '--panel'), ink: pick('--ink-1', '--ink'),
+      ink2: pick('--ink-3', '--ink-2'), border: pick('--border'), btn: pick('--bg-3', '--bg-2'), field: pick('--bg-3', '--bg-2'), accent };
+    Object.keys(tok).forEach(k => { if (tok[k]) q.push(k + '=' + encodeURIComponent(tok[k])); });
+    // Clair ou sombre : déduit de la LUMINANCE du fond, pas du nom du thème
+    // (la liste des thèmes clairs bougera, la luminance non).
+    const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(tok.bg);
+    if (m) {
+      const h = m[1].length === 3 ? m[1].split('').map(c => c + c).join('') : m[1];
+      const L = (0.2126 * parseInt(h.slice(0, 2), 16) + 0.7152 * parseInt(h.slice(2, 4), 16) + 0.0722 * parseInt(h.slice(4, 6), 16)) / 255;
+      q.push('scheme=' + (L > 0.5 ? 'light' : 'dark'));
+    }
+  } catch (_) {}
   location.href = '/src/plays-editor-poc.html' + (q.length ? '?' + q.join('&') : '');
 }
 function _pbEditorV2Row() {
@@ -17028,10 +17054,9 @@ function renderPlayDetail() {
               const nBr = _animBranchCount(a);
               const dot = /^#[0-9a-f]{3,8}$/i.test(a.color || '') ? a.color : 'var(--orange)';
               return `
-              <div style="border:1px solid var(--border);border-radius:12px;overflow:hidden">
+              <div style="border:1px solid var(--border);border-radius:12px;overflow:hidden;cursor:pointer" onclick="openPbEditorV2('${p.id}','${esc(a.id)}','view')" title="Voir en plein écran">
                 <div class="anim-thumb" data-anim-id="${esc(a.id)}" data-play-id="${p.id}"
-                     style="position:relative;cursor:pointer;padding:6px 6px 0"
-                     onclick="openPbEditorV2('${p.id}','${esc(a.id)}','view')" title="Voir en plein écran">
+                     style="position:relative;padding:6px 6px 0">
                   ${_animThumbSvg(a)}
                   <span style="position:absolute;left:12px;bottom:10px;background:rgba(0,0,0,0.62);color:#fff;font-family:'JetBrains Mono';font-size:10px;padding:3px 8px;border-radius:999px">▶ ${nSteps} temps${nBr ? ` · ${nBr} branche${nBr > 1 ? 's' : ''}` : ''}</span>
                 </div>
@@ -17041,7 +17066,6 @@ function renderPlayDetail() {
                     <b style="display:block;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.title || 'Sans titre')}</b>
                     <small style="font-size:11px;color:var(--ink-3)">${esc(a.tag || a.side || '')} · ${a.court_type === 'full' ? 'terrain complet' : 'demi-terrain'}</small>
                   </span>
-                  <button class="btn btn-secondary" onclick="event.stopPropagation();openPbEditorV2('${p.id}','${esc(a.id)}','view')" title="Voir en plein écran">👁</button>
                   ${isCoach && canEditSharedLibrary() ? `
                     <button class="btn btn-secondary" onclick="event.stopPropagation();openPbEditorV2('${p.id}','${esc(a.id)}')" title="Éditer l'animation">✎</button>
                     <button class="btn btn-danger" onclick="event.stopPropagation();deletePlayAnimation('${p.id}','${esc(a.id)}')" title="Supprimer l'animation">🗑</button>
@@ -52758,7 +52782,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.185';
+const APP_VERSION = '2026-08-19.186';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.

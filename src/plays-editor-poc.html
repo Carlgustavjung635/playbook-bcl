@@ -586,7 +586,7 @@
     flex-wrap:wrap; padding:0 8px; bottom:calc(9px + env(safe-area-inset-bottom));
   }
   .vw .btn{pointer-events:auto; opacity:.9}
-  .vwmenu{position:fixed; inset:0; z-index:70; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.44)}
+  .vwmenu{position:fixed; inset:0; z-index:70; display:none; align-items:center; justify-content:center; background:var(--scrim)}
   .vwmenu.show{display:flex}
   .vwmenu .card{
     background:var(--panel); border:1px solid var(--border); border-radius:15px;
@@ -595,6 +595,38 @@
   .vwmenu .card .row{display:flex; gap:6px; margin-bottom:6px}
   .vwmenu .card .row .btn{flex:1}
 </style>
+<!-- THÈME HÔTE (v.186) — en mode viewer (?mode=view), l'app passe les tokens
+     résolus de son thème perso : fond, panneau, texte, bordure, accent. On les
+     pose en variables inline pour que TOUT le viewer (voile, crumb, boutons,
+     badges) suive le thème de l'utilisatrice, en clair comme en sombre. Hors
+     mode viewer, l'éditeur garde son propre thème et son propre sélecteur. -->
+<script>
+(function () {
+  'use strict';
+  try {
+    var q = new URLSearchParams(location.search);
+    if (q.get('mode') !== 'view') return;
+    var r = document.documentElement;
+    var sch = q.get('scheme');
+    if (sch === 'light' || sch === 'dark') r.setAttribute('data-theme', sch);
+    var MAP = { bg: '--bg', panel: '--panel', ink: '--ink', ink2: '--ink-2',
+      border: '--border', btn: '--btn', field: '--field' };
+    Object.keys(MAP).forEach(function (k) { var v = q.get(k); if (v) r.style.setProperty(MAP[k], v); });
+    var a = q.get('accent');
+    if (/^#[0-9a-f]{3,8}$/i.test(a || '')) {
+      // Accent = couleur d'attaque ET couleur des contrôles actifs. La
+      // secondaire reste DÉRIVÉE (complémentaire HSL, cf. applyTeamColors) :
+      // la passer aussi donnerait deux équipes de la même teinte.
+      r.style.setProperty('--pb-primary', a);
+      r.style.setProperty('--accent-2', a);
+      var h = a.slice(1);
+      if (h.length === 3) h = h.split('').map(function (c) { return c + c; }).join('');
+      var L = (0.2126 * parseInt(h.slice(0, 2), 16) + 0.7152 * parseInt(h.slice(2, 4), 16) + 0.0722 * parseInt(h.slice(4, 6), 16)) / 255;
+      r.style.setProperty('--accent-2-ink', L > 0.55 ? '#0B0616' : '#FFFFFF');
+    }
+  } catch (_) {}
+})();
+</script>
 </head>
 <body data-tool="select">
 
