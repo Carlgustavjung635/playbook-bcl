@@ -4040,6 +4040,9 @@
   // coupe JAMAIS (la joueuse decouvre le play en entier, comme une video) ;
   // des la deuxieme, chaque temps qui bifurque attend son choix.
   var vwLoop = 0, vwToldLoop = false, vwHalt = false;
+  // Un reglage que la joueuse a touche elle-meme n est plus jamais ecrase par
+  // les defauts de la 2e lecture.
+  var vwUserSpeed = false, vwUserSize = false;
 
   function vwCrumb() {
     var names = ['Principale'], l = rootSteps(), i, b;
@@ -4051,7 +4054,7 @@
     document.getElementById('vw-crumb').textContent = names.join(' → ');
   }
 
-  function vwStepChanged(force) {
+  function vwStepChanged(force, ask) {
     var st = steps()[pStep];
     var n = (st && Array.isArray(st.branches)) ? st.branches.length : 0;
     if (force || n !== vwBadge) {
@@ -4063,9 +4066,13 @@
       b.style.display = vwHasBranches() ? '' : 'none';
       b.textContent = n ? ('🔀 ' + n + (n > 1 ? ' variantes' : ' variante')) : '🔀';
     }
-    // force = on vient JUSTE de changer de chemin (choix, entree, reboucle) :
-    // pas de question dans la foulee, sinon le menu se rouvre sur lui-meme.
-    if (!force && n && vwLoop >= 1 && playing) vwOpenMenu(pStep);
+    // Par defaut on ne questionne que sur un changement de temps NATUREL ;
+    // les changements de chemin passent leur tour, sauf quand l appelant le
+    // demande explicitement (reboucle : le temps 1 peut bifurquer, et sans ca
+    // sa variante n etait JAMAIS proposee — il n y a pas de `pStep++` qui y
+    // mene).
+    if (ask === undefined) ask = !force;
+    if (ask && n && vwLoop >= 1 && playing) vwOpenMenu(pStep);
   }
 
   function vwHasBranches() {
@@ -4074,12 +4081,12 @@
     return false;
   }
 
-  function vwGoPath(p, now) {
+  function vwGoPath(p, now, ask) {
     bpath = p;
     cur = 0; pStep = 0; pU = 0; pPrepared = -1;
     vwCrumb();
     renderFrame(0, 0);
-    vwStepChanged(true);
+    vwStepChanged(true, ask);
     pT0 = now || performance.now();
   }
 
@@ -4091,13 +4098,27 @@
     } else {
       if (!bpath.length) {
         vwLoop++;
-        if (vwLoop === 1 && !vwToldLoop && vwHasBranches()) {
-          vwToldLoop = true;
-          toast('🔀 Choisis tes variantes maintenant.');
-        }
+        if (vwLoop === 1) vwSecondRead();
+        vwGoPath(bpath, now, true);
+        return;
       }
       vwGoPath(bpath, now);
     }
+  }
+
+  // Passage a la 2e lecture : on ralentit et on rapetisse les pions UNE seule
+  // fois. A partir de la, la lecture sert a comprendre les variantes, pas a
+  // faire joli — et des pions plus petits laissent voir tout le terrain
+  // pendant qu on choisit. Un reglage deja touche a la main est respecte.
+  function vwSecondRead() {
+    var chg = [];
+    if (!vwUserSpeed && vwSpeedIx !== 0) { vwSpeedIx = 0; chg.push('lecture lente'); }
+    if (!vwUserSize && sizeKeyOf() !== 's') { setTokenSize('s'); chg.push('pions S'); }
+    vwSyncButtons();
+    if (vwToldLoop) return;
+    vwToldLoop = true;
+    if (vwHasBranches()) toast('🔀 Choisis tes variantes maintenant.');
+    else if (chg.length) toast('↻ 2e lecture — ' + chg.join(', ') + '.');
   }
 
   // Redessin complet SANS quitter la lecture (miroir, taille des pions).
@@ -4134,6 +4155,7 @@
     if (vwBar) vwBar.style.display = 'none';
     bpath = []; cur = 0; pStep = 0; pU = 0;
     vwLoop = 0; vwToldLoop = false; vwHalt = false; vwBadge = -1;
+    vwUserSpeed = false; vwUserSize = false;
     vwCrumb();
     drawAll();
     play();
@@ -4155,6 +4177,7 @@
 
   document.getElementById('vw-play').addEventListener('click', function () { play(); vwSyncButtons(); });
   document.getElementById('vw-speed').addEventListener('click', function () {
+    vwUserSpeed = true;
     vwSpeedIx = (vwSpeedIx + 1) % VW_SPEEDS.length;
     // Recaler l'origine du temps sur la position COURANTE : sans ça, changer
     // de vitesse en pleine lecture fait sauter l'animation en arrière.
@@ -4162,6 +4185,7 @@
     vwSyncButtons();
   });
   document.getElementById('vw-size').addEventListener('click', function () {
+    vwUserSize = true;
     setTokenSize(SIZE_KEYS[(SIZE_KEYS.indexOf(sizeKeyOf()) + 1) % 3]);
     vwSyncButtons();
   });
