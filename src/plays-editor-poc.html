@@ -668,6 +668,10 @@
   .wtp{display:block; background:var(--bg-1); border-left:3px solid var(--accent);
     border-radius:10px; padding:8px 10px; margin:0 0 9px; font-size:12px;
     line-height:1.5; white-space:pre-wrap}
+  /* Badge de la pastille : 📝 plein = note PROPRE au temps, pale = heritee. */
+  .chip .inh{opacity:.4}
+  .fld .src{font-size:10px; font-weight:700; color:var(--ink-2); margin-top:4px}
+  .fld .src.own{color:var(--accent-2)}
   .wtp b{display:block; font-size:11px; margin-bottom:3px}
   .wtp span{color:var(--ink-2)}
 </style>
@@ -870,7 +874,12 @@
   <div class="fld">
     <label for="f-stepexpl">Ce que la joueuse doit comprendre</label>
     <textarea id="f-stepexpl" rows="6" placeholder="Ajoute une explication pour ce temps (ex: l'ecran doit etre solide, la sortie cote oppose)"></textarea>
-    <div class="note">S'affiche en surimpression pendant CE temps, cote joueuse. Sauvegarde en direct.</div>
+    <div class="src" id="f-note-src"></div>
+    <div class="note">S'affiche en surimpression pendant CE temps, cote joueuse. Sauvegarde en direct. Sans note propre, ce temps reprend celle du temps precedent.</div>
+  </div>
+  <div class="row">
+    <button class="btn" id="f-note-clear" title="Couper la cascade : ce temps n'affiche plus rien">🗑 Effacer</button>
+    <button class="btn" id="f-note-inherit" title="Reprendre la note du temps precedent">↩ Heriter</button>
   </div>
   <div class="row"><button class="btn wide" id="f-note-done">Fermer</button></div>
 </div>
@@ -1182,7 +1191,7 @@
   }
   function clonePos(p) { var o = {}, k; for (k in p) o[k] = { x: p[k].x, y: p[k].y }; return o; }
 
-  function makeStep(pos) { return { id: uid('s'), pos: pos, arw: [], shot: null, note: '', explanation: '' }; }
+  function makeStep(pos) { return { id: uid('s'), pos: pos, arw: [], shot: null, note: '', explanation: '', explOvr: false }; }
 
   function makeDoc() {
     return {
@@ -1268,6 +1277,53 @@
     if (!path.length) return null;
     return branchIn(stepsAt(path.slice(0, -1)), path[path.length - 1].si, path[path.length - 1].bid);
   }
+  // ── Cascade des notes (v.190) ────────────────────────────────────────
+  // Meme principe que les positions : l'HERITAGE est le defaut, l'override
+  // est explicite. Un temps sans note propre montre celle du temps d'avant ;
+  // la remontee ne s'arrete pas a la ligne, elle repart du temps de
+  // bifurcation dans la ligne parente — exactement comme endPos().
+  //
+  // Deux facons d'etre une SOURCE : explOvr (le coach a repris la main), ou
+  // — retrocompat — un texte pose avant que la cascade existe. Une source
+  // explOvr au texte VIDE coupe la cascade : ce temps n'affiche rien.
+  function explEffective(path, i) {
+    var p = (path || []).slice(), idx = i, guard = 0;
+    while (guard++ < 64) {
+      var l = stepsAt(p), k;
+      for (k = Math.min(idx, l.length - 1); k >= 0; k--) {
+        var st = l[k] || {};
+        if (st.explOvr || (st.explanation || '').trim()) {
+          return { txt: (st.explanation || '').trim(), path: p.slice(), i: k };
+        }
+      }
+      if (!p.length) break;
+      idx = p.pop().si;   // on remonte sur le temps de bifurcation
+    }
+    return { txt: '', path: null, i: -1 };
+  }
+  function explLineName(p) {
+    var l = rootSteps(), b = null, i;
+    for (i = 0; i < (p || []).length; i++) {
+      b = branchIn(l, p[i].si, p[i].bid);
+      if (!b) return '';
+      l = b.steps;
+    }
+    return b ? b.name : 'Principale';
+  }
+  function explBadge(i) {
+    var l = steps(), st = l[i] || {};
+    if (st.explOvr) return (st.explanation || '').trim() ? ' 📝' : '';
+    if ((st.explanation || '').trim()) return ' 📝';
+    return explEffective(bpath, i).txt ? ' <span class="inh">📝</span>' : '';
+  }
+  // Signature de toute la ligne : couper une note change AUSSI les pastilles
+  // des temps qui en heritaient. On ne redessine que si quelque chose bouge.
+  function explSig() {
+    var l = steps(), o = '', i;
+    for (i = 0; i < l.length; i++) o += explBadge(i);
+    return o;
+  }
+
   function steps() { return stepsAt(bpath); }
   function step() { return steps()[cur] || steps()[0]; }
   function pos() { return step().pos; }
@@ -2144,7 +2200,7 @@
       // où le coach voit qu'une variante part d'ici sans ouvrir l'arbre.
       var nb = Array.isArray(l[i].branches) ? l[i].branches.length : 0;
       html += '<div class="chip' + (i === cur ? ' on' : '') + (desynced(i) ? ' desync' : '') + '" data-i="' + i + '">'
-        + (i + 1) + (nb ? ' 🔀' + nb : '') + ((l[i].explanation || '').trim() ? ' 📝' : '')
+        + (i + 1) + (nb ? ' 🔀' + nb : '') + explBadge(i)
         + '<span class="mini">' + stepSummary(l[i]) + '</span>'
         + '<button class="x" data-del="' + i + '" title="Supprimer ce temps">×</button>'
         + '</div>';
@@ -3044,21 +3100,57 @@
   // v.190 - l'explication d'un temps vit DANS le step : elle voyage avec lui
   // (copie, import/export, branche) sans table ni colonne.
   var elStepExpl = document.getElementById('f-stepexpl');
-  document.getElementById('s-note').addEventListener('click', function () {
-    var st = step();
-    elStepExpl.value = (st && st.explanation) || '';
-    openSheet('sh-note');
-  });
-  elStepExpl.addEventListener('input', function () {
+  var elNoteSrc = document.getElementById('f-note-src');
+  var NOTE_PH = elStepExpl.getAttribute('placeholder');
+
+  // `fill` : ne re-remplir la textarea qu'a l'ouverture / apres un bouton.
+  // A chaque touche, y reecrire `.value` renverrait le curseur a la fin.
+  function noteSync(fill) {
     var st = step();
     if (!st) return;
-    var was = !!(st.explanation || '').trim();
-    st.explanation = elStepExpl.value;
-    // Le badge de la pastille ne change qu'au passage du vide au plein :
-    // inutile de redessiner la timeline a chaque touche.
-    if (was !== !!(st.explanation || '').trim()) renderTimeline();
+    var own = !!st.explOvr || !!(st.explanation || '').trim();
+    var txt = (st.explanation || '').trim();
+    var inh = explEffective(bpath, cur - 1);   // cur-1 : remonte de lui-meme
+    if (fill) {
+      elStepExpl.value = own ? (st.explanation || '') : '';
+      elStepExpl.placeholder = inh.txt || NOTE_PH;
+    }
+    if (own && txt) {
+      elNoteSrc.className = 'src own';
+      elNoteSrc.textContent = '✍ Note propre a ce temps.';
+    } else if (own) {
+      elNoteSrc.className = 'src';
+      elNoteSrc.textContent = '🚫 Cascade coupee : ce temps n\'affiche rien.';
+    } else if (inh.txt) {
+      elNoteSrc.className = 'src';
+      elNoteSrc.textContent = '↩ Heritee du temps ' + (inh.i + 1)
+        + (inh.path && inh.path.length ? ' \u00b7 ' + explLineName(inh.path) : '') + '.';
+    } else {
+      elNoteSrc.className = 'src';
+      elNoteSrc.textContent = 'Aucune note — ni ici, ni avant.';
+    }
+    document.getElementById('f-note-inherit').style.display = own ? '' : 'none';
+    document.getElementById('f-note-clear').style.display = (own && !txt) ? 'none' : '';
+  }
+  // Toute mutation passe par la : la signature dit si les PASTILLES bougent
+  // (celles des temps qui heritaient comprises), pas seulement ce temps-ci.
+  function noteSet(txt, ovr) {
+    var st = step();
+    if (!st) return;
+    var sig = explSig();
+    st.explanation = txt;
+    st.explOvr = ovr;
+    if (sig !== explSig()) renderTimeline();
     touch();
+  }
+  document.getElementById('s-note').addEventListener('click', function () {
+    noteSync(true);
+    openSheet('sh-note');
   });
+  // Ecrire, c'est reprendre la main : explOvr passe a true tout seul.
+  elStepExpl.addEventListener('input', function () { noteSet(elStepExpl.value, true); noteSync(false); });
+  document.getElementById('f-note-clear').addEventListener('click', function () { noteSet('', true); noteSync(true); });
+  document.getElementById('f-note-inherit').addEventListener('click', function () { noteSet('', false); noteSync(true); });
   document.getElementById('f-note-done').addEventListener('click', closeSheets);
 
   document.getElementById('b-meta').addEventListener('click', function () { metaToForm(); openSheet('sh-meta'); });
@@ -3125,7 +3217,7 @@
       for (id in s.pos) positions[id] = pt(s.pos[id]);
       if (s.shot && flat) flat.push({ step: i, kind: 'shot', from: numOf(s.shot) });
       var o = {
-        n: i + 1, note: s.note || '', explanation: s.explanation || '',
+        n: i + 1, note: s.note || '', explanation: s.explanation || '', explanation_ovr: !!s.explOvr,
         moves: moves,
         screens: screens,
         // `pass` (singulier) duplique passes[0] : c'est la clé du format
@@ -3290,6 +3382,9 @@
       var st = makeStep(sp);
       st.note = s.note || '';
       st.explanation = s.explanation || '';
+      // Absent = cascade active. Un fichier d'avant la cascade garde donc
+      // ses notes, chacune source de sa propre descente.
+      st.explOvr = !!(s.explanation_ovr || s.explanationOvr);
       var moves = Array.isArray(s.moves) ? s.moves : [];
       for (j = 0; j < moves.length; j++) {
         var mv = moves[j];
@@ -4551,10 +4646,8 @@
   var elHint = document.getElementById('vw-hint');
   var vwExplKey = '';
 
-  function vwExplOf() {
-    var l = stepsAt(bpath), st = l && l[pStep];
-    return ((st && st.explanation) || '').trim();
-  }
+  // Cote joueuse, aucune notion d'heritage : elle voit la note EFFECTIVE.
+  function vwExplOf() { return explEffective(bpath, pStep).txt; }
   // Appelee a chaque frame : ne touche au DOM que quand le temps CHANGE.
   function vwExplSync(force) {
     if (!vwOn) return;
