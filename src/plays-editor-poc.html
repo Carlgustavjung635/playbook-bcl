@@ -646,6 +646,30 @@
   body.vwtree .vw .bot{display:none}
   .vwexp .sub{flex:none; font-size:10px; color:var(--ink-2); margin:0 0 7px; line-height:1.45}
   .xnode .go{flex:none; font-size:11px; color:var(--ink-2); opacity:.7}
+
+  /* v.190 - Le texte du coach arrive jusqu'a la joueuse sans jamais lui voler
+     un geste : l'encart est en pointer-events:none, le tap-pour-avancer passe
+     au travers. */
+  .vwexpl{position:fixed; z-index:66; left:10px; right:10px;
+    top:calc(54px + env(safe-area-inset-top)); pointer-events:none;
+    background:var(--panel); color:var(--ink); border:1px solid var(--border);
+    border-radius:12px; padding:9px 11px; font-size:12px; line-height:1.5;
+    white-space:pre-wrap; box-shadow:0 8px 26px rgba(0,0,0,.28);
+    opacity:0; transform:translateY(-6px); display:none;
+    transition:opacity .3s ease, transform .3s ease}
+  .vwexpl.show{display:block; opacity:.97; transform:none}
+  .vwhint{position:fixed; z-index:66; left:0; right:0; pointer-events:none;
+    bottom:calc(60px + env(safe-area-inset-bottom)); text-align:center;
+    font-size:11px; font-weight:600; color:var(--ink-2);
+    opacity:0; transition:opacity .2s ease}
+  .vwhint.show{opacity:.9}
+  body:not(.viewer) .vwexpl, body:not(.viewer) .vwhint{display:none !important}
+  body.vwtree .vwexpl, body.vwtree .vwhint{display:none !important}
+  .wtp{display:block; background:var(--bg-1); border-left:3px solid var(--accent);
+    border-radius:10px; padding:8px 10px; margin:0 0 9px; font-size:12px;
+    line-height:1.5; white-space:pre-wrap}
+  .wtp b{display:block; font-size:11px; margin-bottom:3px}
+  .wtp span{color:var(--ink-2)}
 </style>
 <!-- THÈME HÔTE (v.186) — en mode viewer (?mode=view), l'app passe les tokens
      résolus de son thème perso : fond, panneau, texte, bordure, accent. On les
@@ -745,6 +769,7 @@
   <button class="btn sm" id="s-sync" title="Recaler ce temps sur la sortie du précédent">🔄</button>
   <button class="btn sm" id="s-add" title="Ajouter un temps">＋</button>
   <button class="btn sm" id="s-branch" title="Créer une branche à la fin de ce temps">🔀</button>
+  <button class="btn sm" id="s-note" title="Explication de ce temps (visible cote joueuse)">📝</button>
   <button class="btn sm" id="s-tree" title="Arbre du play (branches)">🌳</button>
 </div>
 
@@ -797,6 +822,11 @@
     <textarea id="f-desc" placeholder="À quoi sert ce play, quand le sortir…"></textarea>
   </div>
   <div class="fld">
+    <label for="f-when">Quand la jouer</label>
+    <textarea id="f-when" rows="3" placeholder="Ex: face a une defense de zone 2-3, en fin de possession, quand la joueuse haute est libre..."></textarea>
+    <div class="note">Affiche en tete de l'arborescence, cote joueuse.</div>
+  </div>
+  <div class="fld">
     <label for="f-points">Points clés</label>
     <textarea id="f-points" rows="5" placeholder="Un point clé par ligne (4 idéalement)"></textarea>
     <div class="note">Une ligne = un point. Les 4 premières lignes sont mises en avant.</div>
@@ -835,6 +865,16 @@
   <div class="row" style="margin-top:10px"><button class="btn wide" id="pl-reload">↻ Rafraîchir</button></div>
 </div>
 
+<div class="sheet" id="sh-note">
+  <h2>📝 Explication de ce temps</h2>
+  <div class="fld">
+    <label for="f-stepexpl">Ce que la joueuse doit comprendre</label>
+    <textarea id="f-stepexpl" rows="6" placeholder="Ajoute une explication pour ce temps (ex: l'ecran doit etre solide, la sortie cote oppose)"></textarea>
+    <div class="note">S'affiche en surimpression pendant CE temps, cote joueuse. Sauvegarde en direct.</div>
+  </div>
+  <div class="row"><button class="btn wide" id="f-note-done">Fermer</button></div>
+</div>
+
 <input type="file" id="f-import" accept="application/json,.json" style="display:none">
 
 <!-- ══ JALON 4 · ARBRE DES BRANCHES (tiroir gauche) ═══════════════════════
@@ -863,8 +903,11 @@
     <button class="btn sm" id="vw-speed" title="Vitesse de lecture">🐢</button>
     <button class="btn sm" id="vw-size" title="Taille des pions">⤢</button>
     <button class="btn sm" id="vw-mirror" title="Inverser gauche / droite">↔</button>
+    <button class="btn sm" id="vw-note" title="Explication de ce temps" style="display:none">📝</button>
   </div>
 </div>
+<div class="vwexpl" id="vw-expl"></div>
+<div class="vwhint" id="vw-hint">Tap pour avancer • ▶ pour reprendre</div>
 <div class="vwmenu" id="vw-menu"><div class="card" id="vw-menu-card"></div></div>
 
 <!-- ══ v.188 · ARBORESCENCE — ÉCRAN D'ACCUEIL DU VIEWER ══════════════════
@@ -1139,7 +1182,7 @@
   }
   function clonePos(p) { var o = {}, k; for (k in p) o[k] = { x: p[k].x, y: p[k].y }; return o; }
 
-  function makeStep(pos) { return { id: uid('s'), pos: pos, arw: [], shot: null, note: '' }; }
+  function makeStep(pos) { return { id: uid('s'), pos: pos, arw: [], shot: null, note: '', explanation: '' }; }
 
   function makeDoc() {
     return {
@@ -2101,7 +2144,7 @@
       // où le coach voit qu'une variante part d'ici sans ouvrir l'arbre.
       var nb = Array.isArray(l[i].branches) ? l[i].branches.length : 0;
       html += '<div class="chip' + (i === cur ? ' on' : '') + (desynced(i) ? ' desync' : '') + '" data-i="' + i + '">'
-        + (i + 1) + (nb ? ' 🔀' + nb : '')
+        + (i + 1) + (nb ? ' 🔀' + nb : '') + ((l[i].explanation || '').trim() ? ' 📝' : '')
         + '<span class="mini">' + stepSummary(l[i]) + '</span>'
         + '<button class="x" data-del="' + i + '" title="Supprimer ce temps">×</button>'
         + '</div>';
@@ -2506,6 +2549,7 @@
 
     pU = u;
     renderFrame(pStep, u);
+    if (vwOn) vwExplSync(false);
     if (Math.floor(u * 1000) % 1000 === 0 || u < 0.02) setHint();
     fpsTick();
     pRaf = requestAnimationFrame(tick);
@@ -2966,22 +3010,25 @@
     title: document.getElementById('f-title'), tag: document.getElementById('f-tag'),
     side: document.getElementById('f-side'),   color: document.getElementById('f-color'),
     desc: document.getElementById('f-desc'),   points: document.getElementById('f-points'),
+    when: document.getElementById('f-when'),
     author: document.getElementById('f-author')
   };
   function metaToForm() {
     F.title.value = doc.title || ''; F.tag.value = doc.tag || '';
     F.side.value = doc.side || 'attaque'; F.color.value = doc.color || '#22D3EE';
     F.desc.value = doc.description || ''; F.points.value = doc.points || '';
+    F.when.value = doc.whenToPlay || '';
     F.author.value = doc.author || '';
   }
   function formToMeta() {
     doc.title = F.title.value.trim(); doc.tag = F.tag.value.trim();
     doc.side = F.side.value; doc.color = F.color.value.trim() || '#22D3EE';
     doc.description = F.desc.value; doc.points = F.points.value;
+    doc.whenToPlay = F.when.value;
     doc.author = F.author.value.trim();
     syncTitle(); touch();
   }
-  ['title','tag','side','color','desc','points','author'].forEach(function (k) {
+  ['title','tag','side','color','desc','points','when','author'].forEach(function (k) {
     F[k].addEventListener('input', formToMeta);
     F[k].addEventListener('change', formToMeta);
   });
@@ -2993,6 +3040,26 @@
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
   }
+
+  // v.190 - l'explication d'un temps vit DANS le step : elle voyage avec lui
+  // (copie, import/export, branche) sans table ni colonne.
+  var elStepExpl = document.getElementById('f-stepexpl');
+  document.getElementById('s-note').addEventListener('click', function () {
+    var st = step();
+    elStepExpl.value = (st && st.explanation) || '';
+    openSheet('sh-note');
+  });
+  elStepExpl.addEventListener('input', function () {
+    var st = step();
+    if (!st) return;
+    var was = !!(st.explanation || '').trim();
+    st.explanation = elStepExpl.value;
+    // Le badge de la pastille ne change qu'au passage du vide au plein :
+    // inutile de redessiner la timeline a chaque touche.
+    if (was !== !!(st.explanation || '').trim()) renderTimeline();
+    touch();
+  });
+  document.getElementById('f-note-done').addEventListener('click', closeSheets);
 
   document.getElementById('b-meta').addEventListener('click', function () { metaToForm(); openSheet('sh-meta'); });
 
@@ -3058,7 +3125,7 @@
       for (id in s.pos) positions[id] = pt(s.pos[id]);
       if (s.shot && flat) flat.push({ step: i, kind: 'shot', from: numOf(s.shot) });
       var o = {
-        n: i + 1, note: s.note || '',
+        n: i + 1, note: s.note || '', explanation: s.explanation || '',
         moves: moves,
         screens: screens,
         // `pass` (singulier) duplique passes[0] : c'est la clé du format
@@ -3106,6 +3173,7 @@
       side: doc.side || 'attaque',
       color: doc.color || '#22D3EE',
       description: doc.description || '',
+      when_to_play: doc.whenToPlay || '',
       points_md: doc.points || '',
       court_type: doc.mode,
       defense_enabled: !!doc.defOn,
@@ -3168,6 +3236,7 @@
     if (['attaque','defense','transition','remise'].indexOf(d.side) < 0) d.side = 'attaque';
     d.color = pick(o, 'color') || '#22D3EE';
     d.description = pick(o, 'description') || '';
+    d.whenToPlay = (o && (o.when_to_play || o.whenToPlay)) || '';
     d.points = pick(o, 'points_md', 'pointsMd', 'points') || '';
     if (Array.isArray(d.points)) d.points = d.points.join('\n');
     d.author = pick(o, 'created_by', 'createdBy', 'author') || '';
@@ -3220,6 +3289,7 @@
       }
       var st = makeStep(sp);
       st.note = s.note || '';
+      st.explanation = s.explanation || '';
       var moves = Array.isArray(s.moves) ? s.moves : [];
       for (j = 0; j < moves.length; j++) {
         var mv = moves[j];
@@ -4317,7 +4387,9 @@
 
   function vwTreeRender() {
     var here = pathKey(bpath), rows = vwTreeRows(rootSteps(), [], 0, []);
-    var html = '<div class="xnode' + (here === '' ? ' on' : '') + '" data-xp="">'
+    var wtp = (doc.whenToPlay || '').trim();
+    var html = wtp ? '<div class="wtp"><b>🎯 Quand la jouer</b><span>' + esc(wtp) + '</span></div>' : '';
+    html += '<div class="xnode' + (here === '' ? ' on' : '') + '" data-xp="">'
       + '<span class="nm">' + (here === '' ? '📍 ' : '▶ ') + 'Ligne principale</span>'
       + '<span class="ct">' + rootSteps().length + ' temps</span></div>';
     rows.forEach(function (r) {
@@ -4463,12 +4535,85 @@
     document.getElementById('vw-speed').textContent = VW_LABEL[vwSpeedIx];
     document.getElementById('vw-size').textContent = '⤢ ' + SIZE_KEYS[SIZE_KEYS.indexOf(sizeKeyOf())].toUpperCase();
     document.getElementById('vw-play').textContent = playing ? '⏸' : '▶';
+    vwHintSync();
+    vwExplSync(true);
   }
   function sizeKeyOf() {
     var v = doc.tokenSize || 1, k;
     for (k in SIZES) if (SIZES[k] === v) return k;
     return 'm';
   }
+
+  // -- v.190 - Tap sur le terrain ---------------------------------------
+  // En lecture : pause immediate. En pause : un tap = UN temps. Le mode
+  // manuel n'est pas un mode a part - c'est la meme ROUTE, avancee a la main.
+  var elExpl = document.getElementById('vw-expl');
+  var elHint = document.getElementById('vw-hint');
+  var vwExplKey = '';
+
+  function vwExplOf() {
+    var l = stepsAt(bpath), st = l && l[pStep];
+    return ((st && st.explanation) || '').trim();
+  }
+  // Appelee a chaque frame : ne touche au DOM que quand le temps CHANGE.
+  function vwExplSync(force) {
+    if (!vwOn) return;
+    var k = pathKey(bpath) + '#' + pStep;
+    if (k === vwExplKey && !force) return;
+    vwExplKey = k;
+    var t = vwExplOf();
+    document.getElementById('vw-note').style.display = t ? '' : 'none';
+    if (!t) { elExpl.classList.remove('show'); elExpl.textContent = ''; return; }
+    elExpl.textContent = t;
+    elExpl.classList.add('show');
+  }
+  function vwHintSync() {
+    if (vwOn && !playing && vwRoute.length) elHint.classList.add('show');
+    else elHint.classList.remove('show');
+  }
+
+  function vwStepForward() {
+    if (!vwOn) return;
+    if (!vwRoute.length) { vwShowTree(); return; }
+    var seg = vwRoute[vwSegIx];
+    if (!seg) { vwRouteEnd(); return; }
+    // Un temps interrompu en plein vol se termine d'abord : le premier tap
+    // finit ce qu'on regardait, le suivant seulement enchaine.
+    if (pU < 1) { pU = 1; renderFrame(pStep, 1); vwExplSync(true); return; }
+    if (pStep >= seg.to) {
+      if (vwSegIx < vwRoute.length - 1) {
+        vwSegIx++;
+        vwGoSeg(vwSegIx);
+        pU = 1; renderFrame(pStep, 1);
+        vwExplSync(true);
+        return;
+      }
+      vwRouteEnd();
+      return;
+    }
+    pStep++; pU = 1;
+    renderFrame(pStep, 1);
+    vwExplSync(true);
+  }
+
+  (function () {
+    var stg = document.querySelector('.stage');
+    if (!stg) return;
+    stg.addEventListener('click', function () {
+      if (!vwOn) return;
+      if (elExp.classList.contains('show') || vwMenu.classList.contains('show')) return;
+      if (!vwRoute.length) { vwShowTree(); return; }
+      if (playing) { pause(); vwSyncButtons(); return; }
+      vwStepForward();
+    });
+  })();
+
+  // Le bouton du bas rappelle l'encart quand il s'est efface : rien de plus.
+  document.getElementById('vw-note').addEventListener('click', function (e) {
+    e.stopPropagation();
+    if (!vwExplOf()) return;
+    elExpl.classList.toggle('show');
+  });
 
   function enterViewer(from) {
     if (vwOn) return;
@@ -4485,6 +4630,7 @@
     if (vwBar) vwBar.style.display = 'none';
     bpath = []; cur = 0; pStep = 0; pU = 0;
     vwRoute = []; vwSegIx = 0;
+    vwExplKey = '';
     vwUserSpeed = false; vwUserSize = false;
     // Pions S dès l'entrée : côté joueuse c'est la taille utile — discrète,
     // tout le terrain lisible sur un petit écran.
