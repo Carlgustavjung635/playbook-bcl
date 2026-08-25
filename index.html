@@ -16487,6 +16487,184 @@ function _ensurePlayNavKeys() {
   });
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// APERÇU EMBARQUÉ D'UNE ANIMATION (jalon 4 — v.183)
+// ══════════════════════════════════════════════════════════════════════
+// Une animation est un MÉDIA du play, au même titre qu'une vidéo : elle
+// s'affiche donc comme une carte média (vignette + badge + actions) et non
+// comme une ligne de liste. La vignette est le terrain au TEMPS 1, dessiné
+// en SVG à partir du JSON déjà publié dans `plays.animations` : aucun
+// fichier image à générer, rien à réinvalider quand le coach republie, et
+// zéro appel réseau supplémentaire.
+//
+// ⚠️ Ce code lit le FORMAT D'ÉCHANGE (celui de l'éditeur), pas un modèle
+// interne : positions en unités terrain (1 unité = 10 cm), joueuses
+// désignées par un numéro SIGNÉ (+3 attaque / −3 défense). Il ne CONNAÎT
+// pas l'éditeur et ne partage aucun code avec lui — c'est volontaire, la
+// contrepartie est que les deux dessins de terrain doivent rester d'accord
+// sur la géométrie (cotes FIBA, marge de 12 unités).
+const _ANIM_JOIN = Math.sqrt(67.5 * 67.5 - 66 * 66);
+
+function _animCourt(full) {
+  const j = (27.75 + _ANIM_JOIN).toFixed(2), jr = (276.25 - _ANIM_JOIN).toFixed(2);
+  const ln = 'fill="none" stroke="currentColor" stroke-opacity="0.34" stroke-width="1"';
+  return full
+    ? `<rect x="12" y="12" width="280" height="150" fill="currentColor" fill-opacity="0.05"/>
+       <rect x="12" y="12" width="280" height="150" ${ln}/>
+       <line x1="152" y1="12" x2="152" y2="162" ${ln}/><circle cx="152" cy="87" r="18" ${ln}/>
+       <rect x="12" y="62.5" width="58" height="49" ${ln}/><circle cx="70" cy="87" r="18" ${ln}/>
+       <path d="M 12 21 L ${j} 21 A 67.5 67.5 0 0 1 ${j} 153 L 12 153" ${ln}/>
+       <rect x="234" y="62.5" width="58" height="49" ${ln}/><circle cx="234" cy="87" r="18" ${ln}/>
+       <path d="M 292 21 L ${jr} 21 A 67.5 67.5 0 0 0 ${jr} 153 L 292 153" ${ln}/>`
+    : `<rect x="12" y="12" width="150" height="140" fill="currentColor" fill-opacity="0.05"/>
+       <rect x="12" y="12" width="150" height="140" ${ln}/>
+       <path d="M 69 152 A 18 18 0 0 1 105 152" ${ln}/>
+       <rect x="62.5" y="12" width="49" height="58" ${ln}/><circle cx="87" cy="70" r="18" ${ln}/>
+       <path d="M 21 12 L 21 ${(27.75 + _ANIM_JOIN).toFixed(2)} A 67.5 67.5 0 0 0 153 ${(27.75 + _ANIM_JOIN).toFixed(2)} L 153 12" ${ln}/>
+       <circle cx="87" cy="27.75" r="2.25" ${ln}/>`;
+}
+
+// Les jetons du format d'échange, filtrés par `defense_enabled` : montrer une
+// défense que l'éditeur cache donnerait une vignette qui ne ressemble pas à
+// l'animation qu'elle annonce.
+function _animTokens(anim) {
+  const defOn = !!(anim.defense_enabled || anim.defenseEnabled);
+  return (Array.isArray(anim.players) ? anim.players : []).map(pl => {
+    const n = Math.abs(Number(pl.n) || 0);
+    if (!n) return null;
+    const side = (pl.side === 'def' || Number(pl.n) < 0) ? 'def' : 'atk';
+    return { id: (side === 'def' ? 'd' : 'a') + n, side, n, x: +pl.x, y: +pl.y };
+  }).filter(t => t && (t.side === 'atk' || defOn));
+}
+
+// Les images-clés de la boucle : la photo de chaque temps, plus la SORTIE du
+// dernier temps (que le format ne stocke pas — elle se déduit des `to` des
+// déplacements). Sans elle, la boucle se figerait sur l'avant-dernier geste.
+function _animFrames(anim) {
+  const steps = Array.isArray(anim.steps) ? anim.steps : [];
+  const frames = steps.map(s => s.positions || {});
+  if (steps.length) {
+    const last = steps[steps.length - 1];
+    const end = Object.assign({}, last.positions || {});
+    (last.moves || []).concat(last.screens || []).forEach(m => {
+      const n = Number(m && m.player);
+      if (!n || !m.to) return;
+      end[(n < 0 ? 'd' : 'a') + Math.abs(n)] = { x: +m.to.x, y: +m.to.y };
+    });
+    frames.push(end);
+  }
+  return frames;
+}
+
+function _animBranchCount(anim) {
+  let n = 0;
+  (function walk(list) {
+    (Array.isArray(list) ? list : []).forEach(s => {
+      (Array.isArray(s && s.branches) ? s.branches : []).forEach(b => { n++; walk(b.steps); });
+    });
+  })(anim && anim.steps);
+  return n;
+}
+
+function _animThumbSvg(anim) {
+  const full = anim.court_type === 'full';
+  const vb = full ? '0 0 304 174' : '0 0 174 164';
+  const R = (full ? 304 : 174) / 19 * (+anim.players_size === 0.75 || +anim.players_size === 1.25 ? +anim.players_size : 1);
+  const col = /^#[0-9a-f]{3,8}$/i.test(anim.color || '') ? anim.color : '#22D3EE';
+  const p0 = (Array.isArray(anim.steps) && anim.steps[0] && anim.steps[0].positions) || {};
+  const letters = anim.player_label_style === 'letters';
+  const toks = _animTokens(anim).map(t => {
+    const q = p0[t.id] || { x: t.x, y: t.y };
+    const lab = t.side === 'def' ? 'X' + t.n : (letters ? 'ABCDE'[t.n - 1] : String(t.n));
+    return `<g data-tok="${t.id}" transform="translate(${(+q.x).toFixed(2)},${(+q.y).toFixed(2)})">
+      <circle r="${R.toFixed(2)}" fill="${t.side === 'def' ? '#8A93A3' : esc(col)}" fill-opacity="${t.side === 'def' ? 0.55 : 0.92}"/>
+      <text y="${(R * 0.36).toFixed(2)}" text-anchor="middle" font-size="${(R * 1.05).toFixed(2)}"
+        font-family="'JetBrains Mono',monospace" font-weight="700" fill="#0B1016">${lab}</text></g>`;
+  }).join('');
+  return `<svg viewBox="${vb}" style="display:block;width:100%;height:auto;color:var(--ink-3)"
+    preserveAspectRatio="xMidYMid meet" aria-hidden="true">${_animCourt(full)}${toks}</svg>`;
+}
+
+// Auto-play PARESSEUX : la vignette ne s'anime que si elle est réellement à
+// l'écran (IntersectionObserver) et jamais en `prefers-reduced-motion`. Sur
+// iPhone, quatre boucles rAF derrière un scroll suffisent à chauffer le
+// téléphone : ce qui est hors champ ne doit rien coûter.
+function _animPreviewsMount() {
+  if (window._animPrevObs) { try { window._animPrevObs.disconnect(); } catch (e) {} window._animPrevObs = null; }
+  const nodes = document.querySelectorAll('.anim-thumb[data-anim-id]');
+  if (!nodes.length) return;
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const obs = new IntersectionObserver(entries => {
+    entries.forEach(e => { e.isIntersecting ? _animPrevStart(e.target) : _animPrevStop(e.target); });
+  }, { threshold: 0.4 });
+  nodes.forEach(n => obs.observe(n));
+  window._animPrevObs = obs;
+}
+
+function _animPrevStart(el) {
+  if (el._raf) return;
+  const play = state.plays.find(x => x.id === el.getAttribute('data-play-id'));
+  const anim = play && (Array.isArray(play.animations) ? play.animations : []).find(a => a && a.id === el.getAttribute('data-anim-id'));
+  if (!anim) return;
+  const frames = el._frames || (el._frames = _animFrames(anim));
+  if (frames.length < 2) return;
+  const toks = {};
+  el.querySelectorAll('[data-tok]').forEach(g => { toks[g.getAttribute('data-tok')] = g; });
+  const DUR = 900, total = (frames.length - 1) * DUR;
+  let t0 = 0;
+  const tick = now => {
+    if (!t0) t0 = now;
+    const u = ((now - t0) % total) / DUR;
+    const k = Math.min(frames.length - 2, Math.floor(u));
+    const r = u - k, e = r < 0.5 ? 2 * r * r : 1 - Math.pow(-2 * r + 2, 2) / 2;
+    const A = frames[k], B = frames[k + 1];
+    for (const id in toks) {
+      const a = A[id]; if (!a) continue;
+      const b = B[id] || a;
+      toks[id].setAttribute('transform',
+        `translate(${(a.x + (b.x - a.x) * e).toFixed(2)},${(a.y + (b.y - a.y) * e).toFixed(2)})`);
+    }
+    el._raf = requestAnimationFrame(tick);
+  };
+  el._raf = requestAnimationFrame(tick);
+}
+
+function _animPrevStop(el) {
+  if (el._raf) cancelAnimationFrame(el._raf);
+  el._raf = 0;
+  const f = el._frames && el._frames[0];
+  if (!f) return;
+  el.querySelectorAll('[data-tok]').forEach(g => {
+    const q = f[g.getAttribute('data-tok')];
+    if (q) g.setAttribute('transform', `translate(${(+q.x).toFixed(2)},${(+q.y).toFixed(2)})`);
+  });
+}
+
+// Suppression d'une animation depuis la fiche play — read-modify-write sur
+// `plays.animations`, comme l'éditeur. On ne passe SURTOUT pas par PbSync :
+// la colonne n'est jamais poussée par l'entité `plays` (cf. playbook), et un
+// flush depuis un localStorage périmé effacerait le travail d'un autre coach.
+async function deletePlayAnimation(playId, animId) {
+  if (!canEditSharedLibrary()) return;
+  const play = state.plays.find(x => x.id === playId);
+  const anim = play && (play.animations || []).find(a => a && a.id === animId);
+  if (!anim) return;
+  if (!confirm(`Supprimer l'animation « ${anim.title || animId} » ?\nCette action est définitive.`)) return;
+  try {
+    const { data, error } = await window.sb.from('plays').select('animations').eq('id', playId).single();
+    if (error) throw error;
+    const list = (Array.isArray(data && data.animations) ? data.animations : []).filter(a => a && a.id !== animId);
+    const { error: e2 } = await window.sb.from('plays').update({ animations: list }).eq('id', playId);
+    if (e2) throw e2;
+    play.animations = list;
+    render();
+    if (typeof toast === 'function') toast('Animation supprimée.');
+  } catch (e) {
+    if (typeof toast === 'function') toast('Suppression impossible — ' + (e.message || e));
+    else alert('Suppression impossible — ' + (e.message || e));
+  }
+}
+
 function renderPlayDetail() {
   const p = state.plays.find(x => x.id === state.view.id);
   if (!p) { state.view = null; return renderPlays(); }
@@ -16514,6 +16692,9 @@ function renderPlayDetail() {
   const hasPrev = navIdx > 0;
   const hasNext = navIdx >= 0 && navIdx < navList.length - 1;
   _ensurePlayNavKeys();
+  // Aperçus animés : montés APRÈS le retour de la fonction (le HTML n existe
+  // pas encore ici). Le remount coupe les boucles rAF de la vue précédente.
+  setTimeout(_animPreviewsMount, 60);
 
   return `
     <div class="fade-up">
@@ -16593,17 +16774,34 @@ function renderPlayDetail() {
         <div class="list-section">
           <div style="padding:14px 16px">
             <div class="eyebrow-muted mb-2">🎬 Animations${hasAnim ? ` (${animations.length})` : ''}</div>
-            ${animations.map(a => `
-              <div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-top:1px solid var(--border)">
-                <span style="width:9px;height:9px;border-radius:50%;flex:none;background:${/^#[0-9a-f]{3,8}$/i.test(a.color || '') ? a.color : 'var(--orange)'}"></span>
-                <span style="flex:1;min-width:0">
-                  <b style="display:block;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.title || 'Sans titre')}</b>
-                  <small style="font-size:11px;color:var(--ink-3)">${esc(a.tag || a.side || '')} · ${Array.isArray(a.steps) ? a.steps.length : 0} temps · ${a.court_type === 'full' ? 'terrain complet' : 'demi-terrain'}</small>
-                </span>
-                <button class="btn btn-secondary" onclick="openPbEditorV2('${p.id}','${esc(a.id)}','view')" title="Lire l'animation">▶</button>
-                ${isCoach && canEditSharedLibrary() ? `<button class="btn btn-secondary" onclick="openPbEditorV2('${p.id}','${esc(a.id)}')" title="Modifier l'animation">✎</button>` : ''}
-              </div>
-            `).join('')}
+            <div style="display:flex;flex-direction:column;gap:12px">
+            ${animations.map(a => {
+              const nSteps = Array.isArray(a.steps) ? a.steps.length : 0;
+              const nBr = _animBranchCount(a);
+              const dot = /^#[0-9a-f]{3,8}$/i.test(a.color || '') ? a.color : 'var(--orange)';
+              return `
+              <div style="border:1px solid var(--border);border-radius:12px;overflow:hidden">
+                <div class="anim-thumb" data-anim-id="${esc(a.id)}" data-play-id="${p.id}"
+                     style="position:relative;cursor:pointer;padding:6px 6px 0"
+                     onclick="openPbEditorV2('${p.id}','${esc(a.id)}','view')" title="Voir en plein écran">
+                  ${_animThumbSvg(a)}
+                  <span style="position:absolute;left:12px;bottom:10px;background:rgba(0,0,0,0.62);color:#fff;font-family:'JetBrains Mono';font-size:10px;padding:3px 8px;border-radius:999px">▶ ${nSteps} temps${nBr ? ` · ${nBr} branche${nBr > 1 ? 's' : ''}` : ''}</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;padding:9px 10px">
+                  <span style="width:9px;height:9px;border-radius:50%;flex:none;background:${dot}"></span>
+                  <span style="flex:1;min-width:0">
+                    <b style="display:block;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.title || 'Sans titre')}</b>
+                    <small style="font-size:11px;color:var(--ink-3)">${esc(a.tag || a.side || '')} · ${a.court_type === 'full' ? 'terrain complet' : 'demi-terrain'}</small>
+                  </span>
+                  <button class="btn btn-secondary" onclick="event.stopPropagation();openPbEditorV2('${p.id}','${esc(a.id)}','view')" title="Voir en plein écran">👁</button>
+                  ${isCoach && canEditSharedLibrary() ? `
+                    <button class="btn btn-secondary" onclick="event.stopPropagation();openPbEditorV2('${p.id}','${esc(a.id)}')" title="Éditer l'animation">✎</button>
+                    <button class="btn btn-danger" onclick="event.stopPropagation();deletePlayAnimation('${p.id}','${esc(a.id)}')" title="Supprimer l'animation">🗑</button>
+                  ` : ''}
+                </div>
+              </div>`;
+            }).join('')}
+            </div>
             ${canAddAnim ? `<button class="btn btn-secondary btn-block" style="margin-top:12px" onclick="openPbEditorV2('${p.id}')">🆕 Créer une animation</button>` : ''}
           </div>
         </div>
@@ -52312,7 +52510,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.182';
+const APP_VERSION = '2026-08-19.183';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.

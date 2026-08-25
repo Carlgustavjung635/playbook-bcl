@@ -531,6 +531,69 @@
   }
   .toast.show{opacity:1; transform:translateX(-50%) translateY(0)}
   .toast.ok{color:var(--ok)} .toast.err{color:var(--err)}
+
+  /* ══ JALON 4 ═══════════════════════════════════════════════════════════
+     Arbre des branches (tiroir gauche) + pistes + viewer joueuse. */
+
+  /* ── Tiroir « arbre du play » ───────────────────────────────────────── */
+  .tree{
+    position:fixed; top:0; left:0; bottom:0; width:min(80vw,308px); z-index:40;
+    background:var(--panel); border-right:1px solid var(--border);
+    transform:translateX(-104%); transition:transform .2s ease; display:flex;
+    flex-direction:column; gap:8px; box-shadow:0 0 42px -14px rgba(0,0,0,.55);
+    padding:calc(12px + env(safe-area-inset-top)) 11px calc(11px + env(safe-area-inset-bottom));
+  }
+  .tree.show{transform:none}
+  .tree h2{font-size:13px; margin:0}
+  .tree .scroll{flex:1; min-height:0; overflow:auto; -webkit-overflow-scrolling:touch}
+  .tnode{
+    display:flex; align-items:center; gap:6px; padding:6px 7px; margin-bottom:2px;
+    border:1px solid transparent; border-radius:9px; cursor:pointer; font-size:12px;
+  }
+  .tnode:active{background:var(--field)}
+  .tnode.on{border-color:var(--accent-2); background:var(--field)}
+  .tnode .nm{flex:1; min-width:0; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .tnode .ct{flex:none; font-size:10px; color:var(--ink-2); font-weight:600}
+  .tnode .del{flex:none; border:0; background:none; padding:2px 3px; font-size:12px; cursor:pointer; color:var(--ink-2)}
+
+  /* ── Pistes (vue « éditeur vidéo ») ─────────────────────────────────── */
+  .lanes{border-top:1px solid var(--border); padding-top:7px; display:flex; flex-direction:column; gap:4px}
+  .lanes .cap{font-size:10px; color:var(--ink-2); font-weight:700}
+  .lane{display:flex; align-items:center; gap:5px; cursor:pointer; font-size:10px; color:var(--ink-2)}
+  .lane .lbl{flex:none; max-width:104px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .lane .blocks{display:flex; gap:2px; flex-wrap:wrap}
+  .lane .blocks i{display:block; width:13px; height:7px; border-radius:2px; background:var(--accent-2); opacity:.45}
+  .lane.main .blocks i{opacity:.9}
+  .lane.main .lbl{color:var(--ink); font-weight:700}
+
+  /* ── Viewer joueuse : plein écran, rien d'autre que le terrain ──────── */
+  body.viewer header, body.viewer .bar, body.viewer .tl,
+  body.viewer .hint, body.viewer .draft, body.viewer .tree{display:none !important}
+  body.viewer .stage{padding:0}
+  .vw{position:fixed; inset:0; z-index:60; display:none; pointer-events:none}
+  body.viewer .vw{display:block}
+  .vw .top{
+    position:absolute; left:8px; right:8px; display:flex; align-items:center; gap:8px;
+    top:calc(7px + env(safe-area-inset-top));
+  }
+  .vw .crumb{
+    flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    background:var(--panel); border:1px solid var(--border); border-radius:999px;
+    padding:5px 11px; font-size:11px; font-weight:700; color:var(--ink-2); opacity:.94;
+  }
+  .vw .bot{
+    position:absolute; left:0; right:0; display:flex; justify-content:center; gap:7px;
+    flex-wrap:wrap; padding:0 8px; bottom:calc(9px + env(safe-area-inset-bottom));
+  }
+  .vw .btn{pointer-events:auto; opacity:.9}
+  .vwmenu{position:fixed; inset:0; z-index:70; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.44)}
+  .vwmenu.show{display:flex}
+  .vwmenu .card{
+    background:var(--panel); border:1px solid var(--border); border-radius:15px;
+    padding:12px; width:min(92vw,330px); max-height:72vh; overflow:auto;
+  }
+  .vwmenu .card .row{display:flex; gap:6px; margin-bottom:6px}
+  .vwmenu .card .row .btn{flex:1}
 </style>
 </head>
 <body data-tool="select">
@@ -597,6 +660,8 @@
   <div class="tl-scroll" id="tl-strip"></div>
   <button class="btn sm" id="s-sync" title="Recaler ce temps sur la sortie du précédent">🔄</button>
   <button class="btn sm" id="s-add" title="Ajouter un temps">＋</button>
+  <button class="btn sm" id="s-branch" title="Créer une branche à la fin de ce temps">🔀</button>
+  <button class="btn sm" id="s-tree" title="Arbre du play (branches)">🌳</button>
 </div>
 
 <!-- Barre de lecture -->
@@ -687,6 +752,37 @@
 </div>
 
 <input type="file" id="f-import" accept="application/json,.json" style="display:none">
+
+<!-- ══ JALON 4 · ARBRE DES BRANCHES (tiroir gauche) ═══════════════════════
+     L'arbre ET les pistes vivent dans le même tiroir : sur un iPhone en
+     portrait, une colonne fixe à gauche mangerait la moitié du terrain. -->
+<div class="tree" id="tree">
+  <h2>🌳 Arbre du play</h2>
+  <div class="scroll" id="tree-list"></div>
+  <div class="lanes" id="tl-lanes"></div>
+  <div class="row"><button class="btn wide" id="tr-home">🏠 Ligne principale</button></div>
+  <div class="row"><button class="btn wide" id="tr-close">Fermer</button></div>
+</div>
+
+<!-- ══ JALON 4 · VIEWER JOUEUSE ═══════════════════════════════════════════
+     Plein écran, boucle infinie, AUCUNE porte vers l'éditeur : les seuls
+     réglages sont ceux du confort de lecture (vitesse, taille, miroir) et le
+     choix d'une variante. -->
+<div class="vw" id="vw">
+  <div class="top">
+    <span class="crumb" id="vw-crumb">Ligne principale</span>
+    <button class="btn sm" id="vw-close" title="Fermer">✕</button>
+  </div>
+  <div class="bot">
+    <button class="btn sm" id="vw-play" title="Lecture / pause">⏸</button>
+    <button class="btn sm" id="vw-speed" title="Vitesse de lecture">🐢</button>
+    <button class="btn sm" id="vw-size" title="Taille des pions">⤢</button>
+    <button class="btn sm" id="vw-mirror" title="Inverser gauche / droite">↔</button>
+    <button class="btn sm" id="vw-br" title="Variantes" style="display:none">🔀</button>
+  </div>
+</div>
+<div class="vwmenu" id="vw-menu"><div class="card" id="vw-menu-card"></div></div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -979,7 +1075,49 @@
   var arwEl = {};            // id flèche → { g, body, hit, head }
 
   function mode() { return doc.mode; }
-  function steps() { return doc[doc.mode].steps; }
+
+  // ── BRANCHES (jalon 4) ───────────────────────────────────────────────
+  // Une branche est une LIGNE DE TEMPS comme une autre : même structure,
+  // rangée dans le temps d'où elle part (`step.branches[]`). C'est ce qui
+  // permet à tout le moteur — cascade, drag, lecture, export photo — de
+  // continuer à ne connaître QU'UNE liste de temps : celle du chemin courant.
+  //
+  //   step.branches = [ { id, name, description, returns_to_main, steps:[…] } ]
+  //
+  // `bpath` est le chemin de navigation : [] = ligne principale, sinon une
+  // suite de sauts { si:<index du temps de départ>, bid:<id de branche> }.
+  // Il est VOLATILE (navigation), jamais publié — le JSON, lui, est récursif.
+  //
+  // Une animation SANS branche n'a aucune clé `branches` : bpath reste vide,
+  // steps() renvoie exactement ce qu'il renvoyait avant, et rien ne change.
+  var BR_DEPTH_MAX = 3;   // branche → sous-branche → sous-sous-branche
+  var BR_PER_STEP  = 5;
+  var bpath = [];
+
+  function rootSteps() { return doc[doc.mode].steps; }
+  function branchIn(list, si, bid) {
+    var st = list[si], i;
+    if (!st || !Array.isArray(st.branches)) return null;
+    for (i = 0; i < st.branches.length; i++) if (st.branches[i].id === bid) return st.branches[i];
+    return null;
+  }
+  // Résolution TOLÉRANTE : si un saut ne retombe sur rien (branche supprimée
+  // sous nos pieds, brouillon d'une autre version), on tronque le chemin et on
+  // remonte au niveau du dessus plutôt que de rendre un écran blanc.
+  function stepsAt(path) {
+    var l = rootSteps(), i, b;
+    for (i = 0; i < path.length; i++) {
+      b = branchIn(l, path[i].si, path[i].bid);
+      if (!b || !Array.isArray(b.steps) || !b.steps.length) { path.length = i; break; }
+      l = b.steps;
+    }
+    return l;
+  }
+  function branchAt(path) {
+    if (!path.length) return null;
+    return branchIn(stepsAt(path.slice(0, -1)), path[path.length - 1].si, path[path.length - 1].bid);
+  }
+  function steps() { return stepsAt(bpath); }
   function step() { return steps()[cur] || steps()[0]; }
   function pos() { return step().pos; }
   // Terrain complet : on tire sur le panier le PLUS PROCHE de la tireuse.
@@ -1768,8 +1906,11 @@
       // Un point d'insertion AVANT chaque temps (celui d'après le dernier,
       // c'est le ＋ de la barre). Insérer en tête est donc possible aussi.
       html += '<button class="ins" data-ins="' + i + '" title="Insérer un temps ici">+</button>';
+      // Un temps qui bifurque le DIT sur sa pastille : c'est le seul endroit
+      // où le coach voit qu'une variante part d'ici sans ouvrir l'arbre.
+      var nb = Array.isArray(l[i].branches) ? l[i].branches.length : 0;
       html += '<div class="chip' + (i === cur ? ' on' : '') + (desynced(i) ? ' desync' : '') + '" data-i="' + i + '">'
-        + (i + 1)
+        + (i + 1) + (nb ? ' 🔀' + nb : '')
         + '<span class="mini">' + stepSummary(l[i]) + '</span>'
         + '<button class="x" data-del="' + i + '" title="Supprimer ce temps">×</button>'
         + '</div>';
@@ -1777,6 +1918,7 @@
     strip.innerHTML = html;
     document.getElementById('s-sync').disabled = (cur === 0) || playing;
     updateProgress();
+    renderTree();
   }
 
   function gotoStep(i, keepTool) {
@@ -1882,7 +2024,9 @@
   var elFill = document.getElementById('prog-fill');
   var elSpeed = document.getElementById('p-speed');
 
-  function stepMs() { return +elSpeed.value || 2000; }
+  // Le viewer joueuse a SON réglage de vitesse (🐢/🐇), qui n'a pas à toucher
+  // au sélecteur de l'éditeur : les deux mondes ne partagent que le moteur.
+  function stepMs() { return vwOn ? VW_SPEEDS[vwSpeedIx] : (+elSpeed.value || 2000); }
   function ease(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
   function win(u, w) { return clamp((u - w[0]) / (w[1] - w[0]), 0, 1); }
 
@@ -2138,12 +2282,16 @@
     var u = (now - pT0) / d;
     while (u >= 1) {
       if (pStep >= steps().length - 1) {
+        // Côté joueuse : jamais de fin. On reboucle (et on remonte à la ligne
+        // principale si on sortait d'une branche qui y revient).
+        if (vwOn) { vwLoopEnd(now); u = 0; break; }
         pU = 1;
         renderFrame(pStep, 1);
         pause();
         return;
       }
       pStep++; u -= 1; pT0 += d;
+      if (vwOn) vwStepChanged();
     }
     pU = u;
     renderFrame(pStep, u);
@@ -2306,6 +2454,7 @@
     doc.mode = m;
     document.getElementById('m-half').classList.toggle('on', m === 'half');
     document.getElementById('m-full').classList.toggle('on', m === 'full');
+    bpath = [];   // chaque mode a SES temps, donc SES branches
     cur = 0; active = null; pending = null;
     pStep = 0; pU = 0;
     drawAll(); renderTimeline(); setHint(); touch();
@@ -2326,19 +2475,30 @@
   // Les jetons ne se touchent pas : ils ne portent aucune orientation propre.
   // Les tirs non plus — en terrain complet, hoop() vise déjà le panier le plus
   // proche, donc ils suivent le play sans rien à recalculer.
+  //
+  // Depuis le jalon 4 le miroir descend dans TOUTES les branches : ne
+  // retourner que la ligne courante laisserait les variantes de l'autre côté
+  // du terrain, et la première bifurcation téléporterait l'équipe entière.
   function mirrorMode() {
-    if (document.body.classList.contains('playing')) exitPlay();
-    var W = MODES[mode()].w, l = steps(), i, j, k;
+    if (document.body.classList.contains('playing') && !vwOn) exitPlay();
+    var W = MODES[mode()].w;
     function mx(p) { if (p && typeof p.x === 'number') p.x = f(W - p.x); }
-    for (i = 0; i < l.length; i++) {
-      for (k in l[i].pos) mx(l[i].pos[k]);
-      for (j = 0; j < l[i].arw.length; j++) {
-        var a = l[i].arw[j];
-        if (a.to && typeof a.to === 'object') mx(a.to);
-        (a.via || []).forEach(mx);
+    (function walk(l) {
+      var i, j, k;
+      for (i = 0; i < l.length; i++) {
+        for (k in l[i].pos) mx(l[i].pos[k]);
+        for (j = 0; j < l[i].arw.length; j++) {
+          var a = l[i].arw[j];
+          if (a.to && typeof a.to === 'object') mx(a.to);
+          (a.via || []).forEach(mx);
+        }
+        if (Array.isArray(l[i].branches)) for (j = 0; j < l[i].branches.length; j++) walk(l[i].branches[j].steps);
       }
-    }
+    })(rootSteps());
     active = null; pending = null;
+    // Côté joueuse le miroir est un CONFORT de lecture : il ne salit pas le
+    // document (pas de touch(), donc pas de brouillon, pas de publication).
+    if (vwOn) { vwRedraw(); return; }
     drawAll(); renderTimeline(); setHint(); touch();
     toast(mode() === 'half' ? 'Play basculé sur l\'autre demi-terrain.' : 'Play basculé sur l\'autre panier.', 'ok');
   }
@@ -2356,6 +2516,9 @@
     syncSizeButtons();
     // drawAll() recalcule PR, donc les jetons, les chiffres, les ballons ET
     // les markers (pointes / barres d'écran) d'un seul geste.
+    // Côté joueuse : réglage de confort, on ne sort pas de la lecture (et on
+    // ne salit pas le document — cf. mirrorMode).
+    if (vwOn) { vwRedraw(); return; }
     if (document.body.classList.contains('playing')) exitPlay();
     drawAll(); touch();
   }
@@ -2649,18 +2812,19 @@
   }
   function pt(p) { return { x: f(p.x), y: f(p.y) }; }
 
-  function toJSON() {
-    var st = steps(), i, j;
-    var players = [], id;
-    for (i = 0; i < TOKENS.length; i++) {
-      id = TOKENS[i].id;
-      var q = st[0].pos[id];
-      if (!q) continue;
-      players.push({ id: id, side: TOKENS[i].side, n: TOKENS[i].n, x: f(q.x), y: f(q.y) });
-    }
-    var outSteps = [], flat = [];
-    for (i = 0; i < st.length; i++) {
-      var s = st[i], moves = [], passes = [], screens = [];
+  // Encodage d'UNE ligne de temps — la principale, ou celle d'une branche.
+  // Les branches sont rangées DANS leur temps de départ (`branches[]`), donc
+  // récursivement : un lecteur qui ignore la clé lit la ligne principale et
+  // rien de plus, ce qui est exactement le comportement voulu (rétrocompat).
+  //
+  // `flat` (le tableau `arrows` du format d'échange, plat par construction) ne
+  // reçoit QUE la ligne principale : il n'a pas de place pour dire « ce
+  // déplacement appartient à la variante 2 », et le remplir avec les branches
+  // ferait lire à un outil tiers un play impossible.
+  function encSteps(list, flat, depth) {
+    var out = [], i, j, id;
+    for (i = 0; i < list.length; i++) {
+      var s = list[i], moves = [], passes = [], screens = [];
       for (j = 0; j < s.arw.length; j++) {
         var a = s.arw[j];
         var via = (a.via || []).map(pt);
@@ -2673,16 +2837,16 @@
           // atk-zone, un export antérieur à la v.174) ignore la clé et affiche
           // un play correct, simplement sans les barres.
           if (a.kind === 'screen') screens.push(rec); else moves.push(rec);
-          flat.push({ step: i, kind: a.kind, from: numOf(a.from), to: pt(d), via: via });
+          if (flat) flat.push({ step: i, kind: a.kind, from: numOf(a.from), to: pt(d), via: via });
         } else {
           passes.push({ from: numOf(a.from), to: typeof a.to === 'string' ? numOf(a.to) : pt(a.to), via: via });
-          flat.push({ step: i, kind: 'pass', from: numOf(a.from), to: typeof a.to === 'string' ? numOf(a.to) : pt(a.to), via: via });
+          if (flat) flat.push({ step: i, kind: 'pass', from: numOf(a.from), to: typeof a.to === 'string' ? numOf(a.to) : pt(a.to), via: via });
         }
       }
       var positions = {};
       for (id in s.pos) positions[id] = pt(s.pos[id]);
-      if (s.shot) flat.push({ step: i, kind: 'shot', from: numOf(s.shot) });
-      outSteps.push({
+      if (s.shot && flat) flat.push({ step: i, kind: 'shot', from: numOf(s.shot) });
+      var o = {
         n: i + 1, note: s.note || '',
         moves: moves,
         screens: screens,
@@ -2693,8 +2857,35 @@
         passes: passes,
         shot: s.shot ? numOf(s.shot) : null,
         positions: positions
-      });
+      };
+      if (depth < BR_DEPTH_MAX && Array.isArray(s.branches) && s.branches.length) {
+        o.branches = s.branches.slice(0, BR_PER_STEP).map(function (b) {
+          return {
+            id: b.id, name: b.name || 'Variante', description: b.description || '',
+            returns_to_main: b.returns_to_main !== false,
+            steps: encSteps(b.steps || [], null, depth + 1)
+          };
+        });
+      }
+      out.push(o);
     }
+    return out;
+  }
+
+  // ⚠️ rootSteps() et NON steps() : publier depuis l'intérieur d'une branche
+  // doit publier le play ENTIER, pas promouvoir la variante en ligne
+  // principale. Le chemin de navigation ne doit jamais fuir dans le document.
+  function toJSON() {
+    var st = rootSteps(), i;
+    var players = [], id;
+    for (i = 0; i < TOKENS.length; i++) {
+      id = TOKENS[i].id;
+      var q = st[0].pos[id];
+      if (!q) continue;
+      players.push({ id: id, side: TOKENS[i].side, n: TOKENS[i].n, x: f(q.x), y: f(q.y) });
+    }
+    var flat = [];
+    var outSteps = encSteps(st, flat, 0);
     return {
       format: 'pb-play/2',
       id: doc.id || slug(doc.title) || 'anim',
@@ -2790,9 +2981,20 @@
       p0[id] = { x: +pl.x, y: +pl.y };
     }
 
-    var out = [], prev = p0;
-    for (i = 0; i < o.steps.length; i++) {
-      var s = o.steps[i] || {};
+    var out = decSteps(o.steps, p0, 0);
+    if (!out.length) out.push(makeStep(p0));
+    d[m] = { steps: out };
+    return d;
+  }
+
+  // Décodage d'une ligne de temps, récursif sur `branches`. Une branche part
+  // de la SORTIE de son temps de départ : c'est la seule entrée cohérente,
+  // et c'est aussi celle que l'éditeur fige au moment de la bifurcation.
+  function decSteps(arr, prev, depth) {
+    var out = [], i, j;
+    if (!Array.isArray(arr)) return out;
+    for (i = 0; i < arr.length; i++) {
+      var s = arr[i] || {};
       // `positions` si le fichier la porte (round-trip exact), sinon on dérive
       // du temps précédent — c'est la seule information disponible.
       var sp = clonePos(prev);
@@ -2832,12 +3034,33 @@
         st.arw.push({ id: uid('w'), kind: 'pass', from: pf, to: ptTo, via: (Array.isArray(pa.via) ? pa.via : []).map(refPoint).filter(Boolean) });
       }
       st.shot = refId(s.shot);
+
+      // ── Branches (jalon 4) ──────────────────────────────────────────
+      // Caps appliqués À L'IMPORT : un fichier bricoté à la main ne doit pas
+      // pouvoir faire exploser la profondeur (et donc la pile) de l'éditeur.
+      var br = Array.isArray(s.branches) ? s.branches : [];
+      if (br.length && depth < BR_DEPTH_MAX) {
+        var kids = [];
+        for (j = 0; j < br.length && kids.length < BR_PER_STEP; j++) {
+          var b = br[j];
+          if (!b || typeof b !== 'object') continue;
+          var ks = decSteps(b.steps, endPos(st), depth + 1);
+          if (!ks.length) continue;   // une branche vide n'est pas une branche
+          kids.push({
+            id: String(b.id || uid('b')),
+            name: String(b.name || 'Variante').slice(0, 60),
+            description: String(b.description || pick(b, 'desc') || '').slice(0, 160),
+            returns_to_main: pick(b, 'returns_to_main', 'returnsToMain') !== false,
+            steps: ks
+          });
+        }
+        if (kids.length) st.branches = kids;
+      }
+
       out.push(st);
       prev = endPos(st);
     }
-    if (!out.length) out.push(makeStep(p0));
-    d[m] = { steps: out };
-    return d;
+    return out;
   }
 
   function slug(s) {
@@ -2849,6 +3072,9 @@
   function loadDoc(d) {
     if (document.body.classList.contains('playing')) exitPlay();
     doc = d;
+    // bpath appartient au document PRÉCÉDENT : le garder ferait pointer un
+    // saut vers une branche qui n'existe pas dans celui qu'on charge.
+    bpath = [];
     cur = 0; pStep = 0; pU = 0; active = null; pending = null;
     document.getElementById('m-half').classList.toggle('on', doc.mode === 'half');
     document.getElementById('m-full').classList.toggle('on', doc.mode === 'full');
@@ -3485,12 +3711,26 @@
     for (k in base) if (d[k] === undefined) d[k] = base[k];
     ['half', 'full'].forEach(function (m) {
       if (!d[m] || !Array.isArray(d[m].steps) || !d[m].steps.length) d[m] = { steps: [ makeStep(startPos(m)) ] };
-      d[m].steps.forEach(function (s) {
-        if (!s.pos) s.pos = startPos(m);
-        if (!Array.isArray(s.arw)) s.arw = [];
-        if (s.shot === undefined) s.shot = null;
-        s.arw.forEach(function (a) { if (!Array.isArray(a.via)) a.via = []; });
-      });
+      // Récursif depuis le jalon 4 : un temps peut porter des branches, qui
+      // sont elles-mêmes des lignes de temps à reboucher exactement pareil.
+      (function fix(list, depth) {
+        list.forEach(function (s) {
+          if (!s.pos) s.pos = startPos(m);
+          if (!Array.isArray(s.arw)) s.arw = [];
+          if (s.shot === undefined) s.shot = null;
+          s.arw.forEach(function (a) { if (!Array.isArray(a.via)) a.via = []; });
+          if (!Array.isArray(s.branches) || !s.branches.length || depth >= BR_DEPTH_MAX) { delete s.branches; return; }
+          s.branches = s.branches.filter(function (b) {
+            return b && b.id && Array.isArray(b.steps) && b.steps.length;
+          }).slice(0, BR_PER_STEP);
+          if (!s.branches.length) { delete s.branches; return; }
+          s.branches.forEach(function (b) {
+            if (!b.name) b.name = 'Variante';
+            if (b.returns_to_main === undefined) b.returns_to_main = true;
+            fix(b.steps, depth + 1);
+          });
+        });
+      })(d[m].steps, 0);
     });
     if (d.mode !== 'full') d.mode = 'half';
     if (d.tokenSize !== 0.75 && d.tokenSize !== 1.25) d.tokenSize = 1;
@@ -3595,6 +3835,318 @@
   });
 
   // ─────────────────────────────────────────────────────────────────────
+  // 14 bis. BRANCHES — arbre, pistes, création (jalon 4)
+  // ─────────────────────────────────────────────────────────────────────
+  // Le modèle est déjà en place (cf. section 2) : ici, uniquement la
+  // NAVIGATION et les gestes du coach. Règle d'or : tout passe par goPath(),
+  // le seul endroit qui change `bpath` côté éditeur — sinon on se retrouve
+  // avec un terrain qui affiche une ligne et une timeline qui en édite une
+  // autre, exactement le genre d'écart qu'on ne voit qu'après publication.
+
+  function pathKey(p) {
+    var s = '', i;
+    for (i = 0; i < p.length; i++) s += (i ? '|' : '') + p[i].si + '~' + p[i].bid;
+    return s;
+  }
+  function pathFromKey(k) {
+    if (!k) return [];
+    return k.split('|').map(function (h) { var a = h.split('~'); return { si: +a[0], bid: a[1] }; });
+  }
+
+  function goPath(p) {
+    if (document.body.classList.contains('playing') && !vwOn) exitPlay();
+    bpath = p;
+    cur = 0; pStep = 0; pU = 0; pPrepared = -1;
+    active = null; pending = null;
+    drawTokens(); drawArrows(); renderTimeline(); syncInfo(); setHint();
+  }
+
+  // Création d'une branche : à la FIN du temps courant, jamais au milieu. Son
+  // premier temps naît sur la SORTIE de ce temps — l'état figé au point de
+  // bifurcation — donc la variante démarre exactement là où la ligne
+  // principale en était, sans téléportation.
+  function addBranchHere() {
+    if (playing || vwOn) return;
+    if (bpath.length >= BR_DEPTH_MAX) { toast('Trois niveaux de branches au maximum.', 'err'); return; }
+    var st = step(), bs = Array.isArray(st.branches) ? st.branches : [];
+    if (bs.length >= BR_PER_STEP) { toast('Cinq branches au maximum sur un temps.', 'err'); return; }
+    // Nommage OBLIGATOIRE : une variante « Branche 2 » ne se retrouve pas
+    // dans l'arbre trois semaines plus tard, et surtout elle ne dit rien à la
+    // joueuse dans le menu du viewer. On refuse plutôt que de replier sur un
+    // nom par défaut.
+    var name = prompt('Nom de la variante (obligatoire)\nEx. « Écran non servi », « Passe interceptée »');
+    if (name === null) return;
+    name = String(name).trim();
+    if (!name) { toast('Nom obligatoire : une variante sans nom ne se retrouve pas.', 'err'); return; }
+    var desc = prompt('Quand la jouer ? (facultatif)\nEx. « Si l\'aide vient »') || '';
+    var b = {
+      id: uid('b'), name: name.slice(0, 60), description: String(desc).trim().slice(0, 160),
+      returns_to_main: true, steps: [ makeStep(endPos(st)) ]
+    };
+    st.branches = bs.concat([b]);
+    dirty = true;
+    goPath(bpath.concat([{ si: cur, bid: b.id }]));
+    toast('Branche « ' + b.name + ' » créée.', 'ok');
+  }
+
+  function delBranchPath(path) {
+    if (!path.length) return;
+    var hop = path[path.length - 1];
+    var parent = stepsAt(path.slice(0, -1));
+    var st = parent[hop.si];
+    if (!st || !Array.isArray(st.branches)) return;
+    var b = branchIn(parent, hop.si, hop.bid);
+    if (!b) return;
+    if (!confirm('Supprimer la branche « ' + b.name + ' » ?\nSes ' + b.steps.length + ' temps et ses sous-branches sont perdus.')) return;
+    st.branches = st.branches.filter(function (x) { return x.id !== hop.bid; });
+    if (!st.branches.length) delete st.branches;
+    dirty = true;
+    // Si on était DEDANS (ou dessous), on remonte au niveau du parent :
+    // rester sur un chemin mort afficherait la ligne du dessus en croyant
+    // éditer la branche.
+    var k = pathKey(path);
+    if (pathKey(bpath).slice(0, k.length) === k) goPath(path.slice(0, -1));
+    else renderTimeline();
+    toast('Branche supprimée.', 'ok');
+  }
+
+  // ── Arbre + pistes ───────────────────────────────────────────────────
+  var elTree = document.getElementById('tree');
+  var elTreeList = document.getElementById('tree-list');
+  var elLanes = document.getElementById('tl-lanes');
+
+  function treeRows(list, path, depth, out) {
+    var i, j, bs, p;
+    for (i = 0; i < list.length; i++) {
+      bs = Array.isArray(list[i].branches) ? list[i].branches : [];
+      for (j = 0; j < bs.length; j++) {
+        p = path.concat([{ si: i, bid: bs[j].id }]);
+        out.push({ path: p, depth: depth, name: bs[j].name, from: i, n: bs[j].steps.length, ret: bs[j].returns_to_main !== false });
+        treeRows(bs[j].steps, p, depth + 1, out);
+      }
+    }
+    return out;
+  }
+
+  function blocksOf(n) {
+    var s = '', i;
+    for (i = 0; i < Math.min(n, 24); i++) s += '<i></i>';
+    return s;
+  }
+
+  function renderTree() {
+    if (!elTreeList) return;
+    var here = pathKey(bpath);
+    var rows = treeRows(rootSteps(), [], 0, []);
+    var html = '<div class="tnode' + (here === '' ? ' on' : '') + '" data-p="">'
+      + '<span class="nm">Principale</span>'
+      + '<span class="ct">' + rootSteps().length + ' temps</span></div>';
+    rows.forEach(function (r) {
+      var k = pathKey(r.path);
+      html += '<div class="tnode' + (k === here ? ' on' : '') + '" data-p="' + esc(k) + '"'
+        + ' style="margin-left:' + ((r.depth + 1) * 11) + 'px">'
+        + '<span class="nm" title="' + esc(r.name) + '">🔀 ' + esc(r.name) + '</span>'
+        + '<span class="ct">T' + (r.from + 1) + ' · ' + r.n + '</span>'
+        + '<button class="del" data-del="' + esc(k) + '" title="Supprimer cette branche">🗑</button></div>';
+    });
+    elTreeList.innerHTML = html;
+
+    // PISTES — la ligne courante en piste principale, ses branches empilées
+    // dessous, décalées à leur temps de bifurcation (repère visuel, pas une
+    // règle graduée : les pastilles n'ont pas toutes la même largeur).
+    var l = steps(), i, j, lanes = '<div class="cap">Pistes — ' + (bpath.length ? 'branche courante' : 'ligne principale') + '</div>';
+    lanes += '<div class="lane main" data-p="' + esc(here) + '"><span class="lbl">▶ ' + (bpath.length ? esc((branchAt(bpath) || {}).name || '') : 'Principale')
+      + '</span><span class="blocks">' + blocksOf(l.length) + '</span></div>';
+    for (i = 0; i < l.length; i++) {
+      var bs = Array.isArray(l[i].branches) ? l[i].branches : [];
+      for (j = 0; j < bs.length; j++) {
+        lanes += '<div class="lane" data-p="' + esc(pathKey(bpath.concat([{ si: i, bid: bs[j].id }]))) + '">'
+          + '<span class="lbl">⤷ ' + esc(bs[j].name) + '</span>'
+          + '<span class="blocks" style="margin-left:' + (i * 15) + 'px">' + blocksOf(bs[j].steps.length) + '</span></div>';
+      }
+    }
+    elLanes.innerHTML = lanes;
+  }
+
+  elTree.addEventListener('click', function (e) {
+    var t = e.target;
+    if (!t || !t.getAttribute) return;
+    var del = t.getAttribute('data-del');
+    if (del !== null) { e.stopPropagation(); delBranchPath(pathFromKey(del)); return; }
+    var node = t.closest ? t.closest('[data-p]') : null;
+    if (!node) return;
+    goPath(pathFromKey(node.getAttribute('data-p')));
+  });
+  document.getElementById('s-tree').addEventListener('click', function () { elTree.classList.toggle('show'); renderTree(); });
+  document.getElementById('tr-close').addEventListener('click', function () { elTree.classList.remove('show'); });
+  document.getElementById('tr-home').addEventListener('click', function () { goPath([]); });
+  document.getElementById('s-branch').addEventListener('click', addBranchHere);
+
+  // ─────────────────────────────────────────────────────────────────────
+  // 14 ter. VIEWER JOUEUSE (jalon 4)
+  // ─────────────────────────────────────────────────────────────────────
+  // Le MÊME moteur que l'éditeur, sans aucune de ses portes : la lecture
+  // boucle à l'infini et les seuls boutons sont ceux du confort (vitesse,
+  // taille, miroir) plus le choix d'une variante. Rien n'écrit dans le
+  // document — miroir et taille passent par vwRedraw(), qui ne touche ni au
+  // brouillon ni à la publication.
+  //
+  // L'édition n'est pas seulement « cachée » : VIEWS['2d'].editable passe à
+  // false, donc les trois gardes du moteur (drag de jeton, drag de flèche,
+  // clic terrain) refusent le geste. Masquer la barre d'outils n'aurait pas
+  // suffi : à l'arrêt sur pause, un drag serait redevenu possible.
+  var VW_SPEEDS = [3200, 1900, 1050];
+  var VW_LABEL  = ['🐢 Lent', '⏱ Normal', '🐇 Rapide'];
+  var SIZE_KEYS = ['s', 'm', 'l'];
+  var vwOn = false, vwFrom = 'url', vwSpeedIx = 1, vwBar = null, vwBadge = -1;
+
+  function vwCrumb() {
+    var names = ['Principale'], l = rootSteps(), i, b;
+    for (i = 0; i < bpath.length; i++) {
+      b = branchIn(l, bpath[i].si, bpath[i].bid);
+      if (!b) break;
+      names.push(b.name); l = b.steps;
+    }
+    document.getElementById('vw-crumb').textContent = names.join(' → ');
+  }
+
+  function vwStepChanged(force) {
+    var st = steps()[pStep];
+    var n = (st && Array.isArray(st.branches)) ? st.branches.length : 0;
+    if (!force && n === vwBadge) return;
+    vwBadge = n;
+    var b = document.getElementById('vw-br');
+    b.style.display = n ? '' : 'none';
+    b.textContent = '🔀 ' + n + (n > 1 ? ' variantes' : ' variante');
+  }
+
+  function vwGoPath(p, now) {
+    bpath = p;
+    cur = 0; pStep = 0; pU = 0; pPrepared = -1;
+    vwCrumb();
+    renderFrame(0, 0);
+    vwStepChanged(true);
+    pT0 = now || performance.now();
+  }
+
+  function vwLoopEnd(now) {
+    var b = branchAt(bpath);
+    if (b && b.returns_to_main !== false) {
+      vwGoPath([], now);
+      toast('↩ Retour à la ligne principale.');
+    } else {
+      vwGoPath(bpath, now);
+    }
+  }
+
+  // Redessin complet SANS quitter la lecture (miroir, taille des pions).
+  function vwRedraw() {
+    drawAll();
+    pPrepared = -1;
+    renderFrame(pStep, pU);
+    if (playing) pT0 = performance.now() - pU * stepMs();
+  }
+
+  function vwSyncButtons() {
+    document.getElementById('vw-speed').textContent = VW_LABEL[vwSpeedIx];
+    document.getElementById('vw-size').textContent = '⤢ ' + SIZE_KEYS[SIZE_KEYS.indexOf(sizeKeyOf())].toUpperCase();
+    document.getElementById('vw-play').textContent = playing ? '⏸' : '▶';
+  }
+  function sizeKeyOf() {
+    var v = doc.tokenSize || 1, k;
+    for (k in SIZES) if (SIZES[k] === v) return k;
+    return 'm';
+  }
+
+  function enterViewer(from) {
+    if (vwOn) return;
+    vwOn = true;
+    vwFrom = from || 'url';
+    closeSheets();
+    elTree.classList.remove('show');
+    document.getElementById('draft-bar').classList.remove('show');
+    document.body.classList.add('viewer');
+    VIEWS['2d'].editable = false;
+    // La barre de lecture de l'éditeur n'a pas de classe à elle : on la range
+    // par son conteneur plutôt que d'inventer un sélecteur fragile.
+    vwBar = elPlay.parentNode;
+    if (vwBar) vwBar.style.display = 'none';
+    bpath = []; cur = 0; pStep = 0; pU = 0;
+    vwCrumb();
+    drawAll();
+    play();
+    vwStepChanged(true);
+    vwSyncButtons();
+  }
+
+  function exitViewer() {
+    if (!vwOn) return;
+    vwOn = false;
+    document.body.classList.remove('viewer');
+    VIEWS['2d'].editable = true;
+    if (vwBar) vwBar.style.display = '';
+    document.getElementById('vw-menu').classList.remove('show');
+    if (playing) pause();
+    exitPlay();
+    goPath([]);
+  }
+
+  document.getElementById('vw-play').addEventListener('click', function () { play(); vwSyncButtons(); });
+  document.getElementById('vw-speed').addEventListener('click', function () {
+    vwSpeedIx = (vwSpeedIx + 1) % VW_SPEEDS.length;
+    // Recaler l'origine du temps sur la position COURANTE : sans ça, changer
+    // de vitesse en pleine lecture fait sauter l'animation en arrière.
+    pT0 = performance.now() - pU * stepMs();
+    vwSyncButtons();
+  });
+  document.getElementById('vw-size').addEventListener('click', function () {
+    setTokenSize(SIZE_KEYS[(SIZE_KEYS.indexOf(sizeKeyOf()) + 1) % 3]);
+    vwSyncButtons();
+  });
+  document.getElementById('vw-mirror').addEventListener('click', mirrorMode);
+  document.getElementById('vw-close').addEventListener('click', function () {
+    if (vwFrom === 'editor') { exitViewer(); return; }
+    if (history.length > 1) history.back(); else location.href = '/';
+  });
+
+  // ── Menu des variantes ───────────────────────────────────────────────
+  var vwMenu = document.getElementById('vw-menu');
+  document.getElementById('vw-br').addEventListener('click', function () {
+    var st = steps()[pStep];
+    if (!st || !Array.isArray(st.branches) || !st.branches.length) return;
+    if (playing) { pause(); vwSyncButtons(); }
+    var html = '<div style="font-size:12px;font-weight:700;margin-bottom:8px">Temps ' + (pStep + 1) + ' — quelle suite ?</div>'
+      + '<div class="row"><button class="btn wide" data-b="">▶ Ligne principale</button></div>';
+    st.branches.forEach(function (b) {
+      html += '<div class="row"><button class="btn wide" data-b="' + esc(b.id) + '">🔀 ' + esc(b.name)
+        + (b.description ? '<br><small style="opacity:.65;font-weight:400">' + esc(b.description) + '</small>' : '')
+        + '</button></div>';
+    });
+    document.getElementById('vw-menu-card').innerHTML = html;
+    vwMenu.classList.add('show');
+  });
+  vwMenu.addEventListener('click', function (e) {
+    var btn = e.target && e.target.closest ? e.target.closest('[data-b]') : null;
+    if (!btn) { if (e.target === vwMenu) vwMenu.classList.remove('show'); return; }
+    var id = btn.getAttribute('data-b');
+    vwMenu.classList.remove('show');
+    if (id) vwGoPath(bpath.concat([{ si: pStep, bid: id }]));
+    if (!playing) { play(); }
+    vwSyncButtons();
+  });
+
+  // Aperçu joueuse depuis l'éditeur — ajouté au menu ⋯ en JS pour garder le
+  // balisage du jalon 3 intact.
+  (function () {
+    var anchor = document.getElementById('a-publish').parentNode;
+    var row = document.createElement('div');
+    row.className = 'row';
+    row.innerHTML = '<button class="btn wide" id="a-viewer">👁 Aperçu joueuse</button>';
+    anchor.parentNode.insertBefore(row, anchor.nextSibling);
+    document.getElementById('a-viewer').addEventListener('click', function () { closeSheets(); enterViewer('editor'); });
+  })();
+
+  // ─────────────────────────────────────────────────────────────────────
   // 15. DÉMARRAGE
   // ─────────────────────────────────────────────────────────────────────
   function setContext(txt) { document.getElementById('doc-ctx').textContent = txt; }
@@ -3613,6 +4165,10 @@
     offerDraft();
   } else {
     setContext('chargement du play…');
+    // mode=view : on masque l'éditeur AVANT le fetch. Sinon la joueuse voit la
+    // barre d'outils clignoter le temps du chargement — et surtout elle peut
+    // la toucher.
+    if (wantView) document.body.classList.add('viewer');
     fetchAnims()
       .then(function (list) {
         setContext(playTitle ? '↳ ' + playTitle : '↳ play');
@@ -3622,8 +4178,8 @@
         if (!found) { toast('Animation introuvable — on repart d\'une page blanche.', 'err'); offerDraft(); return; }
         loadDoc(fromJSON(found));
         dirty = false;
-        // mode=view : on déroule tout de suite, l'éditeur sert de lecteur.
-        if (wantView) setTimeout(function () { document.getElementById('p-play').click(); }, 260);
+        // mode=view : viewer joueuse plein écran, en boucle (jalon 4).
+        if (wantView) setTimeout(function () { document.body.classList.remove('viewer'); enterViewer('url'); }, 120);
       })
       .catch(function (e) {
         setContext('play injoignable');
