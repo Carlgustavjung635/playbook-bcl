@@ -3915,7 +3915,7 @@
   // principale en était, sans téléportation.
   function addBranchHere() {
     if (playing || vwOn) return;
-    if (bpath.length >= BR_DEPTH_MAX) { toast('Trois niveaux de branches au maximum.', 'err'); return; }
+    if (bpath.length >= BR_DEPTH_MAX) { toast('Profondeur maximale atteinte : ' + BR_DEPTH_MAX + ' niveaux de branches.', 'err'); return; }
     var st = step(), bs = Array.isArray(st.branches) ? st.branches : [];
     if (bs.length >= BR_PER_STEP) { toast('Cinq branches au maximum sur un temps.', 'err'); return; }
     // Nommage OBLIGATOIRE : une variante « Branche 2 » ne se retrouve pas
@@ -4103,7 +4103,11 @@
     var st = steps()[ix];
     if (st && st.shot) return clamp(Math.round(stepMs() * 0.40), 520, 1200);
     if (st && passOf(st)) return 300;
-    return 200;
+    // Ni tir ni passe : les deplacements se bouclent a u = 0.65 (PLAY.move),
+    // mais la question se pose QUAND MEME — et apres un souffle, le temps que
+    // la position d arrivee se lise. Un dernier temps sans action finale n est
+    // pas une raison de sauter le menu.
+    return 380;
   }
   function vwAskAfterFrame(ix) {
     vwCancelHold();
