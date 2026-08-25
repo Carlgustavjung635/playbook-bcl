@@ -1648,18 +1648,50 @@
 
   // Une zone appartient à SA ligne de temps (v.198), et à elle seule : la
   // ligne principale garde `doc.zones`, chaque branche — et chaque
-  // sous-branche — porte son propre `branch.zones`. Aucun héritage, aucune
-  // cascade : entrer dans une variante REMPLACE le décor, il ne s en ajoute
-  // pas. Sans ça (v.191) une zone tracée pour une option se retrouvait
-  // peinte sur tous les autres terrains du play.
+  // sous-branche — porte son propre `branch.zones`. Le RENDU, lui, hérite
+  // vers le BAS : on cumule les zones du chemin, de la racine jusqu au nœud
+  // courant. Une zone posée sur la ligne principale vaut donc pour tout le
+  // play, une zone de branche pour elle et ses filles — jamais pour ses
+  // sœurs, jamais pour son parent. Sans ce scope (v.191) une zone tracée
+  // pour une option se retrouvait peinte sur tous les terrains du play.
+  //
+  // Le cumul se fait à l AFFICHAGE seulement, jamais par copie : effacer une
+  // zone du parent la retire partout d un coup, aucun doublon à resynchroniser.
   var zHostKey = null;             // ligne dont les zones sont à l écran
-  function zOwner() {
-    var b = bpath.length ? branchAt(bpath) : null;
-    return b || doc;               // branche introuvable ⇒ ligne principale
+  // Chemin RÉSOLU racine → ligne courante. Tolérant comme le reste des sauts
+  // (v.188) : une branche disparue arrête la chaîne au dernier nœud connu au
+  // lieu de faire tomber tout le décor.
+  function zLineChain(path) {
+    var p = Array.isArray(path) ? path : bpath, chain = [doc], i, b;
+    var l = Array.isArray(doc.steps) ? doc.steps : [];
+    for (i = 0; i < p.length; i++) {
+      b = branchIn(l, p[i].si, p[i].bid);
+      if (!b) break;
+      chain.push(b); l = Array.isArray(b.steps) ? b.steps : [];
+    }
+    return chain;
   }
+  function zOwner() { var c = zLineChain(bpath); return c[c.length - 1]; }
   function zOwnerKey() { var o = zOwner(); return (o === doc) ? '' : String(o.id || ''); }
   function zList() { var o = zOwner(); if (!Array.isArray(o.zones)) o.zones = []; return o.zones; }
+  // ⚠️ zById ne voit QUE la ligne courante : sélectionner, régler, supprimer
+  // ne touche jamais une zone héritée — sinon le coach modifierait depuis une
+  // branche un décor qui appartient à la ligne du dessus.
   function zById(id) { var l = zList(), i; for (i = 0; i < l.length; i++) if (l[i] && l[i].id === id) return l[i]; return null; }
+  // Zones VISIBLES sur la ligne demandée : les héritées d abord, celles de la
+  // ligne courante ensuite — cet ordre fait que le décor local se peint
+  // PAR-DESSUS celui du parent, le seul arbitrage qui ne surprend personne.
+  function getEffectiveZones(path) {
+    var chain = zLineChain(path), out = [], i, j, zs, own;
+    for (i = 0; i < chain.length; i++) {
+      own = (i === chain.length - 1);
+      zs = Array.isArray(chain[i].zones) ? chain[i].zones : [];
+      for (j = 0; j < zs.length; j++) if (zs[j]) out.push({ z: zs[j], own: own, line: chain[i] });
+    }
+    return out;
+  }
+  function zVisible(path) { var e = getEffectiveZones(path), o = [], i; for (i = 0; i < e.length; i++) o.push(e[i].z); return o; }
+  function zAnyById(id) { var e = getEffectiveZones(), i; for (i = 0; i < e.length; i++) if (e[i].z.id === id) return e[i]; return null; }
   function zEsc(v) {
     return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
@@ -1717,16 +1749,18 @@
     // branche : toute navigation repasse par un dessin, donc rien ne peut
     // laisser une zone d une autre ligne sélectionnée dans la barre.
     var k = zOwnerKey();
-    if (k !== zHostKey) { zHostKey = k; zSel = null; zBarSync(); zLegendSync(); }
-    var l = zList(), html = '', i, z, op;
+    if (k !== zHostKey) { zHostKey = k; zSel = null; zBarSync(); zLegendSync(); if (typeof vwLegendSync === 'function') vwLegendSync(); }
+    var l = getEffectiveZones(), html = '', i, z, op, ed = zEditable();
     for (i = 0; i < l.length; i++) {
-      if (!l[i]) continue;
-      z = zNorm(l[i]); op = z.opacity;
-      html += '<g class="zone" data-zone="' + zEsc(z.id) + '"'
+      z = zNorm(l[i].z); op = z.opacity;
+      html += '<g class="zone' + (l[i].own ? '' : ' inherited') + '" data-zone="' + zEsc(z.id) + '"'
         + ' transform="translate(' + f(z.x) + ',' + f(z.y) + ') rotate(' + f(z.rot) + ')"'
         + ' fill="' + zEsc(z.color) + '" fill-opacity="' + op + '"'
         + ' stroke="' + zEsc(z.color) + '" stroke-opacity="' + f(Math.min(1, op + 0.22)) + '" stroke-width="0.45"'
-        + ' style="pointer-events:' + (zEditable() ? 'auto' : 'none') + '">'
+        // Trait tireté = zone HÉRITÉE, donc pas éditable d ici. Repère réservé
+        // à l éditeur : côté joueuse une zone est une zone, d où qu elle vienne.
+        + (ed && !l[i].own ? ' stroke-dasharray="2.2 1.6"' : '')
+        + ' style="pointer-events:' + (ed ? 'auto' : 'none') + '">'
         + zShapeSvg(z) + '</g>';
     }
     layZ.innerHTML = html;
@@ -1763,7 +1797,7 @@
   // ligne de CSS, et ne peut pas recouvrir les contrôles du viewer.
   function zLegendSvg() {
     if (!ZVIEW) return '';
-    var all = zList(), l = [], i;
+    var all = zVisible(), l = [], i;
     for (i = 0; i < all.length; i++) if (all[i] && String(all[i].label || '').trim()) l.push(all[i]);
     if (!l.length) return '';
     var vb = zVb(), s = Math.max(3.2, vb.h * 0.034), pad = s * 0.55, w = 0;
@@ -1873,7 +1907,7 @@
   function zLegendSync() {
     var host = document.getElementById('f-legend');
     if (!host) return;
-    var all = zList(), l = [], i, html = '';
+    var all = zVisible(), l = [], i, html = '';
     for (i = 0; i < all.length; i++) if (all[i] && String(all[i].label || '').trim()) l.push(all[i]);
     if (!l.length) {
       host.innerHTML = '<div class="none">Aucune zone nommée. Ajoute une zone (🎨) et donne-lui un nom pour la voir ici et côté joueuse.</div>';
@@ -1948,6 +1982,17 @@
       var hz = t.closest('[data-zh]'), zg = hz ? null : t.closest('[data-zone]');
       if (!hz && !zg) return;
       var z = zById(hz ? zSel : zg.getAttribute('data-zone'));
+      // Zone héritée : on refuse l édition ICI plutôt que d en fabriquer une
+      // copie locale — deux exemplaires finiraient par diverger sans que le
+      // coach sache lequel fait foi. On lui dit où aller la modifier.
+      if (!z && !hz && zg) {
+        var inh = zAnyById(zg.getAttribute('data-zone'));
+        if (inh) {
+          e.stopPropagation();
+          toast('Zone héritée de « ' + (inh.line === doc ? 'ligne principale' : (inh.line.name || 'Variante')) + ' » — modifie-la depuis cette ligne.');
+          return;
+        }
+      }
       if (!z) return;
       e.stopPropagation();
       if (e.cancelable) e.preventDefault();
@@ -2677,7 +2722,7 @@
     cur = i;
     active = null; pending = null;
     if (!keepTool) { /* l'outil courant reste actif d'un temps à l'autre */ }
-    drawTokens(); drawArrows(); renderTimeline(); syncInfo(); setHint();
+    drawZones(); drawTokens(); drawArrows(); renderTimeline(); syncInfo(); setHint();
   }
 
   function addStep() {
@@ -4822,7 +4867,7 @@
     bpath = p;
     cur = 0; pStep = 0; pU = 0; pPrepared = -1;
     active = null; pending = null;
-    drawTokens(); drawArrows(); renderTimeline(); syncInfo(); setHint();
+    drawZones(); drawTokens(); drawArrows(); renderTimeline(); syncInfo(); setHint();
   }
 
   // Création d'une branche : à la FIN du temps courant, jamais au milieu. Son
@@ -5142,6 +5187,7 @@
     bpath = s.path.slice();
     cur = s.from; pStep = s.from; pU = 0; pPrepared = -1;
     vwCrumb();
+    drawZones();
     renderFrame(pStep, 0);
   }
 
@@ -5261,12 +5307,13 @@
     vwSyncButtons();
   }
 
-  // Les zones vivent au niveau du document : la legende se calcule une fois
-  // a l'entree du viewer, elle ne bouge pas d'un temps a l'autre.
+  // La legende suit la LIGNE en cours (v.198) : zones heritees du chemin puis
+  // zones propres. Elle est resynchronisee depuis drawZones(), seul point de
+  // passage commun a tous les changements de ligne.
   function vwLegendSync() {
     var host = document.getElementById('vw-leg');
     if (!host) return;
-    var all = zList(), i, z, html = '';
+    var all = zVisible(), i, z, html = '';
     for (i = 0; i < all.length; i++) {
       if (!all[i] || !String(all[i].label || '').trim()) continue;
       z = zNorm(all[i]);
