@@ -4128,14 +4128,13 @@
     }
   }
 
-  // Passage a la 2e lecture : on ralentit et on rapetisse les pions UNE seule
-  // fois. A partir de la, la lecture sert a comprendre les variantes, pas a
-  // faire joli — et des pions plus petits laissent voir tout le terrain
-  // pendant qu on choisit. Un reglage deja touche a la main est respecte.
+  // Passage a la 2e lecture : on ralentit UNE seule fois. A partir de la, la
+  // lecture sert a comprendre les variantes, pas a faire joli. La taille des
+  // pions, elle, est deja en S depuis l entree dans le viewer. Un reglage
+  // deja touche a la main est respecte.
   function vwSecondRead() {
     var chg = [];
     if (!vwUserSpeed && vwSpeedIx !== 0) { vwSpeedIx = 0; chg.push('lecture lente'); }
-    if (!vwUserSize && sizeKeyOf() !== 's') { setTokenSize('s'); chg.push('pions S'); }
     vwSyncButtons();
     if (vwToldLoop) return;
     vwToldLoop = true;
@@ -4178,6 +4177,11 @@
     bpath = []; cur = 0; pStep = 0; pU = 0;
     vwLoop = 0; vwToldLoop = false; vwHalt = false; vwAskKey = ''; vwBadge = -1;
     vwUserSpeed = false; vwUserSize = false;
+    // Pions S DES LA 1re lecture : cote joueuse c est la taille utile —
+    // discrete, tout le terrain lisible sur un petit ecran. vwOn est deja a
+    // true, donc setTokenSize passe par vwRedraw() : rien n est ecrit dans le
+    // document ni dans le brouillon.
+    setTokenSize('s');
     vwCrumb();
     drawAll();
     play();
