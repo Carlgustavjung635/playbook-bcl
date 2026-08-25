@@ -665,6 +665,20 @@
   .vwhint.show{opacity:.9}
   body:not(.viewer) .vwexpl, body:not(.viewer) .vwhint{display:none !important}
   body.vwtree .vwexpl, body.vwtree .vwhint{display:none !important}
+  /* v.197 - Legende des zones cote joueuse : meme contenu que la fiche du
+     coach (pastille + nom), derivee des zones nommees. pointer-events:none,
+     sinon elle volerait le tap-pour-avancer. */
+  .vwleg{position:fixed; z-index:66; left:8px; right:8px; pointer-events:none;
+    bottom:calc(84px + env(safe-area-inset-bottom));
+    display:none; flex-wrap:wrap; justify-content:center; gap:5px 8px}
+  .vwleg.show{display:flex}
+  .vwleg .li{display:flex; align-items:center; gap:5px; font-size:10px;
+    font-weight:700; color:var(--ink); background:var(--panel);
+    border:1px solid var(--border); border-radius:999px; padding:3px 8px;
+    opacity:.93; box-shadow:0 4px 14px rgba(0,0,0,.22)}
+  .vwleg .dot{width:9px; height:9px; border-radius:3px; flex:none}
+  body:not(.viewer) .vwleg{display:none !important}
+  body.vwtree .vwleg{display:none !important}
   .wtp{display:block; background:var(--bg-1); border-left:3px solid var(--accent);
     border-radius:10px; padding:8px 10px; margin:0 0 9px; font-size:12px;
     line-height:1.5; white-space:pre-wrap}
@@ -889,9 +903,10 @@
     <textarea id="f-points" rows="5" placeholder="Un point clé par ligne (4 idéalement)"></textarea>
     <div class="note">Une ligne = un point. Les 4 premières lignes sont mises en avant.</div>
   </div>
-  <div class="field">
+  <div class="fld">
     <label>Légende des zones</label>
     <div class="zlegend" id="f-legend"></div>
+    <div class="note">Dérivée des zones nommées. La joueuse la voit aussi pendant la lecture.</div>
   </div>
   <div class="row"><button class="btn wide" id="f-done">Fermer</button></div>
 </div>
@@ -975,6 +990,7 @@
 </div>
 <div class="vwexpl" id="vw-expl"></div>
 <div class="vwhint" id="vw-hint">Tap pour avancer • ▶ pour reprendre</div>
+<div class="vwleg" id="vw-leg"></div>
 <div class="vwmenu" id="vw-menu"><div class="card" id="vw-menu-card"></div></div>
 
 <!-- ══ v.188 · ARBORESCENCE — ÉCRAN D'ACCUEIL DU VIEWER ══════════════════
@@ -1630,7 +1646,19 @@
   var zSel = null;                 // id de la zone sélectionnée (éditeur seul)
   var zNewColor = ZCOLORS[0];
 
-  function zList() { if (!Array.isArray(doc.zones)) doc.zones = []; return doc.zones; }
+  // Une zone appartient à SA ligne de temps (v.198), et à elle seule : la
+  // ligne principale garde `doc.zones`, chaque branche — et chaque
+  // sous-branche — porte son propre `branch.zones`. Aucun héritage, aucune
+  // cascade : entrer dans une variante REMPLACE le décor, il ne s en ajoute
+  // pas. Sans ça (v.191) une zone tracée pour une option se retrouvait
+  // peinte sur tous les autres terrains du play.
+  var zHostKey = null;             // ligne dont les zones sont à l écran
+  function zOwner() {
+    var b = bpath.length ? branchAt(bpath) : null;
+    return b || doc;               // branche introuvable ⇒ ligne principale
+  }
+  function zOwnerKey() { var o = zOwner(); return (o === doc) ? '' : String(o.id || ''); }
+  function zList() { var o = zOwner(); if (!Array.isArray(o.zones)) o.zones = []; return o.zones; }
   function zById(id) { var l = zList(), i; for (i = 0; i < l.length; i++) if (l[i] && l[i].id === id) return l[i]; return null; }
   function zEsc(v) {
     return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) {
@@ -1685,6 +1713,11 @@
 
   function drawZones() {
     if (!layZ) return;
+    // Le changement de ligne se détecte ICI plutôt que sur chaque saut de
+    // branche : toute navigation repasse par un dessin, donc rien ne peut
+    // laisser une zone d une autre ligne sélectionnée dans la barre.
+    var k = zOwnerKey();
+    if (k !== zHostKey) { zHostKey = k; zSel = null; zBarSync(); zLegendSync(); }
     var l = zList(), html = '', i, z, op;
     for (i = 0; i < l.length; i++) {
       if (!l[i]) continue;
@@ -1753,8 +1786,8 @@
   // `rotation` en clair dans le JSON (et non `rot`) : c'est le nom lisible
   // pour qui ouvre le fichier. Un lecteur qui ignore `zones` affiche le play
   // exactement comme avant — rétrocompat des deux côtés.
-  function zEnc() {
-    var l = zList(), out = [], i, z;
+  function zEnc(list) {
+    var l = Array.isArray(list) ? list : zList(), out = [], i, z;
     for (i = 0; i < l.length; i++) {
       if (!l[i]) continue;
       z = zNorm(l[i]);
@@ -3001,6 +3034,9 @@
     if (playing) { pause(); return; }
     if (pU >= 1 && pStep >= steps().length - 1) { pStep = 0; pU = 0; }
     playing = true;
+    // v.197 - Une lecture continue sort du mode tap-a-tap : le ▶ reprend
+    // la route entiere, il ne s'arrete plus au bout du temps courant.
+    vwSolo = false;
     enterPlay();
     elPlay.textContent = '⏸';
     elPlay.classList.add('on');
@@ -3023,6 +3059,17 @@
     var d = stepMs();
     var u = (now - pT0) / d;
     while (u >= 1) {
+      // v.197 - Tap-a-tap : ce temps vient de se jouer EN ENTIER, on rend
+      // la main ici plutot que d'enchainer sur le suivant.
+      if (vwSolo) {
+        vwSolo = false;
+        pU = 1;
+        renderFrame(pStep, 1);
+        pause();
+        vwExplSync(true);
+        vwSyncButtons();
+        return;
+      }
       // Le temps courant vient de s'ACHEVER.
       if (vwOn) {
         // Côté joueuse la lecture ne suit pas une ligne mais une ROUTE : à la
@@ -3698,6 +3745,7 @@
             id: b.id, name: b.name || 'Variante', description: b.description || '',
             enabled: b.enabled !== false,
             returns_to_main: b.returns_to_main !== false,
+            zones: zEnc(b.zones),
             steps: encSteps(b.steps || [], null, depth + 1)
           };
         });
@@ -3738,7 +3786,7 @@
       ball_start: doc.ballStart ? numOf(doc.ballStart) : null,
       created_by: doc.author || null,
       players: players,
-      zones: zEnc(),
+      zones: zEnc(doc.zones),
       arrows: flat,
       steps: outSteps
     };
@@ -3895,6 +3943,7 @@
             description: String(b.description || pick(b, 'desc') || '').slice(0, 160),
             returns_to_main: pick(b, 'returns_to_main', 'returnsToMain') !== false,
             enabled: pick(b, 'enabled') !== false,
+            zones: zDec(b.zones),
             steps: ks
           });
         }
@@ -3913,10 +3962,34 @@
       .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
   }
 
+  // Rétrocompat v.191 → v.198. Les animations écrites du temps où les zones
+  // vivaient au niveau du document ont TOUT dans `doc.zones` — ce qui est
+  // exactement le décor de la ligne principale dans le nouveau modèle : rien
+  // à déplacer, il suffit de donner son tableau à chaque branche. Migration
+  // idempotente, faite à la LECTURE : le fichier d origine n est pas réécrit
+  // dans son dos, seulement à la prochaine sauvegarde du coach.
+  function migrateZonesToBranchScope(d) {
+    if (!d || typeof d !== 'object') return d;
+    if (!Array.isArray(d.zones)) d.zones = [];
+    (function walk(list) {
+      var i, j, bs;
+      for (i = 0; i < (Array.isArray(list) ? list.length : 0); i++) {
+        bs = list[i] && list[i].branches;
+        if (!Array.isArray(bs)) continue;
+        for (j = 0; j < bs.length; j++) {
+          if (!bs[j] || typeof bs[j] !== 'object') continue;
+          if (!Array.isArray(bs[j].zones)) bs[j].zones = [];
+          walk(bs[j].steps);
+        }
+      }
+    })(d.steps);
+    return d;
+  }
+
   function loadDoc(d) {
     if (document.body.classList.contains('playing')) exitPlay();
     doc = d;
-    if (!Array.isArray(doc.zones)) doc.zones = [];
+    migrateZonesToBranchScope(doc); zHostKey = null;
     zSel = null; zBarSync();
     // bpath appartient au document PRÉCÉDENT : le garder ferait pointer un
     // saut vers une branche qui n'existe pas dans celui qu'on charge.
@@ -5177,6 +5250,33 @@
     else elHint.classList.remove('show');
   }
 
+  // v.197 - Un tap ne saute plus au resultat : il JOUE le temps. On
+  // reutilise le moteur de lecture (meme vitesse, meme ralenti de 2e
+  // lecture) et c'est tick() qui met en pause au bout, via vwSolo.
+  var vwSolo = false;
+  function vwSoloRun() {
+    if (playing) pT0 = performance.now() - pU * stepMs();
+    else play();
+    vwSolo = true;   // APRES play(), qui remet le drapeau a zero
+    vwSyncButtons();
+  }
+
+  // Les zones vivent au niveau du document : la legende se calcule une fois
+  // a l'entree du viewer, elle ne bouge pas d'un temps a l'autre.
+  function vwLegendSync() {
+    var host = document.getElementById('vw-leg');
+    if (!host) return;
+    var all = zList(), i, z, html = '';
+    for (i = 0; i < all.length; i++) {
+      if (!all[i] || !String(all[i].label || '').trim()) continue;
+      z = zNorm(all[i]);
+      html += '<span class="li"><span class="dot" style="background:'
+        + zEsc(z.color) + '"></span>' + zEsc(String(z.label).trim()) + '</span>';
+    }
+    host.innerHTML = html;
+    if (html) host.classList.add('show'); else host.classList.remove('show');
+  }
+
   function vwStepForward() {
     if (!vwOn) return;
     if (!vwRoute.length) { vwShowTree(); return; }
@@ -5184,21 +5284,19 @@
     if (!seg) { vwRouteEnd(); return; }
     // Un temps interrompu en plein vol se termine d'abord : le premier tap
     // finit ce qu'on regardait, le suivant seulement enchaine.
-    if (pU < 1) { pU = 1; renderFrame(pStep, 1); vwExplSync(true); return; }
+    if (pU < 1) { vwSoloRun(); return; }
     if (pStep >= seg.to) {
       if (vwSegIx < vwRoute.length - 1) {
         vwSegIx++;
         vwGoSeg(vwSegIx);
-        pU = 1; renderFrame(pStep, 1);
-        vwExplSync(true);
+        pU = 0; vwSoloRun();
         return;
       }
       vwRouteEnd();
       return;
     }
-    pStep++; pU = 1;
-    renderFrame(pStep, 1);
-    vwExplSync(true);
+    pStep++; pU = 0;
+    vwSoloRun();
   }
 
   (function () {
@@ -5237,6 +5335,8 @@
     vwRoute = []; vwSegIx = 0;
     vwExplKey = '';
     vwUserSpeed = false; vwUserSize = false;
+    vwSolo = false;
+    vwLegendSync();
     // Pions S dès l'entrée : côté joueuse c'est la taille utile — discrète,
     // tout le terrain lisible sur un petit écran.
     setTokenSize('s');
