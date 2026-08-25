@@ -2322,12 +2322,12 @@
       // simplement des qu une variante etait prise — d ou le « il manque un
       // temps » sur un chemin imbrique : le temps de bifurcation etait perdu a
       // CHAQUE niveau.
-      if (vwOn && vwLoop >= 1 && !vwAsked && vwBranchesAt(pStep)) {
+      if (vwOn && vwLoop >= 1 && vwAskKey !== vwAskKeyAt(pStep) && vwBranchesAt(pStep)) {
         pU = 1; renderFrame(pStep, 1);
         vwOpenMenu(pStep);
         return;
       }
-      vwAsked = false;
+      vwAskKey = '';
       if (pStep >= steps().length - 1) {
         // Côté joueuse : jamais de fin. On reboucle (et on remonte à la ligne
         // principale si on sortait d'une branche qui y revient).
@@ -4049,7 +4049,7 @@
   // Compteur de lectures de la ligne principale. 0 = premiere lecture, on ne
   // coupe JAMAIS (la joueuse decouvre le play en entier, comme une video) ;
   // des la deuxieme, chaque temps qui bifurque attend son choix.
-  var vwLoop = 0, vwToldLoop = false, vwHalt = false, vwAsked = false;
+  var vwLoop = 0, vwToldLoop = false, vwHalt = false, vwAskKey = '';
   // Un reglage que la joueuse a touche elle-meme n est plus jamais ecrase par
   // les defauts de la 2e lecture.
   var vwUserSpeed = false, vwUserSize = false;
@@ -4083,15 +4083,28 @@
     return (st && Array.isArray(st.branches)) ? st.branches.length : 0;
   }
 
+  // La question posee vaut pour UN temps D UN chemin : un drapeau global
+  // laissait un « deja demande » du niveau du dessus museler la question du
+  // niveau du dessous.
+  function vwAskKeyAt(ix) {
+    return bpath.map(function (h) { return h.si + '~' + h.bid; }).join('|') + '#' + ix;
+  }
+
   function vwHasBranches() {
-    var l = steps(), i;
-    for (i = 0; i < l.length; i++) if (Array.isArray(l[i].branches) && l[i].branches.length) return true;
-    return false;
+    return (function scan(l) {
+      var i, j, bs;
+      for (i = 0; i < l.length; i++) {
+        bs = Array.isArray(l[i].branches) ? l[i].branches : [];
+        if (bs.length) return true;
+        for (j = 0; j < bs.length; j++) if (scan(bs[j].steps || [])) return true;
+      }
+      return false;
+    })(steps());
   }
 
   function vwGoPath(p, now) {
     bpath = p;
-    cur = 0; pStep = 0; pU = 0; pPrepared = -1; vwAsked = false;
+    cur = 0; pStep = 0; pU = 0; pPrepared = -1; vwAskKey = '';
     vwCrumb();
     renderFrame(0, 0);
     vwStepChanged(true);
@@ -4100,6 +4113,9 @@
 
   function vwLoopEnd(now) {
     var b = branchAt(bpath);
+    // Une variante jouee en entier vaut lecture faite : le compteur ne doit
+    // jamais stagner a 0 parce qu on ne finit que des branches.
+    if (b && vwLoop < 1) vwLoop = 1;
     if (b && b.returns_to_main !== false) {
       vwGoPath([], now);
       toast('↩ Retour à la ligne principale.');
@@ -4160,7 +4176,7 @@
     vwBar = elPlay.parentNode;
     if (vwBar) vwBar.style.display = 'none';
     bpath = []; cur = 0; pStep = 0; pU = 0;
-    vwLoop = 0; vwToldLoop = false; vwHalt = false; vwAsked = false; vwBadge = -1;
+    vwLoop = 0; vwToldLoop = false; vwHalt = false; vwAskKey = ''; vwBadge = -1;
     vwUserSpeed = false; vwUserSize = false;
     vwCrumb();
     drawAll();
@@ -4228,7 +4244,7 @@
       vwStepChanged(true);
     }
     if (playing) { pause(); vwSyncButtons(); }
-    vwAsked = true;   // a la reprise on enchaine, sans reposer la question
+    vwAskKey = vwAskKeyAt(ix);   // a la reprise on enchaine, sans reposer la question
     vwHalt = true;
     var html = '<div style="font-size:12px;font-weight:700;margin-bottom:8px">Apres le temps ' + (ix + 1) + ' — quelle suite ?</div>'
       + '<div class="row"><button class="btn wide" data-b="">▶ Ligne principale</button></div>';
@@ -4245,7 +4261,15 @@
     if (!btn) { if (e.target === vwMenu) vwMenu.classList.remove('show'); return; }
     var id = btn.getAttribute('data-b');
     vwMenu.classList.remove('show');
-    if (id) vwGoPath(bpath.concat([{ si: pStep, bid: id }]));
+    if (id) {
+      // Choisir une variante MET FIN a la lecture-decouverte. Sans ca, une
+      // joueuse qui bifurque des la 1re lecture reste bloquee a vwLoop = 0
+      // (le compteur ne monte qu a la fin de la LIGNE PRINCIPALE) et plus
+      // aucune sous-branche ne lui est proposee : le menu « Kick out » d une
+      // sous-branche n apparaissait jamais.
+      if (vwLoop < 1) vwLoop = 1;
+      vwGoPath(bpath.concat([{ si: pStep, bid: id }]));
+    }
     if (!playing) { play(); }
     vwSyncButtons();
   });
