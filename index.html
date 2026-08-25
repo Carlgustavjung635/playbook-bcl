@@ -16294,8 +16294,9 @@ function togglePbEditorV2(on) {
 // (et éventuellement l'animation à ouvrir) en paramètres d'URL, et écrit son
 // résultat dans plays.animations. Sans play, il s'ouvre en bac à sable.
 //
-// Le flag ne garde plus rien (v.187) : il ne pilote que le raccourci « bac a
-// marche pour tout le monde selon son role, sinon le media serait publie mais
+// Le flag ne garde plus la CREATION (v.187) : il ne pilote que le raccourci
+// « bac a sable » des reglages. Ouvrir OU creer une animation depuis une fiche
+// play marche selon le ROLE, sinon le media serait publie mais
 // invisible — et le coach ne pourrait plus en ajouter une deuxieme.
 function openPbEditorV2(playId, animId, mode) {
   const q = [];
