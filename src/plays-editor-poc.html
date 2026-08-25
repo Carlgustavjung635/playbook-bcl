@@ -1321,23 +1321,62 @@
   // Mesuré à 0,03 ms pour 20 temps × 10 jetons — très en dessous des 16 ms
   // d'une frame iPhone, donc on appelle à chaque édition plutôt que
   // d'entretenir un cache à invalider.
-  function recomputeList(l, from, curIdx) {
-    var i, k, prev, p, q, hit = 0;
+  // Recopie l'état d'entrée `prev` dans le temps `st`. Rend 1 si c'est le
+  // temps AFFICHÉ (`cs`, comparé par identité : il peut vivre dans n'importe
+  // quelle ligne de l'arbre) qui a bougé, donc s'il faut redessiner.
+  function pullPos(st, prev, cs) {
+    var k, q, p = st.pos, hit = 0;
+    for (k in prev) {
+      q = p[k];
+      if (!q) { p[k] = { x: prev[k].x, y: prev[k].y }; if (st === cs) hit = 1; continue; }
+      if (Math.abs(q.x - prev[k].x) < 0.001 && Math.abs(q.y - prev[k].y) < 0.001) continue;
+      q.x = prev[k].x; q.y = prev[k].y;
+      if (st === cs) hit = 1;           // le temps affiché a bougé
+    }
+    return hit;
+  }
+  function recomputeList(l, from, cs) {
+    var i, hit = 0;
     if (!(from > 1)) from = 1;
-    for (i = from; i < l.length; i++) {
-      prev = endPos(l[i - 1]);          // ← déjà recalculé au tour d'avant
-      p = l[i].pos;
-      for (k in prev) {
-        q = p[k];
-        if (!q) { p[k] = { x: prev[k].x, y: prev[k].y }; if (i === curIdx) hit++; continue; }
-        if (Math.abs(q.x - prev[k].x) < 0.001 && Math.abs(q.y - prev[k].y) < 0.001) continue;
-        q.x = prev[k].x; q.y = prev[k].y;
-        if (i === curIdx) hit++;        // le temps affiché a bougé
+    // l[i-1] a déjà été recalculé au tour d'avant : sa sortie est à jour.
+    for (i = from; i < l.length; i++) hit += pullPos(l[i], endPos(l[i - 1]), cs);
+    return hit;
+  }
+
+  // ── LA CASCADE DESCEND AUSSI DANS LES BRANCHES (v.189) ────────────
+  // Une branche naît sur la SORTIE de son temps de bifurcation : c'est déjà
+  // ce que fait addBranchHere() avec endPos(st). Mais cette photo était prise
+  // UNE FOIS, à la création, puis figée — la cascade ne parcourait que la
+  // ligne courante. Le coach rallongeait ensuite le déplacement de A dans le
+  // temps forké, et la variante continuait de démarrer avec A à son ancienne
+  // place : téléportation à la bifurcation, exactement le bug que la cascade
+  // était censée éliminer sur la ligne principale.
+  //
+  // On recalcule donc l'ARBRE entier : chaque ligne en cascade, et le PREMIER
+  // temps de chaque branche tiré de la sortie de son temps parent (recalculée
+  // juste avant, donc à jour). Positions et ballon lisent alors le même point
+  // — pullPos() ici, holderEnter() pour la balle.
+  //
+  // Pas de `from` : un début de branche pend sous N'IMPORTE quel temps, donc
+  // la borne « à partir de » de la ligne courante ne dit rien de ce qu'il faut
+  // rafraîchir ailleurs. Le coût reste celui d'un endPos() par temps de l'arbre
+  // (0,03 ms pour 20 temps × 10 jetons), donc on repart de zéro à chaque appel.
+  function recomputeTree(l, cs) {
+    var i, j, bs, e, hit = recomputeList(l, 1, cs);
+    for (i = 0; i < l.length; i++) {
+      bs = l[i].branches;
+      if (!Array.isArray(bs)) continue;
+      e = endPos(l[i]);
+      for (j = 0; j < bs.length; j++) {
+        if (!bs[j] || !Array.isArray(bs[j].steps) || !bs[j].steps.length) continue;
+        hit += pullPos(bs[j].steps[0], e, cs);
+        hit += recomputeTree(bs[j].steps, cs);
       }
     }
     return hit;
   }
-  function recomputeStepPositions(from) { return recomputeList(steps(), from, cur); }
+  // `from` n'est plus qu'un vestige des appelants : la passe est globale.
+  function recomputeStepPositions(from) { return recomputeTree(rootSteps(), steps()[cur] || null); }
   // Recalcule PUIS redessine, mais seulement si le temps à l'écran a
   // effectivement bougé : éditer le temps 3 ne doit pas faire clignoter
   // le terrain à chaque frame de drag.
