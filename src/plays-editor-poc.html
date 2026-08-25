@@ -339,6 +339,16 @@
   .token.has-ball .ball{display:block}
   .token .ball .b{fill:url(#gBall); stroke:var(--ball-line); stroke-width:.4}
   .token .ball .s{fill:none; stroke:var(--ball-line); stroke-width:.35; stroke-linecap:round}
+  /* Dribble : le ballon rebondit tant que sa porteuse se DÉPLACE. Un simple
+     translateY (compositor, pas de filter ni de layout) — l'amplitude vient
+     de --dribble-y, recalculée avec PR pour rester juste à toutes tailles.
+     La couture reste solidaire : c'est le <g class="ball"> entier qui bouge. */
+  @keyframes pbDribble{
+    0%,100%{transform:translateY(calc(var(--dribble-y, 1px) * -0.35))}
+    50%     {transform:translateY(var(--dribble-y, 1px))}
+  }
+  .token.has-ball.dribbling .ball{animation:pbDribble .5s ease-in-out infinite; will-change:transform}
+  @media (prefers-reduced-motion: reduce){ .token.has-ball.dribbling .ball{animation:none} }
   /* Sélection : la joueuse active prend le halo, les autres reculent d'un
      cran (80 %). Une opacité, pas un filtre : gratuit au compositing. */
   .token.active .halo{opacity:.9}
@@ -1103,6 +1113,9 @@
   // lecture. Le drag n'écrit que des attributs, il ne reconstruit rien.
   function drawAll() {
     PR = radiusFor(mode());
+    // Amplitude du rebond de dribble : en unités TERRAIN (px CSS sur du SVG
+    // = unités utilisateur), donc proportionnelle au jeton.
+    document.documentElement.style.setProperty('--dribble-y', f(PR * 0.30) + 'px');
     svg.setAttribute('viewBox', MODES[mode()].vb);
     svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
     svg.innerHTML = defs()
@@ -1934,6 +1947,21 @@
     }
 
     for (id in tokEl) tokEl[id].classList.toggle('has-ball', !flying && id === holder);
+
+    // Dribble : uniquement si la porteuse a une VRAIE courbe dans ce temps et
+    // qu'on est dans la fenêtre de déplacement. Ballon en vol (passe ou tir) →
+    // pas de dribble ; réception → la porteuse ne change qu'en fin de passe
+    // (u >= 0.90), soit après la fenêtre de move : le receveur reste statique
+    // jusqu'à ce que SON temps le fasse bouger.
+    var drib = false;
+    if (holder && !flying) {
+      var mw = win(u, PLAY.move);
+      if (mw > 0 && mw < 1) {
+        for (i = 0; i < pPaths.moves.length; i++)
+          if (pPaths.moves[i].id === holder && pPaths.moves[i].len > 0.01) { drib = true; break; }
+      }
+    }
+    for (id in tokEl) tokEl[id].classList.toggle('dribbling', drib && id === holder);
     updateProgress(k, u);
   }
 
