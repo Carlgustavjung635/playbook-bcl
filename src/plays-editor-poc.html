@@ -1335,17 +1335,47 @@
     if (recomputeStepPositions(from) && !playing) { drawTokens(); drawArrows(); syncInfo(); }
   }
 
-  // Porteuse du ballon au DÉBUT du temps i : on repart de doc.ballStart et on
-  // suit les passes. Dérivé, jamais stocké — une passe supprimée se répercute
-  // donc immédiatement sur tous les temps qui suivent.
-  function holderAt(i) {
-    var h = doc.ballStart, k, j, st;
-    for (k = 0; k < i && k < steps().length; k++) {
-      st = steps()[k];
-      for (j = 0; j < st.arw.length; j++)
-        if (st.arw[j].kind === 'pass' && typeof st.arw[j].to === 'string') h = st.arw[j].to;
-      if (st.shot) h = null;   // après un tir, plus personne ne tient la balle
+  // Une passe / un tir appliqués à la porteuse `h` : la SEULE règle qui fait
+  // bouger le ballon. Elle sert deux fois — le long d'une ligne (holderAt) et
+  // à la traversée d'une bifurcation (holderEnter) — donc elle vit à un seul
+  // endroit : deux copies finiraient par diverger.
+  function holderAfter(st, h) {
+    var j, a = (st && Array.isArray(st.arw)) ? st.arw : [];
+    for (j = 0; j < a.length; j++)
+      if (a[j].kind === 'pass' && typeof a[j].to === 'string') h = a[j].to;
+    return (st && st.shot) ? null : h;   // après un tir, plus personne ne tient la balle
+  }
+
+  // Porteuse à l'ENTRÉE de la ligne désignée par `path` (v.188).
+  //
+  // La ligne principale part de doc.ballStart. Une BRANCHE, elle, hérite de
+  // l'état de FIN de son temps de bifurcation — passes et tir de ce temps
+  // COMPRIS (d'où le `k <= si`), puisqu'elle démarre exactement là où la ligne
+  // du dessus en était. C'est la même règle que endPos() pour les positions :
+  // un début de branche reprend TOUS les paramètres de sortie du temps forké,
+  // pas seulement les coordonnées.
+  //
+  // Sans ce recalcul, holderAt() rembobinait le ballon jusqu'à doc.ballStart
+  // dès qu'on descendait dans une variante : A passait à B au T2, on créait la
+  // branche sur ce T2, et la variante repartait avec A porteuse.
+  function holderEnter(path) {
+    var h = doc.ballStart, l = rootSteps(), i, k, b;
+    for (i = 0; i < path.length; i++) {
+      b = branchIn(l, path[i].si, path[i].bid);
+      if (!b) break;   // chemin mort : on rend ce qu'on a, comme stepsAt()
+      for (k = 0; k <= path[i].si && k < l.length; k++) h = holderAfter(l[k], h);
+      l = b.steps;
     }
+    return h;
+  }
+
+  // Porteuse du ballon au DÉBUT du temps i de la LIGNE COURANTE : on part de
+  // l'état hérité à l'entrée de cette ligne et on suit les passes. Dérivé,
+  // jamais stocké — une passe supprimée se répercute donc immédiatement sur
+  // tous les temps qui suivent, y compris dans les branches nées en dessous.
+  function holderAt(i) {
+    var h = holderEnter(bpath), k, l = steps();
+    for (k = 0; k < i && k < l.length; k++) h = holderAfter(l[k], h);
     return h;
   }
   function passOf(st) {
