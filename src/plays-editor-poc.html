@@ -3001,7 +3001,7 @@
     pPrepared = k;
     layM.innerHTML = '';
     layP.innerHTML = '';
-    pPaths = { moves: [], pass: null, shot: null };
+    pPaths = { moves: [], pass: null, shot: null, hl: [] };
     var st = steps()[k];
     if (!st) return;
     var p0 = st.pos, i;
@@ -4017,6 +4017,12 @@
         pass: passes.length ? passes[0] : null,
         passes: passes,
         shot: s.shot ? numOf(s.shot) : null,
+        // Même encodage que `shot` (numéro de maillot, pas l'id de jeton) :
+        // decSteps() les repasse tous les deux par refId() à la relecture.
+        highlights: (Array.isArray(s.highlights) ? s.highlights : []).map(function (h) {
+          var nb = (h && h.player) ? numOf(h.player) : null;
+          return (nb === null || nb === undefined || nb === '') ? null : { player: nb };
+        }).filter(Boolean),
         positions: positions
       };
       if (depth < BR_DEPTH_MAX && Array.isArray(s.branches) && s.branches.length) {

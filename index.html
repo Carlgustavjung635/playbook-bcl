@@ -16897,20 +16897,24 @@ function _animThumbSvg(anim) {
     preserveAspectRatio="xMidYMid meet" aria-hidden="true">${_animMarkers(_ANIM_MK, R, col)}${_animCourt(full)}${_animZonesSvg(anim)}${arrows}${toks}${ball}</svg>`;
 }
 
-// Auto-play PARESSEUX : la vignette ne s'anime que si elle est réellement à
-// l'écran (IntersectionObserver) et jamais en `prefers-reduced-motion`. Sur
-// iPhone, quatre boucles rAF derrière un scroll suffisent à chauffer le
-// téléphone : ce qui est hors champ ne doit rien coûter.
+// v.207 — Les vignettes ne s'animent PLUS, nulle part : fiche play, liste des
+// plays, exos d'un plan d'entraînement. Le SVG rendu par _animThumbSvg est déjà
+// l'image figée du temps 1 (jetons placés, gestes du temps 1 visibles, ballon
+// posé) ; sans boucle pour la faire bouger, elle reste telle quelle. C'est un
+// aperçu photo, pas une bande-annonce — et sur iPhone c'est autant de rAF et de
+// batterie en moins derrière chaque scroll.
+//
+// Ce point d'entrée reste appelé par les hôtes (cf. le montage des vignettes
+// d'exo) : il se contente désormais de DÉFAIRE l'auto-play — il coupe
+// l'observer et arrête les boucles qu'un rendu précédent aurait lancées, pour
+// qu'aucune vignette ne survive en mouvement à une navigation. _animPrevStart /
+// _animPrevStop / _animPrevPlace restent en place : le scrub de l'éditeur s'en
+// sert pour positionner les jetons à la main.
 function _animPreviewsMount() {
   if (window._animPrevObs) { try { window._animPrevObs.disconnect(); } catch (e) {} window._animPrevObs = null; }
-  const nodes = document.querySelectorAll('.anim-thumb[data-anim-id]');
-  if (!nodes.length) return;
-  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-  const obs = new IntersectionObserver(entries => {
-    entries.forEach(e => { e.isIntersecting ? _animPrevStart(e.target) : _animPrevStop(e.target); });
-  }, { threshold: 0.4 });
-  nodes.forEach(n => obs.observe(n));
-  window._animPrevObs = obs;
+  document.querySelectorAll('.anim-thumb[data-anim-id]').forEach(n => {
+    try { _animPrevStop(n); } catch (e) {}
+  });
 }
 
 // Préfixe courant des markers d'une vignette. Déclaré ici, utilisé plus haut :
@@ -52993,7 +52997,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.206';
+const APP_VERSION = '2026-08-19.207';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
