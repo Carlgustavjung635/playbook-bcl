@@ -1435,11 +1435,28 @@
     var i = isoOf(m);
     return 'matrix(' + f4(i.a) + ' ' + f4(i.b) + ' ' + f4(i.c) + ' ' + f4(i.d) + ' ' + f4(i.e) + ' ' + f4(i.f) + ')';
   }
-  // Matrice INVERSE : pour ce qui vit dans le calque du sol mais doit rester
-  // rond (le ballon en vol).
-  function isoInvMatrix(m) {
+  // Deux inverses, et il ne faut SURTOUT pas les confondre.
+  //
+  // isoInvShape — inverse de la seule partie LINÉAIRE (translation forcée à
+  //   zéro). Pour un objet DÉJÀ positionné par un translate extérieur et dont
+  //   on ne veut corriger que la déformation : le ballon en vol, qui doit
+  //   rester rond dans le calque cisaillé du parquet. Lui rendre aussi la
+  //   translation le déplacerait.
+  //
+  // isoInvFull — inverse AFFINE complet. Pour neutraliser la matrice du sol
+  //   sur tout un CALQUE et retomber en espace écran (#lay-play > .air3).
+  //   C'est le piège qui a coûté un tour : avec l'inverse linéaire seul, le
+  //   produit vaut translate(e, f) et non l'identité — tout le contenu du
+  //   calque part en biais, d'un décalage qui grandit avec l'inclinaison.
+  function isoInvShape(m) {
     var i = isoOf(m), dt = (i.a * i.d - i.b * i.c) || 1e-6;
     return 'matrix(' + f4(i.d / dt) + ' ' + f4(-i.b / dt) + ' ' + f4(-i.c / dt) + ' ' + f4(i.a / dt) + ' 0 0)';
+  }
+  function isoInvFull(m) {
+    var i = isoOf(m), dt = (i.a * i.d - i.b * i.c) || 1e-6;
+    var a = i.d / dt, b = -i.b / dt, c = -i.c / dt, d = i.a / dt;
+    return 'matrix(' + f4(a) + ' ' + f4(b) + ' ' + f4(c) + ' ' + f4(d) + ' '
+      + f4(-(a * i.e + c * i.f)) + ' ' + f4(-(b * i.e + d * i.f)) + ')';
   }
   function project3(p) { var i = isoOf(mode()); return { x: i.a * p.x + i.c * p.y + i.e, y: i.b * p.x + i.d * p.y + i.f }; }
   function unproject3(sp) {
@@ -3462,15 +3479,20 @@
       var g = document.createElementNS('http://www.w3.org/2000/svg', 'path');
       g.setAttribute('class', 'pline');
       layP.appendChild(g);
-      pPaths.pass = { arw: ps, el: g, ball: flyingBall() };
+      // Le TRAIT de la passe reste peint au sol : c'est une annotation du
+      // schéma, comme les courses. Seul le BALLON décolle.
+      pPaths.pass = { arw: ps, el: g, ball: flyingBall(airLayer()) };
     }
     if (st.shot && visible(tokById(st.shot, p0))) {
       var sl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
       sl.setAttribute('class', 'sline');
       var pu = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
       pu.setAttribute('class', 'spulse');
-      layP.appendChild(sl); layP.appendChild(pu);
-      pPaths.shot = { id: st.shot, el: sl, pulse: pu, ball: flyingBall() };
+      // La trajectoire du tir vole (calque .air3) ; le halo de la tireuse
+      // reste un anneau AU SOL, comme les anneaux de highlight.
+      var air = airLayer();
+      (air || layP).appendChild(sl); layP.appendChild(pu);
+      pPaths.shot = { id: st.shot, el: sl, pulse: pu, ball: flyingBall(air) };
     }
 
     // Highlights : un anneau par joueuse marquée, monté UNE fois par temps —
@@ -3486,6 +3508,10 @@
       layP.appendChild(hc);
       pPaths.hl.push({ id: hid, el: hc });
     }
+    // Ce qui vole passe DEVANT tout ce qui est peint au sol : le calque
+    // aérien repart en dernier, une fois le reste du temps monté.
+    var airTop = layP.querySelector('.air3');
+    if (airTop) layP.appendChild(airTop);
   }
 
   function arwVisibleIn(a, p) {
@@ -3494,7 +3520,10 @@
     return true;
   }
 
-  function flyingBall() {
+  // host = le calque d'accueil. Dans .air3 (espace écran) le ballon est déjà
+  // rond : la contre-matrice ne sert QUE dans le calque du parquet.
+  function flyingBall(host) {
+    host = host || layP;
     var br = PR * 0.5;
     var g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     g.setAttribute('class', 'fb');
@@ -3502,7 +3531,7 @@
     // ballon EST rond : on lui rend la matrice inverse. Une fois a la
     // construction du temps, jamais par frame — et sur un <g> INTERIEUR, car
     // renderFrame() ecrit le translate sur le <g> exterieur a chaque image.
-    g.innerHTML = '<g' + (view === '3d' ? ' transform="' + isoInvMatrix(mode()) + '"' : '') + '>'
+    g.innerHTML = '<g' + (view === '3d' && host === layP ? ' class="inv3" transform="' + isoInvShape(mode()) + '"' : '') + '>'
       + '<circle class="b" cx="0" cy="0" r="' + f(br) + '"/>'
       + '<g class="spin">'
       +   '<line class="s" x1="' + f(-br) + '" y1="0" x2="' + f(br) + '" y2="0"/>'
@@ -3511,7 +3540,7 @@
       + '<circle class="bgl" cx="' + f(-br * 0.30) + '" cy="' + f(-br * 0.32) + '" r="' + f(br * 0.36) + '"/>'
       + '</g>';
     g.style.display = 'none';
-    layP.appendChild(g);
+    host.appendChild(g);
     return g;
   }
 
@@ -3570,6 +3599,15 @@
           flying = true;
           var bp = lerpPts(pp, pf);
           ps.ball.style.display = 'block';
+          if (view === '3d') {
+            // Une passe ne rampe pas : le ballon va d'une paire de mains à
+            // l'autre, avec juste ce qu'il faut de cloche pour qu'on la voie
+            // passer AU-DESSUS du parquet et non dessus.
+            var bq = project3(bp);
+            var lf = handH(A) + (handH(B) - handH(A)) * pf;
+            ps.ball.setAttribute('transform', 'translate(' + f(bq.x) + ' '
+              + f(bq.y - lf - Math.sin(pf * Math.PI) * PR * 0.55) + ')');
+          } else
           ps.ball.setAttribute('transform', 'translate(' + f(bp.x) + ' ' + f(bp.y) + ')');
         } else ps.ball.style.display = 'none';
         if (pf >= 1 && typeof ps.arw.to === 'string') holder = ps.arw.to;
@@ -3600,14 +3638,16 @@
         sh.pulse.setAttribute('r', f(PR * (1.15 + 0.55 * Math.sin(pulseT * Math.PI))));
         sh.pulse.setAttribute('opacity', f(sf <= 0 ? 0 : (1 - pulseT) * 0.9));
         // Trajectoire : une cloche, pas une corde — un tir monte.
-        var arc = shotArc(S, H);
+        // 3D : la cible est l'ANNEAU projeté, et la courbe vit en espace
+        // écran. 2D : rigoureusement l'ancien tracé, au point de contrôle près.
+        var arc = (view === '3d') ? shotArc3(S, H) : shotArc(S, H);
         sh.el.setAttribute('d', arc.d);
         var rf = clamp((sf - 0.4) / 0.6, 0, 1);
         sh.el.setAttribute('stroke-dasharray', f(arc.len * rf) + ' ' + f(arc.len));
         sh.el.setAttribute('opacity', rf > 0 ? 1 : 0);
         if (rf > 0 && rf < 1) {
           flying = true;
-          var q2 = quadAt(S, arc.c, H, rf);
+          var q2 = quadAt(arc.a, arc.c, arc.b, rf);
           sh.ball.style.display = 'block';
           sh.ball.setAttribute('transform', 'translate(' + f(q2.x) + ' ' + f(q2.y) + ')');
         } else sh.ball.style.display = 'none';
@@ -3655,6 +3695,57 @@
     return { x: p[p.length-1].x, y: p[p.length-1].y };
   }
 
+  // ── v.216 · LE BALLON NE RAMPE PLUS (correctif 3D) ───────────────────
+  // Le bug : hoop() rend les coordonnées TERRAIN du cercle, et la trajectoire
+  // vivait dans #lay-play — un calque qui porte la matrice du PARQUET. Le tir
+  // atterrissait donc au SOL, sous le panier, pendant que hoop3() dessinait
+  // l'anneau 26·s unités d'écran PLUS HAUT. D'où « le ballon tombe par terre ».
+  //
+  // Un tir n'appartient pas au plan du parquet : il le quitte. Tout ce qui
+  // vole est donc rendu en ESPACE ÉCRAN, dans un calque .air3 qui annule la
+  // matrice du sol — et la cible est l'anneau TEL QU'IL EST DESSINÉ, via la
+  // même formule que hoop3(). Le ballon finit dans le cercle à n'importe quel
+  // angle de caméra, par construction et non par réglage.
+  var SVGNS = 'http://www.w3.org/2000/svg';
+  function airLayer() {
+    if (view !== '3d' || !layP) return null;
+    var g = layP.querySelector('.air3');
+    if (!g) {
+      g = document.createElementNS(SVGNS, 'g');
+      g.setAttribute('class', 'air3');
+      g.setAttribute('transform', isoInvFull(mode()));
+      layP.appendChild(g);
+    }
+    return g;
+  }
+  // Hauteur des mains AU-DESSUS du point de contact au sol, en unités d'écran.
+  // Elle suit l'échelle de profondeur du pion : une joueuse proche est plus
+  // grande, ses mains sont donc plus hautes.
+  function handH(p) { return tokLift() * depthScale(p); }
+  // La balle quitte les MAINS, pas les pieds.
+  function handPt(p) { var q = project3(p); return { x: q.x, y: q.y - handH(p) }; }
+  // L'ANNEAU, pas le sol sous l'anneau. Même formule que hoop3().
+  function rimPt(H) { var i = isoOf(mode()), q = project3(H); return { x: q.x, y: q.y - 26 * i.s }; }
+
+  // Cloche du tir EN 3D : le sommet passe au-dessus des deux extrémités À
+  // L'ÉCRAN. Une cloche tracée dans le plan du parquet, elle, reste couchée
+  // par terre quel que soit l'angle — c'est exactement ce qui était cassé.
+  function shotArc3(S, H) {
+    var a = handPt(S), b = rimPt(H);
+    var dx = b.x - a.x, dy = b.y - a.y, L = Math.sqrt(dx * dx + dy * dy) || 1;
+    var rise = Math.max(PR * 2.4, L * 0.40);
+    // Sommet d'une quadratique = (a + 2c + b)/4 : on résout c pour que ce
+    // sommet tombe `rise` au-dessus du plus haut des deux bouts.
+    var top = Math.min(a.y, b.y) - rise;
+    var c = { x: (a.x + b.x) / 2, y: 2 * top - (a.y + b.y) / 2 };
+    var l1 = Math.sqrt(Math.pow(c.x - a.x, 2) + Math.pow(c.y - a.y, 2));
+    var l2 = Math.sqrt(Math.pow(b.x - c.x, 2) + Math.pow(b.y - c.y, 2));
+    return {
+      d: 'M ' + f(a.x) + ' ' + f(a.y) + ' Q ' + f(c.x) + ' ' + f(c.y) + ' ' + f(b.x) + ' ' + f(b.y),
+      len: (l1 + l2 + L) / 2, c: c, a: a, b: b
+    };
+  }
+
   // Cloche du tir : point de contrôle décalé perpendiculairement au segment
   // tireuse→cercle, d'un quart de sa longueur. Simple, lisible, et ça donne la
   // même silhouette quel que soit l'endroit du terrain.
@@ -3664,7 +3755,9 @@
     var c = { x: mx - dy / L * (L * 0.22), y: my + dx / L * (L * 0.22) };
     return {
       d: 'M ' + f(S.x) + ' ' + f(S.y) + ' Q ' + f(c.x) + ' ' + f(c.y) + ' ' + f(H.x) + ' ' + f(H.y),
-      len: L * 1.08, c: c
+      // a / b : les deux bouts de la courbe. Les exposer rend quadAt()
+      // identique en 2D et en 3D, où ils ne sont plus S et H.
+      len: L * 1.08, c: c, a: S, b: H
     };
   }
   function quadAt(a, c, b, t) {
@@ -4084,8 +4177,14 @@
     if (layZ) layZ.setAttribute('transform', m);
     if (layP) {
       layP.setAttribute('transform', m);
-      var inv = isoInvMatrix(mode()), fbs = layP.querySelectorAll('.fb > g');
-      for (i = 0; i < fbs.length; i++) fbs[i].setAttribute('transform', inv);
+      // Deux inverses distincts (cf. isoInvShape / isoInvFull) :
+      //   .inv3 = un BALLON dans le calque du parquet → correction de FORME
+      //   .air3 = un CALQUE à ramener en espace écran → inverse AFFINE
+      var shp = isoInvShape(mode()), ful = isoInvFull(mode()), j;
+      var balls = layP.querySelectorAll('.fb > .inv3');
+      for (j = 0; j < balls.length; j++) balls[j].setAttribute('transform', shp);
+      var airs = layP.querySelectorAll('.air3');
+      for (j = 0; j < airs.length; j++) airs[j].setAttribute('transform', ful);
     }
     // Pendant la lecture, c'est renderFrame() qui repose les jetons à la frame
     // suivante : y toucher ici ferait sauter l'interpolation en cours.
