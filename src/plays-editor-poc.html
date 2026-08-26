@@ -321,9 +321,11 @@
   /* Les waypoints ne sont manipulables qu'en sélection et en gomme (poser,
      déplacer, retirer) — pendant un tracé de flèche ils ne feraient que gêner. */
   body[data-tool="move"] .arw .wp, body[data-tool="pass"] .arw .wp,
-  body[data-tool="shot"] .arw .wp, body[data-tool="screen"] .arw .wp{display:none}
+  body[data-tool="shot"] .arw .wp, body[data-tool="screen"] .arw .wp,
+  body[data-tool="hl"] .arw .wp{display:none}
   body[data-tool="move"] .arw .wphit, body[data-tool="pass"] .arw .wphit,
-  body[data-tool="shot"] .arw .wphit, body[data-tool="screen"] .arw .wphit{display:none}
+  body[data-tool="shot"] .arw .wphit, body[data-tool="screen"] .arw .wphit,
+  body[data-tool="hl"] .arw .wphit{display:none}
 
   /* Logo peint sur le parquet : sous les jetons ET sous les flèches, comme sur
      un vrai terrain. pointer-events:none, sinon il volerait les taps du fond. */
@@ -385,6 +387,14 @@
   /* Source d'une flèche en cours de tracé : halo qui respire. */
   .token.pending .halo{opacity:.95; animation:pulse .9s ease-in-out infinite}
   @keyframes pulse{50%{opacity:.35}}
+  /* Highlight (✨) : marquer une joueuse pour le temps courant. En ÉDITION on
+     reprend le halo qui respire (le même code visuel que « source d'une flèche »
+     — le coach le lit déjà) plus une pastille ✨ à côté du numéro ; en LECTURE
+     c'est la couche #lay-play qui prend le relais avec l'anneau de la tireuse. */
+  .token.hl .halo{opacity:.9; animation:pulse 1.1s ease-in-out infinite}
+  .token .hlmark{pointer-events:none; text-anchor:middle; fill:var(--arw-shot)}
+  body.playing .token.hl .halo{animation:none}
+  body.playing .token .hlmark{display:none}
 
   /* ── Couche de LECTURE ──────────────────────────────────────────────── */
   body.playing .token{cursor:default}
@@ -398,6 +408,7 @@
   #lay-play .sline{fill:none; stroke:var(--arw-shot); stroke-width:1.35;
     stroke-dasharray:5.5 3; stroke-linecap:round; pointer-events:none}
   #lay-play .spulse{fill:none; stroke:var(--arw-shot); stroke-width:1.5; pointer-events:none}
+  #lay-play .hlpulse{fill:none; stroke:var(--arw-shot); stroke-width:1.5; pointer-events:none}
   #lay-play .fb .b{fill:url(#gBall); stroke:var(--ball-line); stroke-width:.4}
   #lay-play .fb .s{fill:none; stroke:var(--ball-line); stroke-width:.35; stroke-linecap:round}
 
@@ -787,6 +798,7 @@
     <button class="btn sm"    id="t-screen" title="Écran (screen) — trait terminé par une barre">⊥</button>
     <button class="btn sm"    id="t-pass"   title="Flèche de passe">⇢</button>
     <button class="btn sm"    id="t-shot"   title="Tir">🎯</button>
+    <button class="btn sm"    id="t-hl"    title="Highlight — halo qui pulse sur la joueuse pendant tout ce temps">✨</button>
     <button class="btn sm"    id="t-erase"  title="Supprimer flèche / point de passage">🚫</button>
   </div>
   <div class="sep"></div>
@@ -2175,12 +2187,53 @@
     g.setAttribute('transform', 'translate(' + f(s.x) + ' ' + f(s.y) + ')');
   }
 
+  // ── Highlights ───────────────────────────────────────────────────────
+  // st.highlights = [{ player: <id jeton> }]. Lecture TOLÉRANTE : un temps
+  // écrit avant la v.203 n'a pas la clé, et doit se comporter comme un temps
+  // sans highlight — d'où l'accesseur plutôt qu'un champ supposé présent.
+  function hlOf(st) {
+    if (!st) return [];
+    if (!Array.isArray(st.highlights)) st.highlights = [];
+    return st.highlights;
+  }
+  function isHl(st, id) {
+    var l = hlOf(st), i;
+    for (i = 0; i < l.length; i++) if (l[i] && l[i].player === id) return true;
+    return false;
+  }
+  // Bascule : re-taper une joueuse déjà marquée la démarque. Aucune limite de
+  // nombre — un double écran, c'est deux jetons à montrer en même temps.
+  function toggleHl(id) {
+    var l = hlOf(step()), i;
+    for (i = 0; i < l.length; i++) if (l[i] && l[i].player === id) { l.splice(i, 1); return; }
+    l.push({ player: id });
+  }
+  // Pastille ✨ + halo sur les jetons marqués AU TEMPS COURANT.
+  function syncHl() {
+    var st = step(), id, g, on, b;
+    for (id in tokEl) {
+      g = tokEl[id]; on = isHl(st, id);
+      g.classList.toggle('hl', on);
+      b = g.querySelector('.hlmark');
+      if (on && !b) {
+        b = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        b.setAttribute('class', 'hlmark');
+        b.setAttribute('x', f(PR * 1.0));
+        b.setAttribute('y', f(-PR * 0.72));
+        b.setAttribute('font-size', f(PR * 1.15));
+        b.textContent = '✨';
+        g.appendChild(b);
+      } else if (!on && b && b.parentNode) b.parentNode.removeChild(b);
+    }
+  }
+
   function syncSelection() {
     var id;
     for (id in tokEl) {
       tokEl[id].classList.toggle('active', id === active);
       tokEl[id].classList.toggle('pending', id === pending);
     }
+    syncHl();
     if (layT) layT.classList.toggle('has-active', !!(active && tokEl[active]));
     document.getElementById('b-ball').disabled = !(active && tokEl[active]) || playing;
   }
@@ -2190,6 +2243,8 @@
   function syncBall() {
     var h = holderAt(cur), id;
     for (id in tokEl) tokEl[id].classList.toggle('has-ball', id === h);
+    syncHl();   // syncBall() est rejoué à CHAQUE changement de temps : c'est le
+                // seul point d'accroche qui garantit une pastille jamais périmée.
   }
 
   // ── Flèches ──────────────────────────────────────────────────────────
@@ -2612,6 +2667,11 @@
       syncSelection(); setHint();
       return;
     }
+    if (tool === 'hl') {
+      toggleHl(id);
+      syncHl(); renderTimeline(); touch(); setHint();
+      return;
+    }
     if (tool === 'erase') return;   // la gomme ne touche qu'aux flèches
     if (tool === 'shot') {
       // Un seul tir par temps : re-taper la tireuse annule le tir.
@@ -2750,6 +2810,7 @@
     if (sc) out.push(sc + '⊥');
     if (ps) out.push(ps + '⇢');
     if (st.shot) out.push('🎯');
+    if (hlOf(st).length) out.push(hlOf(st).length + '✨');
     return out.join(' ') || '·';
   }
 
@@ -2970,6 +3031,20 @@
       layP.appendChild(sl); layP.appendChild(pu);
       pPaths.shot = { id: st.shot, el: sl, pulse: pu, ball: flyingBall() };
     }
+
+    // Highlights : un anneau par joueuse marquée, monté UNE fois par temps —
+    // renderFrame() n'écrit ensuite que des attributs (aucun coût DOM/frame).
+    var hls = hlOf(st), hi, hid, hc;
+    pPaths.hl = [];
+    for (hi = 0; hi < hls.length; hi++) {
+      hid = hls[hi] && hls[hi].player;
+      if (!hid || !visible(tokById(hid, p0))) continue;
+      hc = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      hc.setAttribute('class', 'hlpulse');
+      hc.setAttribute('opacity', '0');
+      layP.appendChild(hc);
+      pPaths.hl.push({ id: hid, el: hc });
+    }
   }
 
   function arwVisibleIn(a, p) {
@@ -3045,6 +3120,19 @@
         } else ps.ball.style.display = 'none';
         if (pf >= 1 && typeof ps.arw.to === 'string') holder = ps.arw.to;
       }
+    }
+
+    // 2 bis) highlights — exactement l'anneau de la tireuse, mais étalé sur
+    // TOUT le temps (deux respirations, u = 0 → 1) au lieu de la fenêtre de tir.
+    var hll = pPaths.hl, hj, HP, ht;
+    if (hll) for (hj = 0; hj < hll.length; hj++) {
+      HP = live[hll[hj].id];
+      if (!HP) { hll[hj].el.setAttribute('opacity', '0'); continue; }
+      ht = REDUCED_MOTION ? 0.5 : (u * 2) % 1;
+      hll[hj].el.setAttribute('cx', f(HP.x));
+      hll[hj].el.setAttribute('cy', f(HP.y));
+      hll[hj].el.setAttribute('r', f(PR * (1.15 + 0.55 * Math.sin(ht * Math.PI))));
+      hll[hj].el.setAttribute('opacity', f(REDUCED_MOTION ? 0.6 : (1 - ht) * 0.85));
     }
 
     // 3) tir
@@ -3344,7 +3432,7 @@
   // ─────────────────────────────────────────────────────────────────────
   // 10. UI — outils, terrain, vue
   // ─────────────────────────────────────────────────────────────────────
-  var TOOLS = ['select', 'move', 'screen', 'pass', 'shot', 'erase'];
+  var TOOLS = ['select', 'move', 'screen', 'pass', 'shot', 'hl', 'erase'];
   function setTool(t) {
     if (playing || document.body.classList.contains('playing')) exitPlay();
     tool = t;
@@ -4067,6 +4155,10 @@
         st.arw.push({ id: uid('w'), kind: 'pass', from: pf, to: ptTo, via: (Array.isArray(pa.via) ? pa.via : []).map(refPoint).filter(Boolean) });
       }
       st.shot = refId(s.shot);
+      st.highlights = (Array.isArray(s.highlights) ? s.highlights : []).map(function (h) {
+        var r = refId(h && typeof h === 'object' ? h.player : h);
+        return r ? { player: r } : null;
+      }).filter(Boolean);
 
       // ── Branches (jalon 4) ──────────────────────────────────────────
       // Caps appliqués À L'IMPORT : un fichier bricoté à la main ne doit pas
@@ -4823,6 +4915,8 @@
           if (!s.pos) s.pos = startPos(m);
           if (!Array.isArray(s.arw)) s.arw = [];
           if (s.shot === undefined) s.shot = null;
+          s.highlights = (Array.isArray(s.highlights) ? s.highlights : [])
+            .filter(function (h) { return h && h.player; });
           s.arw.forEach(function (a) { if (!Array.isArray(a.via)) a.via = []; });
           if (!Array.isArray(s.branches) || !s.branches.length || depth >= BR_DEPTH_MAX) { delete s.branches; return; }
           s.branches = s.branches.filter(function (b) {
