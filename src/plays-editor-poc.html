@@ -1452,7 +1452,11 @@
   function hoop(from) {
     var m = MODES[mode()];
     if (mode() !== 'full' || !from) return m.hoop;
-    return from.x < 152 ? { x: 27.75, y: 87 } : m.hoop;
+    // v.212 - en PORTRAIT les deux paniers sont empiles (haut / bas) : on
+    // compare donc les Y, pas les X. Comparer les X renvoyait le panier
+    // "gauche" du repere paysage, un point qui n'existe plus nulle part sur
+    // le terrain -> le tir partait dans le vide.
+    return from.y > 152 ? { x: 87, y: 276.25 } : m.hoop;
   }
 
   // Un jeton « live » : identité statique + position du temps courant. Les

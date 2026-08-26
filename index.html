@@ -16698,8 +16698,12 @@ function _animHolders(anim, frames) {
 // Le cercle visé par un tir. En terrain complet, celui du côté où se trouve la
 // tireuse : viser l'autre panier dessinerait une flèche qui traverse tout le
 // terrain.
+let _ANIM_PORTRAIT = false;
 function _animHoop(full, from) {
   if (!full) return { x: 87, y: 27.75 };
+  // v.212 - portrait : paniers empiles, on compare les Y. Un play paysage
+  // jamais re-enregistre garde l'ancienne comparaison, il reste juste.
+  if (_ANIM_PORTRAIT) return (from && from.y > 152) ? { x: 87, y: 276.25 } : { x: 87, y: 27.75 };
   return (from && from.x > 152) ? { x: 276.25, y: 87 } : { x: 27.75, y: 87 };
 }
 
@@ -16881,6 +16885,7 @@ function _animThumbSvg(anim) {
   const col = /^#[0-9a-f]{3,8}$/i.test(anim.color || '') ? anim.color : '#22D3EE';
   // Préfixe de markers propre à CETTE vignette (cf. _animMarkers).
   _ANIM_MK = 'am' + (++_ANIM_UID) + '-';
+  _ANIM_PORTRAIT = portrait;   // v.212 - lu par _animHoop(), comme _ANIM_MK par _animMarkers()
   const steps = Array.isArray(anim.steps) ? anim.steps : [];
   const frames = _animFrames(anim);
   const holders = _animHolders(anim, frames);
@@ -53006,7 +53011,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.211';
+const APP_VERSION = '2026-08-19.212';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
