@@ -282,6 +282,18 @@
      classes, donc plus spécifique que `.arw.atk .body` : c'est lui qui gagne. */
   .arw.atk.screen .body{marker-end:url(#mkScrAtk)}
   .arw.def.screen .body{marker-end:url(#mkScrDef)}
+  /* v.202 — MATÉRIALISATION DES ÉPAULES. Quand une flèche d'écran atteint sa
+     destination, on pose autour du jeton un halo (le tronc) flanqué de deux
+     demi-disques (les épaules qui bloquent), alignés sur le mur de l'écran.
+     C'est un <g> STATIQUE : la boucle ne fait que basculer un `display`, donc
+     aucun coût par frame — et rien à neutraliser en `prefers-reduced-motion`,
+     il n'y a aucune transition à couper. Le groupe vit dans le calque des
+     tracés, donc SOUS les jetons : le halo se lit en anneau, jamais en masque. */
+  .scrshld .core{fill:var(--arw-atk,#22D3EE); fill-opacity:0.20;
+    stroke:var(--arw-atk,#22D3EE); stroke-opacity:0.7; stroke-width:0.5}
+  .scrshld .sh{fill:var(--arw-atk,#22D3EE); fill-opacity:0.9}
+  .scrshld.def .core{fill:var(--arw-def,#8A93A3); stroke:var(--arw-def,#8A93A3)}
+  .scrshld.def .sh{fill:var(--arw-def,#8A93A3)}
   #mkAtk .h, #mkScrAtk .h{fill:var(--arw-atk)}
   #mkDef .h, #mkScrDef .h{fill:var(--arw-def)}
   #mkShot .h{fill:var(--arw-shot)}
@@ -1456,7 +1468,13 @@
   // chiffre, ballon, halo, ombre, pointes de flèche, barre d'écran — est
   // exprimé en fraction de PR, donc tout suit sans un seul cas particulier.
   var SIZES = { s: 0.75, m: 1, l: 1.25 };
-  function radiusFor(m) { return MODES[m].w / 19 * (doc && doc.tokenSize || 1); }
+  // v.202 — Les trois crans restent 0,75 / 1 / 1,25 DANS LE DOCUMENT (c'est la
+  // valeur relue et validée par fromJSON et par la vignette de l'app) ; on ne
+  // rétrécit qu'au RENDU, d'un facteur global. Toucher SIZES aurait invalidé
+  // tous les plays déjà enregistrés, dont le tokenSize serait retombé sur 1.
+  // Effet visible : S 0,60 · M 0,80 · L 1,00.
+  var TOKEN_SHRINK = 0.8;
+  function radiusFor(m) { return MODES[m].w / 19 * (doc && doc.tokenSize || 1) * TOKEN_SHRINK; }
 
   // Sortie d'un temps = sa photo à laquelle on applique ses déplacements.
   // Sert à fabriquer le temps suivant et à détecter les décalages.
@@ -2912,7 +2930,29 @@
         ? (isDef ? 'mkScrDef' : 'mkScrAtk')
         : (isDef ? 'mkDef' : 'mkAtk')) + ')');
       trail.style.opacity = f(REDUCED_MOTION ? TRAIL_OP_MAX : TRAIL_OP_MIN);
-      pPaths.moves.push({ id: a.from, el: el, len: L, trail: trail, ghost: ghost });
+      // v.202 — Les épaules de la poseuse d'écran, préparées ICI (une fois par
+      // temps) et pas dans la boucle : orientation prise sur la tangente de fin
+      // de course, donc le mur d'épaules est perpendiculaire à l'arrivée, comme
+      // le T du marqueur. Repère local après rotate() : +x = sens de la course,
+      // ±y = le mur — les deux demi-disques bombent donc vers l'extérieur.
+      var shld = null;
+      if (a.kind === 'screen' && L > 0.01) {
+        var e1, e0;
+        try { e1 = el.getPointAtLength(L); e0 = el.getPointAtLength(Math.max(0, L - 0.8)); } catch (_) { e1 = null; }
+        if (e1) {
+          var ang = Math.atan2(e1.y - (e0 ? e0.y : e1.y), e1.x - (e0 ? e0.x : e1.x)) * 180 / Math.PI;
+          var hr = PR * 1.12, sr = PR * 0.58;
+          shld = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+          shld.setAttribute('class', 'scrshld' + (isDef ? ' def' : ''));
+          shld.setAttribute('transform', 'translate(' + f(e1.x) + ' ' + f(e1.y) + ') rotate(' + f(ang) + ')');
+          shld.innerHTML = '<circle class="core" cx="0" cy="0" r="' + f(hr) + '"/>'
+            + '<path class="sh" d="M ' + f(-sr) + ' ' + f(-hr) + ' A ' + f(sr) + ' ' + f(sr) + ' 0 0 0 ' + f(sr) + ' ' + f(-hr) + ' Z"/>'
+            + '<path class="sh" d="M ' + f(-sr) + ' ' + f(hr) + ' A ' + f(sr) + ' ' + f(sr) + ' 0 0 1 ' + f(sr) + ' ' + f(hr) + ' Z"/>';
+          shld.style.display = 'none';
+          layP.insertBefore(shld, ghost);
+        }
+      }
+      pPaths.moves.push({ id: a.from, el: el, len: L, trail: trail, ghost: ghost, shld: shld });
     }
 
     var ps = passOf(st);
@@ -2973,6 +3013,10 @@
         live[m.id] = { x: q.x, y: q.y };
       }
       m.trail.setAttribute('stroke-dashoffset', f(m.len * (1 - mu)));
+      // v.202 — L'écran est POSÉ : les épaules apparaissent quand la course est
+      // consommée, et restent jusqu'au bout du temps. Un simple `display`, donc
+      // identique en mouvement réduit.
+      if (m.shld) m.shld.style.display = mu >= 1 ? 'block' : 'none';
       // Le trait se colore au rythme du déplacement : 0.25 → 0.9 (linéaire).
       if (!REDUCED_MOTION)
         m.trail.style.opacity = f(TRAIL_OP_MIN + (TRAIL_OP_MAX - TRAIL_OP_MIN) * mu);

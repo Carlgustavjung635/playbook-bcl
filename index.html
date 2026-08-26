@@ -16852,7 +16852,10 @@ function _animZonesSvg(anim) {
 function _animThumbSvg(anim) {
   const full = anim.court_type === 'full';
   const vb = full ? '0 0 304 174' : '0 0 174 164';
-  const R = (full ? 304 : 174) / 19 * (+anim.players_size === 0.75 || +anim.players_size === 1.25 ? +anim.players_size : 1);
+  // v.202 — Le cran (0,75 / 1 / 1,25) reste la valeur STOCKÉE ; le facteur 0.8
+  // ne vit qu'au rendu, comme TOKEN_SHRINK côté éditeur. Les deux doivent
+  // rester égaux, sinon la vignette ment sur la taille du play.
+  const R = (full ? 304 : 174) / 19 * (+anim.players_size === 0.75 || +anim.players_size === 1.25 ? +anim.players_size : 1) * 0.8;
   const col = /^#[0-9a-f]{3,8}$/i.test(anim.color || '') ? anim.color : '#22D3EE';
   // Préfixe de markers propre à CETTE vignette (cf. _animMarkers).
   _ANIM_MK = 'am' + (++_ANIM_UID) + '-';
@@ -52977,7 +52980,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.201';
+const APP_VERSION = '2026-08-19.202';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
