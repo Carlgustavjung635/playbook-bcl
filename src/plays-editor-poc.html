@@ -5380,6 +5380,17 @@
 
   function vwShowTree() {
     if (!vwOn) return;
+    // v.201 - VERROU UNIQUE : aucune variante activee = aucun arbre, jamais, quel
+    // que soit l appelant (fin de chemin, tap dans le vide, 🌳, menu). La garde
+    // posee a l entree du viewer en v.200 ne couvrait QUE l accueil : la fin de
+    // la ligne principale rouvrait un menu a une seule entree. Ici le viewer
+    // reste ce qu il doit etre dans ce cas : un lecteur lineaire. Le test
+    // rootSteps().length coupe la recursion sur un play vide (route toujours
+    // vide => vwStartRoute rappellerait vwShowTree en boucle).
+    if (!vwHasBranches()) {
+      if (!vwRoute.length && rootSteps().length) vwPlayPath([]);
+      return;
+    }
     if (playing) pause();
     vwMenu.classList.remove('show');
     vwTreeRender();
