@@ -843,6 +843,7 @@
   <div class="zrow">
     <span class="zlbl" id="z-what">Zone</span>
     <input type="text" id="z-label" placeholder="Nom (ex. Rebond fort)" maxlength="28">
+    <button class="btn sm" id="z-dup" title="Dupliquer cette zone">📋</button>
     <button class="btn sm danger" id="z-del" title="Supprimer cette zone">🗑</button>
     <button class="btn sm" id="z-ok" title="Terminé">✓</button>
   </div>
@@ -1864,6 +1865,25 @@
     drawZones(); zBarSync(); zLegendSync();
     toast('Zone ajoutée — glisse-la, puis règle-la en bas.', 'ok');
   }
+  // Dupliquer plutôt que refaire : deux zones jumelles (même couleur, même
+  // taille, même angle) de part et d autre du terrain se posent en un geste
+  // au lieu de six réglages à refaire à l identique. La copie atterrit
+  // décalée de +5 : posée pile sur l originale, le coach croirait que rien
+  // ne s est passé et taperait deux fois de plus.
+  // Elle part dans zList() — donc dans les zones de la LIGNE COURANTE (v.198),
+  // jamais dans celles d une ligne héritée dont elle serait invisible ici.
+  function zDuplicate() {
+    var src = zSel ? zById(zSel) : null;
+    if (!src) return;
+    var z = zNorm(src);           // copie profonde de fait : zNorm reconstruit
+    z.id = uid('z');
+    z.x += 5; z.y += 5;
+    zClamp(z);
+    zList().push(z);
+    zSel = z.id; dirty = true;
+    drawZones(); zBarSync(); zLegendSync();
+    toast('Zone dupliquée — glisse-la où tu veux.', 'ok');
+  }
   function zDelete() {
     var l = zList(), i;
     for (i = 0; i < l.length; i++) if (l[i] && l[i].id === zSel) { l.splice(i, 1); break; }
@@ -1958,6 +1978,7 @@
     document.getElementById('z-ok').addEventListener('click', function () {
       zSel = null; drawZones(); zBarSync();
     });
+    document.getElementById('z-dup').addEventListener('click', function () { zDuplicate(); });
     document.getElementById('z-del').addEventListener('click', function () {
       if (zSel && confirm('Supprimer cette zone ?')) zDelete();
     });
@@ -2002,11 +2023,25 @@
       var p0 = toCourt(e.clientX, e.clientY);
       if (!p0) return;
       var kind = hz ? hz.getAttribute('data-zh') : 'move';
-      var n0 = zNorm(z), moved = false;
+      var n0 = zNorm(z), moved = false, pid = e.pointerId;
       // On repart de la forme NORMALISÉE : sans ça, un h absent sur une zone
       // importée ferait un NaN dès la première poignée tirée.
       z.shape = n0.shape; z.w = n0.w; z.h = n0.h; z.rot = n0.rot;
+      // ⚠️ AU DOIGT, le navigateur capture IMPLICITEMENT le pointeur sur
+      // l élément touché. Or chaque pointermove redessine le calque des
+      // poignées (innerHTML = …) : la cible capturée quitte le DOM, le
+      // navigateur relâche la capture et émet pointercancel — que up() écoute.
+      // Résultat : le geste mourait après le TOUT PREMIER déplacement. À la
+      // souris rien de tout ça, d où un bug resté invisible depuis la v.191
+      // et surtout visible sur la rotation (un angle échantillonné une seule
+      // fois = « ça ne tourne pas », alors qu un déplacement figé après 1 px
+      // passe encore pour un doigt qui a glissé).
+      // On déplace donc la capture sur le <svg> : le seul élément que le
+      // redessin ne remplace jamais. Les pointermove lui sont re-routés, puis
+      // remontent jusqu à window où on les écoute déjà.
+      try { if (pid != null && svg.setPointerCapture) svg.setPointerCapture(pid); } catch (err) {}
       function mv(ev) {
+        if (pid != null && ev.pointerId !== pid) return;   // 2e doigt ignoré
         var p = toCourt(ev.clientX, ev.clientY);
         if (!p) return;
         moved = true;
@@ -2023,7 +2058,9 @@
         zClamp(z);
         drawZones();
       }
-      function up() {
+      function up(ev) {
+        if (ev && pid != null && ev.pointerId !== pid) return;
+        try { if (pid != null && svg.hasPointerCapture && svg.hasPointerCapture(pid)) svg.releasePointerCapture(pid); } catch (err) {}
         window.removeEventListener('pointermove', mv);
         window.removeEventListener('pointerup', up);
         window.removeEventListener('pointercancel', up);
