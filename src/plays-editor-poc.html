@@ -5339,6 +5339,87 @@
                     : '🚫 « ' + b.name + ' » masquée côté joueuse.', 'ok');
   }
 
+  // Dupliquer une variante (v.212) — le coach travaille souvent DEUX lectures
+  // d'une même bifurcation (« aide qui vient » / « aide qui ne vient pas ») :
+  // elles partagent 80 % de leurs temps. Refaire la seconde à la main, c'est
+  // reposer dix positions et rejouer les flèches. Ici : copie profonde, puis
+  // il ne reste qu'à modifier ce qui diffère.
+  //
+  // ⚠️ Deux branches qui partageraient un id de temps, de flèche ou de zone se
+  // marcheraient dessus au premier tap (pathKey, sélection de flèche, drag de
+  // zone raisonnent tous par id). Le clone JSON copie les ids À L'IDENTIQUE :
+  // regenIds() les rebat TOUS, en profondeur, avant que la copie n'entre dans
+  // le document. Les flèches, elles, désignent des JETONS (a1…d5) ou des
+  // points — rien à réécrire de ce côté.
+  function regenIds(list) {
+    (Array.isArray(list) ? list : []).forEach(function (st) {
+      st.id = uid('s');
+      if (Array.isArray(st.arw)) st.arw.forEach(function (w) { w.id = uid('w'); });
+      if (Array.isArray(st.zones)) st.zones.forEach(function (z) { z.id = uid('z'); });
+      if (Array.isArray(st.branches)) st.branches.forEach(function (b) {
+        b.id = uid('b');
+        if (Array.isArray(b.zones)) b.zones.forEach(function (z) { z.id = uid('z'); });
+        regenIds(b.steps);
+      });
+    });
+  }
+
+  function dupBranchPath(path) {
+    if (playing || vwOn) return;
+    if (!path.length) return;
+    var hop = path[path.length - 1];
+    var parent = stepsAt(path.slice(0, -1));
+    var st = parent[hop.si];
+    if (!st || !Array.isArray(st.branches)) return;
+    var i = -1, k;
+    for (k = 0; k < st.branches.length; k++) if (st.branches[k].id === hop.bid) i = k;
+    if (i < 0) return;
+    // Même plafond qu'à la création : la copie est une variante de plus sur ce
+    // temps, elle ne contourne pas la limite.
+    if (st.branches.length >= BR_PER_STEP) { toast('Maximum ' + BR_PER_STEP + ' variantes par temps atteint.', 'err'); return; }
+    var c = JSON.parse(JSON.stringify(st.branches[i]));
+    c.id = uid('b');
+    c.name = (String(c.name || 'Variante') + ' (copie)').slice(0, 60);
+    if (Array.isArray(c.zones)) c.zones.forEach(function (z) { z.id = uid('z'); });
+    regenIds(c.steps);
+    // Juste EN DESSOUS de l'originale : on la retrouve là où on l'a demandée,
+    // pas en fin de liste.
+    st.branches.splice(i + 1, 0, c);
+    dirty = true;
+    renderTree(); renderTimeline();
+    toast('Branche dupliquée : « ' + c.name + ' ».', 'ok');
+  }
+
+  // Réordonner une variante parmi ses SŒURS (v.212) — l'ordre du tableau est
+  // le seul ordre qui existe : l'arbre, les pistes et le menu des variantes
+  // côté joueuse le relisent tous. Un simple échange de deux cases suffit
+  // donc, il n'y a aucun champ « rang » à maintenir.
+  //
+  // Volontairement des flèches et PAS un drag & drop : le DnD des temps avait
+  // dû être retiré en v.178, et la capture de pointeur sur une liste qui se
+  // redessine est exactement le piège de la v.201. Deux taps, zéro geste.
+  //
+  // pathKey() encode (index du temps, id de branche) — pas le rang parmi les
+  // sœurs : échanger deux cases ne périme donc AUCUN chemin ouvert, ni celui
+  // du coach ni celui du viewer.
+  function moveBranchPath(path, dir) {
+    if (playing || vwOn) return;
+    if (!path.length) return;
+    var hop = path[path.length - 1];
+    var parent = stepsAt(path.slice(0, -1));
+    var st = parent[hop.si];
+    if (!st || !Array.isArray(st.branches)) return;
+    var i = -1, k;
+    for (k = 0; k < st.branches.length; k++) if (st.branches[k].id === hop.bid) i = k;
+    if (i < 0) return;
+    var j = i + dir;
+    if (j < 0 || j >= st.branches.length) return;
+    var tmp = st.branches[i]; st.branches[i] = st.branches[j]; st.branches[j] = tmp;
+    dirty = true;
+    renderTree(); renderTimeline();
+    toast('« ' + st.branches[j].name + ' » ' + (dir < 0 ? 'remontée' : 'descendue') + '.', 'ok');
+  }
+
   // ── Arbre + pistes ───────────────────────────────────────────────────
   var elTree = document.getElementById('tree');
   var elTreeList = document.getElementById('tree-list');
@@ -5350,7 +5431,7 @@
       bs = Array.isArray(list[i].branches) ? list[i].branches : [];
       for (j = 0; j < bs.length; j++) {
         p = path.concat([{ si: i, bid: bs[j].id }]);
-        out.push({ path: p, depth: depth, name: bs[j].name, from: i, n: bs[j].steps.length, ret: bs[j].returns_to_main !== false, on: brOn(bs[j]) });
+        out.push({ path: p, depth: depth, name: bs[j].name, from: i, n: bs[j].steps.length, ret: bs[j].returns_to_main !== false, on: brOn(bs[j]), idx: j, sib: bs.length });
         treeRows(bs[j].steps, p, depth + 1, out);
       }
     }
@@ -5377,6 +5458,9 @@
         + '<span class="nm" title="' + esc(r.name) + '">🔀 ' + esc(r.name) + '</span>'
         + '<span class="ct">T' + (r.from + 1) + ' · ' + r.n + '</span>'
         + '<button class="del" data-en="' + esc(k) + '" title="' + (r.on ? 'Masquer' : 'Rendre visible') + ' cette variante côté joueuse">' + (r.on ? '👁' : '🚫') + '</button>'
+        + '<button class="del" data-up="' + esc(k) + '"' + (r.idx === 0 ? ' disabled style="opacity:.25"' : '') + ' title="Remonter parmi les variantes du même temps">⬆</button>'
+        + '<button class="del" data-dn="' + esc(k) + '"' + (r.idx === r.sib - 1 ? ' disabled style="opacity:.25"' : '') + ' title="Descendre parmi les variantes du même temps">⬇</button>'
+        + '<button class="del" data-dup="' + esc(k) + '" title="Dupliquer cette branche (copie profonde)">📋</button>'
         + '<button class="del" data-ren="' + esc(k) + '" title="Renommer cette branche">✎</button>'
         + '<button class="del" data-del="' + esc(k) + '" title="Supprimer cette branche">🗑</button></div>';
     });
@@ -5404,6 +5488,12 @@
     if (!t || !t.getAttribute) return;
     var en = t.getAttribute('data-en');
     if (en !== null) { e.stopPropagation(); toggleBranchPath(pathFromKey(en)); return; }
+    var up = t.getAttribute('data-up');
+    if (up !== null) { e.stopPropagation(); moveBranchPath(pathFromKey(up), -1); return; }
+    var dn = t.getAttribute('data-dn');
+    if (dn !== null) { e.stopPropagation(); moveBranchPath(pathFromKey(dn), 1); return; }
+    var dup = t.getAttribute('data-dup');
+    if (dup !== null) { e.stopPropagation(); dupBranchPath(pathFromKey(dup)); return; }
     var ren = t.getAttribute('data-ren');
     if (ren !== null) { e.stopPropagation(); renameBranchPath(pathFromKey(ren)); return; }
     var del = t.getAttribute('data-del');
