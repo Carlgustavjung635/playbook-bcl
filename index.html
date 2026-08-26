@@ -16578,17 +16578,18 @@ function _ensurePlayNavKeys() {
 // sur la géométrie (cotes FIBA, marge de 12 unités).
 const _ANIM_JOIN = Math.sqrt(67.5 * 67.5 - 66 * 66);
 
-function _animCourt(full) {
+function _animCourt(full, portrait) {
   const j = (27.75 + _ANIM_JOIN).toFixed(2), jr = (276.25 - _ANIM_JOIN).toFixed(2);
   const ln = 'fill="none" stroke="currentColor" stroke-opacity="0.34" stroke-width="1"';
   return full
-    ? `<rect x="12" y="12" width="280" height="150" fill="currentColor" fill-opacity="0.05"/>
+    ? `<g transform="${portrait ? 'rotate(-90) translate(-304,0)' : ''}">
+       <rect x="12" y="12" width="280" height="150" fill="currentColor" fill-opacity="0.05"/>
        <rect x="12" y="12" width="280" height="150" ${ln}/>
        <line x1="152" y1="12" x2="152" y2="162" ${ln}/><circle cx="152" cy="87" r="18" ${ln}/>
        <rect x="12" y="62.5" width="58" height="49" ${ln}/><circle cx="70" cy="87" r="18" ${ln}/>
        <path d="M 12 21 L ${j} 21 A 67.5 67.5 0 0 1 ${j} 153 L 12 153" ${ln}/>
        <rect x="234" y="62.5" width="58" height="49" ${ln}/><circle cx="234" cy="87" r="18" ${ln}/>
-       <path d="M 292 21 L ${jr} 21 A 67.5 67.5 0 0 0 ${jr} 153 L 292 153" ${ln}/>`
+       <path d="M 292 21 L ${jr} 21 A 67.5 67.5 0 0 0 ${jr} 153 L 292 153" ${ln}/></g>`
     : `<rect x="12" y="12" width="150" height="140" fill="currentColor" fill-opacity="0.05"/>
        <rect x="12" y="12" width="150" height="140" ${ln}/>
        <path d="M 69 152 A 18 18 0 0 1 105 152" ${ln}/>
@@ -16869,11 +16870,14 @@ function _animZonesSvg(anim) {
 
 function _animThumbSvg(anim) {
   const full = anim.court_type === 'full';
-  const vb = full ? '0 0 304 174' : '0 0 174 164';
+  // v.210 - chaque play est rendu dans SON orientation : une vignette de play
+  // paysage jamais re-enregistre reste juste, elle ne casse pas.
+  const portrait = full && anim.court_orient === 'portrait';
+  const vb = full ? (portrait ? '0 0 174 304' : '0 0 304 174') : '0 0 174 164';
   // v.202 — Le cran (0,75 / 1 / 1,25) reste la valeur STOCKÉE ; le facteur 0.8
   // ne vit qu'au rendu, comme TOKEN_SHRINK côté éditeur. Les deux doivent
   // rester égaux, sinon la vignette ment sur la taille du play.
-  const R = (full ? 304 : 174) / 19 * (+anim.players_size === 0.75 || +anim.players_size === 1.25 ? +anim.players_size : 1) * 0.8;
+  const R = (full && !portrait ? 304 : 174) / 19 * (+anim.players_size === 0.75 || +anim.players_size === 1.25 ? +anim.players_size : 1) * 0.8;
   const col = /^#[0-9a-f]{3,8}$/i.test(anim.color || '') ? anim.color : '#22D3EE';
   // Préfixe de markers propre à CETTE vignette (cf. _animMarkers).
   _ANIM_MK = 'am' + (++_ANIM_UID) + '-';
@@ -16899,7 +16903,7 @@ function _animThumbSvg(anim) {
   const b0 = holders[0] ? p0[holders[0]] : null;
   const ball = b0 ? _animBallSvg(R).replace('translate(0,0)', `translate(${_animF(b0.x)},${_animF(b0.y)})`) : '';
   return `<svg viewBox="${vb}" style="display:block;width:100%;height:auto;color:var(--ink-3)"
-    preserveAspectRatio="xMidYMid meet" aria-hidden="true">${_animMarkers(_ANIM_MK, R, col)}${_animCourt(full)}${_animZonesSvg(anim)}${arrows}${toks}${ball}</svg>`;
+    preserveAspectRatio="xMidYMid meet" aria-hidden="true">${_animMarkers(_ANIM_MK, R, col)}${_animCourt(full, portrait)}${_animZonesSvg(anim)}${arrows}${toks}${ball}</svg>`;
 }
 
 // v.207 — Les vignettes ne s'animent PLUS, nulle part : fiche play, liste des
@@ -53002,7 +53006,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.210';
+const APP_VERSION = '2026-08-19.211';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.

@@ -1086,7 +1086,11 @@
     // Demi-terrain vertical (panier en haut) — orientation naturelle sur iPhone.
     half: { vb: '0 0 174 164', w: 174, h: 164, hoop: { x: 87, y: 27.75 } },
     // Terrain complet horizontal (deux paniers, on attaque à droite).
-    full: { vb: '0 0 304 174', w: 304, h: 174, hoop: { x: 276.25, y: 87 } }
+    // v.210 - Terrain complet VERTICAL (deux paniers empiles, on attaque vers
+    // le HAUT). Meme sens de lecture qu'en demi-terrain, et un terrain qui tient
+    // dans un telephone sans le tourner. Le repere est le paysage historique
+    // tourne de -90 degres : (x, y) -> (y, 304 - x).
+    full: { vb: '0 0 174 304', w: 174, h: 304, hoop: { x: 87, y: 27.75 } }
   };
 
   // Dispositions de départ. Attaque en 2-1-2 face au panier, défense en
@@ -1103,8 +1107,8 @@
       def: [ {x:87,y:90},  {x:46,y:78},  {x:128,y:78},  {x:64,y:33},  {x:110,y:33} ]
     },
     full: {
-      atk: [ {x:140,y:87}, {x:168,y:30}, {x:168,y:144}, {x:228,y:48},  {x:228,y:126} ],
-      def: [ {x:174,y:87}, {x:202,y:24}, {x:202,y:150}, {x:262,y:48},  {x:262,y:126} ]
+      atk: [ {x:87,y:164}, {x:30,y:136}, {x:144,y:136}, {x:48,y:76},  {x:126,y:76} ],
+      def: [ {x:87,y:130}, {x:24,y:102}, {x:150,y:102}, {x:48,y:42},  {x:126,y:42} ]
     }
   };
 
@@ -1239,6 +1243,9 @@
   function fullCourt() {
     var j = f(27.75 + JOIN), jr = f(276.25 - JOIN);   // raccords arc/corner
     return ''
+      // Le dessin reste ECRIT en repere paysage puis subit la MEME rotation
+      // que les coordonnees du modele : un seul jeu de constantes a maintenir.
+      + '<g transform="rotate(-90) translate(-304,0)">'
       + '<rect class="out" x="0" y="0" width="304" height="174"/>'
       + '<rect class="court" x="12" y="12" width="280" height="150"/>'
       + '<rect class="ln strong" x="12" y="12" width="280" height="150"/>'
@@ -1261,8 +1268,11 @@
       + '<line class="hp" x1="280" y1="87" x2="278.5" y2="87"/>'
       + '<circle class="hp" cx="276.25" cy="87" r="2.25"/>'
       // Logo du club, au centre du rond central — parquet NBA.
-      + courtLogo(152, 87, 18)
-      + '<rect class="sheen" x="12" y="12" width="280" height="150"/>';
+      // (le logo est pose plus bas, HORS rotation)
+      + '<rect class="sheen" x="12" y="12" width="280" height="150"/>'
+      + '</g>'
+      // Le logo NE tourne PAS : il vit dans le repere portrait, plein centre.
+      + courtLogo(87, 152, 18);
   }
 
   function f(n) { return Math.round(n * 100) / 100; }
@@ -1306,7 +1316,7 @@
       id: null, title: '', tag: '', side: 'attaque', color: '#22D3EE',
       description: '', points: '', author: '',
       ballStart: 'a1', defOn: false, mode: 'half', tokenSize: 1, labelStyle: 'numbers',
-      zones: [],
+      zones: [], fullOrient: 'portrait',
       half: { steps: [ makeStep(startPos('half')) ] },
       full: { steps: [ makeStep(startPos('full')) ] }
     };
@@ -4153,6 +4163,7 @@
       when_to_play: doc.whenToPlay || '',
       points_md: doc.points || '',
       court_type: doc.mode,
+      court_orient: 'portrait',
       defense_enabled: !!doc.defOn,
       players_size: doc.tokenSize || 1,
       player_label_style: doc.labelStyle === 'letters' ? 'letters' : 'numbers',
@@ -4219,6 +4230,8 @@
     if (Array.isArray(d.points)) d.points = d.points.join('\n');
     d.author = pick(o, 'created_by', 'createdBy', 'author') || '';
     d.mode = m;
+    // Sans stamp, le fichier vient d'avant v.210 : ses coordonnees sont en paysage.
+    d.fullOrient = (pick(o, 'court_orient', 'courtOrient') === 'portrait') ? 'portrait' : 'landscape';
     d.defOn = !!pick(o, 'defense_enabled', 'defenseEnabled');
     d.zones = zDec(o.zones);
     // Taille des jetons : on n'accepte que les trois crans connus. Un fichier
@@ -4363,9 +4376,41 @@
     return d;
   }
 
+  // -- v.210 : bascule paysage -> portrait du plein terrain ------------
+  // Les plays enregistres AVANT portent des coordonnees paysage. On ne migre
+  // RIEN en base : la rotation se fait au CHARGEMENT, une seule fois, et le
+  // prochain enregistrement stampe court_orient:'portrait'. Un document deja
+  // portrait n'est donc jamais tourne deux fois.
+  //   (x, y) paysage -> (y, 304 - x)   [rotation -90 degres, PAS un miroir]
+  function rotFull(p) {
+    var x = +p.x, y = +p.y;
+    p.x = f(y); p.y = f(304 - x);
+    // Un rectangle tourne d'un quart de tour echange ses cotes.
+    if (isFinite(+p.w) && isFinite(+p.h)) { var w = +p.w; p.w = +p.h; p.h = w; }
+  }
+  // Balayage PROFOND : positions des temps, points de passage des fleches,
+  // sommets des zones peintes, branches des variantes -- sous `full`, tout
+  // couple {x,y} est une coordonnee terrain, sans exception.
+  function rotDeep(n, seen) {
+    if (!n || typeof n !== 'object' || seen.indexOf(n) >= 0) return;
+    seen.push(n);
+    if (isFinite(+n.x) && isFinite(+n.y)) { rotFull(n); return; }
+    if (Array.isArray(n)) { for (var i = 0; i < n.length; i++) rotDeep(n[i], seen); return; }
+    for (var k in n) if (Object.prototype.hasOwnProperty.call(n, k)) rotDeep(n[k], seen);
+  }
+  function migrateFullToPortrait(d) {
+    if (!d || d.fullOrient === 'portrait') return;
+    d.fullOrient = 'portrait';
+    rotDeep(d.full, []);
+    // `zones` global (heritage v.191) : il n'appartient au plein terrain que
+    // si c'est le mode du play.
+    if (d.mode === 'full') rotDeep(d.zones, []);
+  }
+
   function loadDoc(d) {
     if (document.body.classList.contains('playing')) exitPlay();
     doc = d;
+    migrateFullToPortrait(doc);
     migrateZonesToBranchScope(doc); zHostKey = null;
     zSel = null; zBarSync();
     // bpath appartient au document PRÉCÉDENT : le garder ferait pointer un
