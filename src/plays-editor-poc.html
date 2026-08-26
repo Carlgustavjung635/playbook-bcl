@@ -273,6 +273,34 @@
   .net3{fill:none; stroke:var(--hoop); stroke-width:.45; opacity:.7; stroke-linecap:round}
   .post3{fill:none; stroke:var(--hoop); stroke-width:.9; opacity:.7}
   .hsh3{fill:#000; opacity:.20; pointer-events:none}
+  /* Relief du parquet : le fond s'assombrit, l'avant reste clair. */
+  .depth3{fill:url(#gDepth); pointer-events:none}
+  .near3{fill:none; stroke:var(--line); stroke-width:1.05; stroke-linecap:round; opacity:.95}
+  body.v3d .ln{stroke-width:.46}
+  body.v3d .ln.strong{stroke-width:.62}
+  /* PION DEBOUT (v.214b). Tête face caméra : le chiffre reste lisible, ce
+     qu'un cylindre vu de haut ne permet pas. */
+  .foot3{fill:#000; opacity:.34; pointer-events:none}
+  .token .stem3{fill:url(#gDisc); opacity:.68}
+  .token.def .stem3{fill:url(#gDef); opacity:.68}
+  .gloss3{fill:#fff; opacity:.15; pointer-events:none}
+  .token .sh.sh3{opacity:.34}
+  .bgl{fill:#fff; opacity:.34; pointer-events:none}
+  /* Ballon en vol : les coutures tournent. Transform CSS pur = composité,
+     aucune frame de rAF en plus — et coupé net sous reduced-motion. */
+  @keyframes fbspin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+  body.v3d #lay-play .fb .spin{transform-origin:0 0; animation:fbspin 1.15s linear infinite}
+  @media (prefers-reduced-motion: reduce){ body.v3d #lay-play .fb .spin{animation:none} }
+  /* Barre de caméra : deux angles + un retour à zéro. */
+  .cam3d{position:fixed; left:50%; transform:translateX(-50%);
+    bottom:calc(env(safe-area-inset-bottom,0px) + 48px); z-index:60; display:none;
+    gap:10px; align-items:center; padding:6px 12px; border-radius:999px;
+    background:rgba(15,23,42,.88); border:1px solid rgba(148,163,184,.35);
+    box-shadow:0 6px 18px rgba(0,0,0,.35)}
+  body.v3d .cam3d{display:flex}
+  body.viewer.v3d .cam3d{bottom:calc(env(safe-area-inset-bottom,0px) + 114px)}
+  .cam3d label{display:flex; align-items:center; gap:5px; color:#cbd5e1; font-size:13px}
+  .cam3d input[type=range]{width:82px; accent-color:var(--accent,#22D3EE)}
   /* Bandeau discret : la 3D est une vue de LECTURE, il faut que ca se voie. */
   .v3dbadge{position:fixed; left:50%; transform:translateX(-50%);
     bottom:calc(env(safe-area-inset-bottom,0px) + 12px); z-index:60; display:none;
@@ -1064,6 +1092,13 @@
 
 <div class="toast" id="toast"></div>
 <div class="v3dbadge" id="v3d-badge">🎬 Mode lecture 3D</div>
+<!-- Angle de caméra : préférence de LECTURE (localStorage), jamais une
+     donnée du play. Glisser sur le terrain fait la même chose. -->
+<div class="cam3d" id="cam3d">
+  <label title="Inclinaison de la caméra">⛰<input type="range" id="cam-tilt" min="20" max="85" step="1"></label>
+  <label title="Rotation autour du terrain">↻<input type="range" id="cam-yaw" min="-55" max="55" step="1"></label>
+  <button class="btn sm" id="cam-reset" title="Angle par défaut">⟲</button>
+</div>
 
 <script>
 (function () {
@@ -1228,6 +1263,11 @@
       +   '<stop offset="0" stop-color="var(--line)" stop-opacity="0.20"/>'
       +   '<stop offset="1" stop-color="var(--line)" stop-opacity="0"/>'
       + '</linearGradient>'
+      + '<linearGradient id="gDepth" x1="0" y1="0" x2="0" y2="1">'
+      +   '<stop offset="0" stop-color="#000" stop-opacity="0.30"/>'
+      +   '<stop offset="0.55" stop-color="#000" stop-opacity="0.08"/>'
+      +   '<stop offset="1" stop-color="#fff" stop-opacity="0.06"/>'
+      + '</linearGradient>'
       + '</defs>';
   }
 
@@ -1319,97 +1359,182 @@
   // ─────────────────────────────────────────────────────────────────────
   // 1 bis. PROJECTION 3D (v.214 — jalon 6, lecture seule)
   // ─────────────────────────────────────────────────────────────────────
-  // Projection OBLIQUE (cavaliere), pas une vraie perspective : elle est
-  // AFFINE, donc exprimable en une seule matrice SVG. C'est tout l'interet —
-  // un <g transform="matrix(...)"> pose sur le terrain, les fleches, les
-  // zones et le calque de lecture donne EXACTEMENT le meme resultat que
-  // project() applique point par point. Zero reecriture du constructeur de
-  // chemins, zero cout par frame, et les animations 2D existantes se lisent
-  // en 3D sans une ligne de donnee modifiee.
+  // CAMÉRA — deux angles, UNE matrice.
+  //   tilt θ  élévation au-dessus du parquet. 90° = vue du dessus (donc la
+  //           2D), 20° = presque au ras du sol.  sin θ écrase la profondeur.
+  //   yaw  φ  rotation autour de l'axe vertical : c'est elle qui donne le 3/4.
   //
-  //   x' = sx.x + kx.y + x0      (kx = cisaillement : le sol "tourne")
-  //   y' = sy.y + y0             (sy < 1 : la profondeur s'ecrase)
+  // La composition « rotation DANS le plan, puis écrasement » reste AFFINE :
+  //   X = cosφ·x + sinφ·y
+  //   Y = sinθ·(−sinφ·x + cosφ·y)
+  // donc toujours exprimable en UNE matrice SVG. C'est tout l'intérêt : le
+  // terrain, les flèches, les zones et le calque de lecture la portent en
+  // <g transform>, et project() EST cette matrice — un tracé écrit en
+  // coordonnées terrain atterrit exactement sous le jeton, sans toucher au
+  // constructeur de chemins, sans un octet de donnée modifié, et sans un
+  // seul calcul supplémentaire par frame. Bouger la caméra ne réécrit que
+  // SIX nombres.
   //
-  // Le resultat tient dans le MEME viewBox que la 2D (96 % de la largeur,
-  // pousse vers le bas pour degager l'horizon et les paniers en elevation) :
-  // ni l'export photo, ni les mesures, ni le viewer n'ont a bouger.
-  var ISO = { half: { kx: 0.16, sy: 0.62, ty: 0.66 },
-              full: { kx: 0.11, sy: 0.70, ty: 0.62 } };
+  // L'angle est une PRÉFÉRENCE DE LECTURE, pas une donnée du play : il vit
+  // en localStorage, jamais dans doc. Deux coachs regardent le même play
+  // sous deux angles sans se marcher dessus.
+  var CAM_KEY = 'pb_plays_cam3d';
+  var CAM_DEF = { tilt: 42, yaw: 16 };
+  var CAM_LIM = { tlo: 20, thi: 85, ylo: -55, yhi: 55 };
+  function clampCam(v, lo, hi) { v = +v; if (!isFinite(v)) return lo; return v < lo ? lo : (v > hi ? hi : v); }
+  var cam = (function () {
+    try {
+      var r = JSON.parse(localStorage.getItem(CAM_KEY) || 'null');
+      if (r) return { tilt: clampCam(r.tilt, CAM_LIM.tlo, CAM_LIM.thi),
+                      yaw:  clampCam(r.yaw,  CAM_LIM.ylo, CAM_LIM.yhi) };
+    } catch (e) {}
+    return { tilt: CAM_DEF.tilt, yaw: CAM_DEF.yaw };
+  })();
+  function camSave() { try { localStorage.setItem(CAM_KEY, JSON.stringify(cam)); } catch (e) {} }
 
+  var RAD = Math.PI / 180;
+  var HOOP_RISE = 37;        // anneau (26) + panneau (11), en unités d'écran
+  var SLAB = 4.5;            // épaisseur de la dalle de parquet
+  function f4(n) { return Math.round(n * 10000) / 10000; }
+
+  // isoOf() est appelée pour CHAQUE jeton à CHAQUE frame : elle est
+  // mémoïsée sur (mode, tilt, yaw). Sans ça, ce sont 4 sinus + 8 projections
+  // de coins × 10 jetons × 60 fps sur un iPhone.
+  var isoCache = { k: '', v: null };
+  function isoBust() { isoCache.k = ''; }
   function isoOf(m) {
-    var M = MODES[m] || MODES.half, c = ISO[m] || ISO.half;
-    var sx = (M.w * 0.96 - M.h * c.kx) / M.w;
-    return { sx: sx, kx: c.kx, sy: c.sy,
-             x0: (M.w - (sx * M.w + c.kx * M.h)) / 2,
-             y0: (M.h - c.sy * M.h) * c.ty };
+    var key = m + '|' + cam.tilt + '|' + cam.yaw;
+    if (isoCache.k === key) return isoCache.v;
+    var M = MODES[m] || MODES.half, W = M.w, H = M.h;
+    var th = Math.sin(clampCam(cam.tilt, CAM_LIM.tlo, CAM_LIM.thi) * RAD);
+    var ph = clampCam(cam.yaw, CAM_LIM.ylo, CAM_LIM.yhi) * RAD;
+    var cf = Math.cos(ph), sf = Math.sin(ph);
+    var a = cf, b = -th * sf, c = sf, d = th * cf;      // avant mise à l'échelle
+    var xs = [0, a * W, c * H, a * W + c * H];
+    var ys = [0, b * W, d * H, b * W + d * H];
+    var x0 = Math.min.apply(null, xs), x1 = Math.max.apply(null, xs);
+    var y0 = Math.min.apply(null, ys), y1 = Math.max.apply(null, ys);
+    var bw = Math.max(1e-6, x1 - x0), bh = Math.max(1e-6, y1 - y0);
+    // Échelle UNIFORME : c'est l'INCLINAISON qui écrase le parquet, jamais le
+    // cadrage. Une mise à l'échelle anisotrope ferait mentir la géométrie.
+    // La hauteur réservée au panier dressé (HOOP_RISE) dépend elle-même de
+    // l'échelle, d'où la résolution directe s ≤ (H − SLAB)/(bh + HOOP_RISE).
+    var sc = Math.min(W * 0.96 / bw, Math.max(0.05, (H - SLAB) / (bh + HOOP_RISE)));
+    var free = H - (sc * bh + HOOP_RISE * sc + SLAB);
+    var r = {
+      a: sc * a, b: sc * b, c: sc * c, d: sc * d,
+      e: (W - sc * bw) / 2 - sc * x0,
+      f: HOOP_RISE * sc + (free > 0 ? free * 0.55 : 0) - sc * y0,
+      s: sc, sy: th, ybh: sc * bh, ymin: 0
+    };
+    r.ymin = r.f + sc * y0;    // sommet du parquet projeté, en unités d'écran
+    isoCache.k = key; isoCache.v = r;
+    return r;
   }
   function isoMatrix(m) {
     var i = isoOf(m);
-    return 'matrix(' + f(i.sx) + ' 0 ' + f(i.kx) + ' ' + f(i.sy) + ' ' + f(i.x0) + ' ' + f(i.y0) + ')';
+    return 'matrix(' + f4(i.a) + ' ' + f4(i.b) + ' ' + f4(i.c) + ' ' + f4(i.d) + ' ' + f4(i.e) + ' ' + f4(i.f) + ')';
   }
-  // Matrice INVERSE : pour les objets qui vivent dans le calque du sol mais
-  // doivent rester ronds (le ballon en vol).
+  // Matrice INVERSE : pour ce qui vit dans le calque du sol mais doit rester
+  // rond (le ballon en vol).
   function isoInvMatrix(m) {
-    var i = isoOf(m);
-    return 'matrix(' + f(1 / i.sx) + ' 0 ' + f(-i.kx / (i.sx * i.sy)) + ' ' + f(1 / i.sy) + ' 0 0)';
+    var i = isoOf(m), dt = (i.a * i.d - i.b * i.c) || 1e-6;
+    return 'matrix(' + f4(i.d / dt) + ' ' + f4(-i.b / dt) + ' ' + f4(-i.c / dt) + ' ' + f4(i.a / dt) + ' 0 0)';
   }
-  function project3(p)   { var i = isoOf(mode()); return { x: i.sx * p.x + i.kx * p.y + i.x0, y: i.sy * p.y + i.y0 }; }
-  function unproject3(s) { var i = isoOf(mode()), y = (s.y - i.y0) / i.sy; return { x: (s.x - i.kx * y - i.x0) / i.sx, y: y }; }
-  // Transform a poser sur les calques PEINTS AU SOL. Vide en 2D.
+  function project3(p) { var i = isoOf(mode()); return { x: i.a * p.x + i.c * p.y + i.e, y: i.b * p.x + i.d * p.y + i.f }; }
+  function unproject3(sp) {
+    var i = isoOf(mode()), dt = (i.a * i.d - i.b * i.c) || 1e-6;
+    var X = sp.x - i.e, Y = sp.y - i.f;
+    return { x: (i.d * X - i.c * Y) / dt, y: (-i.b * X + i.a * Y) / dt };
+  }
+  // Transform à poser sur les calques PEINTS AU SOL. Vide en 2D.
   function floorTf() { return view === '3d' ? isoMatrix(mode()) : ''; }
-  // Profondeur : un jeton proche est legerement plus gros. +/- 9 %, jamais
-  // plus — au-dela, deux joueuses cote a cote ne se comparent plus.
+  // Profondeur mesurée sur le Y PROJETÉ (donc juste quel que soit le yaw) :
+  // un pion proche est légèrement plus gros. ±10 %, jamais plus — au-delà,
+  // deux joueuses côte à côte ne se comparent plus.
   function depthScale(q) {
     if (view !== '3d') return 1;
-    return 1 + ((q.y / ((MODES[mode()] || MODES.half).h)) - 0.5) * 0.18;
+    var i = isoOf(mode());
+    var u = i.ybh > 0 ? ((i.b * q.x + i.d * q.y + i.f) - i.ymin) / i.ybh : 0.5;
+    return 1 + (u - 0.5) * 0.20;
   }
 
-  // Paniers EN ELEVATION. Le demi-terrain n'en a qu'un (en haut, donc loin) ;
-  // le terrain plein en a deux, celui du bas etant PROCHE — sa structure
-  // recouvre alors le parquet, ce qui est exactement ce qu'on voit en vrai.
-  // Ils vivent dans la couche TERRAIN, donc toujours SOUS les jetons.
+  // Paniers EN ÉLÉVATION. Le demi-terrain n'en a qu'un (en haut, donc loin) ;
+  // le terrain plein en a deux, celui du bas étant PROCHE — sa structure
+  // recouvre alors le parquet, exactement ce qu'on voit en vrai. Ils vivent
+  // dans la couche TERRAIN, donc toujours SOUS les jetons.
   function hoopsOf(m) {
     var h = (MODES[m] || MODES.half).hoop;
     if (m !== 'full') return [ { x: h.x, y: h.y, base: 12 } ];
     return [ { x: h.x, y: h.y, base: 12 }, { x: h.x, y: 304 - h.y, base: 292 } ];
   }
   function hoop3(h) {
-    var i = isoOf(mode()), s = i.sx;
+    var i = isoOf(mode()), sc = i.s;
     var p = project3(h), b = project3({ x: h.x, y: h.base });
-    // Hauteur d'anneau : 3,05 m. Une hauteur est VERTICALE a l'ecran, elle
-    // suit donc l'echelle horizontale (sx), jamais la compression de
-    // profondeur (sy) — sinon le panier s'ecrase avec le sol.
-    var rimY = p.y - 26 * s;
-    var bw = 9 * s, bt = rimY - 11 * s, bb = rimY - 1.2 * s;
-    var rx = 2.6 * s, ry = Math.max(0.7, 2.6 * s * i.sy);
+    // Une hauteur est VERTICALE à l'écran : elle suit l'échelle uniforme,
+    // jamais la compression de profondeur — sinon le panier s'écrase avec le
+    // sol quand on baisse la caméra.
+    var rimY = p.y - 26 * sc;
+    var bw = 9 * sc, bt = rimY - 11 * sc, bb = rimY - 1.2 * sc;
+    var rx = 2.6 * sc, ry = Math.max(0.5, 2.6 * sc * i.sy);
     return ''
-      + '<ellipse class="hsh3" cx="' + f(p.x) + '" cy="' + f(p.y) + '" rx="' + f(4 * s) + '" ry="' + f(4 * s * i.sy) + '"/>'
-      + '<path class="post3" d="M ' + f(p.x) + ' ' + f(bt + 2 * s) + ' L ' + f(b.x) + ' ' + f(b.y) + '"/>'
-      + '<rect class="bb3" x="' + f(p.x - bw) + '" y="' + f(bt) + '" width="' + f(bw * 2) + '" height="' + f(bb - bt) + '" rx="' + f(0.6 * s) + '"/>'
+      + '<ellipse class="hsh3" cx="' + f(p.x) + '" cy="' + f(p.y) + '" rx="' + f(4 * sc) + '" ry="' + f(Math.max(0.6, 4 * sc * i.sy)) + '"/>'
+      + '<path class="post3" d="M ' + f(p.x) + ' ' + f(bt + 2 * sc) + ' L ' + f(b.x) + ' ' + f(b.y) + '"/>'
+      + '<rect class="bb3" x="' + f(p.x - bw) + '" y="' + f(bt) + '" width="' + f(bw * 2) + '" height="' + f(bb - bt) + '" rx="' + f(0.6 * sc) + '"/>'
       + '<ellipse class="rim3" cx="' + f(p.x) + '" cy="' + f(rimY) + '" rx="' + f(rx) + '" ry="' + f(ry) + '"/>'
       + '<path class="net3" d="'
-        + 'M ' + f(p.x - rx) + ' ' + f(rimY) + ' L ' + f(p.x - rx * 0.45) + ' ' + f(rimY + 5 * s)
-        + ' M ' + f(p.x + rx) + ' ' + f(rimY) + ' L ' + f(p.x + rx * 0.45) + ' ' + f(rimY + 5 * s)
-        + ' M ' + f(p.x) + ' ' + f(rimY + ry) + ' L ' + f(p.x) + ' ' + f(rimY + 5 * s)
-        + ' M ' + f(p.x - rx * 0.45) + ' ' + f(rimY + 5 * s) + ' L ' + f(p.x + rx * 0.45) + ' ' + f(rimY + 5 * s)
+        + 'M ' + f(p.x - rx) + ' ' + f(rimY) + ' L ' + f(p.x - rx * 0.45) + ' ' + f(rimY + 5 * sc)
+        + ' M ' + f(p.x + rx) + ' ' + f(rimY) + ' L ' + f(p.x + rx * 0.45) + ' ' + f(rimY + 5 * sc)
+        + ' M ' + f(p.x) + ' ' + f(rimY + ry) + ' L ' + f(p.x) + ' ' + f(rimY + 5 * sc)
+        + ' M ' + f(p.x - rx * 0.45) + ' ' + f(rimY + 5 * sc) + ' L ' + f(p.x + rx * 0.45) + ' ' + f(rimY + 5 * sc)
       + '"/>';
   }
-  // Le dessin du terrain n'est PAS reecrit : c'est le meme halfCourt() /
-  // fullCourt() qu'en 2D, glisse sous la matrice. Une seule source de verite
-  // pour la geometrie officielle FIBA.
-  function court3d(m) {
-    var M = MODES[m] || MODES.half, i = isoOf(m), th = 4.5;
-    var c0 = project3({ x: 0, y: M.h }), c1 = project3({ x: M.w, y: M.h });
-    var hs = hoopsOf(m), k, hoops = '';
-    for (k = 0; k < hs.length; k++) hoops += hoop3(hs[k]);
+
+  // Décor ARRIÈRE : horizon + tranche de parquet. La dalle est le quad
+  // projeté, recopié 4,5 unités plus bas : seul le liseré du bas dépasse du
+  // parquet, et ça marche pour N'IMPORTE quel angle de caméra.
+  function decorBack3(m) {
+    var M = MODES[m] || MODES.half, i = isoOf(m), k, d = '';
+    var q = [ project3({ x: 0, y: 0 }), project3({ x: M.w, y: 0 }),
+              project3({ x: M.w, y: M.h }), project3({ x: 0, y: M.h }) ];
+    for (k = 0; k < q.length; k++) d += (k ? ' L ' : 'M ') + f(q[k].x) + ' ' + f(q[k].y);
     return ''
-      // Horizon : une brume qui s'eteint sur le bord haut du parquet.
-      + '<rect class="sky3" x="0" y="0" width="' + f(M.w) + '" height="' + f(i.y0 + 8) + '"/>'
-      // Tranche du parquet : la dalle est POSEE, elle ne flotte pas.
-      + '<path class="slab3" d="M ' + f(c0.x) + ' ' + f(c0.y) + ' L ' + f(c1.x) + ' ' + f(c1.y)
-        + ' L ' + f(c1.x) + ' ' + f(c1.y + th) + ' L ' + f(c0.x) + ' ' + f(c0.y + th) + ' Z"/>'
-      + '<g transform="' + isoMatrix(m) + '">' + (m === 'half' ? halfCourt() : fullCourt()) + '</g>'
-      + hoops;
+      + '<rect class="sky3" x="0" y="0" width="' + f(M.w) + '" height="' + f(Math.max(6, i.ymin + 10)) + '"/>'
+      + '<path class="slab3" d="' + d + ' Z" transform="translate(0 ' + SLAB + ')"/>';
+  }
+  // Décor AVANT : les paniers dressés, posés PAR-DESSUS le parquet.
+  function decorFront3(m) {
+    var hs = hoopsOf(m), k, o = '';
+    for (k = 0; k < hs.length; k++) o += hoop3(hs[k]);
+    return o;
+  }
+  // Voile de profondeur : le fond du terrain s'assombrit, l'avant reste clair.
+  // Il vit DANS le calque du parquet, donc son dégradé suit l'axe de
+  // profondeur du terrain quelle que soit la rotation de la caméra.
+  function depthWash(m) {
+    var M = MODES[m] || MODES.half;
+    return '<rect class="depth3" x="12" y="12" width="' + f(M.w - 24) + '" height="' + f(M.h - 24) + '"/>';
+  }
+  // Lignes PROCHES plus épaisses. En projection affine un trait garde une
+  // épaisseur constante : on affine donc tout le tracé (CSS) et on repasse
+  // au-dessus le bord proche, plus gras. Deux <path>, pas une frame de plus.
+  function nearLines(m) {
+    var M = MODES[m] || MODES.half, y2 = M.h - 12, y1 = y2 - (m === 'full' ? 84 : 48);
+    return '<path class="near3" d="M 12 ' + f(y1) + ' L 12 ' + f(y2)
+      + ' L 162 ' + f(y2) + ' L 162 ' + f(y1) + '"/>';
+  }
+
+  // Le dessin du terrain n'est PAS réécrit : c'est le même halfCourt() /
+  // fullCourt() qu'en 2D, glissé sous la matrice. Une seule source de vérité
+  // pour la géométrie officielle FIBA.
+  function court3d(m) {
+    return ''
+      + '<g class="dec3 back">' + decorBack3(m) + '</g>'
+      + '<g class="floor3" transform="' + isoMatrix(m) + '">'
+      +   (m === 'half' ? halfCourt() : fullCourt())
+      +   depthWash(m) + nearLines(m)
+      + '</g>'
+      + '<g class="dec3 front">' + decorFront3(m) + '</g>';
   }
 
   // ─────────────────────────────────────────────────────────────────────
@@ -2352,21 +2477,42 @@
     syncInfo();
   }
 
+  // v.214b — HAUTEUR DU PION en 3D. L'origine du jeton reste le point de
+  // CONTACT AU SOL : c'est lui que visent les flèches, qui vivent dans le
+  // calque du parquet. Seule la tête monte au-dessus. Tout ce qui est
+  // accroché à la tête (chiffre, halo, ballon, ✨) monte donc de tokLift().
+  function tokLift() { return view === '3d' ? PR * 0.95 : 0; }
   function tokenMarkup(t) {
     var lbl = labelOf(t.id);
     var fs  = t.side === 'atk' ? PR * 1.05 : PR * 0.82;
-    var br  = PR * 0.44, bx = PR * 0.82, by = -PR * 0.78;
+    var L   = tokLift();
+    var br  = PR * 0.44, bx = PR * 0.82, by = -PR * 0.78 - L;
+    // Pion de plateau plutôt que cylindre vu de haut : une tête PLEINE face
+    // caméra garde le chiffre parfaitement lisible, et l'ombre au sol + le
+    // pied elliptique suffisent à dire « ça tient debout sur le parquet ».
+    var body = L
+      ? '<ellipse class="sh sh3" cx="0" cy="0" rx="' + f(PR * 1.14) + '" ry="' + f(PR * 0.46) + '"/>'
+        + '<ellipse class="foot3" cx="0" cy="0" rx="' + f(PR * 0.60) + '" ry="' + f(PR * 0.24) + '"/>'
+        + '<path class="stem3" d="M ' + f(-PR * 0.60) + ' 0'
+          + ' C ' + f(-PR * 0.54) + ' ' + f(-L * 0.50) + ' ' + f(-PR * 0.68) + ' ' + f(-L * 0.66) + ' ' + f(-PR * 0.74) + ' ' + f(-L * 0.86)
+          + ' L ' + f(PR * 0.74) + ' ' + f(-L * 0.86)
+          + ' C ' + f(PR * 0.68) + ' ' + f(-L * 0.66) + ' ' + f(PR * 0.54) + ' ' + f(-L * 0.50) + ' ' + f(PR * 0.60) + ' 0 Z"/>'
+        + '<circle class="disc" cx="0" cy="' + f(-L) + '" r="' + f(PR) + '"/>'
+        + '<ellipse class="gloss3" cx="0" cy="' + f(-L - PR * 0.40) + '" rx="' + f(PR * 0.64) + '" ry="' + f(PR * 0.30) + '"/>'
+        + '<circle class="halo" cx="0" cy="' + f(-L) + '" r="' + f(PR + 1.6) + '"/>'
+      : '<ellipse class="sh" cx="0" cy="' + f(PR * 0.46) + '" rx="' + f(PR * 1.02) + '" ry="' + f(PR * 0.52) + '"/>'
+        + '<circle class="disc" cx="0" cy="0" r="' + f(PR) + '"/>'
+        + '<circle class="halo" cx="0" cy="0" r="' + f(PR + 1.6) + '"/>';
     return '<g class="token ' + t.side + '" data-id="' + t.id + '">'
-      + '<ellipse class="sh" cx="0" cy="' + f(PR * 0.46) + '" rx="' + f(PR * 1.02) + '" ry="' + f(PR * 0.52) + '"/>'
-      + '<circle class="disc" cx="0" cy="0" r="' + f(PR) + '"/>'
-      + '<circle class="halo" cx="0" cy="0" r="' + f(PR + 1.6) + '"/>'
-      + '<text class="num" x="0" y="0" dy="0.35em" font-size="' + f(fs) + '">' + lbl + '</text>'
+      + body
+      + '<text class="num" x="0" y="' + f(-L) + '" dy="0.35em" font-size="' + f(fs) + '">' + lbl + '</text>'
       // Ballon : petit disque orange collé en haut à droite du chiffre, avec
       // deux coutures. Masqué par CSS tant que le jeton n'a pas .has-ball.
       + '<g class="ball">'
       +   '<circle class="b" cx="' + f(bx) + '" cy="' + f(by) + '" r="' + f(br) + '"/>'
       +   '<line class="s" x1="' + f(bx - br) + '" y1="' + f(by) + '" x2="' + f(bx + br) + '" y2="' + f(by) + '"/>'
       +   '<line class="s" x1="' + f(bx) + '" y1="' + f(by - br) + '" x2="' + f(bx) + '" y2="' + f(by + br) + '"/>'
+      +   '<circle class="bgl" cx="' + f(bx - br * 0.32) + '" cy="' + f(by - br * 0.34) + '" r="' + f(br * 0.38) + '"/>'
       + '</g>'
 
       + '</g>';
@@ -2439,7 +2585,7 @@
         b = document.createElementNS('http://www.w3.org/2000/svg', 'text');
         b.setAttribute('class', 'hlmark');
         b.setAttribute('x', f(PR * 1.0));
-        b.setAttribute('y', f(-PR * 0.72));
+        b.setAttribute('y', f(-PR * 0.72 - tokLift()));
         b.setAttribute('font-size', f(PR * 1.15));
         b.textContent = '✨';
         g.appendChild(b);
@@ -3358,8 +3504,11 @@
     // renderFrame() ecrit le translate sur le <g> exterieur a chaque image.
     g.innerHTML = '<g' + (view === '3d' ? ' transform="' + isoInvMatrix(mode()) + '"' : '') + '>'
       + '<circle class="b" cx="0" cy="0" r="' + f(br) + '"/>'
-      + '<line class="s" x1="' + f(-br) + '" y1="0" x2="' + f(br) + '" y2="0"/>'
-      + '<line class="s" x1="0" y1="' + f(-br) + '" x2="0" y2="' + f(br) + '"/>'
+      + '<g class="spin">'
+      +   '<line class="s" x1="' + f(-br) + '" y1="0" x2="' + f(br) + '" y2="0"/>'
+      +   '<line class="s" x1="0" y1="' + f(-br) + '" x2="0" y2="' + f(br) + '"/>'
+      + '</g>'
+      + '<circle class="bgl" cx="' + f(-br * 0.30) + '" cy="' + f(-br * 0.32) + '" r="' + f(br * 0.36) + '"/>'
       + '</g>';
     g.style.display = 'none';
     layP.appendChild(g);
@@ -3907,11 +4056,102 @@
     pPrepared = -1;
     try { renderFrame(pStep, pU); } catch (e) {}
     setHint();
-    if (v === '3d' && typeof toast === 'function') toast('🎬 Mode lecture 3D — édition désactivée');
+    if (v === '3d') {
+      camSyncUI();
+      if (typeof toast === 'function') toast('🎬 Mode lecture 3D — glisse sur le terrain pour changer d\'angle');
+    }
   }
   document.getElementById('v-2d').addEventListener('click', function () { setView('2d'); });
   document.getElementById('v-3d').addEventListener('click', function () { setView('3d'); });
   document.getElementById('v-3d').disabled = !VIEWS['3d'].ready;
+
+  // ── v.214b · PILOTAGE DE LA CAMÉRA 3D ────────────────────────────────
+  // Bouger l'angle NE PASSE PAS par drawAll() : reconstruire tout le SVG
+  // détruirait le calque de lecture (donc l'animation en cours) et coûterait
+  // un layout complet par frame de glissement. On ne réécrit que les six
+  // nombres de la matrice, le décor dressé, et la pose des jetons.
+  var camRaf = 0;
+  function cam3dApply() {
+    camRaf = 0;
+    if (view !== '3d' || !layC) return;
+    var m = isoMatrix(mode()), i;
+    var fl = layC.querySelector('.floor3');
+    if (fl) fl.setAttribute('transform', m);
+    var bk = layC.querySelector('.dec3.back'), ft = layC.querySelector('.dec3.front');
+    if (bk) bk.innerHTML = decorBack3(mode());
+    if (ft) ft.innerHTML = decorFront3(mode());
+    if (layA) layA.setAttribute('transform', m);
+    if (layZ) layZ.setAttribute('transform', m);
+    if (layP) {
+      layP.setAttribute('transform', m);
+      var inv = isoInvMatrix(mode()), fbs = layP.querySelectorAll('.fb > g');
+      for (i = 0; i < fbs.length; i++) fbs[i].setAttribute('transform', inv);
+    }
+    // Pendant la lecture, c'est renderFrame() qui repose les jetons à la frame
+    // suivante : y toucher ici ferait sauter l'interpolation en cours.
+    if (!playing) { for (var id in tokEl) placeToken(id); }
+  }
+  function camBadge() {
+    var b = document.getElementById('v3d-badge');
+    if (b) b.textContent = '🎬 Lecture 3D · ' + Math.round(cam.tilt) + '° / ' + Math.round(cam.yaw) + '°';
+  }
+  function camSyncUI() {
+    var t = document.getElementById('cam-tilt'), y = document.getElementById('cam-yaw');
+    if (t) t.value = Math.round(cam.tilt);
+    if (y) y.value = Math.round(cam.yaw);
+    camBadge();
+  }
+  function camSet(tilt, yaw) {
+    cam.tilt = clampCam(tilt, CAM_LIM.tlo, CAM_LIM.thi);
+    cam.yaw  = clampCam(yaw,  CAM_LIM.ylo, CAM_LIM.yhi);
+    isoBust();               // l'angle a bougé : la mémoïsation est périmée
+    camSyncUI();
+    if (!camRaf) camRaf = requestAnimationFrame(cam3dApply);
+  }
+  document.getElementById('cam-tilt').addEventListener('input', function () { camSet(this.value, cam.yaw); });
+  document.getElementById('cam-yaw').addEventListener('input', function () { camSet(cam.tilt, this.value); });
+  document.getElementById('cam-tilt').addEventListener('change', camSave);
+  document.getElementById('cam-yaw').addEventListener('change', camSave);
+  document.getElementById('cam-reset').addEventListener('click', function () {
+    camSet(CAM_DEF.tilt, CAM_DEF.yaw); camSave();
+  });
+
+  // ORBITE AU DOIGT. En 3D rien n'est déplaçable (editable:false) : le geste
+  // de glissement est donc LIBRE, pas besoin de deux doigts ni de Shift.
+  // Seuil de 6 px avant de prendre la main, sinon un simple tap du viewer
+  // (choix de variante, solo) serait avalé. Pas de setPointerCapture : le
+  // décor dressé est reconstruit pendant le geste, une capture posée sur un
+  // noeud retiré du DOM tuerait le glissement au premier move (cf. v.201).
+  (function () {
+    var on = false, live = false, pid = 0, x0 = 0, y0 = 0, t0 = 0, w0 = 0, k = 0.35;
+    function mv(e) {
+      if (!on || e.pointerId !== pid) return;
+      var dx = e.clientX - x0, dy = e.clientY - y0;
+      if (!live && Math.abs(dx) + Math.abs(dy) < 6) return;
+      live = true;
+      camSet(t0 + dy * k, w0 + dx * k);
+      if (e.cancelable) e.preventDefault();
+    }
+    function up(e) {
+      if (!on || e.pointerId !== pid) return;
+      on = false;
+      window.removeEventListener('pointermove', mv);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      if (live) camSave();
+      live = false;
+    }
+    svg.addEventListener('pointerdown', function (e) {
+      if (view !== '3d' || on) return;
+      var r = svg.getBoundingClientRect();
+      on = true; live = false; pid = e.pointerId;
+      x0 = e.clientX; y0 = e.clientY; t0 = cam.tilt; w0 = cam.yaw;
+      k = 90 / Math.max(140, r.width);
+      window.addEventListener('pointermove', mv);
+      window.addEventListener('pointerup', up);
+      window.addEventListener('pointercancel', up);
+    }, true);
+  })();
 
   // ─────────────────────────────────────────────────────────────────────
   // 10 bis. COULEURS D'ÉQUIPE PILOTÉES PAR LE THÈME (v.174)
