@@ -14002,17 +14002,32 @@ function playTile(p, opts) {
       ? p.tags.slice(0,2).map(t => esc(t)).join(' · ')
       : `${esc(descPlain.slice(0, 40))}${descPlain.length > 40 ? '…' : ''}`);
 
+  // v.205 — Un play qui n'a NI vidéo NI photo mais AU MOINS une animation
+  // affichait le placeholder ballon + tags, alors que le play est entièrement
+  // décrit par son animation. On rend alors le temps 1 de la 1re animation avec
+  // le MÊME renderer statique que la fiche play (_animThumbSvg, v.184) : aucun
+  // rAF, aucune image à charger, donc rien à observer paresseusement. Les plays
+  // avec vidéo/photo gardent strictement leur vignette actuelle.
+  const anims = Array.isArray(p.animations) ? p.animations : [];
+  const animThumb = (!previewSrc && !hasVideo && anims.length && typeof _animThumbSvg === 'function')
+    ? String(_animThumbSvg(anims[0])).replace('<svg', '<svg style="width:100%;height:100%;display:block"')
+    : '';
+  const animSteps = animThumb ? (Array.isArray(anims[0].steps) ? anims[0].steps.length : 0) : 0;
+
   return `
     <div class="v-tile" style="${dim ? 'opacity:0.55' : ''}">
       <div class="v-tile-media" onclick="openPlay('${p.id}')" style="cursor:pointer"${remoteThumbUrl ? ` data-vthumb="${remoteThumbUrl}"` : ''}>
         ${previewSrc
           ? `<img src="${previewSrc}" alt="" onerror="this.style.display='none'">`
+          : animThumb
+          ? `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden">${animThumb}</div>`
           : `<div class="v-tile-placeholder"${hasVideo && provider ? ` data-vprov="${provider}"` : ''} data-vthumb-ph>
               ${hasVideo && provLabel ? `<div class="v-tile-prov">${videoProviderGlyph(provider)}<span>${esc(provLabel)}</span></div>` : ''}
               <div class="v-tile-placeholder-icon">${hasVideo ? '▶' : '🏀'}</div>
               ${hasVideo ? `<div class="v-tile-placeholder-title">${esc(p.title)}</div>` : ''}
               <div class="v-tile-placeholder-tags">${phTags}</div>
             </div>`}
+        ${animThumb ? `<div class="v-tile-badge" style="position:absolute;bottom:6px;left:6px;background:rgba(0,0,0,0.75);color:#fff">🎬 ${animSteps} temps${anims.length > 1 ? ` · ${anims.length} variantes` : ''}</div>` : ''}
         <div style="position:absolute;top:6px;left:6px;display:flex;gap:4px;flex-wrap:wrap">
           ${hasGallery ? `<div class="v-tile-badge" style="background:rgba(var(--accent-rgb),0.9);color:black">📷 ${images.length}</div>` : ''}
           ${hasVideo ? `<div class="v-tile-badge">▶</div>` : ''}
@@ -52980,7 +52995,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.204';
+const APP_VERSION = '2026-08-19.205';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
