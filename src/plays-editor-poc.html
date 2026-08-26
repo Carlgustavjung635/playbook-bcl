@@ -259,6 +259,28 @@
   .ln{fill:none; stroke:var(--line); stroke-width:.62; stroke-linecap:round}
   .ln.strong{stroke:var(--line-strong); stroke-width:.95}
   .hp{fill:none; stroke:var(--hoop); stroke-width:1.15; stroke-linecap:round}
+  /* ── v.214 · JALON 6 — VUE 3D (LECTURE SEULE) ───────────────────────
+     Perspective OBLIQUE : le sol subit UNE matrice affine, partagee par le
+     terrain, les fleches, les zones et le calque de lecture. project() EST
+     cette matrice : un trace ecrit en coordonnees terrain atterrit donc
+     exactement sous le jeton, sans toucher au constructeur de chemins.
+     Les elements VERTICAUX (panneau, cercle, filet, jetons) restent DEBOUT :
+     ils sont poses a la position projetee mais jamais deformes. */
+  .sky3{fill:url(#gSky); pointer-events:none}
+  .slab3{fill:#000; opacity:.42; pointer-events:none}
+  .bb3{fill:var(--hoop); fill-opacity:.13; stroke:var(--hoop); stroke-width:.7}
+  .rim3{fill:none; stroke:var(--hoop); stroke-width:1.15}
+  .net3{fill:none; stroke:var(--hoop); stroke-width:.45; opacity:.7; stroke-linecap:round}
+  .post3{fill:none; stroke:var(--hoop); stroke-width:.9; opacity:.7}
+  .hsh3{fill:#000; opacity:.20; pointer-events:none}
+  /* Bandeau discret : la 3D est une vue de LECTURE, il faut que ca se voie. */
+  .v3dbadge{position:fixed; left:50%; transform:translateX(-50%);
+    bottom:calc(env(safe-area-inset-bottom,0px) + 12px); z-index:60; display:none;
+    padding:6px 12px; border-radius:999px; background:rgba(15,23,42,.85); color:#e2e8f0;
+    font-size:12px; font-weight:600; letter-spacing:.02em; pointer-events:none;
+    border:1px solid rgba(148,163,184,.35); box-shadow:0 6px 18px rgba(0,0,0,.35)}
+  body.v3d .v3dbadge{display:block}
+  body.viewer.v3d .v3dbadge{bottom:calc(env(safe-area-inset-bottom,0px) + 78px)}
 
   /* ── Flèches ───────────────────────────────────────────────────────── */
   /* v.174 — LA POINTE EST UN marker-end, PLUS UN TRIANGLE DESSINÉ À PART.
@@ -821,7 +843,7 @@
     <button class="btn sm"    id="m-full" title="Terrain complet">▭</button>
     <button class="btn sm"    id="b-mirror" title="Miroir : bascule le play sur l'autre demi-terrain (gauche ⇄ droite)">⇋</button>
     <button class="btn sm on" id="v-2d" title="Vue d'édition">2D</button>
-    <button class="btn sm"    id="v-3d" disabled title="Vue de lecture 3D — jalon 4">3D</button>
+    <button class="btn sm"    id="v-3d" title="Vue 3D — lecture seule (l'édition reste en 2D)">3D</button>
   </div>
   <div class="sep"></div>
   <!-- Taille des jetons : S 0,75× · M 1× · L 1,25×. Chiffres et ballons
@@ -1019,6 +1041,7 @@
     <button class="btn sm" id="vw-speed" title="Vitesse de lecture">🐢</button>
     <button class="btn sm" id="vw-size" title="Taille des pions">⤢</button>
     <button class="btn sm" id="vw-mirror" title="Inverser gauche / droite">↔</button>
+    <button class="btn sm" id="vw-3d" title="Vue 3D / 2D">🎬</button>
     <button class="btn sm" id="vw-note" title="Explication de ce temps" style="display:none">📝</button>
   </div>
 </div>
@@ -1040,6 +1063,7 @@
 </div>
 
 <div class="toast" id="toast"></div>
+<div class="v3dbadge" id="v3d-badge">🎬 Mode lecture 3D</div>
 
 <script>
 (function () {
@@ -1068,8 +1092,16 @@
       court:     function (m) { return m === 'half' ? halfCourt() : fullCourt(); }
     },
     '3d': {
-      label: '3D', ready: false, editable: false,
-      project: null, unproject: null, court: null
+      // v.214 - LECTURE SEULE, et ce n'est pas un manque : viser un jeton en
+      // perspective au doigt sur iPhone est frustrant. editable:false suffit,
+      // les gardes du moteur de drag interrogent deja la vue.
+      label: '3D', ready: true, editable: false,
+      project:   function (p) { return project3(p); },
+      // unproject n'est JAMAIS appele en 3D (editable:false), mais une matrice
+      // affine s'inverse pour trois fois rien : mieux vaut un inverse juste
+      // qu'un null qui exploserait si un chemin d'appel nous echappait.
+      unproject: function (p) { return unproject3(p); },
+      court:     function (m) { return court3d(m); }
     }
   };
   var view = '2d';
@@ -1189,6 +1221,13 @@
       + '<linearGradient id="gBall" x1="0" y1="0" x2="0" y2="1"><stop class="a" offset="0"/><stop class="b" offset="1"/></linearGradient>'
       + '<radialGradient id="gSheen" cx="50%" cy="34%" r="72%"><stop class="a" offset="0"/><stop class="b" offset="1"/></radialGradient>'
       + '<radialGradient id="gShadow"><stop class="a" offset="0"/><stop class="b" offset="0.6"/><stop class="c" offset="1"/></radialGradient>'
+      // v.214 - horizon de la vue 3D. Les stops portent leur couleur EN DUR
+      // (via var(--line), donc suivant le theme) : un stop qui depend d'une
+      // classe CSS ne survivrait pas toujours a l'export PNG.
+      + '<linearGradient id="gSky" x1="0" y1="0" x2="0" y2="1">'
+      +   '<stop offset="0" stop-color="var(--line)" stop-opacity="0.20"/>'
+      +   '<stop offset="1" stop-color="var(--line)" stop-opacity="0"/>'
+      + '</linearGradient>'
       + '</defs>';
   }
 
@@ -1276,6 +1315,102 @@
   }
 
   function f(n) { return Math.round(n * 100) / 100; }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // 1 bis. PROJECTION 3D (v.214 — jalon 6, lecture seule)
+  // ─────────────────────────────────────────────────────────────────────
+  // Projection OBLIQUE (cavaliere), pas une vraie perspective : elle est
+  // AFFINE, donc exprimable en une seule matrice SVG. C'est tout l'interet —
+  // un <g transform="matrix(...)"> pose sur le terrain, les fleches, les
+  // zones et le calque de lecture donne EXACTEMENT le meme resultat que
+  // project() applique point par point. Zero reecriture du constructeur de
+  // chemins, zero cout par frame, et les animations 2D existantes se lisent
+  // en 3D sans une ligne de donnee modifiee.
+  //
+  //   x' = sx.x + kx.y + x0      (kx = cisaillement : le sol "tourne")
+  //   y' = sy.y + y0             (sy < 1 : la profondeur s'ecrase)
+  //
+  // Le resultat tient dans le MEME viewBox que la 2D (96 % de la largeur,
+  // pousse vers le bas pour degager l'horizon et les paniers en elevation) :
+  // ni l'export photo, ni les mesures, ni le viewer n'ont a bouger.
+  var ISO = { half: { kx: 0.16, sy: 0.62, ty: 0.66 },
+              full: { kx: 0.11, sy: 0.70, ty: 0.62 } };
+
+  function isoOf(m) {
+    var M = MODES[m] || MODES.half, c = ISO[m] || ISO.half;
+    var sx = (M.w * 0.96 - M.h * c.kx) / M.w;
+    return { sx: sx, kx: c.kx, sy: c.sy,
+             x0: (M.w - (sx * M.w + c.kx * M.h)) / 2,
+             y0: (M.h - c.sy * M.h) * c.ty };
+  }
+  function isoMatrix(m) {
+    var i = isoOf(m);
+    return 'matrix(' + f(i.sx) + ' 0 ' + f(i.kx) + ' ' + f(i.sy) + ' ' + f(i.x0) + ' ' + f(i.y0) + ')';
+  }
+  // Matrice INVERSE : pour les objets qui vivent dans le calque du sol mais
+  // doivent rester ronds (le ballon en vol).
+  function isoInvMatrix(m) {
+    var i = isoOf(m);
+    return 'matrix(' + f(1 / i.sx) + ' 0 ' + f(-i.kx / (i.sx * i.sy)) + ' ' + f(1 / i.sy) + ' 0 0)';
+  }
+  function project3(p)   { var i = isoOf(mode()); return { x: i.sx * p.x + i.kx * p.y + i.x0, y: i.sy * p.y + i.y0 }; }
+  function unproject3(s) { var i = isoOf(mode()), y = (s.y - i.y0) / i.sy; return { x: (s.x - i.kx * y - i.x0) / i.sx, y: y }; }
+  // Transform a poser sur les calques PEINTS AU SOL. Vide en 2D.
+  function floorTf() { return view === '3d' ? isoMatrix(mode()) : ''; }
+  // Profondeur : un jeton proche est legerement plus gros. +/- 9 %, jamais
+  // plus — au-dela, deux joueuses cote a cote ne se comparent plus.
+  function depthScale(q) {
+    if (view !== '3d') return 1;
+    return 1 + ((q.y / ((MODES[mode()] || MODES.half).h)) - 0.5) * 0.18;
+  }
+
+  // Paniers EN ELEVATION. Le demi-terrain n'en a qu'un (en haut, donc loin) ;
+  // le terrain plein en a deux, celui du bas etant PROCHE — sa structure
+  // recouvre alors le parquet, ce qui est exactement ce qu'on voit en vrai.
+  // Ils vivent dans la couche TERRAIN, donc toujours SOUS les jetons.
+  function hoopsOf(m) {
+    var h = (MODES[m] || MODES.half).hoop;
+    if (m !== 'full') return [ { x: h.x, y: h.y, base: 12 } ];
+    return [ { x: h.x, y: h.y, base: 12 }, { x: h.x, y: 304 - h.y, base: 292 } ];
+  }
+  function hoop3(h) {
+    var i = isoOf(mode()), s = i.sx;
+    var p = project3(h), b = project3({ x: h.x, y: h.base });
+    // Hauteur d'anneau : 3,05 m. Une hauteur est VERTICALE a l'ecran, elle
+    // suit donc l'echelle horizontale (sx), jamais la compression de
+    // profondeur (sy) — sinon le panier s'ecrase avec le sol.
+    var rimY = p.y - 26 * s;
+    var bw = 9 * s, bt = rimY - 11 * s, bb = rimY - 1.2 * s;
+    var rx = 2.6 * s, ry = Math.max(0.7, 2.6 * s * i.sy);
+    return ''
+      + '<ellipse class="hsh3" cx="' + f(p.x) + '" cy="' + f(p.y) + '" rx="' + f(4 * s) + '" ry="' + f(4 * s * i.sy) + '"/>'
+      + '<path class="post3" d="M ' + f(p.x) + ' ' + f(bt + 2 * s) + ' L ' + f(b.x) + ' ' + f(b.y) + '"/>'
+      + '<rect class="bb3" x="' + f(p.x - bw) + '" y="' + f(bt) + '" width="' + f(bw * 2) + '" height="' + f(bb - bt) + '" rx="' + f(0.6 * s) + '"/>'
+      + '<ellipse class="rim3" cx="' + f(p.x) + '" cy="' + f(rimY) + '" rx="' + f(rx) + '" ry="' + f(ry) + '"/>'
+      + '<path class="net3" d="'
+        + 'M ' + f(p.x - rx) + ' ' + f(rimY) + ' L ' + f(p.x - rx * 0.45) + ' ' + f(rimY + 5 * s)
+        + ' M ' + f(p.x + rx) + ' ' + f(rimY) + ' L ' + f(p.x + rx * 0.45) + ' ' + f(rimY + 5 * s)
+        + ' M ' + f(p.x) + ' ' + f(rimY + ry) + ' L ' + f(p.x) + ' ' + f(rimY + 5 * s)
+        + ' M ' + f(p.x - rx * 0.45) + ' ' + f(rimY + 5 * s) + ' L ' + f(p.x + rx * 0.45) + ' ' + f(rimY + 5 * s)
+      + '"/>';
+  }
+  // Le dessin du terrain n'est PAS reecrit : c'est le meme halfCourt() /
+  // fullCourt() qu'en 2D, glisse sous la matrice. Une seule source de verite
+  // pour la geometrie officielle FIBA.
+  function court3d(m) {
+    var M = MODES[m] || MODES.half, i = isoOf(m), th = 4.5;
+    var c0 = project3({ x: 0, y: M.h }), c1 = project3({ x: M.w, y: M.h });
+    var hs = hoopsOf(m), k, hoops = '';
+    for (k = 0; k < hs.length; k++) hoops += hoop3(hs[k]);
+    return ''
+      // Horizon : une brume qui s'eteint sur le bord haut du parquet.
+      + '<rect class="sky3" x="0" y="0" width="' + f(M.w) + '" height="' + f(i.y0 + 8) + '"/>'
+      // Tranche du parquet : la dalle est POSEE, elle ne flotte pas.
+      + '<path class="slab3" d="M ' + f(c0.x) + ' ' + f(c0.y) + ' L ' + f(c1.x) + ' ' + f(c1.y)
+        + ' L ' + f(c1.x) + ' ' + f(c1.y + th) + ' L ' + f(c0.x) + ' ' + f(c0.y + th) + ' Z"/>'
+      + '<g transform="' + isoMatrix(m) + '">' + (m === 'half' ? halfCourt() : fullCourt()) + '</g>'
+      + hoops;
+  }
 
   // ─────────────────────────────────────────────────────────────────────
   // 2. MODÈLE
@@ -2201,6 +2336,15 @@
     layP = document.getElementById('lay-play');
     layM = document.getElementById('lay-meas');
     layZ = document.getElementById('lay-zone');
+    // v.214 — les calques PEINTS AU SOL (zones, fleches, traces de lecture)
+    // partagent la matrice de la vue. #lay-meas et #lay-tok en sont exclus :
+    // le premier mesure en coordonnees TERRAIN (c'est lui qui nourrit
+    // placeToken), le second porte des jetons debout.
+    var tf3 = floorTf();
+    layA.setAttribute('transform', tf3);
+    layZ.setAttribute('transform', tf3);
+    layP.setAttribute('transform', tf3);
+    document.body.classList.toggle('v3d', view === '3d');
     drawZones();
     drawTokens();
     drawArrows();
@@ -2255,7 +2399,11 @@
     var s = VIEWS[view].project(q);   // terrain → scène (identité en 2D)
     // transform (composité) plutôt que cx/cy : moins de recalcul par frame,
     // et l'ombre peinte suit le jeton sans travail supplémentaire.
-    g.setAttribute('transform', 'translate(' + f(s.x) + ' ' + f(s.y) + ')');
+    // v.214 — en 3D le jeton reste DEBOUT (billboard) et grossit legerement
+    // en s'approchant : la profondeur se lit sans deformer la joueuse.
+    var k = depthScale(q);
+    g.setAttribute('transform', 'translate(' + f(s.x) + ' ' + f(s.y) + ')'
+      + (k === 1 ? '' : ' scale(' + f(k) + ')'));
   }
 
   // ── Highlights ───────────────────────────────────────────────────────
@@ -3204,9 +3352,15 @@
     var br = PR * 0.5;
     var g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     g.setAttribute('class', 'fb');
-    g.innerHTML = '<circle class="b" cx="0" cy="0" r="' + f(br) + '"/>'
+    // v.214 — le ballon vit dans le calque du sol (donc cisaille), mais un
+    // ballon EST rond : on lui rend la matrice inverse. Une fois a la
+    // construction du temps, jamais par frame — et sur un <g> INTERIEUR, car
+    // renderFrame() ecrit le translate sur le <g> exterieur a chaque image.
+    g.innerHTML = '<g' + (view === '3d' ? ' transform="' + isoInvMatrix(mode()) + '"' : '') + '>'
+      + '<circle class="b" cx="0" cy="0" r="' + f(br) + '"/>'
       + '<line class="s" x1="' + f(-br) + '" y1="0" x2="' + f(br) + '" y2="0"/>'
-      + '<line class="s" x1="0" y1="' + f(-br) + '" x2="0" y2="' + f(br) + '"/>';
+      + '<line class="s" x1="0" y1="' + f(-br) + '" x2="0" y2="' + f(br) + '"/>'
+      + '</g>';
     g.style.display = 'none';
     layP.appendChild(g);
     return g;
@@ -3746,6 +3900,14 @@
     document.getElementById('v-2d').classList.toggle('on', v === '2d');
     document.getElementById('v-3d').classList.toggle('on', v === '3d');
     drawAll();
+    // drawAll() vient de reconstruire tout le SVG : le calque de lecture et
+    // les <path> de mesure du temps courant sont des noeuds DETACHES. Sans
+    // invalider le cache de preparation, renderFrame() ecrirait dans le vide
+    // et le terrain resterait fige au temps 0.
+    pPrepared = -1;
+    try { renderFrame(pStep, pU); } catch (e) {}
+    setHint();
+    if (v === '3d' && typeof toast === 'function') toast('🎬 Mode lecture 3D — édition désactivée');
   }
   document.getElementById('v-2d').addEventListener('click', function () { setView('2d'); });
   document.getElementById('v-3d').addEventListener('click', function () { setView('3d'); });
@@ -5745,6 +5907,7 @@
     document.getElementById('vw-speed').textContent = VW_LABEL[vwSpeedIx];
     document.getElementById('vw-size').textContent = '⤢ ' + SIZE_KEYS[SIZE_KEYS.indexOf(sizeKeyOf())].toUpperCase();
     document.getElementById('vw-play').textContent = playing ? '⏸' : '▶';
+    document.getElementById('vw-3d').classList.toggle('on', view === '3d');
     vwHintSync();
     vwExplSync(true);
   }
@@ -5916,6 +6079,9 @@
   function exitViewer() {
     if (!vwOn) return;
     vwOn = false;
+    // On rend TOUJOURS un editeur en 2D : la 3D n'est pas editable, sortir du
+    // viewer en 3D laisserait le coach devant un terrain qui ne repond pas.
+    if (view === '3d') setView('2d');
     vwRoute = []; vwSegIx = 0;
     vwHideTree();
     document.body.classList.remove('viewer');
@@ -5927,6 +6093,13 @@
     goPath([]);
   }
 
+  // v.214 — bascule 2D/3D cote joueuse. La 3D aide a SITUER les courses dans
+  // l'espace ; la 2D reste la vue de precision. Aucune des deux n'edite quoi
+  // que ce soit dans le viewer.
+  document.getElementById('vw-3d').addEventListener('click', function () {
+    setView(view === '3d' ? '2d' : '3d');
+    vwSyncButtons();
+  });
   document.getElementById('vw-play').addEventListener('click', function () { play(); vwSyncButtons(); });
   document.getElementById('vw-prev').addEventListener('click', vwStepBack);
   document.getElementById('vw-next').addEventListener('click', vwStepForward);
