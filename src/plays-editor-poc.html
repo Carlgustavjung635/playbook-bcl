@@ -1914,6 +1914,45 @@
     drawZones(); zBarSync(); zLegendSync();
     toast('Zone dupliquée — glisse-la où tu veux.', 'ok');
   }
+  // Rattrapage d outil : le coach pose une zone, trace deux flèches, puis tape
+  // sa zone pour la régler — et il ne se passait RIEN, parce que l éditeur
+  // était resté sur l outil flèche. Rien à l écran ne disait qu il fallait
+  // d abord revenir en Sélection : la zone paraissait simplement morte.
+  //
+  // On ne vole pas le pointerdown au moteur de flèches (cf. son appelant) : on
+  // observe le geste, et on n agit QUE s il se termine sans avoir bougé ni
+  // traîné — un tap sec, qui ne produit aucune flèche. Le basculement est
+  // différé d un tick pour que le moteur de flèches finisse son propre
+  // pointerup avec l outil qu il croit encore actif.
+  function zTapToSelect(e, zid) {
+    var pid = e.pointerId, x0 = e.clientX, y0 = e.clientY, t0 = e.timeStamp || 0, far = false;
+    function mv(ev) {
+      if (pid != null && ev.pointerId !== pid) return;
+      if (Math.abs(ev.clientX - x0) > 6 || Math.abs(ev.clientY - y0) > 6) far = true;
+    }
+    function up(ev) {
+      window.removeEventListener('pointermove', mv, true);
+      window.removeEventListener('pointerup', up, true);
+      window.removeEventListener('pointercancel', up, true);
+      if (!ev || ev.type !== 'pointerup') return;
+      if (pid != null && ev.pointerId !== pid) return;
+      if (far || (ev.timeStamp || 0) - t0 > 600) return;   // drag ou appui long
+      setTimeout(function () {
+        if (!zEditable()) return;
+        if (!zById(zid)) {                                  // zone héritée
+          var inh = zAnyById(zid);
+          if (inh) toast('Zone héritée de « ' + (inh.line === doc ? 'ligne principale' : (inh.line.name || 'Variante')) + ' » — modifie-la depuis cette ligne.');
+          return;
+        }
+        if (tool !== 'select') setTool('select');
+        zSel = zid; drawZones(); zBarSync();
+        toast('Zone sélectionnée — outil Sélection réactivé.');
+      }, 0);
+    }
+    window.addEventListener('pointermove', mv, true);
+    window.addEventListener('pointerup', up, true);
+    window.addEventListener('pointercancel', up, true);
+  }
   function zDelete() {
     var l = zList(), i;
     for (i = 0; i < l.length; i++) if (l[i] && l[i].id === zSel) { l.splice(i, 1); break; }
@@ -2029,11 +2068,22 @@
     // voit rien passer. Les jetons sont AU-DESSUS des zones : les glisser
     // reste prioritaire, exactement comme avant.
     svg.addEventListener('pointerdown', function (e) {
-      if (!zEditable() || tool !== 'select') return;
+      if (!zEditable()) return;
       var t = e.target;
       if (!t || !t.closest) return;
       var hz = t.closest('[data-zh]'), zg = hz ? null : t.closest('[data-zone]');
       if (!hz && !zg) return;
+      // HORS mode Sélection, le geste appartient au moteur de flèches : on le
+      // laisse passer intégralement (sinon plus moyen de tracer une flèche qui
+      // part d une zone — et les zones couvrent souvent la raquette). On guette
+      // seulement le TAP SEC, qui ne trace jamais rien, pour ramener le coach
+      // en Sélection sur la zone touchée. La gomme est exclue : son tap sec à
+      // elle sert à effacer une flèche posée par-dessus la zone.
+      if (tool !== 'select') {
+        if (!zg || tool === 'erase') return;
+        zTapToSelect(e, zg.getAttribute('data-zone'));
+        return;
+      }
       var z = zById(hz ? zSel : zg.getAttribute('data-zone'));
       // Zone héritée : on refuse l édition ICI plutôt que d en fabriquer une
       // copie locale — deux exemplaires finiraient par diverger sans que le
