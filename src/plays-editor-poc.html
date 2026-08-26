@@ -289,6 +289,7 @@
      aucun coût par frame — et rien à neutraliser en `prefers-reduced-motion`,
      il n'y a aucune transition à couper. Le groupe vit dans le calque des
      tracés, donc SOUS les jetons : le halo se lit en anneau, jamais en masque. */
+  .scrshld{pointer-events:none}
   .scrshld .core{fill:var(--arw-atk,#22D3EE); fill-opacity:0.20;
     stroke:var(--arw-atk,#22D3EE); stroke-opacity:0.7; stroke-width:0.5}
   .scrshld .sh{fill:var(--arw-atk,#22D3EE); fill-opacity:0.9}
@@ -2380,6 +2381,13 @@
 
   function drawArrows() {
     var list = step().arw, html = '', i;
+    // v.208 — Rendu STATIQUE des écrans encore debout. On ne montre que les
+    // écrans HÉRITÉS (posés à un temps antérieur) : au temps de la pose, la
+    // joueuse est encore à son point de départ, planter ses épaules à l'arrivée
+    // dirait un état qu'elle n'a pas atteint. Écrit en tête du calque des
+    // flèches, donc sous elles et sous les jetons (#lay-tok vient après).
+    var shl = shldsAt(cur);
+    for (i = 0; i < shl.length; i++) if (!shl[i].live) html += shldMarkup(shl[i]);
     for (i = 0; i < list.length; i++) if (arwVisible(list[i])) html += arrowMarkup(list[i]);
     var sh = step().shot;
     if (sh && visible(tokById(sh))) html += shotMarkup();
@@ -2994,6 +3002,73 @@
   function ease(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
   function win(u, w) { return clamp((u - w[0]) / (w[1] - w[0]), 0, 1); }
 
+  // ── UN ÉCRAN POSÉ RESTE POSÉ (v.203) ──────────────────────────────────
+  // Un écran n'est pas l'affaire d'un seul temps : la poseuse reste plantée là
+  // jusqu'à ce qu'elle reparte. AUCUN drapeau n'est stocké — l'état se DÉDUIT
+  // du modèle existant : dernier écran de la joueuse à un temps j <= k, et
+  // aucune trajectoire de sa part entre j+1 et k. Le temps où elle repart la
+  // retire donc d'office, et c'est précisément ce qui marque la fin de l'écran.
+  // Conséquence : rien à migrer, et les plays déjà enregistrés héritent du
+  // comportement sans être retouchés.
+  function scrGeom(a, p) {
+    var pts = rawPts(a, p);
+    if (!pts || pts.length < 2) return null;
+    var r = buildPath(pts), e = pts[pts.length - 1];
+    return { x: e.x, y: e.y, ang: r.ang * 180 / Math.PI };
+  }
+
+  function standingScreens(k) {
+    var list = steps(), out = {}, j, i;
+    for (j = 0; j <= k && j < list.length; j++) {
+      var st = list[j];
+      for (i = 0; i < st.arw.length; i++) {
+        var a = st.arw[i];
+        if (!isMoveKind(a.kind)) continue;
+        // Elle bouge => l'écran qu'elle tenait tombe. Qu'elle reparte en poser
+        // un AUTRE ne change rien : c'est le nouveau qui vaudra, juste après.
+        delete out[a.from];
+        if (a.kind !== 'screen') continue;
+        var t = tokById(a.from, st.pos);
+        if (!visible(t)) continue;
+        var g = scrGeom(a, st.pos);
+        if (!g) continue;
+        g.def = (t.side === 'def'); g.at = j;
+        out[a.from] = g;
+      }
+    }
+    return out;
+  }
+
+  // Les épaules à afficher au temps k. `live` = posé PENDANT ce temps-là (la
+  // lecture doit attendre la fin de la course) ; sinon c'est un écran hérité,
+  // visible dès la première frame.
+  function shldsAt(k) {
+    var scr = standingScreens(k), list = steps();
+    var pk = (list[k] && list[k].pos) || {}, out = [], id;
+    for (id in scr) {
+      var g = scr[id];
+      // Après le temps de pose, on recentre sur la position RÉELLE de la
+      // joueuse à ce temps-là (le coach a pu recaler la photo à la main) ;
+      // l'angle du mur, lui, reste celui de la pose.
+      var c = (g.at === k || !pk[id]) ? g : { x: pk[id].x, y: pk[id].y, ang: g.ang };
+      out.push({ id: id, x: c.x, y: c.y, ang: c.ang, def: g.def, live: g.at === k });
+    }
+    return out;
+  }
+
+  // Anneau (le tronc) + deux demi-disques (les épaules). Repère local après
+  // rotate() : +x = sens de la course, ±y = le mur — les demi-disques bombent
+  // donc vers l'extérieur, dans l'axe du T du marqueur.
+  function shldMarkup(s) {
+    var hr = PR * 1.12, sr = PR * 0.58;
+    return '<g class="scrshld' + (s.def ? ' def' : '') + '" data-shld="' + s.id + '"'
+      + ' transform="translate(' + f(s.x) + ' ' + f(s.y) + ') rotate(' + f(s.ang) + ')">'
+      + '<circle class="core" cx="0" cy="0" r="' + f(hr) + '"/>'
+      + '<path class="sh" d="M ' + f(-sr) + ' ' + f(-hr) + ' A ' + f(sr) + ' ' + f(sr) + ' 0 0 0 ' + f(sr) + ' ' + f(-hr) + ' Z"/>'
+      + '<path class="sh" d="M ' + f(-sr) + ' ' + f(hr) + ' A ' + f(sr) + ' ' + f(sr) + ' 0 0 1 ' + f(sr) + ' ' + f(hr) + ' Z"/>'
+      + '</g>';
+  }
+
   // Prépare les <path> de mesure du temps k. Fait UNE fois par temps, jamais
   // par frame : getTotalLength() force un layout, c'est cher.
   function prepare(k) {
@@ -3001,10 +3076,26 @@
     pPrepared = k;
     layM.innerHTML = '';
     layP.innerHTML = '';
-    pPaths = { moves: [], pass: null, shot: null, hl: [] };
+    pPaths = { moves: [], pass: null, shot: null, hl: [], shlds: [] };
     var st = steps()[k];
     if (!st) return;
     var p0 = st.pos, i;
+
+    // Les épaules D'ABORD : posées en tête de calque, elles restent SOUS les
+    // tracés — et sous les jetons, qui vivent dans un calque au-dessus. Des <g>
+    // strictement statiques : la boucle ne touchera qu'un `display`, donc rien
+    // à neutraliser en `prefers-reduced-motion`.
+    var shl = shldsAt(k);
+    for (i = 0; i < shl.length; i++) {
+      var box = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      box.innerHTML = shldMarkup(shl[i]);
+      var sgg = box.firstChild;
+      // L'écran HÉRITÉ est déjà en place quand le temps commence ; celui qui se
+      // pose PENDANT ce temps attend que la course soit consommée.
+      sgg.style.display = shl[i].live ? 'none' : 'block';
+      layP.appendChild(sgg);
+      pPaths.shlds.push({ el: sgg, live: shl[i].live });
+    }
 
     for (i = 0; i < st.arw.length; i++) {
       var a = st.arw[i];
@@ -3041,29 +3132,7 @@
         ? (isDef ? 'mkScrDef' : 'mkScrAtk')
         : (isDef ? 'mkDef' : 'mkAtk')) + ')');
       trail.style.opacity = f(REDUCED_MOTION ? TRAIL_OP_MAX : TRAIL_OP_MIN);
-      // v.202 — Les épaules de la poseuse d'écran, préparées ICI (une fois par
-      // temps) et pas dans la boucle : orientation prise sur la tangente de fin
-      // de course, donc le mur d'épaules est perpendiculaire à l'arrivée, comme
-      // le T du marqueur. Repère local après rotate() : +x = sens de la course,
-      // ±y = le mur — les deux demi-disques bombent donc vers l'extérieur.
-      var shld = null;
-      if (a.kind === 'screen' && L > 0.01) {
-        var e1, e0;
-        try { e1 = el.getPointAtLength(L); e0 = el.getPointAtLength(Math.max(0, L - 0.8)); } catch (_) { e1 = null; }
-        if (e1) {
-          var ang = Math.atan2(e1.y - (e0 ? e0.y : e1.y), e1.x - (e0 ? e0.x : e1.x)) * 180 / Math.PI;
-          var hr = PR * 1.12, sr = PR * 0.58;
-          shld = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-          shld.setAttribute('class', 'scrshld' + (isDef ? ' def' : ''));
-          shld.setAttribute('transform', 'translate(' + f(e1.x) + ' ' + f(e1.y) + ') rotate(' + f(ang) + ')');
-          shld.innerHTML = '<circle class="core" cx="0" cy="0" r="' + f(hr) + '"/>'
-            + '<path class="sh" d="M ' + f(-sr) + ' ' + f(-hr) + ' A ' + f(sr) + ' ' + f(sr) + ' 0 0 0 ' + f(sr) + ' ' + f(-hr) + ' Z"/>'
-            + '<path class="sh" d="M ' + f(-sr) + ' ' + f(hr) + ' A ' + f(sr) + ' ' + f(sr) + ' 0 0 1 ' + f(sr) + ' ' + f(hr) + ' Z"/>';
-          shld.style.display = 'none';
-          layP.insertBefore(shld, ghost);
-        }
-      }
-      pPaths.moves.push({ id: a.from, el: el, len: L, trail: trail, ghost: ghost, shld: shld });
+      pPaths.moves.push({ id: a.from, el: el, len: L, trail: trail, ghost: ghost });
     }
 
     var ps = passOf(st);
@@ -3138,14 +3207,18 @@
         live[m.id] = { x: q.x, y: q.y };
       }
       m.trail.setAttribute('stroke-dashoffset', f(m.len * (1 - mu)));
-      // v.202 — L'écran est POSÉ : les épaules apparaissent quand la course est
-      // consommée, et restent jusqu'au bout du temps. Un simple `display`, donc
-      // identique en mouvement réduit.
-      if (m.shld) m.shld.style.display = mu >= 1 ? 'block' : 'none';
       // Le trait se colore au rythme du déplacement : 0.25 → 0.9 (linéaire).
       if (!REDUCED_MOTION)
         m.trail.style.opacity = f(TRAIL_OP_MIN + (TRAIL_OP_MAX - TRAIL_OP_MIN) * mu);
     }
+    // v.208 — L'écran POSÉ pendant ce temps n'apparaît qu'une fois la course
+    // consommée ; l'écran HÉRITÉ d'un temps antérieur est là depuis u=0 et ne
+    // bougera plus (son `display` a été fixé dans prepare()). `mu` est commun à
+    // tous les déplacements du temps, donc une seule comparaison suffit — et
+    // c'est un `display`, pas une transition.
+    for (i = 0; i < pPaths.shlds.length; i++)
+      if (pPaths.shlds[i].live)
+        pPaths.shlds[i].el.style.display = mu >= 1 ? 'block' : 'none';
     for (id in tokEl) placeToken(id, live[id]);
 
     // 2) porteuse — masquée pendant qu'un ballon vole
