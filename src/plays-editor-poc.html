@@ -635,6 +635,35 @@
   .tnode .nm{flex:1; min-width:0; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
   .tnode .ct{flex:none; font-size:10px; color:var(--ink-2); font-weight:600}
   .tnode .del{flex:none; border:0; background:none; padding:2px 3px; font-size:12px; cursor:pointer; color:var(--ink-2)}
+  /* Kebab ⋯ : la porte d'entree des actions rares d'une branche (v.221). */
+  .tnode .kb{
+    flex:none; border:1px solid var(--border); background:none; border-radius:8px;
+    padding:0 6px; height:24px; line-height:21px; font-size:14px; letter-spacing:1px;
+    cursor:pointer; color:var(--ink-2);
+  }
+  .tnode .kb:active{background:var(--field)}
+  .brmenu-back{position:fixed; inset:0; z-index:2000}
+  .brmenu{
+    position:fixed; z-index:2001; min-width:184px; max-width:230px; padding:5px;
+    background:var(--panel); border:1px solid var(--border); border-radius:12px;
+    box-shadow:0 12px 30px rgba(0,0,0,.38);
+    display:flex; flex-direction:column; gap:1px;
+    opacity:0; transform:scale(.96); transform-origin:top right;
+    transition:opacity .12s ease, transform .12s ease;
+  }
+  .brmenu.show{opacity:1; transform:none}
+  .brmenu .hd{
+    font-size:10px; font-weight:700; color:var(--ink-2); padding:4px 8px 6px;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  .brmenu button{
+    display:flex; align-items:center; gap:9px; width:100%; text-align:left;
+    border:0; background:none; color:inherit; font:inherit; font-size:13px; font-weight:600;
+    padding:9px 8px; border-radius:8px; cursor:pointer;
+  }
+  .brmenu button:active{background:var(--field)}
+  .brmenu button[disabled]{opacity:.32; cursor:default}
+  .brmenu button.danger{color:var(--danger,#E4572E)}
 
   /* ── Pistes (vue « éditeur vidéo ») ─────────────────────────────────── */
   .lanes{border-top:1px solid var(--border); padding-top:7px; display:flex; flex-direction:column; gap:4px}
@@ -5962,8 +5991,72 @@
     return s;
   }
 
+  // ── Menu ⋯ des actions de branche (v.221) ────────────────────────────
+  // Sept icones collees par ligne, l'arbre devenait illisible des la deuxieme
+  // variante : le nom n'avait plus de place et chaque cible faisait 12 px de
+  // large au doigt. Ne restent inline que ce qu'on LIT (nom, temps) et le ⏩,
+  // seule action assez frequente pour meriter un tap direct. Le reste — six
+  // actions rares et pour deux d'entre elles destructrices — passe derriere un
+  // kebab ancre au bouton, comme un menu contextuel natif.
+  var treeRowMap = {};
+  var elBrMenu = null, elBrBack = null;
+
+  function closeBranchMenu() {
+    if (elBrBack) { elBrBack.parentNode && elBrBack.parentNode.removeChild(elBrBack); elBrBack = null; }
+    if (elBrMenu) { elBrMenu.parentNode && elBrMenu.parentNode.removeChild(elBrMenu); elBrMenu = null; }
+  }
+
+  function openBranchMenu(k, btn) {
+    closeBranchMenu();
+    var r = treeRowMap[k];
+    if (!r) return;
+    elBrBack = document.createElement('div');
+    elBrBack.className = 'brmenu-back';
+    elBrMenu = document.createElement('div');
+    elBrMenu.className = 'brmenu';
+    elBrMenu.innerHTML = '<div class="hd">🔀 ' + esc(r.name) + '</div>'
+      + '<button data-mact="en">' + (r.on ? '🚫 Désactiver' : '👁 Activer') + '</button>'
+      + '<button data-mact="up"' + (r.idx === 0 ? ' disabled' : '') + '>⬆ Remonter</button>'
+      + '<button data-mact="dn"' + (r.idx === r.sib - 1 ? ' disabled' : '') + '>⬇ Descendre</button>'
+      + '<button data-mact="dup">📋 Dupliquer</button>'
+      + '<button data-mact="ren">✎ Renommer</button>'
+      + '<button class="danger" data-mact="del">🗑 Supprimer</button>';
+    // Le tiroir est `transform`-e : un enfant `position:fixed` s'y ancrerait au
+    // lieu du viewport. Le menu vit donc sur <body>, coordonnees ecran.
+    document.body.appendChild(elBrBack);
+    document.body.appendChild(elBrMenu);
+    var rc = btn.getBoundingClientRect(), mw = elBrMenu.offsetWidth, mh = elBrMenu.offsetHeight;
+    var top = rc.bottom + 4;
+    if (top + mh > window.innerHeight - 8) top = Math.max(8, rc.top - mh - 4);
+    var left = Math.min(Math.max(8, rc.right - mw), Math.max(8, window.innerWidth - mw - 8));
+    elBrMenu.style.top = top + 'px';
+    elBrMenu.style.left = left + 'px';
+    requestAnimationFrame(function () { if (elBrMenu) elBrMenu.classList.add('show'); });
+    elBrBack.addEventListener('click', function (e) { e.stopPropagation(); closeBranchMenu(); });
+    elBrMenu.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var b = e.target && e.target.closest ? e.target.closest('[data-mact]') : null;
+      if (!b || b.disabled) return;
+      var a = b.getAttribute('data-mact'), p = pathFromKey(k);
+      closeBranchMenu();
+      if (a === 'en') toggleBranchPath(p);
+      else if (a === 'up') moveBranchPath(p, -1);
+      else if (a === 'dn') moveBranchPath(p, 1);
+      else if (a === 'dup') dupBranchPath(p);
+      else if (a === 'ren') renameBranchPath(p);
+      else if (a === 'del') delBranchPath(p);   // garde confirm() inchangee
+    });
+  }
+
+  // Capture : sinon l'Escape refermerait d'abord le tiroir sous le menu.
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && elBrMenu) { e.stopPropagation(); closeBranchMenu(); }
+  }, true);
+
   function renderTree() {
     if (!elTreeList) return;
+    closeBranchMenu();               // les lignes sont reconstruites : l'ancre saute
+    treeRowMap = {};
     var here = pathKey(bpath);
     var rows = treeRows(rootSteps(), [], 0, []);
     var html = '<div class="tnode' + (here === '' ? ' on' : '') + '" data-p="">'
@@ -5971,17 +6064,13 @@
       + '<span class="ct">' + rootSteps().length + ' temps</span></div>';
     rows.forEach(function (r) {
       var k = pathKey(r.path);
+      treeRowMap[k] = r;
       html += '<div class="tnode' + (k === here ? ' on' : '') + (r.on ? '' : ' off') + '" data-p="' + esc(k) + '"'
         + ' style="margin-left:' + ((r.depth + 1) * 11) + 'px">'
         + '<span class="nm" title="' + esc(r.name) + '">🔀 ' + esc(r.name) + '</span>'
         + '<span class="ct">T' + (r.from + 1) + ' · ' + r.n + '</span>'
         + '<button class="del" data-xsk="' + esc(k) + '" title="Tester cette variante seule (skip : demarre a son T1)">⏩</button>'
-        + '<button class="del" data-en="' + esc(k) + '" title="' + (r.on ? 'Masquer' : 'Rendre visible') + ' cette variante côté joueuse">' + (r.on ? '👁' : '🚫') + '</button>'
-        + '<button class="del" data-up="' + esc(k) + '"' + (r.idx === 0 ? ' disabled style="opacity:.25"' : '') + ' title="Remonter parmi les variantes du même temps">⬆</button>'
-        + '<button class="del" data-dn="' + esc(k) + '"' + (r.idx === r.sib - 1 ? ' disabled style="opacity:.25"' : '') + ' title="Descendre parmi les variantes du même temps">⬇</button>'
-        + '<button class="del" data-dup="' + esc(k) + '" title="Dupliquer cette branche (copie profonde)">📋</button>'
-        + '<button class="del" data-ren="' + esc(k) + '" title="Renommer cette branche">✎</button>'
-        + '<button class="del" data-del="' + esc(k) + '" title="Supprimer cette branche">🗑</button></div>';
+        + '<button class="kb" data-menu="' + esc(k) + '" title="Actions sur cette branche">⋯</button></div>';
     });
     elTreeList.innerHTML = html;
 
@@ -6005,6 +6094,8 @@
   elTree.addEventListener('click', function (e) {
     var t = e.target;
     if (!t || !t.getAttribute) return;
+    var mn = t.getAttribute('data-menu');
+    if (mn !== null) { e.stopPropagation(); openBranchMenu(mn, t); return; }
     var xsk = t.getAttribute('data-xsk');
     if (xsk !== null) {
       e.stopPropagation();
