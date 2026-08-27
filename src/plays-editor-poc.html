@@ -1082,6 +1082,7 @@
     <button class="btn sm" id="vw-prev" title="Temps précédent">⏮</button>
     <button class="btn sm" id="vw-play" title="Lecture / pause">⏸</button>
     <button class="btn sm" id="vw-next" title="Temps suivant">⏭</button>
+    <button class="btn sm" id="vw-skip" title="Sauter à une variante" style="display:none">&gt;&gt;</button>
     <button class="btn sm" id="vw-speed" title="Vitesse de lecture">🐢</button>
     <button class="btn sm" id="vw-size" title="Taille des pions">⤢</button>
     <button class="btn sm" id="vw-mirror" title="Inverser gauche / droite">↔</button>
@@ -6218,6 +6219,44 @@
     }
   }
 
+  // v.220 - Le meme >> que dans l arbre, mais SANS quitter le terrain : depuis
+  // la ligne qu on est en train de lire, tout ce qui bifurque en dessous. On
+  // repart de stepsAt(bpath) et non de la racine — la joueuse veut changer de
+  // variante ici, pas repartir du play entier ; l arbre complet reste a un tap
+  // du 🌳. vwTreeRows() ne retient que les branches ACTIVEES : une variante
+  // masquee par le coach n est pas un saut possible, ici comme ailleurs.
+  function vwSkipHops() {
+    if (!vwOn || !vwRoute.length) return [];
+    return vwTreeRows(stepsAt(bpath), bpath.slice(), 0, []);
+  }
+
+  // Une seule suite = pas de menu, on saute (l ecran d apres est le meme, un
+  // tap plus loin). Plusieurs = on demande. Zero = le bouton n existe pas.
+  function vwSkipBtn() {
+    var hops = vwSkipHops();
+    if (!hops.length) return;
+    if (hops.length === 1) { vwSkipPath(hops[0].path); return; }
+    vwOpenSkipMenu(hops);
+  }
+
+  // Menu de saut. Il reutilise la carte de fin de chemin, mais c est un menu
+  // OUVERT : ici la lecture continue derriere, on doit pouvoir renoncer — d ou
+  // vwMenuSkip, qui autorise la sortie par le fond (interdite en fin de
+  // chemin, ou renoncer laisserait la joueuse sur une photo figee).
+  var vwMenuSkip = false;
+  function vwOpenSkipMenu(hops) {
+    var html = '<div style="font-size:12px;font-weight:700;margin-bottom:8px">&gt;&gt; Sauter à une variante</div>';
+    hops.forEach(function (h) {
+      html += '<div class="row" style="margin-left:' + (h.depth * 10) + 'px"><button class="btn wide" data-skiphop="' + esc(pathKey(h.path)) + '">🔀 ' + esc(h.name)
+        + '<br><small style="opacity:.65;font-weight:400">bifurque au temps ' + (h.from + 1) + ' · ' + h.n + ' temps</small></button></div>';
+    });
+    html += '<div class="row"><button class="btn wide" data-skiphop="~x">✕ Continuer la lecture</button></div>';
+    document.getElementById('vw-menu-card').innerHTML = html;
+    vwMenuSkip = true;
+    if (playing) { pause(); vwSyncButtons(); }
+    vwMenu.classList.add('show');
+  }
+
   // Descente dans un segment. Comme un changement de ligne, mais SANS couper
   // la lecture : tick() enchaîne dans la même frame.
   function vwGoSeg(k) {
@@ -6278,8 +6317,19 @@
   vwMenu.addEventListener('click', function (e) {
     // Pas de sortie par le fond : en fin de chemin il FAUT choisir, sinon on
     // laisse la joueuse sur une photo figée sans rien lui proposer.
+    var sh = e.target && e.target.closest ? e.target.closest('[data-skiphop]') : null;
+    if (sh) {
+      var sv = sh.getAttribute('data-skiphop');
+      vwMenu.classList.remove('show'); vwMenuSkip = false;
+      if (sv !== '~x') vwSkipPath(pathFromKey(sv));
+      else if (!playing) { play(); vwSyncButtons(); }
+      return;
+    }
     var btn = e.target && e.target.closest ? e.target.closest('[data-hop]') : null;
-    if (!btn) return;
+    // Sortie par le fond : permise pour le menu de saut (la lecture attend
+    // derriere), jamais en fin de chemin.
+    if (!btn) { if (vwMenuSkip) { vwMenu.classList.remove('show'); vwMenuSkip = false; } return; }
+    vwMenuSkip = false;
     var v = btn.getAttribute('data-hop');
     vwMenu.classList.remove('show');
     if (v === 'tree') { vwShowTree(); return; }
@@ -6302,6 +6352,9 @@
     document.getElementById('vw-size').textContent = '⤢ ' + SIZE_KEYS[SIZE_KEYS.indexOf(sizeKeyOf())].toUpperCase();
     document.getElementById('vw-play').textContent = playing ? '⏸' : '▶';
     document.getElementById('vw-3d').classList.toggle('on', view === '3d');
+    // v.220 - Un bouton qui ne mene nulle part ne s affiche pas : sur la
+    // derniere feuille de l arbre, il n y a plus rien a sauter.
+    document.getElementById('vw-skip').style.display = vwSkipHops().length ? '' : 'none';
     vwHintSync();
     vwExplSync(true);
   }
@@ -6497,6 +6550,7 @@
   document.getElementById('vw-play').addEventListener('click', function () { play(); vwSyncButtons(); });
   document.getElementById('vw-prev').addEventListener('click', vwStepBack);
   document.getElementById('vw-next').addEventListener('click', vwStepForward);
+  document.getElementById('vw-skip').addEventListener('click', vwSkipBtn);
   document.getElementById('vw-speed').addEventListener('click', function () {
     vwUserSpeed = true;
     vwSpeedIx = (vwSpeedIx + 1) % VW_SPEEDS.length;
