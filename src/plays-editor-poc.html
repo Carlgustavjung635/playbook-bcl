@@ -6219,23 +6219,58 @@
     }
   }
 
-  // v.220 - Le meme >> que dans l arbre, mais SANS quitter le terrain : depuis
-  // la ligne qu on est en train de lire, tout ce qui bifurque en dessous. On
-  // repart de stepsAt(bpath) et non de la racine — la joueuse veut changer de
-  // variante ici, pas repartir du play entier ; l arbre complet reste a un tap
-  // du 🌳. vwTreeRows() ne retient que les branches ACTIVEES : une variante
+  // Deux chemins sont-ils le meme / l un sous l autre ? On compare les
+  // maillons plutot que les cles : pathKey() est un format d affichage, pas un
+  // contrat de prefixe.
+  function vwSameP(a, b) {
+    if (a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i++) if (a[i].si !== b[i].si || a[i].bid !== b[i].bid) return false;
+    return true;
+  }
+  function vwUnderP(p, base) {
+    if (p.length < base.length) return false;
+    for (var i = 0; i < base.length; i++) if (p[i].si !== base[i].si || p[i].bid !== base[i].bid) return false;
+    return true;
+  }
+
+  // v.220 - Le meme >> que dans l arbre, mais SANS quitter le terrain.
+  //
+  // Premiere version : on ne listait que le sous-arbre de la ligne courante
+  // (stepsAt(bpath)). Conséquence — sur une FEUILLE, zero suite, donc bouton
+  // masque : le >> existait sur la principale et disparaissait des qu on
+  // descendait au bout d une variante, la ou justement on veut sauter
+  // ailleurs. Le saut n est pas « la suite », c est un DEPLACEMENT : depuis
+  // n importe ou dans l arbre on doit pouvoir aller n importe ou.
+  //
+  // On repart donc de la racine (comme l arbre) : soeurs, tantes, filles, et
+  // la ligne principale elle-meme quand on n y est pas. Seule exclusion : le
+  // noeud courant, sauter sur place n a pas de sens. Les destinations SOUS la
+  // ligne courante remontent en tete (near) — c est le cas frequent, et
+  // sort() est stable, donc l ordre de l arbre est conserve dans chaque
+  // groupe. vwTreeRows() ne retient que les branches ACTIVEES : une variante
   // masquee par le coach n est pas un saut possible, ici comme ailleurs.
   function vwSkipHops() {
     if (!vwOn || !vwRoute.length) return [];
-    return vwTreeRows(stepsAt(bpath), bpath.slice(), 0, []);
+    var rows = vwTreeRows(rootSteps(), [], 0, []), out = [], i, r;
+    if (bpath.length) out.push({ path: [], depth: 0, name: 'Ligne principale', from: 0, n: rootSteps().length, near: false, root: true });
+    for (i = 0; i < rows.length; i++) {
+      r = rows[i];
+      if (vwSameP(r.path, bpath)) continue;         // sauter sur place : non
+      r.near = vwUnderP(r.path, bpath);
+      out.push(r);
+    }
+    out.sort(function (a, b) { return (b.near ? 1 : 0) - (a.near ? 1 : 0); });
+    return out;
   }
 
-  // Une seule suite = pas de menu, on saute (l ecran d apres est le meme, un
-  // tap plus loin). Plusieurs = on demande. Zero = le bouton n existe pas.
+  // Un seul saut ET c est une suite directe de la ligne courante : pas de menu
+  // pour un choix unique, on y va. Le raccourci s arrete la : renvoyer la
+  // joueuse d office sur la principale (le seul « saut » restant au bout d un
+  // play a une branche) serait un deplacement qu elle n a pas demande.
   function vwSkipBtn() {
     var hops = vwSkipHops();
     if (!hops.length) return;
-    if (hops.length === 1) { vwSkipPath(hops[0].path); return; }
+    if (hops.length === 1 && hops[0].near) { vwSkipPath(hops[0].path); return; }
     vwOpenSkipMenu(hops);
   }
 
@@ -6247,8 +6282,11 @@
   function vwOpenSkipMenu(hops) {
     var html = '<div style="font-size:12px;font-weight:700;margin-bottom:8px">&gt;&gt; Sauter à une variante</div>';
     hops.forEach(function (h) {
-      html += '<div class="row" style="margin-left:' + (h.depth * 10) + 'px"><button class="btn wide" data-skiphop="' + esc(pathKey(h.path)) + '">🔀 ' + esc(h.name)
-        + '<br><small style="opacity:.65;font-weight:400">bifurque au temps ' + (h.from + 1) + ' · ' + h.n + ' temps</small></button></div>';
+      html += '<div class="row" style="margin-left:' + (h.depth * 10) + 'px"><button class="btn wide" data-skiphop="' + esc(pathKey(h.path)) + '">'
+        + (h.root ? '▶ ' : '🔀 ') + esc(h.name) + (h.near ? ' <small style="opacity:.7">· depuis ici</small>' : '')
+        + '<br><small style="opacity:.65;font-weight:400">'
+        + (h.root ? 'tout le play depuis le début · ' + h.n + ' temps' : 'bifurque au temps ' + (h.from + 1) + ' · ' + h.n + ' temps')
+        + '</small></button></div>';
     });
     html += '<div class="row"><button class="btn wide" data-skiphop="~x">✕ Continuer la lecture</button></div>';
     document.getElementById('vw-menu-card').innerHTML = html;
