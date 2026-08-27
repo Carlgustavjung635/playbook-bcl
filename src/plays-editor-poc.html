@@ -1393,8 +1393,14 @@
   function camSave() { try { localStorage.setItem(CAM_KEY, JSON.stringify(cam)); } catch (e) {} }
 
   var RAD = Math.PI / 180;
-  var HOOP_RISE = 37;        // anneau (26) + panneau (11), en unités d'écran
   var SLAB = 4.5;            // épaisseur de la dalle de parquet
+  // ── v.217 · COTES VERTICALES (1 unité = 10 cm), officielles FIBA ─────
+  // Le panier n'est plus une vignette face caméra : c'est de la GÉOMÉTRIE,
+  // décrite en (x, y, z) monde et projetée comme le reste.
+  var Z_RIM = 30.5;          // anneau à 3,05 m
+  var Z_BB0 = 29.0;          // bas de planche à 2,90 m
+  var Z_BB1 = 39.5;          // haut de planche à 3,95 m
+  var R_RIM = 2.25;          // rayon de l'anneau (0,225 m)
   function f4(n) { return Math.round(n * 10000) / 10000; }
 
   // isoOf() est appelée pour CHAQUE jeton à CHAQUE frame : elle est
@@ -1406,7 +1412,8 @@
     var key = m + '|' + cam.tilt + '|' + cam.yaw;
     if (isoCache.k === key) return isoCache.v;
     var M = MODES[m] || MODES.half, W = M.w, H = M.h;
-    var th = Math.sin(clampCam(cam.tilt, CAM_LIM.tlo, CAM_LIM.thi) * RAD);
+    var tr = clampCam(cam.tilt, CAM_LIM.tlo, CAM_LIM.thi) * RAD;
+    var th = Math.sin(tr), cz = Math.cos(tr);
     var ph = clampCam(cam.yaw, CAM_LIM.ylo, CAM_LIM.yhi) * RAD;
     var cf = Math.cos(ph), sf = Math.sin(ph);
     var a = cf, b = -th * sf, c = sf, d = th * cf;      // avant mise à l'échelle
@@ -1419,13 +1426,18 @@
     // cadrage. Une mise à l'échelle anisotrope ferait mentir la géométrie.
     // La hauteur réservée au panier dressé (HOOP_RISE) dépend elle-même de
     // l'échelle, d'où la résolution directe s ≤ (H − SLAB)/(bh + HOOP_RISE).
-    var sc = Math.min(W * 0.96 / bw, Math.max(0.05, (H - SLAB) / (bh + HOOP_RISE)));
-    var free = H - (sc * bh + HOOP_RISE * sc + SLAB);
+    // Réserve de hauteur pour le panier DRESSÉ. Elle suit cos θ : caméra
+    // rasante = poteau très haut à l'écran, caméra au zénith = panier écrasé
+    // sur son ombre. Le cadrage respire donc avec l'angle au lieu de garder
+    // un bandeau vide permanent.
+    var rise = Z_BB1 * cz;
+    var sc = Math.min(W * 0.96 / bw, Math.max(0.05, (H - SLAB) / (bh + rise)));
+    var free = H - (sc * bh + rise * sc + SLAB);
     var r = {
       a: sc * a, b: sc * b, c: sc * c, d: sc * d,
       e: (W - sc * bw) / 2 - sc * x0,
-      f: HOOP_RISE * sc + (free > 0 ? free * 0.55 : 0) - sc * y0,
-      s: sc, sy: th, ybh: sc * bh, ymin: 0
+      f: rise * sc + (free > 0 ? free * 0.55 : 0) - sc * y0,
+      s: sc, sy: th, cz: cz, ybh: sc * bh, ymin: 0
     };
     r.ymin = r.f + sc * y0;    // sommet du parquet projeté, en unités d'écran
     isoCache.k = key; isoCache.v = r;
@@ -1459,6 +1471,30 @@
       + f4(-(a * i.e + c * i.f)) + ' ' + f4(-(b * i.e + d * i.f)) + ')';
   }
   function project3(p) { var i = isoOf(mode()); return { x: i.a * p.x + i.c * p.y + i.e, y: i.b * p.x + i.d * p.y + i.f }; }
+  // Point du MONDE : (x, y) au sol + z de hauteur. Une verticale ne se
+  // projette PAS à longueur constante — elle raccourcit quand la caméra monte
+  // (cos θ) jusqu'à disparaître à la verticale pure. C'est exactement ce qui
+  // manquait : un panneau dessiné à hauteur fixe est une vignette collée à
+  // l'écran, pas un objet posé dans le terrain.
+  function project3z(p, z) {
+    var i = isoOf(mode()), q = project3(p);
+    return { x: q.x, y: q.y - (z || 0) * i.s * i.cz };
+  }
+  // Cercle HORIZONTAL de rayon r à la hauteur z, échantillonné puis projeté
+  // point par point. Sous une matrice de caméra quelconque il devient une
+  // ellipse correctement ORIENTÉE, et il s'aplatit en trait quand la caméra
+  // descend au ras du sol. Aucun cas particulier à écrire, aucune ellipse à
+  // résoudre analytiquement.
+  function ring3(cx, cy, r, z, n) {
+    var d = '', k, a, p;
+    n = n || 20;
+    for (k = 0; k < n; k++) {
+      a = k / n * Math.PI * 2;
+      p = project3z({ x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r }, z);
+      d += (k ? ' L ' : 'M ') + f(p.x) + ' ' + f(p.y);
+    }
+    return d + ' Z';
+  }
   function unproject3(sp) {
     var i = isoOf(mode()), dt = (i.a * i.d - i.b * i.c) || 1e-6;
     var X = sp.x - i.e, Y = sp.y - i.f;
@@ -1485,26 +1521,51 @@
     if (m !== 'full') return [ { x: h.x, y: h.y, base: 12 } ];
     return [ { x: h.x, y: h.y, base: 12 }, { x: h.x, y: 304 - h.y, base: 292 } ];
   }
+  // Un panier RÉEL : planche verticale dans le plan de la ligne de fond,
+  // anneau horizontal à 3,05 m, potence qui redescend au sol derrière la
+  // ligne. Tout est décrit en (x, y, z) MONDE et passe par project3z(), donc
+  // l'ensemble tourne avec le terrain au lieu de faire face à la caméra.
   function hoop3(h) {
-    var i = isoOf(mode()), sc = i.s;
-    var p = project3(h), b = project3({ x: h.x, y: h.base });
-    // Une hauteur est VERTICALE à l'écran : elle suit l'échelle uniforme,
-    // jamais la compression de profondeur — sinon le panier s'écrase avec le
-    // sol quand on baisse la caméra.
-    var rimY = p.y - 26 * sc;
-    var bw = 9 * sc, bt = rimY - 11 * sc, bb = rimY - 1.2 * sc;
-    var rx = 2.6 * sc, ry = Math.max(0.5, 2.6 * sc * i.sy);
-    return ''
-      + '<ellipse class="hsh3" cx="' + f(p.x) + '" cy="' + f(p.y) + '" rx="' + f(4 * sc) + '" ry="' + f(Math.max(0.6, 4 * sc * i.sy)) + '"/>'
-      + '<path class="post3" d="M ' + f(p.x) + ' ' + f(bt + 2 * sc) + ' L ' + f(b.x) + ' ' + f(b.y) + '"/>'
-      + '<rect class="bb3" x="' + f(p.x - bw) + '" y="' + f(bt) + '" width="' + f(bw * 2) + '" height="' + f(bb - bt) + '" rx="' + f(0.6 * sc) + '"/>'
-      + '<ellipse class="rim3" cx="' + f(p.x) + '" cy="' + f(rimY) + '" rx="' + f(rx) + '" ry="' + f(ry) + '"/>'
-      + '<path class="net3" d="'
-        + 'M ' + f(p.x - rx) + ' ' + f(rimY) + ' L ' + f(p.x - rx * 0.45) + ' ' + f(rimY + 5 * sc)
-        + ' M ' + f(p.x + rx) + ' ' + f(rimY) + ' L ' + f(p.x + rx * 0.45) + ' ' + f(rimY + 5 * sc)
-        + ' M ' + f(p.x) + ' ' + f(rimY + ry) + ' L ' + f(p.x) + ' ' + f(rimY + 5 * sc)
-        + ' M ' + f(p.x - rx * 0.45) + ' ' + f(rimY + 5 * sc) + ' L ' + f(p.x + rx * 0.45) + ' ' + f(rimY + 5 * sc)
-      + '"/>';
+    // La planche est à 1,20 m de la ligne de fond, côté terrain ; le pied de
+    // la potence 0,60 m derrière cette ligne, hors de l'aire de jeu.
+    var toward = h.y > h.base ? 1 : -1;
+    var bY = h.base + 12 * toward, pY = h.base - 6 * toward;
+    var hw = 9;                                   // demi-largeur de planche (1,80 m)
+    // Quatre coins du panneau : deux points du monde par arête verticale.
+    var t1 = project3z({ x: h.x - hw, y: bY }, Z_BB1), t2 = project3z({ x: h.x + hw, y: bY }, Z_BB1);
+    var b2 = project3z({ x: h.x + hw, y: bY }, Z_BB0), b1 = project3z({ x: h.x - hw, y: bY }, Z_BB0);
+    var bb = 'M ' + f(t1.x) + ' ' + f(t1.y) + ' L ' + f(t2.x) + ' ' + f(t2.y)
+           + ' L ' + f(b2.x) + ' ' + f(b2.y) + ' L ' + f(b1.x) + ' ' + f(b1.y) + ' Z';
+    // Potence : bras horizontal derrière la planche, puis mât jusqu'au sol.
+    var a1 = project3z({ x: h.x, y: bY }, Z_BB0);
+    var a2 = project3z({ x: h.x, y: pY }, Z_BB0);
+    var a3 = project3z({ x: h.x, y: pY }, 0);
+    var post = 'M ' + f(a1.x) + ' ' + f(a1.y) + ' L ' + f(a2.x) + ' ' + f(a2.y)
+             + ' L ' + f(a3.x) + ' ' + f(a3.y);
+    // Tige qui relie l'anneau à la planche, à la hauteur de l'anneau.
+    var r1 = project3z({ x: h.x, y: bY }, Z_RIM), r2 = project3z({ x: h.x, y: h.y }, Z_RIM);
+    var arm = 'M ' + f(r1.x) + ' ' + f(r1.y) + ' L ' + f(r2.x) + ' ' + f(r2.y);
+    var rim = ring3(h.x, h.y, R_RIM, Z_RIM, 20);
+    // Filet : quelques brins de l'anneau vers un cerceau plus petit, 40 cm
+    // plus bas — donc lui aussi horizontal, donc lui aussi projeté.
+    var net = ring3(h.x, h.y, R_RIM * 0.62, Z_RIM - 4, 12), k, aa, p1, p2;
+    for (k = 0; k < 6; k++) {
+      aa = k / 6 * Math.PI * 2;
+      p1 = project3z({ x: h.x + Math.cos(aa) * R_RIM,        y: h.y + Math.sin(aa) * R_RIM        }, Z_RIM);
+      p2 = project3z({ x: h.x + Math.cos(aa) * R_RIM * 0.62, y: h.y + Math.sin(aa) * R_RIM * 0.62 }, Z_RIM - 4);
+      net += ' M ' + f(p1.x) + ' ' + f(p1.y) + ' L ' + f(p2.x) + ' ' + f(p2.y);
+    }
+    // Ombre portée : un disque AU SOL sous l'anneau, donc z = 0.
+    var sh = '<path class="hsh3" d="' + ring3(h.x, h.y, R_RIM * 1.7, 0, 14) + '"/>';
+    var bbEl  = '<path class="bb3" d="' + bb + '"/>';
+    var rimEl = '<path class="rim3" d="' + rim + '"/>'
+              + '<path class="post3" d="' + arm + '"/>'
+              + '<path class="net3" d="' + net + '"/>';
+    // Ordre de recouvrement : sur le panier LOINTAIN la planche est derrière
+    // l'anneau, sur le panier PROCHE elle est devant. Un simple test de sens
+    // suffit — c'est le seul endroit du rendu où la profondeur compte.
+    return sh + '<path class="post3" d="' + post + '"/>'
+      + (toward > 0 ? bbEl + rimEl : rimEl + bbEl);
   }
 
   // Décor ARRIÈRE : horizon + tranche de parquet. La dalle est le quad
@@ -3724,8 +3785,10 @@
   function handH(p) { return tokLift() * depthScale(p); }
   // La balle quitte les MAINS, pas les pieds.
   function handPt(p) { var q = project3(p); return { x: q.x, y: q.y - handH(p) }; }
-  // L'ANNEAU, pas le sol sous l'anneau. Même formule que hoop3().
-  function rimPt(H) { var i = isoOf(mode()), q = project3(H); return { x: q.x, y: q.y - 26 * i.s }; }
+  // L'ANNEAU, pas le sol sous l'anneau : le MÊME point du monde que celui
+  // qui dessine le cercle dans hoop3(), à la même hauteur FIBA. La cible
+  // suit donc l'anneau à n'importe quel angle, sans constante à resynchroniser.
+  function rimPt(H) { return project3z(H, Z_RIM); }
 
   // Cloche du tir EN 3D : le sommet passe au-dessus des deux extrémités À
   // L'ÉCRAN. Une cloche tracée dans le plan du parquet, elle, reste couchée
@@ -5438,6 +5501,13 @@
   // `anim=` désigne celle qu'on ouvre — sans lui, on en crée une nouvelle.
   var planId = Q.get('plan') || null;      // "<convocId>::<date>"
   var exoId  = Q.get('exo') || null;       // l'exercice du plan
+  // v.218 — TROISIÈME hôte : la BIBLIOTHÈQUE partagée (table `animations`).
+  // `lib=<id>` ouvre la ligne, `lib=new` part d'une page blanche. Une animation
+  // de bibliothèque n'appartient à aucun play : elle est ATTACHÉE à N plays via
+  // plays.animation_refs. `attach=<playId>` demande de rattacher la création à
+  // la fiche d'où l'on vient, en référence (le défaut du modèle).
+  var libId = Q.get('lib') || null;
+  var attachPlay = Q.get('attach') || null;
   var playTitle = '';
 
   function sbFetch(path, opts) {
@@ -5468,6 +5538,24 @@
   }
 
   function fetchAnims() {
+    // MODE BIBLIOTHÈQUE — une LIGNE, pas un tableau. On renvoie quand même une
+    // liste à un élément : tout le reste de l'éditeur (publier, ouvrir,
+    // supprimer) parle en listes, et lui faire parler deux langues serait le
+    // moyen le plus sûr d'oublier une porte.
+    if (libId) {
+      playTitle = 'bibliothèque';
+      if (libId === 'new') return Promise.resolve([]);
+      return sbFetch('animations?id=eq.' + encodeURIComponent(libId) + '&select=id,title,data&limit=1')
+        .then(function (rows) {
+          if (!rows || !rows.length) return [];
+          var blob = (rows[0].data && typeof rows[0].data === 'object') ? rows[0].data : {};
+          // L'id de la LIGNE fait foi (une copie mal recopiée peut porter l'id
+          // de sa source dans son blob — on écraserait l'original au publish).
+          blob.id = rows[0].id;
+          if (!blob.title) blob.title = rows[0].title || '';
+          return [blob];
+        });
+    }
     if (planId && exoId) {
       return sbFetch('training_plans?id=eq.' + encodeURIComponent(planId) + '&select=id,plan&limit=1')
         .then(function (rows) {
@@ -5494,6 +5582,38 @@
   }
 
   function writeAnims(list) {
+    // MODE BIBLIOTHÈQUE — upsert de LA ligne, puis rattachement éventuel.
+    // On n'écrit QUE l'animation courante : les autres lignes de la biblio ne
+    // nous appartiennent pas, et un PATCH global les écraserait avec ce qui
+    // dort dans cet onglet.
+    if (libId) {
+      var cur = null, j, arr = list || [];
+      for (j = 0; j < arr.length; j++) if (arr[j] && arr[j].id === doc.id) cur = arr[j];
+      if (!cur) cur = arr[arr.length - 1];
+      if (!cur || !cur.id) return Promise.reject(new Error('rien à publier'));
+      // `title` est dupliqué hors du blob : la bibliothèque se liste et se trie
+      // sans désérialiser N blobs (cf. en-tête de la migration 20260830_001).
+      var row = { id: cur.id, title: cur.title || 'Sans titre', data: cur, updated_at: new Date().toISOString() };
+      return sbFetch('animations', { method: 'POST', body: row, prefer: 'resolution=merge-duplicates,return=minimal' })
+        .then(function () {
+          if (!attachPlay) return null;
+          // read-modify-write : un autre coach a pu attacher autre chose à ce
+          // play pendant qu'on dessinait. On n'ajoute que si la ref manque.
+          return sbFetch('plays?id=eq.' + encodeURIComponent(attachPlay) + '&select=animation_refs&limit=1')
+            .then(function (rows) {
+              var refs = (rows && rows[0] && Array.isArray(rows[0].animation_refs)) ? rows[0].animation_refs : [];
+              var k, r, t, has = false;
+              for (k = 0; k < refs.length; k++) {
+                r = refs[k] || {};
+                t = (r.mode === 'copy' && r.copy_id) ? r.copy_id : r.id;
+                if (t === row.id) has = true;
+              }
+              if (has) return null;
+              return sbFetch('plays?id=eq.' + encodeURIComponent(attachPlay),
+                { method: 'PATCH', body: { animation_refs: refs.concat([{ id: row.id, mode: 'ref' }]) }, prefer: 'return=minimal' });
+            });
+        });
+    }
     // MODE EXO — read-modify-write sur le blob ENTIER. `plan` porte tout le
     // travail du coach (exos, groupes, notes, alternatives) : un PATCH aveugle
     // l'écraserait. On relit, on ne remplace que `exercises[i].animation`, et
@@ -5634,7 +5754,7 @@
   // ── Publier ──────────────────────────────────────────────────────────
   document.getElementById('a-publish').addEventListener('click', function () {
     closeSheets();
-    if (!playId && !planId) { toast('Bac à sable : ouvre l\'éditeur depuis un play ou un exo pour publier.', 'err'); return; }
+    if (!playId && !planId && !libId) { toast('Bac à sable : ouvre l\'éditeur depuis un play ou un exo pour publier.', 'err'); return; }
     if (!doc.title.trim()) { metaToForm(); openSheet('sh-meta'); toast('Un titre est obligatoire pour publier.', 'err'); F.title.focus(); return; }
     if (!doc.id) doc.id = (slug(doc.title) || 'anim') + '-' + Math.random().toString(36).slice(2, 7);
     var o = toJSON();
@@ -5657,7 +5777,18 @@
   // ── Supprimer une animation du play ──────────────────────────────────
   document.getElementById('a-delete').addEventListener('click', function () {
     closeSheets();
-    if ((!playId && !planId) || !doc.id) { toast('Cette animation n\'a jamais été publiée.', 'err'); return; }
+    if ((!playId && !planId && !libId) || !doc.id) { toast('Cette animation n\'a jamais été publiée.', 'err'); return; }
+    // MODE BIBLIOTHÈQUE — SOFT-delete : d'autres plays peuvent la référencer,
+    // et une ligne vraiment effacée leur laisserait un trou muet. Leur fiche
+    // affichera « Animation supprimée » avec un bouton Détacher.
+    if (libId) {
+      if (!confirm('Supprimer « ' + (doc.title || doc.id) + ' » de la bibliothèque ?\nLes plays qui la référencent perdront cette animation.')) return;
+      sbFetch('animations?id=eq.' + encodeURIComponent(doc.id),
+        { method: 'PATCH', body: { deleted_at: new Date().toISOString() }, prefer: 'return=minimal' })
+        .then(function () { toast('Animation supprimée de la bibliothèque.', 'ok'); })
+        .catch(function (e) { toast('Échec de la suppression — ' + sbMsg(e), 'err'); });
+      return;
+    }
     if (!confirm('Retirer « ' + (doc.title || doc.id) + ' » de ' + (planId ? 'cet exercice' : 'ce play') + ' ?')) return;
     var gone = doc.id;
     fetchAnims()
@@ -6533,11 +6664,11 @@
   renderTimeline();
   setHint();
 
-  if (!playId && !planId) {
+  if (!playId && !planId && !libId) {
     setContext('bac à sable');
     offerDraft();
   } else {
-    setContext(planId ? 'chargement de l\'exercice…' : 'chargement du play…');
+    setContext(libId ? 'chargement de la bibliothèque…' : (planId ? 'chargement de l\'exercice…' : 'chargement du play…'));
     // mode=view : on masque l'éditeur AVANT le fetch. Sinon la joueuse voit la
     // barre d'outils clignoter le temps du chargement — et surtout elle peut
     // la toucher.
@@ -6545,6 +6676,16 @@
     fetchAnims()
       .then(function (list) {
         setContext(playTitle ? '↳ ' + playTitle : (planId ? '↳ exercice' : '↳ play'));
+        // MODE BIBLIOTHÈQUE — la liste ne porte que LA ligne demandée, il n'y
+        // a donc rien à chercher par `anim=`. `lib=new` (ou ligne disparue) =
+        // page blanche : on publiera une nouvelle entrée.
+        if (libId) {
+          if (libId === 'new' || !list.length) { offerDraft(); return; }
+          loadDoc(fromJSON(list[0]));
+          dirty = false;
+          if (wantView) setTimeout(function () { document.body.classList.remove('viewer'); enterViewer('url'); }, 120);
+          return;
+        }
         // Sans `anim=`, on CRÉE : play comme exo, une porte unique.
         if (!wantAnim) { offerDraft(); return; }
         var found = null, i;
