@@ -4643,14 +4643,7 @@ const ENTITIES = [
           // « réconcilier avant de pousser » et l'en-tête de la migration
           // 20260823_002). Fallback sur le local : tant que la migration n'est
           // pas appliquée, r.animations est undefined et on ne perd rien.
-          animations: Array.isArray(r.animations) ? r.animations : (local.animations || []),
-          // animation_refs (v.218) — MÊME régime que la ligne au-dessus : LU
-          // ici, jamais poussé par le dump. C'est la colonne qui attache des
-          // animations de la BIBLIOTHÈQUE partagée (table `animations`) au
-          // play, en référence ou en copie. Tant que la migration
-          // 20260830_001 n'est pas appliquée, r.animation_refs est undefined
-          // et la lecture retombe sur `animations` inline : rien ne bouge.
-          animation_refs: Array.isArray(r.animation_refs) ? r.animation_refs : (local.animation_refs || [])
+          animations: Array.isArray(r.animations) ? r.animations : (local.animations || [])
         };
       });
       // Préserve les locaux récents non encore push (id format uid() = 'x...')
@@ -14020,11 +14013,7 @@ function playTile(p, opts) {
   // Corollaire : pas de `data-vthumb` quand l'animation gagne, sinon
   // l'hydratation de la vignette distante (Instagram/TikTok/Vimeo) irait
   // écraser le SVG qu'on vient de poser.
-  // v.218 — la résolution passe par getPlayAnimations : une vignette de grille
-  // doit montrer l'animation de la BIBLIOTHÈQUE quand le play en attache une,
-  // et l'inline sinon. Une seule porte, sinon la grille et la fiche divergent.
-  const anims = (typeof getPlayAnimations === 'function') ? getPlayAnimations(p)
-    : (Array.isArray(p.animations) ? p.animations : []);
+  const anims = Array.isArray(p.animations) ? p.animations : [];
   const animThumb = (anims.length && typeof _animThumbSvg === 'function')
     ? String(_animThumbSvg(anims[0])).replace('<svg', '<svg style="width:100%;height:100%;display:block"')
     : '';
@@ -16176,9 +16165,6 @@ function confirmPlayerAbsence(cid) {
 // PLAYS
 // ============================================================
 function renderPlays() {
-  // Charge la bibliothèque d'animations une fois par session (et déclenche
-  // l'extraction de l'inline si ce coach ne l'a pas encore faite).
-  _animLibEnsure();
   if (state.view && state.view.type === 'play') return renderPlayDetail();
 
   // Fallback : si state.playsCat est invalide (legacy 'all' ou cat supprimée), revenir à 'off'
@@ -16401,7 +16387,6 @@ function _pbEditorV2Row() {
         <span>Éditeur de plays v2 (beta)</span>
       </label>
       ${on ? `<button class="btn btn-secondary" style="font-size:12px" onclick="openPbEditorV2()">🆕 Nouvel éditeur (beta)</button>` : ''}
-      ${canEditSharedLibrary() ? `<button class="btn btn-secondary" style="font-size:12px" onclick="openAnimLibrary()">🎬 Bibliothèque animations</button>` : ''}
     </div>`;
 }
 
@@ -16972,10 +16957,7 @@ function _animResolveEl(el) {
   const exo = el.getAttribute('data-exo-id');
   if (exo) return _exoAnimGet(el.getAttribute('data-plan-id'), exo, el.getAttribute('data-anim-id'));
   const play = state.plays.find(x => x.id === el.getAttribute('data-play-id'));
-  // v.218 — même porte que la fiche et la grille : une vignette animée peut
-  // désormais décrire une animation de la bibliothèque (résolue via
-  // animation_refs) ou une inline restée en place.
-  return (play && getPlayAnimations(play).find(a => a && a.id === el.getAttribute('data-anim-id'))) || null;
+  return (play && (Array.isArray(play.animations) ? play.animations : []).find(a => a && a.id === el.getAttribute('data-anim-id'))) || null;
 }
 function _animPrevStart(el) {
   if (el._raf) return;
@@ -17055,390 +17037,13 @@ async function deletePlayAnimation(playId, animId) {
   }
 }
 
-// ============================================================================
-// BIBLIOTHÈQUE D'ANIMATIONS (v.218) — une animation, N plays
-// ----------------------------------------------------------------------------
-// Jusqu'ici une animation était un MÉDIA du play, rangée inline dans
-// `plays.animations[]` (v.173). Ça tenait tant qu'un dessin ne servait qu'à un
-// play. Ce n'est plus le cas : la même sortie de balle illustre trois plays, et
-// il fallait la redessiner — puis la corriger — trois fois.
-//
-// Le modèle est donc : une TABLE `animations` (la bibliothèque), et sur chaque
-// play un tableau `animation_refs[]` qui l'ATTACHE :
-//   { id, mode:'ref' }                      → référence : éditer propage
-//   { id:<source>, mode:'copy', copy_id }   → clone indépendant, plus rien ne
-//                                             le relie à la source
-//
-// RÈGLE DE LECTURE UNIQUE, c'est elle qui porte la rétrocompat :
-//   animation_refs non vide ⇒ la bibliothèque fait foi
-//   animation_refs vide     ⇒ on rend `animations` inline, exactement comme
-//                             avant la migration 20260830_001
-// Un play jamais migré (ou un front déployé sans la table) s'affiche donc
-// comme avant, côté coach ET côté joueuse.
-//
-// ÉCRITURE : jamais par PbSync. Ni `animations` ni `animation_refs` ne sont
-// dans le `dump` de l'entité `plays` — un appareil au localStorage en retard
-// réécrirait des refs périmées au flush suivant (playbook « réconcilier avant
-// de pousser »). Tout passe par un read-modify-write PostgREST explicite.
-// ============================================================================
-const PB_ANIM_LIB_FLAG = 'pb_anim_lib_migrated_v1';
-let _animLibLoaded = false, _animLibPromise = null;
-
-function _animNewId(title) {
-  const s = String(title || 'anim').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
-    .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 28) || 'anim';
-  return s + '-' + Math.random().toString(36).slice(2, 7);
-}
-
-// La bibliothèque est chargée UNE fois par session, pour tout le monde : la
-// joueuse en a besoin elle aussi, sinon les animations attachées à ses plays ne
-// se résoudraient pas. Ce qui est coach-only, c'est l'ÉCRAN de bibliothèque.
-async function loadAnimLibrary(force) {
-  if (!window.sb) return {};
-  if (_animLibPromise && !force) return _animLibPromise;
-  _animLibPromise = (async () => {
-    try {
-      const { data, error } = await window.sb.from('animations')
-        .select('id,title,data,created_by,created_at,updated_at,deleted_at')
-        .is('deleted_at', null);
-      if (error) throw error;
-      const map = {};
-      (data || []).forEach(r => {
-        const blob = (r.data && typeof r.data === 'object') ? r.data : {};
-        // L'id de la LIGNE fait foi : le blob peut porter un id hérité d'une
-        // copie mal recopiée, et toute la résolution se fait par id de ligne.
-        map[r.id] = Object.assign({}, blob, {
-          id: r.id, title: blob.title || r.title || 'Sans titre',
-          _lib: true, _updatedAt: r.updated_at, _createdBy: r.created_by
-        });
-      });
-      state._animLib = map;
-      _animLibLoaded = true;
-    } catch (e) {
-      // Table absente = migration pas encore appliquée : bibliothèque vide,
-      // et toutes les fiches retombent sur leurs animations inline.
-      state._animLib = state._animLib || {};
-    }
-    return state._animLib;
-  })();
-  return _animLibPromise;
-}
-// Chargement paresseux depuis les écrans qui en ont besoin. Le render() de fin
-// ne boucle pas : _animLibLoaded coupe le second appel.
-function _animLibEnsure() {
-  if (_animLibLoaded || _animLibPromise) return;
-  loadAnimLibrary().then(() => {
-    try { render(); } catch (e) {}
-    _migrateInlineAnimsToLibrary();
-  });
-}
-
-function playAnimRefs(p) {
-  return Array.isArray(p && p.animation_refs) ? p.animation_refs.filter(r => r && r.id) : [];
-}
-// L'id de la ligne à AFFICHER : pour une copie c'est le clone, pas la source.
-function _animRefTarget(r) { return (r.mode === 'copy' && r.copy_id) ? r.copy_id : r.id; }
-
-// LA porte de résolution — fiche play, grille, vignettes animées, viewer.
-// Renvoie des objets au format d'échange de l'éditeur, enrichis de deux clés
-// de service : `_refMode` ('ref' | 'copy' | 'inline') et `_missing` (la ligne
-// a été soft-supprimée sous les pieds du play).
-function getPlayAnimations(p) {
-  const refs = playAnimRefs(p);
-  if (!refs.length) {
-    return (Array.isArray(p && p.animations) ? p.animations : [])
-      .filter(a => a && a.id).map(a => Object.assign({}, a, { _refMode: 'inline' }));
-  }
-  const lib = state._animLib || {};
-  return refs.map(r => {
-    const id = _animRefTarget(r);
-    const a = lib[id];
-    if (!a) return { id, title: 'Animation supprimée', steps: [], _refMode: r.mode === 'copy' ? 'copy' : 'ref', _missing: true };
-    return Object.assign({}, a, { _refMode: r.mode === 'copy' ? 'copy' : 'ref', _srcId: r.id });
-  });
-}
-
-function animLibList() {
-  return Object.values(state._animLib || {})
-    .sort((a, b) => String(b._updatedAt || '').localeCompare(String(a._updatedAt || '')));
-}
-// « Utilisée dans N plays » — se dérive des refs, aucun compteur en base
-// (un compteur stocké serait faux dès le premier détachement fait ailleurs).
-function animUsage(libId) {
-  return (state.plays || []).filter(p => playAnimRefs(p).some(r => _animRefTarget(r) === libId));
-}
-
-// ── Écritures PostgREST directes (jamais PbSync, cf. en-tête) ───────────────
-async function _readAnimRefs(playId) {
-  const { data, error } = await window.sb.from('plays').select('animation_refs').eq('id', playId).single();
-  if (error) throw error;
-  return Array.isArray(data && data.animation_refs) ? data.animation_refs : [];
-}
-async function _writeAnimRefs(playId, refs) {
-  const { error } = await window.sb.from('plays').update({ animation_refs: refs }).eq('id', playId);
-  if (error) throw error;
-  const p = (state.plays || []).find(x => x.id === playId);
-  if (p) p.animation_refs = refs;
-  return refs;
-}
-async function _animLibUpsert(row) {
-  const payload = Object.assign({ updated_at: new Date().toISOString() }, row);
-  const { error } = await window.sb.from('animations').upsert(payload, { onConflict: 'id' });
-  if (error) throw error;
-  const blob = (payload.data && typeof payload.data === 'object') ? payload.data : {};
-  state._animLib = state._animLib || {};
-  state._animLib[payload.id] = Object.assign({}, blob, {
-    id: payload.id, title: blob.title || payload.title || 'Sans titre',
-    _lib: true, _updatedAt: payload.updated_at
-  });
-  return payload.id;
-}
-
-function _animErr(e) {
-  const msg = (e && (e.message || e.msg)) || String(e);
-  if (/animations|animation_refs/.test(msg) && /(relation|column|does not exist|schema cache)/i.test(msg))
-    return 'bibliothèque absente — applique la migration 20260830_001.';
-  return msg;
-}
-
-// ── Éditeur : ouverture d'une animation de BIBLIOTHÈQUE ────────────────────
-// `lib=` désigne la ligne à éditer (ou 'new'), `attach=` le play auquel
-// rattacher automatiquement la création. L'ancien couple play=/anim= reste en
-// service pour les animations inline pas encore extraites.
-function openLibAnimEditor(libId, attachPlayId, mode) {
-  const q = ['lib=' + encodeURIComponent(libId || 'new')];
-  if (attachPlayId) q.push('attach=' + encodeURIComponent(attachPlayId));
-  if (mode) q.push('mode=' + encodeURIComponent(mode));
-  _pbEditorThemeParams(q);
-  location.href = '/src/plays-editor-poc.html?' + q.join('&');
-}
-// Ouvrir une animation depuis une fiche play — c'est ici que se joue la
-// différence entre référence et copie, et c'est ici qu'on prévient AVANT
-// d'éditer, pas après avoir propagé.
-function openPlayAnimation(playId, animId, mode) {
-  const p = (state.plays || []).find(x => x.id === playId);
-  const a = p && getPlayAnimations(p).find(x => x && x.id === animId);
-  if (!a) return;
-  if (a._missing) { if (typeof toast === 'function') toast('Cette animation a été supprimée de la bibliothèque.'); return; }
-  if (a._refMode === 'inline') return openPbEditorV2(playId, animId, mode);
-  if (mode !== 'view' && a._refMode === 'ref') {
-    const others = animUsage(animId).filter(x => x.id !== playId);
-    if (others.length && !confirm(
-      `« ${a.title || animId} » est une RÉFÉRENCE partagée.\n\n`
-      + `Ta modification impactera aussi ${others.length} autre${others.length > 1 ? 's' : ''} play :\n`
-      + others.slice(0, 8).map(x => '· ' + (x.title || x.id)).join('\n')
-      + (others.length > 8 ? `\n· … et ${others.length - 8} de plus` : '')
-      + `\n\nContinuer ?`)) return;
-  }
-  openLibAnimEditor(animId, null, mode);
-}
-function createPlayAnimation(playId) {
-  if (!canEditSharedLibrary()) return;
-  openLibAnimEditor('new', playId);
-}
-
-// ── Attacher depuis la bibliothèque ────────────────────────────────────────
-function openAnimAttachPicker(playId) {
-  if (!canEditSharedLibrary()) return;
-  const p = (state.plays || []).find(x => x.id === playId);
-  if (!p) return;
-  const already = new Set(playAnimRefs(p).map(_animRefTarget));
-  const list = animLibList();
-  openModal(`
-    <div style="padding:4px 4px 8px">
-      <div class="eyebrow-muted mb-2">🔗 Attacher une animation</div>
-      <div style="font-size:12px;color:var(--ink-3);margin-bottom:10px">Bibliothèque partagée — ${list.length} animation${list.length > 1 ? 's' : ''}.</div>
-      <label style="display:flex;align-items:center;gap:8px;padding:9px 10px;border:1px solid var(--border);border-radius:10px;margin-bottom:12px;cursor:pointer;font-size:12px">
-        <input type="checkbox" id="anim-attach-copy">
-        <span>📋 Attacher en <b>copie indépendante</b> — les modifications ne remonteront pas à l'original.</span>
-      </label>
-      ${list.length ? `<div style="display:flex;flex-direction:column;gap:8px;max-height:52vh;overflow-y:auto">
-        ${list.map(a => {
-          const used = animUsage(a.id).length;
-          const has = already.has(a.id);
-          return `
-          <div style="display:flex;align-items:center;gap:10px;border:1px solid var(--border);border-radius:10px;padding:8px 10px">
-            <span style="flex:1;min-width:0">
-              <b style="display:block;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.title || 'Sans titre')}</b>
-              <small style="font-size:11px;color:var(--ink-3)">${Array.isArray(a.steps) ? a.steps.length : 0} temps · ${a.court_type === 'full' ? 'terrain complet' : 'demi-terrain'} · utilisée dans ${used} play${used > 1 ? 's' : ''}</small>
-            </span>
-            <button class="btn btn-secondary" ${has ? 'disabled style="opacity:0.45"' : ''} onclick="attachAnimFromLibrary('${p.id}','${esc(a.id)}')">${has ? 'Déjà là' : 'Attacher'}</button>
-          </div>`;
-        }).join('')}
-      </div>` : `<div class="empty"><div class="empty-icon">○</div><div class="empty-title">Bibliothèque vide</div><div class="empty-desc">Crée une animation depuis un play : elle atterrira ici.</div></div>`}
-      <button class="btn btn-secondary btn-block" style="margin-top:12px" onclick="closeModal()">Fermer</button>
-    </div>`);
-}
-async function attachAnimFromLibrary(playId, libId) {
-  if (!canEditSharedLibrary()) return;
-  const cb = document.getElementById('anim-attach-copy');
-  const asCopy = !!(cb && cb.checked);
-  const src = (state._animLib || {})[libId];
-  if (!src) return;
-  try {
-    const refs = await _readAnimRefs(playId);
-    if (!asCopy && refs.some(r => _animRefTarget(r) === libId)) {
-      if (typeof toast === 'function') toast('Déjà attachée à ce play.');
-      return closeModal();
-    }
-    let entry;
-    if (asCopy) {
-      // La copie est une VRAIE ligne de la bibliothèque, avec son id : c'est ce
-      // qui la rend éditable sans toucher à la source. `id` garde la trace de
-      // l'original, pour l'affichage seulement.
-      const cloneId = _animNewId(src.title);
-      const blob = JSON.parse(JSON.stringify(src));
-      ['_lib', '_updatedAt', '_createdBy', '_refMode', '_srcId', '_missing'].forEach(k => { delete blob[k]; });
-      blob.id = cloneId;
-      blob.title = (src.title || 'Sans titre') + ' (copie)';
-      await _animLibUpsert({ id: cloneId, title: blob.title, data: blob });
-      entry = { id: libId, mode: 'copy', copy_id: cloneId };
-    } else {
-      entry = { id: libId, mode: 'ref' };
-    }
-    await _writeAnimRefs(playId, refs.concat([entry]));
-    closeModal();
-    render();
-    if (typeof toast === 'function') toast(asCopy ? 'Copie indépendante attachée.' : 'Animation attachée (référence partagée).');
-  } catch (e) {
-    if (typeof toast === 'function') toast('Attachement impossible — ' + _animErr(e));
-  }
-}
-// Détacher ≠ supprimer : la ligne reste en bibliothèque, seul le lien saute.
-async function detachPlayAnimation(playId, animId) {
-  if (!canEditSharedLibrary()) return;
-  const p = (state.plays || []).find(x => x.id === playId);
-  const a = p && getPlayAnimations(p).find(x => x && x.id === animId);
-  if (!confirm(`Détacher « ${(a && a.title) || animId} » de ce play ?\nL'animation reste dans la bibliothèque.`)) return;
-  try {
-    const refs = await _readAnimRefs(playId);
-    await _writeAnimRefs(playId, refs.filter(r => _animRefTarget(r) !== animId));
-    render();
-    if (typeof toast === 'function') toast('Animation détachée.');
-  } catch (e) {
-    if (typeof toast === 'function') toast('Détachement impossible — ' + _animErr(e));
-  }
-}
-
-// ── L'écran bibliothèque (coach non scopé uniquement) ──────────────────────
-function openAnimLibrary() {
-  if (!canEditSharedLibrary()) return;
-  const list = animLibList();
-  openModal(`
-    <div style="padding:4px 4px 8px">
-      <div class="eyebrow-muted mb-2">🎬 Bibliothèque d'animations${list.length ? ` (${list.length})` : ''}</div>
-      <div style="font-size:12px;color:var(--ink-3);margin-bottom:12px">Une animation peut être attachée à plusieurs plays. Une modification se propage à tous ceux qui la <b>référencent</b>.</div>
-      ${list.length ? `<div style="display:flex;flex-direction:column;gap:10px;max-height:58vh;overflow-y:auto">
-        ${list.map(a => {
-          const used = animUsage(a.id);
-          const dot = /^#[0-9a-f]{3,8}$/i.test(a.color || '') ? a.color : 'var(--orange)';
-          return `
-          <div style="border:1px solid var(--border);border-radius:12px;overflow:hidden">
-            <div style="padding:6px 6px 0;cursor:pointer" onclick="closeModal();openLibAnimEditor('${esc(a.id)}',null,'view')" title="Voir en plein écran">${_animThumbSvg(a)}</div>
-            <div style="display:flex;align-items:center;gap:8px;padding:9px 10px">
-              <span style="width:9px;height:9px;border-radius:50%;flex:none;background:${dot}"></span>
-              <span style="flex:1;min-width:0">
-                <b style="display:block;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.title || 'Sans titre')}</b>
-                <small style="font-size:11px;color:var(--ink-3)">${Array.isArray(a.steps) ? a.steps.length : 0} temps · utilisée dans ${used.length} play${used.length > 1 ? 's' : ''}</small>
-              </span>
-              <button class="btn btn-secondary" onclick="closeModal();openLibAnimEditor('${esc(a.id)}')" title="Éditer">✎</button>
-              <button class="btn btn-secondary" onclick="duplicateLibAnim('${esc(a.id)}')" title="Dupliquer">📋</button>
-              <button class="btn btn-danger" onclick="deleteLibAnim('${esc(a.id)}')" title="Supprimer">🗑</button>
-            </div>
-          </div>`;
-        }).join('')}
-      </div>` : `<div class="empty"><div class="empty-icon">○</div><div class="empty-title">Bibliothèque vide</div><div class="empty-desc">Crée une animation depuis la fiche d'un play.</div></div>`}
-      <div style="display:flex;gap:8px;margin-top:12px">
-        <button class="btn btn-secondary btn-block" onclick="closeModal();openLibAnimEditor('new')">🆕 Nouvelle animation</button>
-        <button class="btn btn-secondary" onclick="closeModal()">Fermer</button>
-      </div>
-    </div>`);
-}
-async function duplicateLibAnim(libId) {
-  if (!canEditSharedLibrary()) return;
-  const src = (state._animLib || {})[libId];
-  if (!src) return;
-  try {
-    const id = _animNewId(src.title);
-    const blob = JSON.parse(JSON.stringify(src));
-    ['_lib', '_updatedAt', '_createdBy', '_refMode', '_srcId', '_missing'].forEach(k => { delete blob[k]; });
-    blob.id = id;
-    blob.title = (src.title || 'Sans titre') + ' (copie)';
-    await _animLibUpsert({ id, title: blob.title, data: blob });
-    openAnimLibrary();
-    if (typeof toast === 'function') toast('Animation dupliquée.');
-  } catch (e) {
-    if (typeof toast === 'function') toast('Duplication impossible — ' + _animErr(e));
-  }
-}
-// SOFT-delete : la ligne reste, les refs des plays qui la citent deviennent
-// muettes plutôt que cassées (« Animation supprimée » sur la fiche). Un hard
-// delete ne serait pas un état terminal durable de toute façon (playbook).
-async function deleteLibAnim(libId) {
-  if (!canEditSharedLibrary()) return;
-  const a = (state._animLib || {})[libId];
-  if (!a) return;
-  const used = animUsage(libId);
-  const warn = used.length >= 2
-    ? `Cette animation est utilisée dans ${used.length} plays :\n${used.slice(0, 8).map(x => '· ' + (x.title || x.id)).join('\n')}${used.length > 8 ? `\n· … et ${used.length - 8} de plus` : ''}\n\nLa supprimer les affectera tous. Continuer ?`
-    : `Supprimer « ${a.title || libId} » de la bibliothèque ?${used.length ? '\nElle est attachée à 1 play.' : ''}`;
-  if (!confirm(warn)) return;
-  try {
-    const { error } = await window.sb.from('animations')
-      .update({ deleted_at: new Date().toISOString() }).eq('id', libId);
-    if (error) throw error;
-    delete state._animLib[libId];
-    openAnimLibrary();
-    render();
-    if (typeof toast === 'function') toast('Animation supprimée de la bibliothèque.');
-  } catch (e) {
-    if (typeof toast === 'function') toast('Suppression impossible — ' + _animErr(e));
-  }
-}
-
-// ── Extraction progressive de l'inline vers la bibliothèque ────────────────
-// Opportuniste : au premier passage d'un coach non scopé sur l'écran Plays.
-// Rien n'est supprimé de `plays.animations` — si l'extraction casse en route,
-// la lecture retombe dessus et on retentera à la prochaine ouverture (le
-// drapeau n'est posé qu'en cas de succès complet).
-async function _migrateInlineAnimsToLibrary() {
-  if (!window.sb || !_animLibLoaded) return;
-  if (state.auth.role !== 'coach' || !canEditSharedLibrary()) return;
-  try { if (localStorage.getItem(PB_ANIM_LIB_FLAG) === '1') return; } catch (e) {}
-  const todo = (state.plays || []).filter(p =>
-    Array.isArray(p.animations) && p.animations.length && !playAnimRefs(p).length);
-  if (!todo.length) { try { localStorage.setItem(PB_ANIM_LIB_FLAG, '1'); } catch (e) {} return; }
-  let moved = 0;
-  for (const p of todo) {
-    try {
-      const refs = [];
-      for (const a of p.animations.filter(x => x && x.id)) {
-        // Deux plays peuvent porter une inline au MÊME id (play dupliqué) avec
-        // des contenus divergents : le second prend un id neuf, sinon
-        // l'extraction ferait silencieusement de l'un la copie de l'autre.
-        const id = (state._animLib || {})[a.id] ? _animNewId(a.title) : a.id;
-        const blob = Object.assign({}, a, { id });
-        await _animLibUpsert({ id, title: blob.title || 'Sans titre', data: blob });
-        refs.push({ id, mode: 'ref' });
-      }
-      if (!refs.length) continue;
-      await _writeAnimRefs(p.id, refs);
-      moved += refs.length;
-    } catch (e) { return; }  // on retentera : pas de drapeau
-  }
-  try { localStorage.setItem(PB_ANIM_LIB_FLAG, '1'); } catch (e) {}
-  if (moved) { try { render(); } catch (e) {} }
-}
-
 function renderPlayDetail() {
-  _animLibEnsure();
   const p = state.plays.find(x => x.id === state.view.id);
   if (!p) { state.view = null; return renderPlays(); }
   const isCoach = state.auth.role === 'coach';
   const images = p.images || [];
   const concepts = p.concepts || [];
-  // v.218 — refs de bibliothèque si le play en a, inline sinon (rétrocompat).
-  const animations = getPlayAnimations(p);
+  const animations = Array.isArray(p.animations) ? p.animations : [];
   const hasAnim = animations.length > 0;
   // Le flag ne garde plus que la CRÉATION : une animation déjà publiée se
   // regarde sans rien activer, sinon elle serait invisible pour l'équipe.
@@ -17551,25 +17156,8 @@ function renderPlayDetail() {
               const nSteps = Array.isArray(a.steps) ? a.steps.length : 0;
               const nBr = _animBranchCount(a);
               const dot = /^#[0-9a-f]{3,8}$/i.test(a.color || '') ? a.color : 'var(--orange)';
-              // La ref pointe une animation soft-supprimée : on le DIT, on ne
-              // laisse pas une carte vide et cliquable sur la fiche.
-              if (a._missing) return `
-              <div style="border:1px dashed var(--border);border-radius:12px;padding:14px;display:flex;align-items:center;gap:10px">
-                <span style="flex:1;min-width:0;font-size:12px;color:var(--ink-3)">🗑 Animation supprimée de la bibliothèque</span>
-                ${isCoach && canEditSharedLibrary() ? `<button class="btn btn-secondary" onclick="detachPlayAnimation('${p.id}','${esc(a.id)}')" title="Retirer la référence">Détacher</button>` : ''}
-              </div>`;
-              // Le badge dit la NATURE du lien, pas l'état du dessin : c'est la
-              // seule chose que le coach ne peut pas deviner en regardant la
-              // vignette, et c'est celle qui décide si sa retouche partira
-              // chez les autres plays.
-              const usedN = a._refMode === 'ref' ? animUsage(a.id).length : 0;
-              const badge = a._refMode === 'ref'
-                ? `<span class="chip" style="font-size:9px" title="Modifier cette animation impacte tous les plays qui la référencent">🔗 Référence${usedN > 1 ? ` · ${usedN} plays` : ''}</span>`
-                : a._refMode === 'copy'
-                  ? `<span class="chip" style="font-size:9px" title="Copie indépendante : les modifications restent sur ce play">📋 Copie</span>`
-                  : '';
               return `
-              <div style="border:1px solid var(--border);border-radius:12px;overflow:hidden;cursor:pointer" onclick="openPlayAnimation('${p.id}','${esc(a.id)}','view')" title="Voir en plein écran">
+              <div style="border:1px solid var(--border);border-radius:12px;overflow:hidden;cursor:pointer" onclick="openPbEditorV2('${p.id}','${esc(a.id)}','view')" title="Voir en plein écran">
                 <div class="anim-thumb" data-anim-id="${esc(a.id)}" data-play-id="${p.id}"
                      style="position:relative;padding:6px 6px 0">
                   ${_animThumbSvg(a)}
@@ -17581,22 +17169,15 @@ function renderPlayDetail() {
                     <b style="display:block;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.title || 'Sans titre')}</b>
                     <small style="font-size:11px;color:var(--ink-3)">${esc(a.tag || a.side || '')} · ${a.court_type === 'full' ? 'terrain complet' : 'demi-terrain'}</small>
                   </span>
-                  ${isCoach && badge ? badge : ''}
                   ${isCoach && canEditSharedLibrary() ? `
-                    <button class="btn btn-secondary" onclick="event.stopPropagation();openPlayAnimation('${p.id}','${esc(a.id)}')" title="Éditer l'animation">✎</button>
-                    ${a._refMode === 'inline'
-                      ? `<button class="btn btn-danger" onclick="event.stopPropagation();deletePlayAnimation('${p.id}','${esc(a.id)}')" title="Supprimer l'animation">🗑</button>`
-                      : `<button class="btn btn-danger" onclick="event.stopPropagation();detachPlayAnimation('${p.id}','${esc(a.id)}')" title="Détacher (l'animation reste en bibliothèque)">🗑</button>`}
+                    <button class="btn btn-secondary" onclick="event.stopPropagation();openPbEditorV2('${p.id}','${esc(a.id)}')" title="Éditer l'animation">✎</button>
+                    <button class="btn btn-danger" onclick="event.stopPropagation();deletePlayAnimation('${p.id}','${esc(a.id)}')" title="Supprimer l'animation">🗑</button>
                   ` : ''}
                 </div>
               </div>`;
             }).join('')}
             </div>
-            ${canAddAnim ? `
-              <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
-                <button class="btn btn-secondary btn-block" onclick="createPlayAnimation('${p.id}')">🆕 Créer une animation</button>
-                <button class="btn btn-secondary btn-block" onclick="openAnimAttachPicker('${p.id}')">🔗 Attacher depuis la bibliothèque</button>
-              </div>` : ''}
+            ${canAddAnim ? `<button class="btn btn-secondary btn-block" style="margin-top:12px" onclick="openPbEditorV2('${p.id}')">🆕 Créer une animation</button>` : ''}
           </div>
         </div>
       ` : ''}
@@ -53430,7 +53011,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.218';
+const APP_VERSION = '2026-08-19.216';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
