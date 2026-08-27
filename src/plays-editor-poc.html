@@ -709,6 +709,22 @@
   .xnode.on{border-color:var(--accent-2); background:var(--field)}
   .xnode .nm{flex:1; min-width:0; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
   .xnode .ct{flex:none; font-size:10px; color:var(--ink-2); font-weight:600}
+  /* v.220 - deux portes par noeud. ▶ rejoue le chemin complet depuis le debut
+     (comportement Jalon 4, inchange) ; >> saute directement au T1 de la
+     variante. Boutons explicites plutot qu un appui long : la difference doit
+     se lire, pas se deviner. */
+  .xnode .act{
+    flex:none; border:1px solid var(--border); background:var(--panel); color:var(--ink);
+    border-radius:8px; padding:4px 7px; font:inherit; font-size:11px; font-weight:800;
+    line-height:1; cursor:pointer;
+  }
+  .xnode .act:active{background:var(--field)}
+  .xnode .act.sk{color:var(--accent-2); border-color:var(--accent-2)}
+  .vw .crumb .skb{
+    flex:none; font-size:10px; font-weight:800; color:var(--accent-2);
+    border:1px solid var(--border); border-radius:999px; padding:1px 6px;
+    white-space:nowrap; max-width:34vw; overflow:hidden; text-overflow:ellipsis;
+  }
   .vwexpbk{position:fixed; inset:0; z-index:71; display:none; background:var(--scrim)}
   .vwexpbk.show{display:block}
   /* Branche désactivée : gardée dans l'arbre du coach (grisée, éditable),
@@ -5958,6 +5974,7 @@
         + ' style="margin-left:' + ((r.depth + 1) * 11) + 'px">'
         + '<span class="nm" title="' + esc(r.name) + '">🔀 ' + esc(r.name) + '</span>'
         + '<span class="ct">T' + (r.from + 1) + ' · ' + r.n + '</span>'
+        + '<button class="del" data-xsk="' + esc(k) + '" title="Tester cette variante seule (skip : demarre a son T1)">⏩</button>'
         + '<button class="del" data-en="' + esc(k) + '" title="' + (r.on ? 'Masquer' : 'Rendre visible') + ' cette variante côté joueuse">' + (r.on ? '👁' : '🚫') + '</button>'
         + '<button class="del" data-up="' + esc(k) + '"' + (r.idx === 0 ? ' disabled style="opacity:.25"' : '') + ' title="Remonter parmi les variantes du même temps">⬆</button>'
         + '<button class="del" data-dn="' + esc(k) + '"' + (r.idx === r.sib - 1 ? ' disabled style="opacity:.25"' : '') + ' title="Descendre parmi les variantes du même temps">⬇</button>'
@@ -5987,6 +6004,15 @@
   elTree.addEventListener('click', function (e) {
     var t = e.target;
     if (!t || !t.getAttribute) return;
+    var xsk = t.getAttribute('data-xsk');
+    if (xsk !== null) {
+      e.stopPropagation();
+      var xp = pathFromKey(xsk);
+      elTree.classList.remove('show');
+      if (!vwOn) enterViewer('tree');
+      vwSkipPath(xp);
+      return;
+    }
     var en = t.getAttribute('data-en');
     if (en !== null) { e.stopPropagation(); toggleBranchPath(pathFromKey(en)); return; }
     var up = t.getAttribute('data-up');
@@ -6045,6 +6071,9 @@
   // La route en cours et le segment qu'on est en train de jouer. Volatiles :
   // rien de tout ça n'est écrit dans le document.
   var vwRoute = [], vwSegIx = 0;
+  // v.220 - nom de la variante sur laquelle un >> a demarre la lecture (badge
+  // du fil d ariane) + le drapeau « le tooltip a deja ete montre une fois ».
+  var vwSkipAt = '', vwSkipHinted = false;
   // Un réglage que la joueuse a touché elle-même n'est jamais écrasé.
   var vwUserSpeed = false, vwUserSize = false;
   var vwMenu = document.getElementById('vw-menu');
@@ -6064,6 +6093,7 @@
       html += '<span class="sep">→</span><button class="cr" data-cp="' + esc(pathKey(p)) + '">' + esc(b.name) + '</button>';
       l = b.steps;
     }
+    if (vwSkipAt) html += '<span class="skb" title="Lecture demarree directement sur cette variante">&gt;&gt; ' + esc(vwSkipAt) + '</span>';
     document.getElementById('vw-crumb').innerHTML = html;
     if (elExp && elExp.classList.contains('show')) vwTreeRender();
   }
@@ -6090,13 +6120,17 @@
     var html = wtp ? '<div class="wtp"><b>🎯 Quand la jouer</b><span>' + esc(wtp) + '</span></div>' : '';
     html += '<div class="xnode' + (here === '' ? ' on' : '') + '" data-xp="">'
       + '<span class="nm">' + (here === '' ? '📍 ' : '▶ ') + 'Ligne principale</span>'
-      + '<span class="ct">' + rootSteps().length + ' temps</span></div>';
+      + '<span class="ct">' + rootSteps().length + ' temps</span>'
+      + '<button class="act" data-xp="" title="Lire depuis le debut">▶</button>'
+      + '<button class="act sk" data-xskip="" title="Skip : commence directement a cette variante">&gt;&gt;</button></div>';
     rows.forEach(function (r) {
       var k = pathKey(r.path);
       html += '<div class="xnode' + (k === here ? ' on' : '') + '" data-xp="' + esc(k) + '"'
         + ' style="margin-left:' + ((r.depth + 1) * 12) + 'px">'
         + '<span class="nm">' + (k === here ? '📍 ' : '🔀 ') + esc(r.name) + '</span>'
-        + '<span class="ct">T' + (r.from + 1) + ' · ' + r.n + ' temps</span></div>';
+        + '<span class="ct">T' + (r.from + 1) + ' · ' + r.n + ' temps</span>'
+        + '<button class="act" data-xp="' + esc(k) + '" title="Lire tout le chemin depuis le debut">▶</button>'
+        + '<button class="act sk" data-xskip="' + esc(k) + '" title="Skip : commence directement a cette variante">&gt;&gt;</button></div>';
     });
     if (!rows.length) html += '<div class="xnode" style="opacity:.6;cursor:default"><span class="nm">Pas de variante — un seul chemin à voir.</span></div>';
     document.getElementById('vw-exp-list').innerHTML = html;
@@ -6162,7 +6196,27 @@
     if (!playing) play();
     vwSyncButtons();
   }
-  function vwPlayPath(path) { vwStartRoute(vwBuildRoute(path)); }
+  function vwPlayPath(path) { vwSkipAt = ''; vwStartRoute(vwBuildRoute(path)); }
+
+  // v.220 - « >> » : on ne rejoue RIEN de la ligne mere. Le T1 d une branche
+  // porte deja l etat de SORTIE de son temps de bifurcation — addBranchHere
+  // l ecrit avec endPos(st), et la passe de reaccord au chargement le retient
+  // (pullPos) ; le porteur du ballon se lit du chemin via holderEnter(bpath),
+  // les zones heritees via getEffectiveZones(). Un segment unique suffit donc :
+  // la variante se tient debout toute seule. C est exactement ce que
+  // vwPlayFrom() fait deja pour « la suite », moins le temps de bifurcation
+  // qu il rejouait pour la continuite visuelle — ici on l assume coupe.
+  // Le fil d ariane garde le chemin COMPLET (contexte) + un badge >>.
+  function vwSkipPath(path) {
+    var l = rootSteps(), i, b = null;
+    for (i = 0; i < path.length; i++) { b = branchIn(l, path[i].si, path[i].bid); if (!b) { path = path.slice(0, i); break; } l = b.steps; }
+    vwSkipAt = b ? (b.name || 'Variante') : '';
+    vwStartRoute([{ path: path.slice(), from: 0, to: -1 }]);
+    if (path.length && !vwSkipHinted) {
+      vwSkipHinted = true;
+      toast('⏩ Skip : la lecture commence directement a cette variante.');
+    }
+  }
 
   // Descente dans un segment. Comme un changement de ligne, mais SANS couper
   // la lecture : tick() enchaîne dans la même frame.
@@ -6180,6 +6234,7 @@
   // vient de voir : on rejoue le seul temps de bifurcation — sans lui la
   // variante démarrerait dans le vide — puis on descend dans la sous-branche.
   function vwPlayFrom(path, si, bid) {
+    vwSkipAt = '';
     vwStartRoute([
       { path: path.slice(), from: si, to: si },
       { path: path.concat([{ si: si, bid: bid }]), from: 0, to: -1 }
@@ -6395,7 +6450,7 @@
     vwBar = elPlay.parentNode;
     if (vwBar) vwBar.style.display = 'none';
     bpath = []; cur = 0; pStep = 0; pU = 0;
-    vwRoute = []; vwSegIx = 0;
+    vwRoute = []; vwSegIx = 0; vwSkipAt = '';
     vwExplKey = '';
     vwUserSpeed = false; vwUserSize = false;
     vwSolo = false;
@@ -6421,7 +6476,7 @@
     // On rend TOUJOURS un editeur en 2D : la 3D n'est pas editable, sortir du
     // viewer en 3D laisserait le coach devant un terrain qui ne repond pas.
     if (view === '3d') setView('2d');
-    vwRoute = []; vwSegIx = 0;
+    vwRoute = []; vwSegIx = 0; vwSkipAt = '';
     vwHideTree();
     document.body.classList.remove('viewer');
     VIEWS['2d'].editable = true;
@@ -6476,6 +6531,8 @@
     if (vwRoute.length) vwHideTree();
   });
   elExp.addEventListener('click', function (e) {
+    var sk = e.target && e.target.closest ? e.target.closest('[data-xskip]') : null;
+    if (sk) { e.stopPropagation(); vwSkipPath(pathFromKey(sk.getAttribute('data-xskip'))); return; }
     var n = e.target && e.target.closest ? e.target.closest('[data-xp]') : null;
     if (!n) return;
     vwPlayPath(pathFromKey(n.getAttribute('data-xp')));
