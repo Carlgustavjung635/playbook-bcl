@@ -23995,12 +23995,53 @@ function sanctionsTodayBlockHtml(convocId, dateStr) {
 // --- Joueuse : bandeaux discrets par type (non bloquants) -------------------
 // L'overlay bloquant reste RÉSERVÉ au tirage classique. Une sanction ou un défi
 // n'a rien d'un tirage : ils s'annoncent, ils n'interrompent pas.
+function _kindReminderBannerHtml(icon, eyebrow, line, onclick) {
+  return `
+      <div onclick="${onclick}" style="cursor:pointer;margin:0 14px 10px;padding:11px 13px;border-radius:12px;background:rgba(var(--accent-rgb),0.07);border:1px solid var(--border-soft);border-left:3px solid var(--orange)">
+        <div style="display:flex;align-items:center;gap:9px">
+          <div style="font-size:20px;flex:0 0 auto">${icon}</div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:11px;font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:.04em;color:var(--orange)">${esc(eyebrow)}</div>
+            <div style="font-size:13px;color:var(--ink);line-height:1.35;margin-top:2px">${line}</div>
+          </div>
+          <div style="flex:0 0 auto;color:var(--orange);font-family:'Anton';font-size:16px">→</div>
+        </div>
+      </div>`;
+}
+// Rouvre le tirage dû du type demandé (le plus ancien d'abord). Même chemin que
+// l'ouverture automatique : la ligne reste 'owed' tant que rien n'est décidé.
+function openOwedKindDraw(kind) {
+  const pid = state.auth && state.auth.playerId; if (!pid) return;
+  if (window._gageOverlayOpen) return;
+  const d = pendingKindDraws(pid).find(x => _drawKind(x) === kind
+    && (_kindDrawItemId(x) || _kindPoolFor(pid, kind).length));
+  if (d) showKindReveal(d);
+}
 function renderPlayerKindReminders() {
   if (!state.auth || state.auth.role !== 'player' || !state.auth.playerId) return '';
   const pid = state.auth.playerId;
   const prog = sanctionProgramFor(pid);
   const defis = playerPendingDefis(pid);
   let out = '';
+  // Un tirage DÛ (status 'owed') n'avait AUCUN bandeau : il ne vivait que dans
+  // l'overlay d'ouverture d'app. Refermé (deferKindDraw) ou raté parce que le
+  // réservoir était vide à cet instant, il redevenait invisible jusqu'au
+  // prochain démarrage — coach convaincu d'avoir sanctionné, joueuse qui ne voit
+  // rien. On l'annonce ici aussi, et le bandeau rouvre le tirage.
+  const owedByKind = k => pendingKindDraws(pid).filter(d => _drawKind(d) === k
+    && (_kindDrawItemId(d) || _kindPoolFor(pid, k).length));   // rien à piocher → on se tait
+  const owedSanctions = owedByKind('sanction_physique').length;
+  const owedDefis = owedByKind('defi').length;
+  if (owedSanctions) {
+    out += _kindReminderBannerHtml('💪', 'Sanction à tirer au sort',
+      `Ton coach t'a mis <strong>${owedSanctions}</strong> sanction${owedSanctions > 1 ? 's' : ''} à tirer`,
+      `openOwedKindDraw('sanction_physique')`);
+  }
+  if (owedDefis) {
+    out += _kindReminderBannerHtml('🎯', 'Défi à tirer au sort',
+      `Ton coach t'a mis <strong>${owedDefis}</strong> défi${owedDefis > 1 ? 's' : ''} à tirer`,
+      `openOwedKindDraw('defi')`);
+  }
   if (prog.count) {
     out += `
       <div onclick="openPlayerSanctionProgram()" style="cursor:pointer;margin:0 14px 10px;padding:11px 13px;border-radius:12px;background:rgba(var(--accent-rgb),0.07);border:1px solid var(--border-soft);border-left:3px solid var(--orange)">
@@ -53011,7 +53052,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.221';
+const APP_VERSION = '2026-08-19.222';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
