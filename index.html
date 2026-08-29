@@ -21883,6 +21883,14 @@ function liveActionFor(playerId, key, increment) {
     label: entryLabel,
     value: entryValue,
     playerId, key, inc,
+    // `inc` NE DIT PAS si c'était un tir réussi : `const inc = increment || 1`
+    // normalise le clic « panier marqué » (increment undefined) en 1 — la même
+    // valeur exactement qu'un incrément explicite. L'annulation se gardait sur
+    // `!last.inc`, condition donc TOUJOURS fausse : elle décrémentait p2i mais
+    // ne retirait ni la tentative ni les points, et comme le score global est
+    // la somme des `pts`, il ne bougeait pas d'un pouce. On enregistre le fait
+    // au lieu d'essayer de le redéduire d'une valeur qui l'a perdu.
+    made: !increment,
   });
   save(K.liveSession + '_' + state.live.matchId, state.live.log);
   persist();
@@ -21974,10 +21982,27 @@ function copyPublicLink() {
   }
 }
 
+// Ces cinq clés ne sont JAMAIS journalisées autrement que par un tir réussi :
+// les ratés s'enregistrent sous p2iA / p2eA / p3A / ftA, et les boutons 2I, 2E,
+// 3, LF, CA appellent tous `liveAction(key)` sans second argument. La déduction
+// est donc sûre — et c'est elle qui répare les entrées d'AVANT ce correctif, qui
+// n'ont pas de champ `made` : le journal live survit dans localStorage, un match
+// commencé avant le déploiement doit rester annulable correctement.
+const LIVE_MADE_KEYS = ['p2i', 'p2e', 'p3', 'ft', 'ca'];
+function _liveEntryIsMade(e) {
+  if (!e) return false;
+  if (typeof e.made === 'boolean') return e.made;
+  return LIVE_MADE_KEYS.includes(e.key);
+}
+
 function undoLastAction() {
-  if (state.live.log.length === 0) return;
-  const last = state.live.log.pop();
+  if (!state.live || !state.live.log || state.live.log.length === 0) return;
   const m = state.matches.find(x => x.id === state.live.matchId);
+  // Le match est cherché AVANT le pop : sans lui, tout ce qui suit lève, et
+  // l'action serait retirée du journal sans avoir été défaite nulle part —
+  // l'annulation détruirait la seule trace de ce qu'elle devait corriger.
+  if (!m) return;
+  const last = state.live.log.pop();
 
   // Cas spécial : score adverse
   if (last.key === 'opp') {
@@ -21985,22 +22010,31 @@ function undoLastAction() {
     m.lastLiveUpdate = Date.now();
     save(K.liveSession + '_' + state.live.matchId, state.live.log);
     persist();
+    if (m.publicLive && window.PbStore) pushLiveScore(m);
     render();
     return;
   }
 
-  const s = m.playerStats[last.playerId];
+  const s = (m.playerStats || {})[last.playerId];
   if (s) {
+    // `made` et non `!last.inc` : cf. le commentaire dans liveActionFor.
+    const made = _liveEntryIsMade(last);
     s[last.key] = Math.max(0, (s[last.key] || 0) - (last.inc || 1));
-    if (last.key === 'p2i' && !last.inc) { s.p2iA = Math.max(0, (s.p2iA || 0) - 1); s.pts = Math.max(0, (s.pts || 0) - 2); }
-    else if (last.key === 'p2e' && !last.inc) { s.p2eA = Math.max(0, (s.p2eA || 0) - 1); s.pts = Math.max(0, (s.pts || 0) - 2); }
-    else if (last.key === 'p3' && !last.inc) { s.p3A = Math.max(0, (s.p3A || 0) - 1); s.pts = Math.max(0, (s.pts || 0) - 3); }
-    else if (last.key === 'ft' && !last.inc) { s.ftA = Math.max(0, (s.ftA || 0) - 1); s.pts = Math.max(0, (s.pts || 0) - 1); }
-    else if (last.key === 'ca' && !last.inc) { s.p2i = Math.max(0, (s.p2i||0) - 1); s.p2iA = Math.max(0, (s.p2iA||0) - 1); s.pts = Math.max(0, (s.pts||0) - 2); }
+    if (last.key === 'p2i' && made) { s.p2iA = Math.max(0, (s.p2iA || 0) - 1); s.pts = Math.max(0, (s.pts || 0) - 2); }
+    else if (last.key === 'p2e' && made) { s.p2eA = Math.max(0, (s.p2eA || 0) - 1); s.pts = Math.max(0, (s.pts || 0) - 2); }
+    else if (last.key === 'p3' && made) { s.p3A = Math.max(0, (s.p3A || 0) - 1); s.pts = Math.max(0, (s.pts || 0) - 3); }
+    else if (last.key === 'ft' && made) { s.ftA = Math.max(0, (s.ftA || 0) - 1); s.pts = Math.max(0, (s.pts || 0) - 1); }
+    else if (last.key === 'ca' && made) { s.p2i = Math.max(0, (s.p2i||0) - 1); s.p2iA = Math.max(0, (s.p2iA||0) - 1); s.pts = Math.max(0, (s.pts||0) - 2); }
   }
   recalcMatchScore(m);
   save(K.liveSession + '_' + state.live.matchId, state.live.log);
   persist();
+  // La correction doit remonter comme l'ajout : sinon le score reste faux pour
+  // tous ceux qui suivent la diffusion publique, alors qu'il est juste ici.
+  if (m.publicLive && window.PbStore) {
+    if (s) { try { PbStore.upsertPlayerStats(m.id, last.playerId, s); } catch (e) {} }
+    pushLiveScore(m);
+  }
   render();
 }
 
@@ -53111,7 +53145,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.223';
+const APP_VERSION = '2026-08-19.224';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
