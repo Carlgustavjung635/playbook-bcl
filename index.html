@@ -52242,7 +52242,11 @@ async function openPushSettings() {
   try { subscribed = await pushIsSubscribed(); } catch (e) {}
   const perm = pushPermission();
   if (subscribed) {
-    if (confirm('🔔 Notifications activées sur cet appareil.\n\nLes désactiver ici ?')) await disablePush();
+    // Le test passe AVANT la désactivation : quand quelqu'un ouvre cet écran en
+    // disant « je ne reçois rien », l'action utile est de vérifier, pas de tout
+    // couper. Le test est non destructif, la désactivation reste à un tap.
+    if (confirm('🔔 Notifications activées sur cet appareil.\n\nOK → envoyer une notification de TEST\nAnnuler → autres options')) { await pushSelfTest(); return; }
+    if (confirm('Désactiver les notifications sur cet appareil ?')) await disablePush();
     return;
   }
   if (perm === 'denied') {
@@ -52254,6 +52258,61 @@ async function openPushSettings() {
   // La mesure est remontée quel que soit le résultat : un refus est justement
   // ce que le coach a besoin de savoir.
   try { _notifSyncPermission(); } catch (e) {}
+}
+
+// ============================================================
+// AUTO-TEST « est-ce que cet appareil AFFICHE une notification ? »
+// ------------------------------------------------------------
+// Deux causes radicalement différentes produisent le même « je ne reçois
+// rien » :
+//   (a) le push n'arrive pas — problème d'envoi, côté serveur ;
+//   (b) le push arrive et l'appareil le jette sans rien dire.
+// Rien dans l'app ne permet de les distinguer à distance : la permission est
+// 'granted' et la souscription est vive dans les deux cas. C'est exactement
+// l'angle mort qui a laissé « ça ne marche pas sur Samsung » sans diagnostic.
+//
+// Une notification LOCALE, affichée par le MÊME service worker que les push,
+// tranche en trois secondes et sans réseau :
+//   • elle apparaît      → l'affichage marche, chercher en amont (envoi) ;
+//   • elle n'apparaît pas → c'est l'appareil qui filtre, et AUCUNE mise à jour
+//     de l'app n'y changera quoi que ce soit — il faut les réglages système.
+// D'où le texte d'aide ci-dessous, différent selon la plateforme : sur Android
+// les trois coupables habituels ne sont pas dans les réglages du site mais
+// dans ceux de la batterie et des canaux de notification du navigateur.
+async function pushSelfTest() {
+  try {
+    if (!pushSupported()) { alert('🔔 Notifications non supportées sur cet appareil.'); return; }
+    if (pushPermission() !== 'granted') { alert("🔕 Active d'abord les notifications, puis relance le test."); return; }
+    const reg = (await navigator.serviceWorker.getRegistration('/push-sw.js')) || (await navigator.serviceWorker.getRegistration());
+    if (!reg) { alert("Service worker absent — désactive puis réactive les notifications."); return; }
+    await reg.showNotification('🧪 Test Playbook BCL', {
+      body: "Si tu vois ce message, l'affichage des notifications fonctionne sur cet appareil.",
+      icon: '/icon-192.png', badge: '/icon-192.png',
+      tag: 'pb8-selftest', renotify: true, data: { url: '/' }
+    });
+    // Le délai laisse la bannière s'afficher AVANT l'alerte, sinon la question
+    // « tu l'as vue ? » arrive par-dessus la réponse.
+    setTimeout(() => { try { alert(_pushSelfTestHelp()); } catch (e) {} }, 1200);
+  } catch (e) {
+    alert('Échec du test : ' + ((e && e.message) ? e.message : e) + "\n\nC'est déjà une information : l'appareil refuse d'afficher la notification.");
+  }
+}
+function _pushIsAndroid() { try { return /Android/i.test(navigator.userAgent || ''); } catch (e) { return false; } }
+function _pushSelfTestHelp() {
+  const head = "🧪 Une notification de test vient d'être envoyée à cet appareil.\n\n"
+    + "✅ Tu l'as vue → l'affichage fonctionne. Si les vraies notifications n'arrivent toujours pas, préviens le coach.\n\n"
+    + "❌ Tu ne l'as PAS vue → c'est l'appareil qui les bloque :\n";
+  if (!_pushIsAndroid()) {
+    return head + "\niPhone : Réglages → Notifications → Playbook BCL → « Autoriser les notifications ».\n"
+      + "Vérifie aussi que « Ne pas déranger » / un Mode de concentration n'est pas actif.";
+  }
+  return head
+    + "\nAndroid / Samsung — les trois réglages qui bloquent presque toujours :\n\n"
+    + "1) Paramètres → Applications → ton navigateur (Chrome ou Samsung Internet) → Notifications : activer, et vérifier la catégorie « Sites ».\n\n"
+    + "2) Paramètres → Batterie → « Limites d'utilisation en arrière-plan » : retirer le navigateur des applis mises en veille, et désactiver « Mettre en veille les applis inutilisées ».\n"
+    + "   ⚠️ C'est le coupable n°1 sur Samsung : One UI endort le navigateur tout seul et Android garde la notification sans jamais l'afficher.\n\n"
+    + "3) Paramètres → Notifications → « Ne pas déranger » : vérifier que le navigateur n'y figure pas.\n\n"
+    + "Aucune mise à jour de l'app ne peut contourner ces trois réglages.";
 }
 
 // ============================================================
@@ -53052,7 +53111,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.222';
+const APP_VERSION = '2026-08-19.223';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
