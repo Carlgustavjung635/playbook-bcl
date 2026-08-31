@@ -16490,6 +16490,204 @@ function _trexEntryRow() {
       <button class="btn btn-secondary" style="font-size:12px" onclick="goSection('exos')">🏋️ Exercices d'entraînement →</button>
     </div>`;
 }
+// ── LIEN PLAN ↔ BIBLIOTHÈQUE D'EXOS (v.226) ──────────────────────────────
+// Un exo de plan (`trainingPlan.exercises[]`, sérialisé dans le jsonb
+// `training_plans.plan`) peut désormais POINTER vers un exercice de la
+// bibliothèque via `exercise_ref_id`. C'est une RÉFÉRENCE, pas une copie :
+// éditer l'exo de biblio mets à jour tous les plans qui le citent, et
+// détacher ne supprime jamais rien de la biblio. Le champ vit dans le JSON
+// existant — aucune migration.
+// Rétrocompat : un exo sans `exercise_ref_id` reste 100 % inline (v.195).
+function _exoRefLookup(refId) {
+  if (!refId) return { state: 'none' };
+  if (TREX.list === null) {
+    // La biblio n'a pas encore été lue sur cet appareil : on la demande, et
+    // `trexFetch` finit par render() — l'écran se corrigera tout seul.
+    if (!TREX.loading) setTimeout(() => { try { trexFetch(); } catch (e) {} }, 0);
+    return { state: 'loading' };
+  }
+  // Un exo soft-deleté de la biblio sort de `TREX.list` : on ne ment pas au
+  // coach, on affiche « Exercice supprimé » + un ↩ Détacher.
+  const row = (TREX.list || []).find(r => String(r.id) === String(refId));
+  return row ? { state: 'ok', row } : { state: 'missing' };
+}
+// Fetch JUMEAU de `trexFetch` mais SANS render() : le picker vit dans une
+// modale, et repasser par le rendu global la ferait sous les doigts du coach.
+async function _exoRefFetch() {
+  if (!window.sb) { TREX.err = 'Supabase indisponible.'; TREX.list = TREX.list || []; return; }
+  if (TREX.loading) return;
+  TREX.loading = true; TREX.err = null;
+  try {
+    const { data, error } = await window.sb
+      .from('training_exercises')
+      .select('id,title,data,created_by,updated_at')
+      .is('deleted_at', null)
+      .order('updated_at', { ascending: false })
+      .limit(200);
+    if (error) throw error;
+    TREX.list = data || []; TREX.at = Date.now();
+  } catch (e) {
+    const m = (e && e.message) || String(e);
+    TREX.err = /training_exercises|schema cache|does not exist/i.test(m)
+      ? "Table training_exercises absente — applique la migration 20260901_001."
+      : m;
+    TREX.list = TREX.list || [];
+  } finally { TREX.loading = false; }
+}
+function _exoRefCurrent() {
+  const idx = state._editingExerciseIdx;
+  if (idx == null) return null;
+  const c = (state.convocations || []).find(x => x.id === (state._editingTraining || {}).convocId);
+  const ex = c && c.trainingPlan && (c.trainingPlan.exercises || [])[idx];
+  return ex ? { idx, ex } : null;
+}
+function _exoRefSave() {
+  persist();
+  try { _saveTrainingPlanNow(); } catch (e) {}
+}
+// Quitter la page pour l'éditeur d'exos, c'est perdre tout ce qui n'est pas
+// encore parti au serveur : on enregistre AVANT de naviguer.
+function _exoRefEdit(id, mode) { _exoRefSave(); openTrainingExoEditor(id, mode); }
+function _exoRefBack() {
+  const idx = state._editingExerciseIdx;
+  closeModal();
+  if (idx != null) setTimeout(() => { try { openTrainingExerciseDetail(idx); } catch (e) {} }, 60);
+}
+function _exoRefRefresh() { TREX.list = null; openExoRefPicker(); }
+function openExoRefPicker() {
+  if (_denyIfScopedCoach()) return;
+  const cur = _exoRefCurrent();
+  if (!cur) return;
+  if (TREX.list === null) {
+    _exoRefFetch().then(() => { if (state._editingExerciseIdx === cur.idx) openExoRefPicker(); });
+  }
+  const rows = TREX.list || [];
+  const body = (TREX.list === null)
+    ? `<div class="empty-state">Chargement de la bibliothèque…</div>`
+    : TREX.err
+      ? `<div class="empty-state">⚠️ ${_trexEsc(TREX.err)}</div>`
+      : !rows.length
+        ? `<div class="empty-state">Bibliothèque vide.<br>« 🆕 Créer un nouvel exercice » pour en dessiner un.</div>`
+        : rows.map(r => `
+            <button onclick="attachExoRef('${_trexEsc(r.id)}')" style="display:flex;align-items:center;gap:10px;width:100%;padding:11px 12px;margin-bottom:8px;background:var(--bg-1);border:1px solid var(--border);border-radius:9px;cursor:pointer;text-align:left;color:var(--ink)">
+              <span style="font-size:18px">🏋️</span>
+              <span style="flex:1;min-width:0">
+                <span style="display:block;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_trexEsc(r.title || 'Sans titre')}</span>
+                <span class="eyebrow-muted" style="display:block;margin-top:3px">${_trexEsc(_trexCount(r))}</span>
+              </span>
+              <span style="font-family:'JetBrains Mono';font-size:10px;color:var(--orange)">ATTACHER →</span>
+            </button>`).join('');
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">Exercice ${cur.idx + 1}</div>
+        <div class="modal-title">🔗 Bibliothèque d'exercices</div>
+      </div>
+      <button class="modal-close" onclick="_exoRefBack()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:11px;color:var(--ink-3);line-height:1.5;margin-bottom:12px">
+        L'exo du plan CITERA l'exercice choisi : il reste dans la bibliothèque, et le détacher ne le supprime pas.
+      </div>
+      ${body}
+    </div>
+    <div class="modal-footer" style="flex-direction:column;gap:6px">
+      <button class="btn btn-secondary btn-block" onclick="_exoRefRefresh()">↻ Rafraîchir la bibliothèque</button>
+      <button class="btn btn-secondary btn-block" onclick="_exoRefBack()">Annuler</button>
+    </div>
+  `);
+}
+function attachExoRef(refId) {
+  const cur = _exoRefCurrent();
+  if (!cur) return;
+  cur.ex.exercise_ref_id = refId;
+  const row = (TREX.list || []).find(r => String(r.id) === String(refId));
+  // Un exo de plan fraîchement ajouté s'appelle « Nouvel exercice » : reprendre
+  // le titre de la biblio évite de le retaper. Un titre écrit à la main n'est
+  // JAMAIS écrasé.
+  const t = String(cur.ex.title || '').trim();
+  if (row && row.title && (!t || /^nouvel?\s+exercice$/i.test(t))) cur.ex.title = row.title;
+  _exoRefSave();
+  closeModal();
+  setTimeout(() => { try { openTrainingExerciseDetail(cur.idx); } catch (e) {} }, 60);
+}
+function createExoRefForPlan() {
+  if (_denyIfScopedCoach()) return;
+  const cur = _exoRefCurrent();
+  if (!cur) return;
+  // Même convention d'id que `createTrainingExo` : la LIGNE naît au premier
+  // enregistrement dans l'éditeur. Le plan référence donc un id encore absent
+  // de la base — vu comme « supprimé » jusqu'au 1er save, ce qui est
+  // exactement ce qu'il faut dire tant que rien n'a été dessiné.
+  const id = 'exo-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+  cur.ex.exercise_ref_id = id;
+  _exoRefSave();
+  TREX.list = null;
+  openTrainingExoEditor(id);
+}
+function detachExoRef() {
+  const cur = _exoRefCurrent();
+  if (!cur) return;
+  // Détacher = retirer la RÉFÉRENCE. L'exercice de la bibliothèque n'est pas
+  // touché ; l'exo du plan retombe simplement en mode inline.
+  delete cur.ex.exercise_ref_id;
+  _exoRefSave();
+  try { _flashSaved(); } catch (e) {}
+  closeModal();
+  setTimeout(() => { try { openTrainingExerciseDetail(cur.idx); } catch (e) {} }, 60);
+}
+// Bloc coach, dans la modale d'un exo du plan.
+function _exoRefEditorBlock(ex) {
+  const lk = _exoRefLookup(ex && ex.exercise_ref_id);
+  if (lk.state === 'none') {
+    return `
+      <div style="margin:14px 0;padding:11px 12px;background:var(--bg-2);border:1px dashed var(--border);border-radius:8px">
+        <div style="font-size:10px;font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em;color:var(--ink-3);margin-bottom:8px">Bibliothèque d'exercices</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px">
+          <button class="btn btn-secondary" style="font-size:11px" onclick="openExoRefPicker()">🔗 Attacher un exercice de la bibliothèque</button>
+          <button class="btn btn-secondary" style="font-size:11px" onclick="createExoRefForPlan()">🆕 Créer un nouvel exercice</button>
+        </div>
+      </div>`;
+  }
+  const missing = lk.state === 'missing';
+  const title = lk.state === 'ok' ? (lk.row.title || 'Sans titre')
+    : lk.state === 'loading' ? 'Chargement…' : 'Exercice supprimé';
+  const sub = lk.state === 'ok' ? _trexCount(lk.row)
+    : missing ? "Il n'est plus dans la bibliothèque (ou pas encore enregistré)." : '';
+  const color = missing ? 'var(--red)' : 'var(--orange)';
+  const rid = _trexEsc(ex.exercise_ref_id);
+  return `
+    <div style="margin:14px 0;padding:11px 12px;background:var(--bg-2);border-left:3px solid ${color};border-radius:6px">
+      <div style="font-size:10px;color:${color};font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em">🔗 Depuis biblio</div>
+      <div style="font-weight:700;margin-top:4px">${_trexEsc(title)}</div>
+      ${sub ? `<div class="eyebrow-muted" style="margin-top:3px">${_trexEsc(sub)}</div>` : ''}
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:9px">
+        ${lk.state === 'ok' ? `
+          <button class="btn btn-secondary" style="font-size:11px" onclick="_exoRefEdit('${rid}','view')">▶ Voir</button>
+          <button class="btn btn-secondary" style="font-size:11px" onclick="_exoRefEdit('${rid}')">✎ Éditer l'exo</button>
+          <button class="btn btn-secondary" style="font-size:11px" onclick="openExoRefPicker()">↔ Changer</button>` : ''}
+        ${missing ? `<button class="btn btn-secondary" style="font-size:11px" onclick="_exoRefEdit('${rid}')">✎ Ouvrir l'éditeur</button>` : ''}
+        <button class="btn btn-secondary" style="font-size:11px;color:var(--red)" onclick="detachExoRef()">🗑 Détacher</button>
+      </div>
+    </div>`;
+}
+// Bloc joueuse : vignette + tap → viewer plein écran de l'exercice.
+function _exoRefPlayerBlock(ex) {
+  const lk = _exoRefLookup(ex && ex.exercise_ref_id);
+  if (lk.state === 'none') return '';
+  if (lk.state === 'loading') return `<div class="eyebrow-muted" style="margin-top:8px">🔗 Chargement de l'exercice…</div>`;
+  if (lk.state === 'missing') return `<div class="eyebrow-muted" style="margin-top:8px">🔗 Exercice supprimé</div>`;
+  const r = lk.row;
+  return `
+    <div onclick="event.stopPropagation();openTrainingExoEditor('${_trexEsc(r.id)}','view')" style="display:flex;align-items:center;gap:10px;margin-top:10px;padding:9px 11px;background:var(--bg-3);border:1px solid var(--border);border-radius:8px;cursor:pointer">
+      <div style="width:44px;height:44px;flex-shrink:0;border-radius:6px;background:linear-gradient(135deg,rgba(var(--accent-rgb),0.30),rgba(var(--accent-rgb),0.06));display:flex;align-items:center;justify-content:center;font-size:20px">🏋️</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:700;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_trexEsc(r.title || 'Exercice')}</div>
+        <div class="eyebrow-muted" style="margin-top:2px">${_trexEsc(_trexCount(r))}</div>
+      </div>
+      <div style="font-family:'JetBrains Mono';font-size:10px;color:var(--orange)">▶ VOIR</div>
+    </div>`;
+}
 function renderTrainingExos() {
   const isCoach = state.auth.role === 'coach';
   if (TREX.list === null && !TREX.loading && !TREX.err) trexFetch();
@@ -40986,6 +41184,7 @@ function trainingExerciseRow(ex, idx, totalCount, startTime, endTime) {
             <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;line-height:1.2;flex:1;min-width:0">${esc(ex.title)}</div>
             ${altActiveBadge(ex)}
             <span style="font-size:9px;color:${ex.source === 'play' ? 'var(--orange)' : 'var(--ink-3)'};font-family:'JetBrains Mono'">${ex.source === 'play' ? '📚' : '✎'}</span>
+            ${ex.exercise_ref_id ? `<span style="font-size:9px;color:var(--orange);font-family:'JetBrains Mono'" title="Depuis la bibliothèque">🔗</span>` : ''}
           </div>
           <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.04em">
             ${hasGroups ? `${(ex.groups || []).length} groupes` : '1 groupe'}${totalGroupPlayers > 0 ? ` · ${totalGroupPlayers} joueuses` : ''}
@@ -41899,6 +42098,8 @@ function renderExerciseDetail() {
         <div id="ex-desc-mentions"></div>
       </div>
 
+      ${_exoRefEditorBlock(ex)}
+
       <!-- BANDEAU PLAY LIÉ -->
       ${linkedPlay ? `
         <div style="padding:10px 12px;background:var(--bg-2);border-left:3px solid var(--orange);border-radius:6px;margin:14px 0;font-size:11px;color:var(--ink-2);line-height:1.5">
@@ -42525,6 +42726,7 @@ function openMyTrainingPlan(convocId, dateStr) {
                   </div>
                   ${ex.description ? `<div class="md-content" style="font-size:12px;color:var(--ink-2);margin-top:6px">${pbRenderMdWithMentions(ex.description)}</div>` : ''}
                   ${_exoAnimBlock(_tcnKey(convocId, _idate), ex.id)}
+                  ${_exoRefPlayerBlock(ex)}
 
                   ${linkedPlay && linkedPlay.concepts && linkedPlay.concepts.length > 0 ? `
                     <div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:8px" onclick="event.stopPropagation()">
@@ -53286,7 +53488,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.225';
+const APP_VERSION = '2026-08-19.226';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
