@@ -1852,6 +1852,24 @@
   var TM_BASE = { full: { w: 174, h: 304 }, half: { w: 174, h: 164 } };
   var TM_EXT_MAX = 20;                       // 20 m de rab par côté, large
 
+  // v.229 — declaree ICI et pas pres de ses usages : lecon de la v.228, une
+  // table lue par exoNeutralize()/fromJSON() au chargement d un document ne
+  // doit pas dependre de l endroit ou la section « entrainement » commence.
+  // CHASUBLES. En exercice il n y a ni attaque ni defense : toutes les
+  // joueuses sont des participantes, et ce qui fait les groupes c est la
+  // chasuble. Axe A PART, pas un quatrieme cote : `side` reste 'neu' pour
+  // tout le monde et `bib` porte la couleur (null = jeton neutre).
+  var BIBS = {
+    red:    { c: '#EF4444', ink: '#FFFFFF', lbl: '🟥 Rouge' },
+    blue:   { c: '#3B82F6', ink: '#FFFFFF', lbl: '🟦 Bleu' },
+    yellow: { c: '#FACC15', ink: '#111827', lbl: '🟨 Jaune' },
+    green:  { c: '#22C55E', ink: '#FFFFFF', lbl: '🟩 Vert' },
+    orange: { c: '#F97316', ink: '#FFFFFF', lbl: '🟧 Orange' },
+    purple: { c: '#A855F7', ink: '#FFFFFF', lbl: '🟪 Violet' }
+  };
+  var BIB_KEYS = ['red', 'blue', 'yellow', 'green', 'orange', 'purple'];
+  var TM_BK_PAD = 6;                         // demi-encombrement d un panier
+
   function makeDoc() {
     var d = {
       id: null, title: '', tag: '', side: 'attaque', color: '#22D3EE',
@@ -2866,7 +2884,6 @@
   // celle du doigt, sinon le panier serait AIMANTÉ au milieu de la marge et
   // ne pourrait plus la longer — c'était le vrai symptôme « on ne peut pas
   // le déplacer ». Point déjà dehors, ou aucune extension : rien à faire.
-  var TM_BK_PAD = 6;                     // demi-encombrement d'un panier
   function tmPushOut(p, d) {
     if (!p || !isFinite(+p.x) || !isFinite(+p.y)) return p;
     var dim = tmDims(d), pad = TM_BK_PAD;
@@ -3093,20 +3110,6 @@
     return d.players;
   }
   var TM_PREFIX = { atk: 'a', def: 'd', neu: 'n' };
-  // v.228 — CHASUBLES. En exercice il n'y a ni attaque ni défense : toutes
-  // les joueuses sont des participantes. Ce qui fait les groupes, c'est la
-  // chasuble — exactement comme au gymnase. C'est donc un axe À PART, pas un
-  // quatrième « côté » : `side` reste 'neu' pour tout le monde, et `bib`
-  // porte la couleur (ou null, jeton neutre par défaut).
-  var BIBS = {
-    red:    { c: '#EF4444', ink: '#FFFFFF', lbl: '🟥 Rouge' },
-    blue:   { c: '#3B82F6', ink: '#FFFFFF', lbl: '🟦 Bleu' },
-    yellow: { c: '#FACC15', ink: '#111827', lbl: '🟨 Jaune' },
-    green:  { c: '#22C55E', ink: '#FFFFFF', lbl: '🟩 Vert' },
-    orange: { c: '#F97316', ink: '#FFFFFF', lbl: '🟧 Orange' },
-    purple: { c: '#A855F7', ink: '#FFFFFF', lbl: '🟪 Violet' }
-  };
-  var BIB_KEYS = ['red', 'blue', 'yellow', 'green', 'orange', 'purple'];
   function bibOf(t) { return (t && t.bib && BIBS[t.bib]) ? BIBS[t.bib] : null; }
   function tmAddPlayer(side) {
     var l = tmPlayers();
