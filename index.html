@@ -16225,6 +16225,7 @@ function renderPlays() {
           <div class="eyebrow-muted">${items.length} ${items.length > 1 ? 'plays' : 'play'}${orphanItems.length > 0 ? ' · ' + orphanItems.length + ' dispo' : ''}</div>
           <h2 class="display-lg mt-2">Playbook</h2>
           ${isCoach ? _pbEditorV2Row() : ''}
+          ${_trexEntryRow()}
         </div>
         ${isCoach && canEditSharedLibrary() ? `<button class="btn btn-primary" onclick="editPlay()">+ NOUVEAU</button>` : ''}
       </div>
@@ -16387,6 +16388,144 @@ function _pbEditorV2Row() {
         <span>Éditeur de plays v2 (beta)</span>
       </label>
       ${on ? `<button class="btn btn-secondary" style="font-size:12px" onclick="openPbEditorV2()">🆕 Nouvel éditeur (beta)</button>` : ''}
+    </div>`;
+}
+
+// ── EXERCICES D'ENTRAÎNEMENT (v.225) ─────────────────────────────────────
+// Même éditeur que les plays, autre HÔTE : la table `training_exercises`
+// (migration 20260901_001). Un exercice n'est pas un play — pas de catégorie
+// de playbook, pas de lien saison, pas de variantes — d'où une entité et une
+// section à part plutôt qu'un onglet de plus dans le Playbook.
+//
+// CANAL DÉDIÉ, hors PbSync : la table ne porte que du contenu écrit par
+// l'éditeur (une page à part, qui écrit en direct au serveur). La faire
+// transiter par le moteur de synchro lui ferait pousser un état local qui
+// n'est jamais la source de vérité. On lit donc à l'ouverture de la section,
+// avec un ↻ explicite — même choix que `players` (v.155), et la même
+// vigilance : base fraîche + écran figé ⇒ le bug est dans la LECTURE.
+const TREX = { list: null, loading: false, err: null, at: 0 };
+function _trexEsc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+async function trexFetch(force) {
+  if (TREX.loading) return;
+  if (!force && TREX.list && Date.now() - TREX.at < 60000) return;
+  if (!window.sb) { TREX.err = 'Supabase indisponible.'; TREX.list = []; render(); return; }
+  TREX.loading = true; TREX.err = null;
+  try {
+    const { data, error } = await window.sb
+      .from('training_exercises')
+      .select('id,title,data,created_by,updated_at')
+      .is('deleted_at', null)
+      .order('updated_at', { ascending: false })
+      .limit(200);
+    if (error) throw error;
+    TREX.list = data || [];
+    TREX.at = Date.now();
+  } catch (e) {
+    const m = (e && e.message) || String(e);
+    // Cause n°1 au premier essai : la migration n'a pas été appliquée. Le
+    // dire, plutôt que d'afficher un code PostgREST que personne ne lit.
+    TREX.err = /training_exercises|schema cache|does not exist/i.test(m)
+      ? "Table training_exercises absente — applique la migration 20260901_001."
+      : m;
+    TREX.list = TREX.list || [];
+  } finally {
+    TREX.loading = false;
+    render();
+  }
+}
+// L'éditeur reçoit l'exercice par l'URL, exactement comme il reçoit un play.
+// `exo=` SEUL (sans `plan=`) désigne cette table ; `plan=X&exo=Y` reste l'exo
+// d'une séance du jalon 4.5 — les deux portes ne se croisent pas.
+function openTrainingExoEditor(exoId, mode) {
+  const q = ['exo=' + encodeURIComponent(exoId)];
+  if (mode) q.push('mode=' + encodeURIComponent(mode));
+  _pbEditorThemeParams(q);
+  location.href = '/src/plays-editor-poc.html?' + q.join('&');
+}
+function createTrainingExo() {
+  if (_denyIfScopedCoach()) return;
+  // L'id est frappé ICI, la ligne naît au PREMIER enregistrement : ouvrir un
+  // exercice qu'on abandonne ne laisse donc aucune ligne fantôme en base.
+  const id = 'exo-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+  openTrainingExoEditor(id);
+}
+async function deleteTrainingExo(id) {
+  if (_denyIfScopedCoach()) return;
+  const row = (TREX.list || []).find(r => r.id === id);
+  if (!confirm('Supprimer l\'exercice « ' + ((row && row.title) || id) + ' » ?')) return;
+  try {
+    // Soft-delete (cf. migration) : un hard DELETE ressusciterait au flush
+    // suivant d'un appareil hors ligne.
+    const { error } = await window.sb.from('training_exercises')
+      .update({ deleted_at: new Date().toISOString() }).eq('id', id);
+    if (error) throw error;
+    TREX.list = (TREX.list || []).filter(r => r.id !== id);
+    render();
+  } catch (e) { alert('Échec de la suppression — ' + ((e && e.message) || e)); }
+}
+function _trexCount(row) {
+  const d = row && row.data;
+  if (!d) return '';
+  const st = Array.isArray(d.steps) ? d.steps.length : 0;
+  const pl = Array.isArray(d.players) ? d.players.length : 0;
+  const ba = Array.isArray(d.balls) ? d.balls.length : 0;
+  const ac = Array.isArray(d.accessories) ? d.accessories.length : 0;
+  const bits = [];
+  if (st) bits.push(st + ' temps');
+  if (pl) bits.push(pl + ' joueuse' + (pl > 1 ? 's' : ''));
+  if (ba) bits.push(ba + ' 🏀');
+  if (ac) bits.push(ac + ' 🎪');
+  return bits.join(' · ');
+}
+// Point d'entrée posé sur la page Playbook, pour les deux rôles : la section
+// existe et est routable (#/exos) mais n'entre PAS dans la barre de nav —
+// y ajouter un 6e onglet redessinerait la nav de tout le monde pour une
+// feature qui débute.
+function _trexEntryRow() {
+  return `
+    <div style="margin-top:10px">
+      <button class="btn btn-secondary" style="font-size:12px" onclick="goSection('exos')">🏋️ Exercices d'entraînement →</button>
+    </div>`;
+}
+function renderTrainingExos() {
+  const isCoach = state.auth.role === 'coach';
+  if (TREX.list === null && !TREX.loading && !TREX.err) trexFetch();
+  const rows = TREX.list || [];
+  const body = TREX.loading && !rows.length
+    ? `<div class="empty-state">Chargement…</div>`
+    : TREX.err
+      ? `<div class="empty-state">⚠️ ${_trexEsc(TREX.err)}</div>`
+      : !rows.length
+        ? `<div class="empty-state">Aucun exercice pour l'instant.${isCoach ? '<br>« 🆕 Nouvel exercice » pour en dessiner un.' : ''}</div>`
+        : rows.map(r => `
+            <div class="card" style="margin:0 18px 10px;padding:14px">
+              <div style="display:flex;align-items:center;gap:10px">
+                <div style="flex:1;min-width:0">
+                  <div style="font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_trexEsc(r.title || 'Sans titre')}</div>
+                  <div class="eyebrow-muted" style="margin-top:3px">${_trexEsc(_trexCount(r))}</div>
+                </div>
+                <button class="btn btn-secondary" style="font-size:12px" onclick="openTrainingExoEditor('${_trexEsc(r.id)}','view')">▶ Voir</button>
+                ${isCoach ? `<button class="btn btn-secondary" style="font-size:12px" onclick="openTrainingExoEditor('${_trexEsc(r.id)}')">✏️</button>
+                <button class="btn btn-secondary" style="font-size:12px" onclick="deleteTrainingExo('${_trexEsc(r.id)}')">🗑</button>` : ''}
+              </div>
+            </div>`).join('');
+  return `
+    <div class="fade-up">
+      <div class="section-header">
+        <div>
+          <div class="eyebrow-muted">${rows.length} exercice${rows.length > 1 ? 's' : ''}</div>
+          <h2 class="display-lg mt-2">🏋️ Entraînement</h2>
+        </div>
+        ${isCoach ? `<button class="btn btn-primary" onclick="createTrainingExo()">🆕 NOUVEL EXERCICE</button>` : ''}
+      </div>
+      <div style="padding:0 18px 10px;display:flex;gap:8px">
+        <button class="btn btn-secondary" style="font-size:12px" onclick="trexFetch(true)">↻ Rafraîchir</button>
+        <button class="btn btn-secondary" style="font-size:12px" onclick="goSection('plays')">← Playbook</button>
+      </div>
+      ${body}
     </div>`;
 }
 
@@ -52878,6 +53017,7 @@ function _renderBody() {
   if (role === 'coach') {
     if (state.section === 'home') content = renderHomeCoach();
     else if (state.section === 'plays') content = renderPlays();
+    else if (state.section === 'exos') content = renderTrainingExos();
     else if (state.section === 'matches') content = renderMatches();
     else if (state.section === 'team') content = renderTeam();
     else if (state.section === 'inspire') content = renderInspire();
@@ -52901,6 +53041,7 @@ function _renderBody() {
     else if (state.view && state.view.type === 'ffbb') content = renderFFBB();  // Feature 2 : dashboard FFBB lecture seule
     else if (state.section === 'home') content = renderHomePlayer();
     else if (state.section === 'plays') content = renderPlays();
+    else if (state.section === 'exos') content = renderTrainingExos();
     else if (state.section === 'challenges') content = renderPlayerChallenges();
     else if (state.section === 'match') content = renderPlayerMatches();
     else if (state.section === 'calendrier') content = renderPlayerCalendrier();
@@ -52954,7 +53095,7 @@ var _pbModalDepth = 0;       // 1 si une modal a une entrée d'historique, 0 sin
 var _pbSuppressPop = false;  // ignore le prochain popstate (close programmatique)
 var _pbInPop = false;        // true pendant le traitement d'un popstate (anti-boucle)
 
-var _PB_SECTIONS = ['home','plays','matches','team','inspire','ffbb','live','challenges','match','calendrier','programme'];
+var _PB_SECTIONS = ['home','plays','exos','matches','team','inspire','ffbb','live','challenges','match','calendrier','programme'];
 function _pbIsValidSection(id) { return _PB_SECTIONS.indexOf(id) !== -1; }
 function _pbHashSection() { var h = (location.hash || '').replace(/^#\/?/, '').trim(); return h || null; }
 function _pbModalOpen() { var r = document.getElementById('modal-root'); return !!(r && r.innerHTML.trim() !== ''); }

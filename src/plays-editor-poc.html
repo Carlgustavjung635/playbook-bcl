@@ -1082,6 +1082,7 @@
   <h2>⋯ Animation</h2>
   <div class="row"><button class="btn wide" id="a-plays">🎬 Animations de ce play</button></div>
   <div class="row"><button class="btn wide" id="a-publish">💾 Publier dans le play</button></div>
+  <div class="row" id="row-exo-back" hidden><button class="btn wide" id="a-exo-back">← Retour aux exercices</button></div>
   <div class="row">
     <button class="btn" id="a-png">📸 Photo</button>
     <button class="btn" id="a-series">🎞 Série photos</button>
@@ -2663,6 +2664,29 @@
   function tmEnabled() {
     try { return localStorage.getItem(TM_FLAG_KEY) === '1'; } catch (e) { return false; }
   }
+  // Le drapeau garde le mode entraînement DANS un play (où il est une option
+  // exotique). Un exercice d'entraînement, lui, EST un atelier : le drapeau
+  // n'a rien à y dire, sinon un coach qui ouvre son exo depuis la liste
+  // tomberait sur un demi-terrain vide sans comprendre pourquoi.
+  function tmAvailable() { return !!trexId || tmEnabled(); }
+  // Mode EXERCICE : le terrain est imposé, l'arbre de variantes n'existe pas.
+  function exoMode() { return !!trexId; }
+  // Aplatir = retirer `branches` partout, pas seulement à la racine. Un
+  // brouillon repris d'un play, un JSON importé, un exercice écrit par une
+  // version future : tout ce qui entre passe par ici, et l'invariant « un
+  // exercice n'a pas de variante » n'a donc qu'UN seul endroit à tenir.
+  function exoFlatten(d) {
+    ['half', 'full', 'training'].forEach(function (m) {
+      var l = (d && d[m] && Array.isArray(d[m].steps)) ? d[m].steps : [];
+      (function walk(list) {
+        for (var i = 0; i < list.length; i++) {
+          if (Array.isArray(list[i].branches)) { walk(list[i].branches.reduce(function (a, b) { return a.concat(b.steps || []); }, [])); }
+          delete list[i].branches;
+        }
+      })(l);
+    });
+    return d;
+  }
   function tmSetEnabled(on) {
     try { localStorage.setItem(TM_FLAG_KEY, on ? '1' : '0'); } catch (e) {}
   }
@@ -3131,8 +3155,28 @@
   var layX = null, layB = null;
 
   function tmChromeSync() {
-    var on = tmEnabled();
-    document.getElementById('m-train').hidden = !on;
+    var on = tmAvailable();
+    // En mode exercice il n'y a qu'UN terrain : les trois bascules et le
+    // miroir disparaissent plutôt que de proposer un choix qui n'existe pas.
+    var ex = exoMode();
+    ['m-half', 'm-full', 'b-mirror', 'm-train'].forEach(function (k) {
+      var el = document.getElementById(k); if (el) el.hidden = ex;
+    });
+    // Structure PLATE : ni bifurcation, ni tiroir d'arbre.
+    ['s-branch', 's-tree'].forEach(function (k) {
+      var el = document.getElementById(k); if (el) el.hidden = ex;
+    });
+    if (!ex) document.getElementById('m-train').hidden = !on;
+    if (ex) {
+      // Le menu ⋯ parle de « play » partout : dans un exercice, ces mots
+      // désignent quelque chose qui n'existe pas. On renomme plutôt que de
+      // laisser le coach traduire dans sa tête à chaque ouverture.
+      var ap = document.getElementById('a-plays'); if (ap) ap.hidden = true;
+      var af = document.getElementById('a-trainflag'); if (af) af.hidden = true;
+      document.getElementById('a-publish').textContent = '💾 Enregistrer l\'exercice';
+      document.getElementById('a-delete').textContent = '🗑 Supprimer l\'exercice';
+      document.getElementById('row-exo-back').hidden = false;
+    }
     var tm = on && mode() === 'training', els = document.querySelectorAll('.tmonly'), i;
     for (i = 0; i < els.length; i++) els[i].hidden = !tm;
     document.getElementById('m-half').classList.toggle('on', mode() === 'half');
@@ -3216,6 +3260,10 @@
       toast(on ? '🏋️ Mode Entraînement activé.' : 'Mode Entraînement désactivé.', 'ok');
     });
     document.getElementById('m-train').addEventListener('click', function () { setMode('training'); });
+    document.getElementById('a-exo-back').addEventListener('click', function () {
+      if (dirty && !confirm('Des modifications ne sont pas enregistrées.\nQuitter quand même ?')) return;
+      history.back();
+    });
     document.getElementById('b-train').addEventListener('click', function () { tmSheetSync(); openSheet('sh-train'); });
     document.getElementById('b-acc').addEventListener('click', function () { openSheet('sh-acc'); });
     document.getElementById('b-balls').addEventListener('click', function () { tbListSync(); openSheet('sh-balls'); });
@@ -5644,6 +5692,20 @@
       steps: outSteps
     };
     if (tm) for (var tk in tm) base[tk] = tm[tk];
+    // ── Format EXERCICE (pb-exo/1) ────────────────────────────────────
+    // Le même document, relu par la même fonction fromJSON() : on ne
+    // fabrique PAS un second décodeur. On ajoute `terrain_config` (le nom du
+    // périmètre, qui regroupe ce que l'exo appelle « le terrain ») et on
+    // garantit l'invariant de la table — aucune clé `branches`, à aucune
+    // profondeur, même si un brouillon en avait apporté.
+    if (exoMode()) {
+      base.format = 'pb-exo/1';
+      base.terrain_config = { court_size: base.court_size, extra_baskets: base.extra_baskets };
+      base.notes = doc.description || '';
+      (function strip(l) {
+        for (var i = 0; i < l.length; i++) { if (l[i].branches) { strip([].concat.apply([], l[i].branches.map(function (b) { return b.steps || []; }))); delete l[i].branches; } }
+      })(base.steps || []);
+    }
     return base;
   }
 
@@ -6449,6 +6511,12 @@
   // `anim=` désigne celle qu'on ouvre — sans lui, on en crée une nouvelle.
   var planId = Q.get('plan') || null;      // "<convocId>::<date>"
   var exoId  = Q.get('exo') || null;       // l'exercice du plan
+  // v.225 — EXERCICE D'ENTRAÎNEMENT AUTONOME (table training_exercises).
+  // `exo=` SEUL, sans `plan=`, ouvre la nouvelle entité : même moteur, autre
+  // hôte, structure PLATE (aucune branche). Avec `plan=`, `exo=` garde
+  // exactement son sens du jalon 4.5 — les deux ne se croisent jamais, parce
+  // que TOUTES les portes du mode plan sont gardées par `planId && exoId`.
+  var trexId = (!planId && exoId) ? exoId : null;
   var playTitle = '';
 
   function sbFetch(path, opts) {
@@ -6471,6 +6539,8 @@
   // Message parlant plutôt qu'un code HTTP : au premier essai, la cause la plus
   // probable est que la migration n'a pas encore été appliquée.
   function sbMsg(e) {
+    if (trexId && /training_exercises/.test(e.message))
+      return 'table training_exercises absente — applique la migration 20260901_001.';
     if (/animations/.test(e.message) && /column|colonne/i.test(e.message))
       return 'colonne plays.animations absente — applique la migration 20260823_002.';
     if (planId && /HTTP 40[04]/.test(e.message)) return 'plan d\'entraînement introuvable — enregistre le plan avant d\'y ajouter une animation.';
@@ -6530,6 +6600,34 @@
       { method: 'PATCH', body: { animations: list }, prefer: 'return=minimal' });
   }
 
+  // ── EXERCICE D'ENTRAÎNEMENT (training_exercises) ─────────────────────
+  // Une LIGNE = un exercice, pas une liste d'animations : il n'y a rien à
+  // fusionner, donc pas de read-modify-write. L'upsert écrase la ligne
+  // entière, ce qui est exactement le contrat (l'éditeur est la seule source).
+  function trexLoad() {
+    return sbFetch('training_exercises?id=eq.' + encodeURIComponent(trexId)
+      + '&select=id,title,data,deleted_at&limit=1')
+      .then(function (rows) {
+        if (!rows || !rows.length || rows[0].deleted_at) return null;
+        playTitle = rows[0].title || '';
+        return rows[0].data && rows[0].data.steps ? rows[0].data : null;
+      });
+  }
+  function trexSave(o) {
+    return sbFetch('training_exercises?on_conflict=id', {
+      method: 'POST',
+      body: [ { id: trexId, title: (doc.title || 'Exercice').slice(0, 120), data: o,
+                created_by: doc.author || null, updated_at: new Date().toISOString() } ],
+      prefer: 'resolution=merge-duplicates,return=minimal'
+    });
+  }
+  // Soft-delete : un hard DELETE ne tue pas une ligne qu'un autre appareil
+  // garde en localStorage — elle ressusciterait au flush suivant.
+  function trexDelete() {
+    return sbFetch('training_exercises?id=eq.' + encodeURIComponent(trexId),
+      { method: 'PATCH', body: { deleted_at: new Date().toISOString() }, prefer: 'return=minimal' });
+  }
+
   // `dirty` = du travail non publié existe. On ne réécrit le brouillon que
   // s'il a changé : un setInterval qui sérialise 10 temps toutes les 5 s pour
   // rien réveille le CPU de l'iPhone sans raison.
@@ -6553,7 +6651,10 @@
   }
 
   function draftPayload() {
-    return JSON.stringify({ v: 3, at: new Date().toISOString(), play: playId, doc: doc, cur: cur });
+    // Le brouillon est SCOPÉ à son hôte : sans `exo`, le brouillon d'un
+    // exercice serait proposé au bac à sable (playId null des deux côtés) et
+    // le coach ouvrirait un atelier en croyant ouvrir une page blanche.
+    return JSON.stringify({ v: 3, at: new Date().toISOString(), play: playId, exo: trexId, doc: doc, cur: cur });
   }
   function saveDraft() {
     try {
@@ -6581,6 +6682,7 @@
     // Un brouillon appartient à SON play : le proposer sur un autre play
     // ferait recoller le travail au mauvais endroit.
     if ((o.play || null) !== playId) return;
+    if ((o.exo || null) !== trexId) return;
     // Et il n'a plus d'intérêt si on vient d'ouvrir l'animation qu'il décrit
     // dans une version déjà publiée — sauf s'il est plus récent, ce qu'on ne
     // peut pas savoir : on le propose, le coach tranche.
@@ -6652,7 +6754,10 @@
     if (d.mode !== 'full' && d.mode !== 'training') d.mode = 'half';
     // Le drapeau a pu être éteint entre-temps : un brouillon d'atelier ne doit
     // pas rouvrir un mode que l'interface n'expose plus.
-    if (d.mode === 'training' && !tmEnabled()) d.mode = 'half';
+    if (d.mode === 'training' && !tmAvailable()) d.mode = 'half';
+    // Un exercice EST un atelier, et il est PLAT : on impose le terrain et on
+    // retire toute branche qu'un brouillon d'un autre contexte aurait laissée.
+    if (exoMode()) { d.mode = 'training'; exoFlatten(d); }
     if (d.tokenSize !== 0.75 && d.tokenSize !== 1.25) d.tokenSize = 1;
     if (d.labelStyle !== 'letters') d.labelStyle = 'numbers';
     return d;
@@ -6661,8 +6766,16 @@
   // ── Publier ──────────────────────────────────────────────────────────
   document.getElementById('a-publish').addEventListener('click', function () {
     closeSheets();
-    if (!playId && !planId) { toast('Bac à sable : ouvre l\'éditeur depuis un play ou un exo pour publier.', 'err'); return; }
+    if (!playId && !planId && !trexId) { toast('Bac à sable : ouvre l\'éditeur depuis un play ou un exo pour publier.', 'err'); return; }
     if (!doc.title.trim()) { metaToForm(); openSheet('sh-meta'); toast('Un titre est obligatoire pour publier.', 'err'); F.title.focus(); return; }
+    if (trexId) {
+      doc.id = trexId;   // l'exercice EST la ligne : son id ne se recalcule pas
+      toast('Enregistrement…');
+      trexSave(toJSON())
+        .then(function () { dirty = false; saveDraft(); playTitle = doc.title; setContext('↳ ' + doc.title); toast('Exercice enregistré.', 'ok'); })
+        .catch(function (e) { toast('Échec de l\'enregistrement — ' + sbMsg(e), 'err'); });
+      return;
+    }
     if (!doc.id) doc.id = (slug(doc.title) || 'anim') + '-' + Math.random().toString(36).slice(2, 7);
     var o = toJSON();
     o.updated_at = new Date().toISOString();
@@ -6684,6 +6797,13 @@
   // ── Supprimer une animation du play ──────────────────────────────────
   document.getElementById('a-delete').addEventListener('click', function () {
     closeSheets();
+    if (trexId) {
+      if (!confirm('Supprimer l\'exercice « ' + (doc.title || trexId) + ' » ?')) return;
+      trexDelete()
+        .then(function () { dirty = false; toast('Exercice supprimé.', 'ok'); setTimeout(function () { history.back(); }, 700); })
+        .catch(function (e) { toast('Échec de la suppression — ' + sbMsg(e), 'err'); });
+      return;
+    }
     if ((!playId && !planId) || !doc.id) { toast('Cette animation n\'a jamais été publiée.', 'err'); return; }
     if (!confirm('Retirer « ' + (doc.title || doc.id) + ' » de ' + (planId ? 'cet exercice' : 'ce play') + ' ?')) return;
     var gone = doc.id;
@@ -7754,7 +7874,36 @@
   renderTimeline();
   setHint();
 
-  if (!playId && !planId) {
+  if (trexId) {
+    // Un exercice s'ouvre TOUJOURS sur son atelier, même vide : le coach doit
+    // voir le terrain qu'il va dessiner, pas un demi-terrain qu'il devra
+    // basculer. Le doc neuf est donc stampé avant le premier rendu.
+    setContext('chargement de l\'exercice…');
+    doc.mode = 'training'; doc.id = trexId;
+    rebuildTokens(); tmSync(); drawAll(); renderTimeline(); tmChromeSync();
+    if (wantView) document.body.classList.add('viewer');
+    trexLoad()
+      .then(function (data) {
+        if (!data) {
+          // Ligne pas encore écrite = exercice tout neuf : page blanche, pas
+          // une erreur. C'est le chemin normal du bouton « 🆕 Nouvel exercice ».
+          setContext('↳ nouvel exercice');
+          doc.mode = 'training'; drawAll(); renderTimeline();
+          if (wantView) { document.body.classList.remove('viewer'); toast('Cet exercice n\'a pas encore été dessiné.', 'err'); }
+          return;
+        }
+        loadDoc(exoFlatten(fromJSON(data)));
+        doc.id = trexId;
+        dirty = false;
+        setContext('↳ ' + (doc.title || 'exercice'));
+        if (wantView) setTimeout(function () { document.body.classList.remove('viewer'); enterViewer('url'); }, 120);
+      })
+      .catch(function (e) {
+        setContext('exercice injoignable');
+        toast('Exercice injoignable — ' + sbMsg(e), 'err');
+        if (wantView) document.body.classList.remove('viewer');
+      });
+  } else if (!playId && !planId) {
     setContext('bac à sable');
     offerDraft();
   } else {
