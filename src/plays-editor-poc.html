@@ -1826,6 +1826,17 @@
 
   function makeStep(pos) { return { id: uid('s'), pos: pos, arw: [], shot: null, note: '', explanation: '', explOvr: false }; }
 
+  // v.228 — CES DEUX CONSTANTES SONT LUES AU BOOT. `var doc = makeDoc()`
+  // s'exécute quelques lignes plus bas et descend jusqu'à tmDims() ; les
+  // laisser déclarées au milieu de la section « terrain d'entraînement »
+  // (v.227) les rendait `undefined` à cet instant précis — TM_BASE[bk] levait
+  // « Cannot read properties of undefined (reading 'full') » et TOUT le script
+  // de l'éditeur mourait au chargement, plays compris. Une constante lue à
+  // l'initialisation se déclare AVANT l'initialisation, pas près de ses
+  // usages.
+  var TM_BASE = { full: { w: 174, h: 304 }, half: { w: 174, h: 164 } };
+  var TM_EXT_MAX = 20;                       // 20 m de rab par côté, large
+
   function makeDoc() {
     var d = {
       id: null, title: '', tag: '', side: 'attaque', color: '#22D3EE',
@@ -2777,8 +2788,6 @@
   // mètres, collées à l'extérieur du terrain. Elles agrandissent la TOILE
   // sans toucher au terrain — d'où le décalage (el, et) appliqué une fois,
   // au <g> qui porte le dessin officiel, et jamais recalculé ailleurs.
-  var TM_BASE = { full: { w: 174, h: 304 }, half: { w: 174, h: 164 } };
-  var TM_EXT_MAX = 20;                       // 20 m de rab par côté, large
   function tmBaseOf(d) { return ((d || doc) && (d || doc).courtBase === 'half') ? 'half' : 'full'; }
   // Normalisation UNIQUE des extensions : tout ce qui entre (JSON importé,
   // vieux document, slider) passe par ici, jamais par une lecture directe.
