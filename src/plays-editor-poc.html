@@ -866,6 +866,15 @@
      dedans, et c'est le point : ce qui est trace est officiel, ce qui ne
      l'est pas est libre. */
   .tmext { opacity: .42; }
+  /* Panier d'atelier sélectionné : liseré pointillé + anneau accentué. */
+  #lay-court .tb.sel .hp { stroke: var(--acc, #22D3EE); }
+  #lay-court .tb .bksel { fill: none; stroke: var(--acc, #22D3EE); stroke-width: .9; stroke-dasharray: 2.5 2; opacity: .95; }
+  /* Nuancier de chasubles dans la liste des joueuses. */
+  .tmlist .bibs { display: flex; gap: 3px; align-items: center; }
+  .tmlist .bsw { width: 16px; height: 16px; border-radius: 50%; padding: 0; cursor: pointer;
+                 border: 1px solid rgba(128,128,128,.5); background: transparent; }
+  .tmlist .bsw.none { background: repeating-linear-gradient(45deg, transparent, transparent 3px, rgba(128,128,128,.45) 3px, rgba(128,128,128,.45) 5px); }
+  .tmlist .bsw.on { outline: 2px solid var(--acc, #22D3EE); outline-offset: 1px; }
   .tmextln { fill: none; stroke: currentColor; stroke-width: .6; opacity: .22; stroke-dasharray: 3 3; }
   /* Sections repliables des panneaux d'atelier : un seul chantier ouvert a
      la fois, plutot que quatre panneaux empiles. */
@@ -1148,6 +1157,12 @@
   <div id="tm-bklist" class="tmlist"></div>
   </details>
   <details class="tmsec">
+    <summary>🏟️ Mes gymnases — <b id="tm-gymn">0</b></summary>
+    <p class="zlbl">Le terrain (base + extensions + paniers) se réutilise : on ne change pas de salle entre deux exos. Le dernier utilisé est repris automatiquement sur un exercice vierge.</p>
+    <div class="row"><button class="btn wide" id="tm-gym-save">💾 Enregistrer ce terrain</button></div>
+    <div id="tm-gymlist" class="tmlist"></div>
+  </details>
+  <details class="tmsec">
     <summary>👥 Joueuses — <b id="tm-pn">10</b>/20</summary>
   <div class="row">
     <button class="btn" id="tm-padd-atk">➕ Attaque</button>
@@ -1211,7 +1226,7 @@
     <button class="btn sm" id="ac-ok" title="Terminé">✓</button>
   </div>
   <div class="zrow"><span class="zlbl">Rotation</span><input type="range" id="ac-rot" min="-180" max="180" step="5"><b class="zlbl" id="ac-rotv">0°</b></div>
-  <div class="zrow"><span class="zlbl">Taille</span><input type="range" id="ac-esize" min="5" max="30" step="1"><b class="zlbl" id="ac-esizev">10</b></div>
+  <div class="zrow" id="ac-rowsize"><span class="zlbl">Taille</span><input type="range" id="ac-esize" min="5" max="30" step="1"><b class="zlbl" id="ac-esizev">10</b></div>
 </div>
 
 <div class="sheet" id="sh-plays">
@@ -2761,7 +2776,24 @@
   // brouillon repris d'un play, un JSON importé, un exercice écrit par une
   // version future : tout ce qui entre passe par ici, et l'invariant « un
   // exercice n'a pas de variante » n'a donc qu'UN seul endroit à tenir.
+  // Toutes les joueuses d'un exercice sont ÉGALES : `side` est ramené à 'neu'
+  // et les numéros sont réattribués 1…N. Sans la renumérotation, un a3 et un
+  // d3 devenus tous deux neutres s'afficheraient « 3 » et « 3 ».
+  // RÉTROCOMPAT : c'est ici qu'un exo v.225/226 (attaque/défense) devient un
+  // effectif plat sans chasuble — la migration demandée, en une passe.
+  function exoNeutralize(d) {
+    var l = (d && Array.isArray(d.players)) ? d.players : null, i;
+    if (!l) return d;
+    for (i = 0; i < l.length; i++) {
+      if (!l[i]) continue;
+      l[i].side = 'neu';
+      l[i].n = i + 1;
+      l[i].bib = BIBS[l[i].bib] ? l[i].bib : null;
+    }
+    return d;
+  }
   function exoFlatten(d) {
+    exoNeutralize(d);
     ['half', 'full', 'training'].forEach(function (m) {
       var l = (d && d[m] && Array.isArray(d[m].steps)) ? d[m].steps : [];
       (function walk(list) {
@@ -2829,25 +2861,121 @@
     var dim = tmDims(d);
     return { x0: dim.el + 12, y0: dim.et + 12, x1: dim.el + dim.bw - 12, y1: dim.et + dim.bh - 12 };
   }
-  // Pousse un point HORS du terrain officiel, dans la bande d'extension la
-  // plus proche. Renvoie le point inchangé s'il est déjà dehors — ou s'il
-  // n'existe aucune extension (auquel cas il n'y a nulle part où le mettre,
-  // et l'ajout de panier est déjà refusé en amont).
+  // Pousse un point HORS du bloc officiel, contre le bord de la bande
+  // d'extension la plus proche. Une seule coordonnée bouge : l'autre reste
+  // celle du doigt, sinon le panier serait AIMANTÉ au milieu de la marge et
+  // ne pourrait plus la longer — c'était le vrai symptôme « on ne peut pas
+  // le déplacer ». Point déjà dehors, ou aucune extension : rien à faire.
+  var TM_BK_PAD = 6;                     // demi-encombrement d'un panier
   function tmPushOut(p, d) {
     if (!p || !isFinite(+p.x) || !isFinite(+p.y)) return p;
-    var R = tmCourtRect(d), dim = tmDims(d);
-    if (p.x < R.x0 || p.x > R.x1 || p.y < R.y0 || p.y > R.y1) return p;
+    var dim = tmDims(d), pad = TM_BK_PAD;
+    var X0 = dim.el, X1 = dim.el + dim.bw, Y0 = dim.et, Y1 = dim.et + dim.bh;
+    if (p.x < X0 || p.x > X1 || p.y < Y0 || p.y > Y1) return p;
     var c = [];
-    if (dim.el > 0) c.push({ x: dim.el / 2, y: p.y, d: p.x - R.x0 });
-    if (dim.er > 0) c.push({ x: dim.w - dim.er / 2, y: p.y, d: R.x1 - p.x });
-    if (dim.et > 0) c.push({ x: p.x, y: dim.et / 2, d: p.y - R.y0 });
-    if (dim.eb > 0) c.push({ x: p.x, y: dim.h - dim.eb / 2, d: R.y1 - p.y });
+    if (dim.el > 0) c.push({ d: p.x - X0, x: Math.max(pad, X0 - pad), y: p.y });
+    if (dim.er > 0) c.push({ d: X1 - p.x, x: Math.min(dim.w - pad, X1 + pad), y: p.y });
+    if (dim.et > 0) c.push({ d: p.y - Y0, x: p.x, y: Math.max(pad, Y0 - pad) });
+    if (dim.eb > 0) c.push({ d: Y1 - p.y, x: p.x, y: Math.min(dim.h - pad, Y1 + pad) });
     if (!c.length) return p;
     c.sort(function (a, b) { return a.d - b.d; });
     p.x = f(c[0].x); p.y = f(c[0].y);
     return p;
   }
+  // Panier d'atelier SÉLECTIONNÉ (barre rotation + 🗑). Même rôle qu'accSel
+  // pour les accessoires : les deux ne peuvent pas être actifs ensemble.
+  var bkSel = null;
   function tmHasExt(d) { var dm = tmDims(d); return (dm.el + dm.er + dm.et + dm.eb) > 0; }
+
+  // ── Translation du contenu ───────────────────────────────────────────
+  // Une extension GAUCHE ou HAUTE décale l'origine du terrain officiel. Si
+  // on ne translatait pas ce qui est posé dessus, ajouter une marge ferait
+  // GLISSER l'effectif hors du terrain — alors que le geste veut dire « fais
+  // moi de la place autour », pas « déplace mes joueuses ».
+  function tmTrPt(p, dx, dy) {
+    if (!p || !isFinite(+p.x) || !isFinite(+p.y)) return;
+    p.x = f(+p.x + dx); p.y = f(+p.y + dy);
+  }
+  function tmTrZones(l, dx, dy) {
+    if (!Array.isArray(l)) return;
+    for (var i = 0; i < l.length; i++) {
+      var z = l[i]; if (!z) continue;
+      if (Array.isArray(z.pts)) for (var j = 0; j < z.pts.length; j++) tmTrPt(z.pts[j], dx, dy);
+      if (isFinite(+z.x) && isFinite(+z.y)) tmTrPt(z, dx, dy);
+    }
+  }
+  function tmTranslateAll(dx, dy) {
+    if (!dx && !dy) return;
+    tmWalkSteps(function (st) {
+      var k;
+      for (k in st.pos) tmTrPt(st.pos[k], dx, dy);
+      (st.arw || []).forEach(function (a) {
+        if (a.to && typeof a.to === 'object') tmTrPt(a.to, dx, dy);
+        (a.via || []).forEach(function (v) { tmTrPt(v, dx, dy); });
+      });
+      tmTrZones(st.zones, dx, dy);
+    });
+    tmTrZones(doc.zones, dx, dy);
+    var l = Array.isArray(doc.accessories) ? doc.accessories : [], i;
+    for (i = 0; i < l.length; i++) tmTrPt(l[i], dx, dy);
+    var eb = Array.isArray(doc.extraBaskets) ? doc.extraBaskets : [];
+    for (i = 0; i < eb.length; i++) tmTrPt(eb[i], dx, dy);
+  }
+
+  // ── Mes gymnases ─────────────────────────────────────────────────────
+  var GYM_KEY = 'pb_exo_gyms', GYM_LAST = 'pb_exo_gym_last', GYM_MAX = 12;
+  function gymRead() {
+    try { var a = JSON.parse(localStorage.getItem(GYM_KEY) || '[]'); return Array.isArray(a) ? a : []; }
+    catch (e) { return []; }
+  }
+  function gymWrite(a) {
+    try { localStorage.setItem(GYM_KEY, JSON.stringify(a.slice(0, GYM_MAX))); } catch (e) {}
+  }
+  function gymSnap(name) {
+    var dim = tmDims();
+    return {
+      id: 'gym-' + Math.random().toString(36).slice(2, 8),
+      name: String(name || '').slice(0, 32),
+      base: dim.base,
+      ext: { l: dim.ml, r: dim.mr, t: dim.mt, b: dim.mb },
+      baskets: (Array.isArray(doc.extraBaskets) ? doc.extraBaskets : [])
+        .map(function (b) { return { x: f(+b.x - dim.el), y: f(+b.y - dim.et), a: +b.a || 0 }; })
+    };
+  }
+  // Les paniers sont mémorisés en coordonnées RELATIVES à l'origine du
+  // terrain officiel : le même gymnase appliqué à un exo qui a d'autres
+  // marges les repose au bon endroit, pas décalés de la différence.
+  function gymApply(g) {
+    if (!g) return false;
+    var d0 = tmDims();
+    doc.courtBase = (g.base === 'half') ? 'half' : 'full';
+    doc.ext = tmExtNorm(g.ext);
+    var d1 = tmDims();
+    tmTranslateAll(d1.el - d0.el, d1.et - d0.et);
+    doc.extraBaskets = (Array.isArray(g.baskets) ? g.baskets : []).slice(0, TM_BASKET_MAX)
+      .filter(function (b) { return b && isFinite(+b.x) && isFinite(+b.y); })
+      .map(function (b) { return { id: uid('bk'), x: f(d1.el + +b.x), y: f(d1.et + +b.y), a: +b.a || 0 }; });
+    return true;
+  }
+  function gymRemember() {
+    try { localStorage.setItem(GYM_LAST, JSON.stringify(gymSnap('dernier utilisé'))); } catch (e) {}
+  }
+  function gymLast() {
+    try { var g = JSON.parse(localStorage.getItem(GYM_LAST) || 'null'); return (g && g.ext) ? g : null; }
+    catch (e) { return null; }
+  }
+  // Rappel AUTOMATIQUE du dernier terrain, uniquement sur un exercice encore
+  // VIERGE (aucune extension, aucun panier d'atelier). Un exo déjà travaillé
+  // garde le sien : on ne réécrit jamais un terrain que le coach a posé.
+  function gymRecall() {
+    var g = gymLast();
+    if (!g) return;
+    if (tmHasExt() || (Array.isArray(doc.extraBaskets) && doc.extraBaskets.length)) return;
+    if (!(g.ext.l || g.ext.r || g.ext.t || g.ext.b) && !(g.baskets || []).length) return;
+    if (!gymApply(g)) return;
+    tmClampAll(); drawAll(); tmSheetSync();
+    toast('🏟️ Terrain repris : ' + (g.name || 'dernier utilisé') + '.', 'ok');
+  }
   // Un panier d'atelier ne vit QUE sur une extension. L'invariant est tenu
   // ici, au même endroit pour l'ajout, le glissé et le changement de marge.
   function tmSnapBaskets(d) {
@@ -2886,12 +3014,13 @@
   // n'importe où et orientable — c'est tout ce qui distingue un panier
   // d'atelier d'un panier officiel.
   function tmBasketMarkup(b) {
-    return '<g class="tb' + (b.main ? ' main' : '') + '" data-bk="' + b.id + '"'
+    return '<g class="tb' + (b.main ? ' main' : '') + (bkSel === b.id ? ' sel' : '') + '" data-bk="' + b.id + '"'
       + ' transform="translate(' + f(b.x) + ' ' + f(b.y) + ') rotate(' + f(b.a) + ')">'
       + '<line class="hp" x1="-9" y1="-3.75" x2="9" y2="-3.75"/>'
       + '<line class="hp" x1="0" y1="-3.75" x2="0" y2="-2.25"/>'
       + '<circle class="hp" cx="0" cy="0" r="2.25"/>'
       + (b.main ? '' : '<circle class="hit" r="10" fill="transparent"/>')
+      + (!b.main && bkSel === b.id ? '<circle class="bksel" r="11"/>' : '')
       + '</g>';
   }
 
@@ -2906,7 +3035,6 @@
   // est du parquet NU : pas une ligne, parce qu'aucune ligne n'y serait vraie.
   function trainingCourt() {
     var dim = tmSync(), W = dim.w, H = dim.h, i, s = '';
-    tmSnapBaskets();
     s += '<rect class="out" x="0" y="0" width="' + f(W) + '" height="' + f(H) + '"/>'
       +  '<rect class="court tmext" x="0" y="0" width="' + f(W) + '" height="' + f(H) + '"/>'
       +  (tmHasExt() ? '<rect class="tmextln" x="1" y="1" width="' + f(W - 2) + '" height="' + f(H - 2) + '"/>' : '')
@@ -2965,9 +3093,35 @@
     return d.players;
   }
   var TM_PREFIX = { atk: 'a', def: 'd', neu: 'n' };
+  // v.228 — CHASUBLES. En exercice il n'y a ni attaque ni défense : toutes
+  // les joueuses sont des participantes. Ce qui fait les groupes, c'est la
+  // chasuble — exactement comme au gymnase. C'est donc un axe À PART, pas un
+  // quatrième « côté » : `side` reste 'neu' pour tout le monde, et `bib`
+  // porte la couleur (ou null, jeton neutre par défaut).
+  var BIBS = {
+    red:    { c: '#EF4444', ink: '#FFFFFF', lbl: '🟥 Rouge' },
+    blue:   { c: '#3B82F6', ink: '#FFFFFF', lbl: '🟦 Bleu' },
+    yellow: { c: '#FACC15', ink: '#111827', lbl: '🟨 Jaune' },
+    green:  { c: '#22C55E', ink: '#FFFFFF', lbl: '🟩 Vert' },
+    orange: { c: '#F97316', ink: '#FFFFFF', lbl: '🟧 Orange' },
+    purple: { c: '#A855F7', ink: '#FFFFFF', lbl: '🟪 Violet' }
+  };
+  var BIB_KEYS = ['red', 'blue', 'yellow', 'green', 'orange', 'purple'];
+  function bibOf(t) { return (t && t.bib && BIBS[t.bib]) ? BIBS[t.bib] : null; }
   function tmAddPlayer(side) {
     var l = tmPlayers();
     if (l.length >= MAX_PLAYERS) { toast('20 joueuses maximum sur un atelier.', 'err'); return; }
+    if (exoMode()) {
+      var used = {}, k2, nn = 1;
+      for (k2 = 0; k2 < l.length; k2++) used[l[k2].n] = 1;
+      while (used[nn] && nn <= MAX_PLAYERS) nn++;
+      var tt = { id: 'p' + nn + '-' + Math.random().toString(36).slice(2, 5), side: 'neu', n: nn, bib: null };
+      l.push(tt);
+      var qq = tmFreeSlot(rootSteps()[0].pos);
+      tmWalkSteps(function (st) { if (!st.pos[tt.id]) st.pos[tt.id] = { x: qq.x, y: qq.y }; });
+      rebuildTokens();
+      return tt;
+    }
     var pre = TM_PREFIX[side] || 'a', n = 0, i;
     for (n = 1; n <= 10; n++) {
       var free = true;
@@ -3131,7 +3285,7 @@
     var a = { id: uid('ac'), type: t, subtype: sub || '', color: accNewColor,
               size: accNewSize, x: f(dim.w / 2), y: f(dim.h / 2 + 20), rot: 0 };
     l.push(a);
-    accSel = a.id;
+    accSel = a.id; bkSel = null;
     drawAcc(); tmAttach(); accBarSync(); touch();
     return a;
   }
@@ -3192,6 +3346,32 @@
     stBalls(step())[tbSel] = target;
     drawTrainBalls(); tbListSync(); touch();
     toast('🏀 → ' + (String(target).charAt(0) === '@' ? 'panier' : labelOf(target)), 'ok');
+    return true;
+  }
+  // Passe d'un ballon d'atelier de `from` vers `to`. Renvoie false SEULEMENT
+  // quand la passe est refusée (receveuse pleine) : la flèche n'est alors pas
+  // tracée non plus, sinon le dessin dirait une passe qui n'a pas eu lieu.
+  // Une passeuse sans ballon renvoie true — la flèche reste un dessin licite,
+  // c'est ce qu'on trace pour préparer un enchaînement.
+  function tmPassBall(from, to) {
+    if (!from || !to || from === to) return true;
+    var m = ballsAt(cur), list = tmBallList(), mine = [], n2 = 0, i, bid;
+    for (i = 0; i < list.length; i++) {
+      bid = list[i].id;
+      if (m[bid] === from) mine.push(bid);
+      else if (m[bid] === to) n2++;
+    }
+    if (!mine.length) return true;
+    if (n2 >= BALL_PER_PLAYER) {
+      toast(labelOf(to) + ' tient déjà 2 ballons.', 'err');
+      return false;
+    }
+    // Si un ballon est armé dans le panneau et qu'il est bien dans les mains
+    // de la passeuse, c'est CELUI-LÀ qui part : le coach a désigné lequel.
+    var pick = (tbSel && mine.indexOf(tbSel) >= 0) ? tbSel : mine[0];
+    stBalls(step())[pick] = to;
+    drawTrainBalls(); tbListSync();
+    toast('🏀 ' + labelOf(from) + ' → ' + labelOf(to), 'ok');
     return true;
   }
   function tbShoot() {
@@ -3259,6 +3439,10 @@
       var p = toCourt(ev.clientX, ev.clientY);
       o.x = f(clamp(p.x + ox, 8, dim.w - 8));
       o.y = f(clamp(p.y + oy, 8, dim.h - 8));
+      // La contrainte « uniquement sur une extension » est appliquée PENDANT
+      // le geste, pas après : le panier bute visiblement contre le terrain
+      // officiel et le longe, au lieu d'être corrigé une fois le doigt levé.
+      if (kind === 'bk') tmPushOut(o);
       moved = true;
       if (kind === 'acc') { drawAcc(); tmAttach(); }
       else { layC.innerHTML = courtOf('training'); applyLogo(); tmAttach(); tbSoon(); }
@@ -3269,7 +3453,17 @@
       svg.removeEventListener('pointerup', up);
       svg.removeEventListener('pointercancel', up);
       try { svg.releasePointerCapture(pid); } catch (_) {}
-      if (kind === 'acc' && !moved) { accSel = id; drawAcc(); tmAttach(); accBarSync(); return; }
+      if (kind === 'acc' && !moved) { accSel = id; bkSel = null; drawAcc(); tmAttach(); accBarSync(); return; }
+      // Un panier se SÉLECTIONNE au tap (poignée de rotation + 🗑 dans la
+      // barre flottante) et se GLISSE au drag : la même UX que les
+      // accessoires et les joueuses, qui manquait entièrement.
+      if (kind === 'bk') {
+        if (!moved) { bkSel = (bkSel === id) ? null : id; accSel = null; }
+        layC.innerHTML = courtOf('training'); applyLogo(); tmAttach(); tbSoon();
+        accBarSync();
+        if (moved) { tmSheetSync(); touch(); }
+        return;
+      }
       if (moved) touch();
     }
     svg.addEventListener('pointermove', mv);
@@ -3325,6 +3519,10 @@
       document.getElementById('a-publish').textContent = '💾 Enregistrer l\'exercice';
       document.getElementById('a-delete').textContent = '🗑 Supprimer l\'exercice';
       document.getElementById('row-exo-back').hidden = false;
+      // Rappel du terrain : UNE fois par document. `_gymInit` vit sur `doc`,
+      // qui est remplacé à chaque chargement — et toJSON() n'exporte que des
+      // clés explicites, donc ce drapeau ne fuit jamais dans le fichier.
+      if (!doc._gymInit) { doc._gymInit = 1; try { gymRecall(); } catch (e) {} }
       // Onboarding : une seule fois, jamais rappelé.
       try {
         if (localStorage.getItem('pb_exo_onboard') !== '1') {
@@ -3353,6 +3551,18 @@
       document.getElementById('tm-ext-' + k).value = E[k];
       document.getElementById('tm-ext-' + k + 'v').textContent = E[k] + ' m';
     });
+    var gl = gymRead(), gh = '', gi;
+    document.getElementById('tm-gymn').textContent = String(gl.length);
+    for (gi = 0; gi < gl.length; gi++) {
+      var ge = gl[gi].ext || {}, gtot = (+ge.l || 0) + (+ge.r || 0) + (+ge.t || 0) + (+ge.b || 0);
+      gh += '<div class="li"><span class="nm">🏟️ ' + esc(gl[gi].name || 'Sans nom')
+        + ' <small style="opacity:.6">· ' + (gl[gi].base === 'half' ? 'demi' : 'plein')
+        + (gtot ? ' · +' + gtot + ' m' : '')
+        + ((gl[gi].baskets || []).length ? ' · ' + gl[gi].baskets.length + ' 🏀' : '') + '</small></span>'
+        + '<button class="btn xs" data-gymuse="' + gl[gi].id + '">↧ Appliquer</button>'
+        + '<button class="btn xs danger" data-gymdel="' + gl[gi].id + '">🗑</button></div>';
+    }
+    document.getElementById('tm-gymlist').innerHTML = gh || '<div class="empty">Aucun terrain enregistré. Règle tes extensions, pose tes paniers, puis 💾.</div>';
     var tot = E.l + E.r + E.t + E.b;
     document.getElementById('tm-extn').textContent = tot ? (tot + ' m au total') : 'aucune';
     document.getElementById('tm-base-full').classList.toggle('on', dim.base === 'full');
@@ -3371,10 +3581,28 @@
     document.getElementById('tm-pn').textContent = String(pl.length);
     h = '';
     var SIDE = { atk: 'Attaque', def: 'Défense', neu: 'Neutre' };
+    var _ex = exoMode();
+    // En exercice, la ligne d'une joueuse n'affiche plus un côté (il n'y en a
+    // pas) mais son nuancier de chasubles — un tap suffit à la changer.
+    document.getElementById('tm-padd-atk').hidden = _ex;
+    document.getElementById('tm-padd-def').hidden = _ex;
+    document.getElementById('tm-padd-neu').textContent = _ex ? '➕ Ajouter une joueuse' : '➕ Neutre';
     for (i = 0; i < pl.length; i++) {
-      h += '<div class="li"><span class="nm">' + labelOf(pl[i].id) + ' · ' + (SIDE[pl[i].side] || '?') + '</span>'
-        + '<button class="btn xs" data-pside="' + pl[i].id + '">↻ côté</button>'
-        + '<button class="btn xs danger" data-pdel="' + pl[i].id + '">🗑</button></div>';
+      if (_ex) {
+        h += '<div class="li"><span class="nm">' + labelOf(pl[i].id) + '</span>'
+          + '<span class="bibs" data-pbib="' + pl[i].id + '">'
+          +   '<button class="bsw none' + (!pl[i].bib ? ' on' : '') + '" data-bibc="" title="Aucune chasuble"></button>'
+          +   BIB_KEYS.map(function (bk2, bj) {
+                return '<button class="bsw' + (pl[bj] && false ? '' : '') + (pl[i].bib === bk2 ? ' on' : '')
+                  + '" data-bibc="' + bk2 + '" title="' + BIBS[bk2].lbl + '" style="background:' + BIBS[bk2].c + '"></button>';
+              }).join('')
+          + '</span>'
+          + '<button class="btn xs danger" data-pdel="' + pl[i].id + '">🗑</button></div>';
+      } else {
+        h += '<div class="li"><span class="nm">' + labelOf(pl[i].id) + ' · ' + (SIDE[pl[i].side] || '?') + '</span>'
+          + '<button class="btn xs" data-pside="' + pl[i].id + '">↻ côté</button>'
+          + '<button class="btn xs danger" data-pdel="' + pl[i].id + '">🗑</button></div>';
+      }
     }
     document.getElementById('tm-plist').innerHTML = h;
   }
@@ -3395,7 +3623,24 @@
   }
 
   function accBarSync() {
-    var bar = document.getElementById('abar'), a = accSel && accById(accSel);
+    var bar = document.getElementById('abar');
+    // v.228 — la MÊME barre sert les paniers d'atelier : sélection → poignée
+    // de rotation + 🗑. Un panier n'a pas de taille (c'est un panier) ni de
+    // duplication utile, donc ces deux commandes s'effacent plutôt que de
+    // rester là sans rien faire.
+    var bk = bkSel && tmExtraById(bkSel);
+    if (bk && mode() === 'training') {
+      bar.classList.add('show');
+      document.getElementById('ac-what').textContent = '🏀 Panier d\'atelier';
+      document.getElementById('ac-dup').style.display = 'none';
+      document.getElementById('ac-rowsize').style.display = 'none';
+      document.getElementById('ac-rot').value = +bk.a || 0;
+      document.getElementById('ac-rotv').textContent = f(+bk.a || 0) + '°';
+      return;
+    }
+    document.getElementById('ac-dup').style.display = '';
+    document.getElementById('ac-rowsize').style.display = '';
+    var a = accSel && accById(accSel);
     if (!a || mode() !== 'training') { bar.classList.remove('show'); return; }
     bar.classList.add('show');
     document.getElementById('ac-what').textContent = a.type + (a.subtype ? ' · ' + a.subtype : '');
@@ -3404,7 +3649,13 @@
     document.getElementById('ac-esize').value = +a.size || 10;
     document.getElementById('ac-esizev').textContent = String(+a.size || 10);
   }
-  function accBarClose() { accSel = null; document.getElementById('abar').classList.remove('show'); drawAcc(); }
+  function accBarClose() {
+    var hadBk = !!bkSel;
+    accSel = null; bkSel = null;
+    document.getElementById('abar').classList.remove('show');
+    drawAcc();
+    if (hadBk && layC && mode() === 'training') { layC.innerHTML = courtOf('training'); applyLogo(); tmAttach(); tbSoon(); }
+  }
 
   function tmBindUI() {
     var i, h = '';
@@ -3453,10 +3704,15 @@
     // v.227 — une extension change la TOILE, donc les coordonnées de tout ce
     // qui est posé : on repasse par tmClampAll(), qui recadre ET repousse les
     // paniers d'atelier hors du terrain officiel.
-    function tmApply() { tmClampAll(); drawAll(); tmSheetSync(); touch(); }
+    function tmApply() { tmClampAll(); drawAll(); tmSheetSync(); gymRemember(); touch(); }
     function setExt(k, v) {
       doc.ext = tmExtNorm(doc.ext);
+      var d0 = tmDims();
       doc.ext[k] = Math.min(TM_EXT_MAX, Math.max(0, Math.round(+v || 0)));
+      var d1 = tmDims();
+      // Le terrain officiel reste SOUS les joueuses : c'est la marge qui
+      // pousse le cadre, pas le contenu qui glisse.
+      tmTranslateAll(d1.el - d0.el, d1.et - d0.et);
       tmApply();
     }
     ['l', 'r', 't', 'b'].forEach(function (k) {
@@ -3470,6 +3726,29 @@
       doc.courtBase = b; tmApply();
       toast(b === 'full' ? '▭ Plein terrain officiel.' : '½ Demi-terrain officiel.', 'ok');
     }
+    document.getElementById('tm-gym-save').addEventListener('click', function () {
+      var l = gymRead();
+      if (l.length >= GYM_MAX) { toast(GYM_MAX + ' terrains enregistrés maximum — supprime-en un.', 'err'); return; }
+      var nm = prompt('Nom de ce terrain (ex : « Gymnase Léo-Lagrange »)', 'Gymnase ' + (l.length + 1));
+      if (nm === null) return;
+      l.unshift(gymSnap(nm.trim() || ('Gymnase ' + (l.length + 1))));
+      gymWrite(l); tmSheetSync();
+      toast('🏟️ Terrain enregistré.', 'ok');
+    });
+    document.getElementById('tm-gymlist').addEventListener('click', function (e) {
+      var el = e.target, id = el.getAttribute && el.getAttribute('data-gymdel');
+      if (id) {
+        gymWrite(gymRead().filter(function (g) { return g.id !== id; }));
+        tmSheetSync(); return;
+      }
+      id = el.getAttribute && el.getAttribute('data-gymuse');
+      if (!id) return;
+      var g = gymRead().filter(function (x) { return x.id === id; })[0];
+      if (!g) return;
+      if ((doc.extraBaskets || []).length && !confirm('Remplacer le terrain actuel (extensions et paniers d\'atelier) par « ' + g.name + ' » ?')) return;
+      gymApply(g); tmApply();
+      toast('🏟️ ' + g.name + ' appliqué.', 'ok');
+    });
     document.getElementById('tm-base-full').addEventListener('click', function () { setBase('full'); });
     document.getElementById('tm-base-half').addEventListener('click', function () { setBase('half'); });
 
@@ -3511,7 +3790,16 @@
       });
     });
     document.getElementById('tm-plist').addEventListener('click', function (e) {
-      var el = e.target, id = el.getAttribute && el.getAttribute('data-pdel');
+      var el = e.target;
+      // Nuancier de chasubles : '' = aucune. getAttribute rend null quand
+      // l'attribut est absent, '' quand il est vide — d'où le test strict.
+      var bc = el.getAttribute && el.getAttribute('data-bibc');
+      if (bc !== null && bc !== undefined && el.parentNode && el.parentNode.getAttribute('data-pbib')) {
+        var pid2 = el.parentNode.getAttribute('data-pbib'), t2 = TOKMAP[pid2];
+        if (t2) { t2.bib = BIBS[bc] ? bc : null; drawTokens(); tmSheetSync(); touch(); }
+        return;
+      }
+      var id = el.getAttribute && el.getAttribute('data-pdel');
       if (id) {
         tmRemovePlayer(id);
         drawAll(); renderTimeline(); tmSheetSync(); touch();
@@ -3566,6 +3854,15 @@
       document.getElementById('ac-sizev').textContent = String(accNewSize);
     });
     document.getElementById('ac-rot').addEventListener('input', function () {
+      // Poignée de rotation partagée : panier d'abord, accessoire ensuite.
+      var bk = bkSel && tmExtraById(bkSel);
+      if (bk) {
+        bk.a = +this.value;
+        document.getElementById('ac-rotv').textContent = f(bk.a) + '°';
+        layC.innerHTML = courtOf('training'); applyLogo(); tmAttach(); tbSoon();
+        tmSheetSync(); touch();
+        return;
+      }
       var a = accSel && accById(accSel); if (!a) return;
       a.rot = +this.value;
       document.getElementById('ac-rotv').textContent = f(a.rot) + '°';
@@ -3578,6 +3875,7 @@
       drawAcc(); tmAttach(); touch();
     });
     document.getElementById('ac-dup').addEventListener('click', function () {
+      if (bkSel) return;
       var a = accSel && accById(accSel); if (!a) return;
       var c = { id: uid('ac'), type: a.type, subtype: a.subtype, color: a.color,
                 size: a.size, x: f(a.x + 12), y: f(a.y + 12), rot: a.rot };
@@ -3585,6 +3883,16 @@
       drawAcc(); tmAttach(); accBarSync(); touch();
     });
     document.getElementById('ac-del').addEventListener('click', function () {
+      if (bkSel) {
+        var bl = Array.isArray(doc.extraBaskets) ? doc.extraBaskets : [], b2;
+        for (b2 = 0; b2 < bl.length; b2++) if (String(bl[b2].id) === String(bkSel)) { bl.splice(b2, 1); break; }
+        // Les ballons rangés dans CE panier retombent sur le principal :
+        // un ballon qui pointerait vers un panier disparu ne s'afficherait
+        // plus nulle part (même garde que la suppression depuis le panneau).
+        tmWalkSteps(function (st) { if (st.balls) for (var k in st.balls) if (st.balls[k] === '@' + bkSel) st.balls[k] = '@main'; });
+        accBarClose(); drawAll(); tmSheetSync(); touch();
+        return;
+      }
       var l = accList(), j;
       for (j = 0; j < l.length; j++) if (l[j].id === accSel) { l.splice(j, 1); break; }
       accBarClose(); tmAttach(); touch();
@@ -3669,6 +3977,12 @@
   function tokenMarkup(t) {
     var lbl = labelOf(t.id);
     var fs  = t.side === 'atk' ? PR * 1.05 : PR * 0.82;
+    // La chasuble repeint le DISQUE : c'est ce qui se lit d'un coup d'œil de
+    // l'autre bout du gymnase, là où un liseré de couleur se perd. Sans
+    // chasuble, le jeton garde son rendu neutre — aucune règle CSS touchée.
+    var _b = bibOf(t);
+    var ds = _b ? ' style="fill:' + _b.c + '"' : '';
+    var ns = _b ? ' style="fill:' + _b.ink + '"' : '';
     var L   = tokLift();
     var br  = PR * 0.44, bx = PR * 0.82, by = -PR * 0.78 - L;
     // Pion de plateau plutôt que cylindre vu de haut : une tête PLEINE face
@@ -3681,15 +3995,15 @@
           + ' C ' + f(-PR * 0.54) + ' ' + f(-L * 0.50) + ' ' + f(-PR * 0.68) + ' ' + f(-L * 0.66) + ' ' + f(-PR * 0.74) + ' ' + f(-L * 0.86)
           + ' L ' + f(PR * 0.74) + ' ' + f(-L * 0.86)
           + ' C ' + f(PR * 0.68) + ' ' + f(-L * 0.66) + ' ' + f(PR * 0.54) + ' ' + f(-L * 0.50) + ' ' + f(PR * 0.60) + ' 0 Z"/>'
-        + '<circle class="disc" cx="0" cy="' + f(-L) + '" r="' + f(PR) + '"/>'
+        + '<circle class="disc" cx="0" cy="' + f(-L) + '" r="' + f(PR) + '"' + ds + '/>'
         + '<ellipse class="gloss3" cx="0" cy="' + f(-L - PR * 0.40) + '" rx="' + f(PR * 0.64) + '" ry="' + f(PR * 0.30) + '"/>'
         + '<circle class="halo" cx="0" cy="' + f(-L) + '" r="' + f(PR + 1.6) + '"/>'
       : '<ellipse class="sh" cx="0" cy="' + f(PR * 0.46) + '" rx="' + f(PR * 1.02) + '" ry="' + f(PR * 0.52) + '"/>'
-        + '<circle class="disc" cx="0" cy="0" r="' + f(PR) + '"/>'
+        + '<circle class="disc" cx="0" cy="0" r="' + f(PR) + '"' + ds + '/>'
         + '<circle class="halo" cx="0" cy="0" r="' + f(PR + 1.6) + '"/>';
     return '<g class="token ' + t.side + '" data-id="' + t.id + '">'
       + body
-      + '<text class="num" x="0" y="' + f(-L) + '" dy="0.35em" font-size="' + f(fs) + '">' + lbl + '</text>'
+      + '<text class="num" x="0" y="' + f(-L) + '" dy="0.35em" font-size="' + f(fs) + '"' + ns + '>' + lbl + '</text>'
       // Ballon : petit disque orange collé en haut à droite du chiffre, avec
       // deux coutures. Masqué par CSS tant que le jeton n'a pas .has-ball.
       + '<g class="ball">'
@@ -4245,7 +4559,14 @@
     }
     if (!pending) { pending = id; syncSelection(); setHint(); return; }
     if (pending === id) { pending = null; syncSelection(); setHint(); return; }
-    if (tool === 'pass') { addArrow('pass', pending, id); pending = null; syncSelection(); return; }
+    if (tool === 'pass') {
+      // v.228 — en atelier, une flèche de passe DÉPLACE le ballon. La règle
+      // est celle du terrain : la passeuse doit en tenir un, la receveuse
+      // peut déjà en tenir un (elle finit à deux) mais jamais trois. Le cap
+      // se vérifie sur l'état RÉSULTANT du temps courant, comme tbAssign().
+      if (mode() === 'training' && !tmPassBall(pending, id)) { pending = null; syncSelection(); setHint(); return; }
+      addArrow('pass', pending, id); pending = null; syncSelection(); return;
+    }
     // Déplacement / écran : cliquer un autre jeton vaut « va à cet endroit ».
     // On s ARRETE AU CONTACT, jamais sur le centre de l autre : arriver
     // exactement sur ses coordonnees superposait les deux disques et l une des
@@ -5205,7 +5526,7 @@
     doc.mode = m;
     if (m === 'training') tmSync();
     rebuildTokens();
-    accSel = null; tbSel = null;
+    accSel = null; tbSel = null; bkSel = null;
     bpath = [];   // chaque mode a SES temps, donc SES branches
     cur = 0; active = null; pending = null;
     pStep = 0; pU = 0;
@@ -5847,7 +6168,8 @@
       var q = st[0].pos[id];
       if (!q) continue;
       players.push({ id: id, side: TOKENS[i].side, n: TOKENS[i].n,
-                     color: TOKENS[i].color || null, x: f(q.x), y: f(q.y) });
+                     color: TOKENS[i].color || null, bib_color: TOKENS[i].bib || null,
+                     x: f(q.x), y: f(q.y) });
     }
     var flat = [];
     var outSteps = encSteps(st, flat, 0);
@@ -6018,7 +6340,8 @@
       if (pin.length) {
         d.players = pin.map(function (p) {
           var sd = (p.side === 'def' || p.side === 'neu') ? p.side : 'atk';
-          return { id: String(p.id), side: sd, n: Math.abs(+p.n) || 1, color: p.color || '' };
+          return { id: String(p.id), side: sd, n: Math.abs(+p.n) || 1, color: p.color || '',
+                   bib: BIBS[p.bib_color] ? p.bib_color : (BIBS[p.bib] ? p.bib : null) };
         });
       }
       rebuildTokens(d);
@@ -6209,7 +6532,7 @@
     // saut vers une branche qui n'existe pas dans celui qu'on charge.
     bpath = [];
     cur = 0; pStep = 0; pU = 0; active = null; pending = null;
-    accSel = null; tbSel = null;
+    accSel = null; tbSel = null; bkSel = null;
     if (doc.mode === 'training') tmSync();
     rebuildTokens();
     document.getElementById('b-def').classList.toggle('on', !!doc.defOn);
