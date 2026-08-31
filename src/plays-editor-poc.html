@@ -861,6 +861,19 @@
 #sh-acc .accgrid .btn { flex: 1 1 88px; font-size: 12px; }
 #sh-acc .zrow, #sh-train .zrow, #sh-balls .zrow { display: flex; gap: 6px; align-items: center; margin: 4px 0; }
 #sh-acc .zlbl, #sh-train .zlbl, #sh-balls .zlbl { font-size: 11px; opacity: .68; white-space: nowrap; }
+  /* v.227 - EXTENSIONS. Le parquet d'extension reprend la teinte du terrain,
+     eclaircie : c'est du bois, pas une autre surface. Il n'y a AUCUNE ligne
+     dedans, et c'est le point : ce qui est trace est officiel, ce qui ne
+     l'est pas est libre. */
+  .tmext { opacity: .42; }
+  .tmextln { fill: none; stroke: currentColor; stroke-width: .6; opacity: .22; stroke-dasharray: 3 3; }
+  /* Sections repliables des panneaux d'atelier : un seul chantier ouvert a
+     la fois, plutot que quatre panneaux empiles. */
+  .tmsec { border-top: 1px solid rgba(128,128,128,.22); margin-top: 8px; padding-top: 4px; }
+  .tmsec > summary { cursor: pointer; font-size: 12px; font-weight: 600; padding: 6px 2px; list-style: none; opacity: .9; }
+  .tmsec > summary::-webkit-details-marker { display: none; }
+  .tmsec > summary::before { content: '▸ '; opacity: .55; }
+  .tmsec[open] > summary::before { content: '▾ '; }
 #sh-acc input[type=range], #sh-train input[type=range] { flex: 1; min-width: 90px; accent-color: var(--acc, #22D3EE); }
 .tmlist { display: flex; flex-direction: column; gap: 5px; max-height: 34vh; overflow: auto; margin: 4px 0; }
 .tmlist .li { display: flex; gap: 6px; align-items: center; font-size: 12px; }
@@ -945,9 +958,16 @@
     <button class="btn sm" id="b-def"  title="Afficher / masquer la défense">🛡️</button>
     <button class="btn sm" id="b-reset" title="Repartir de la disposition de départ">↺</button>
     <button class="btn sm" id="b-zone" title="Zones peintes sur le parquet">🎨</button>
-    <button class="btn sm tmonly" id="b-acc" hidden title="Accessoires : plots, cerceaux, échelles, chaises…">🎪</button>
-    <button class="btn sm tmonly" id="b-balls" hidden title="Ballons de l'atelier">🏀➕</button>
-    <button class="btn sm tmonly" id="b-train" hidden title="Réglages du terrain d'entraînement">⚙️</button>
+    <!-- v.227 — les quatre chantiers de l'atelier (terrain, ballons,
+         accessoires, zones) tenaient quatre boutons dans une barre qui en
+         comptait déjà seize. Ils passent derrière UN bouton 🧰 qui ouvre le
+         hub : un seul chantier ouvert à la fois. Les boutons d'origine
+         restent dans le DOM (leurs écouteurs sont la seule porte vers les
+         panneaux) mais ne s'affichent plus. -->
+    <button class="btn sm tmonly" id="b-kit" hidden title="Atelier : terrain, ballons, accessoires, zones">🧰</button>
+    <button id="b-acc" hidden style="display:none"></button>
+    <button id="b-balls" hidden style="display:none"></button>
+    <button id="b-train" hidden style="display:none"></button>
   </div>
   <div class="sep"></div>
   <div class="seg">
@@ -1107,20 +1127,61 @@
 
 <!-- ── Jalon 5 — terrain d'entraînement ─────────────────────────────────── -->
 <div class="sheet" id="sh-train">
-  <h2>⚙️ Terrain d'entraînement</h2>
-  <div class="zrow"><span class="zlbl">Largeur</span><input type="range" id="tm-w" min="8" max="30" step="1"><b class="zlbl" id="tm-wv">15 m</b></div>
-  <div class="zrow"><span class="zlbl">Longueur</span><input type="range" id="tm-h" min="10" max="40" step="1"><b class="zlbl" id="tm-hv">28 m</b></div>
-  <p class="zlbl" style="margin-top:8px">Paniers d'atelier — <b id="tm-bkn">0</b>/10 · glisse-les sur le parquet</p>
+  <h2>📐 Terrain</h2>
+  <p class="zlbl">Le terrain officiel ne se règle pas — il a toujours la même taille.</p>
+  <div class="row">
+    <button class="btn" id="tm-base-full" title="Plein terrain officiel">▭ 28 × 15 m</button>
+    <button class="btn" id="tm-base-half" title="Demi-terrain officiel">½ 14 × 15 m</button>
+  </div>
+  <details class="tmsec" open>
+    <summary>➕ Extensions — <b id="tm-extn">aucune</b></summary>
+    <p class="zlbl">Marges de travail autour du terrain. C'est là — et seulement là — que se posent les paniers d'atelier.</p>
+    <div class="zrow"><span class="zlbl">◀ Gauche</span><input type="range" id="tm-ext-l" min="0" max="20" step="1"><b class="zlbl" id="tm-ext-lv">0 m</b></div>
+    <div class="zrow"><span class="zlbl">Droite ▶</span><input type="range" id="tm-ext-r" min="0" max="20" step="1"><b class="zlbl" id="tm-ext-rv">0 m</b></div>
+    <div class="zrow"><span class="zlbl">▲ Haut</span><input type="range" id="tm-ext-t" min="0" max="20" step="1"><b class="zlbl" id="tm-ext-tv">0 m</b></div>
+    <div class="zrow"><span class="zlbl">Bas ▼</span><input type="range" id="tm-ext-b" min="0" max="20" step="1"><b class="zlbl" id="tm-ext-bv">0 m</b></div>
+    <div class="row"><button class="btn wide" id="tm-ext-clear">↺ Retirer les extensions</button></div>
+  </details>
+  <details class="tmsec">
+    <summary>🏀 Paniers d'atelier — <b id="tm-bkn">0</b>/10</summary>
   <div class="row"><button class="btn wide" id="tm-bkadd">➕ Ajouter un panier</button></div>
   <div id="tm-bklist" class="tmlist"></div>
-  <p class="zlbl" style="margin-top:8px">Joueuses — <b id="tm-pn">10</b>/20</p>
+  </details>
+  <details class="tmsec">
+    <summary>👥 Joueuses — <b id="tm-pn">10</b>/20</summary>
   <div class="row">
     <button class="btn" id="tm-padd-atk">➕ Attaque</button>
     <button class="btn" id="tm-padd-def">➕ Défense</button>
     <button class="btn" id="tm-padd-neu">➕ Neutre</button>
   </div>
   <div id="tm-plist" class="tmlist"></div>
+  </details>
   <div class="row" style="margin-top:8px"><button class="btn wide" id="tm-close">Fermer</button></div>
+</div>
+
+<!-- ── v.227 · HUB DE L'ATELIER ────────────────────────────────────────────
+     Une porte unique vers les quatre chantiers, plutôt que quatre boutons
+     concurrents dans la barre. Chaque entrée FERME les autres modes avant
+     d'ouvrir le sien : un seul chantier actif à la fois. -->
+<div class="sheet" id="sh-kit">
+  <h2>🧰 Atelier</h2>
+  <p class="zlbl">Un chantier à la fois.</p>
+  <div class="row"><button class="btn wide" id="k-train">📐 Terrain &amp; extensions</button></div>
+  <div class="row"><button class="btn wide" id="k-balls">🏀 Ballons</button></div>
+  <div class="row"><button class="btn wide" id="k-acc">🎪 Accessoires</button></div>
+  <div class="row"><button class="btn wide" id="k-zone">🎨 Zones peintes</button></div>
+  <div class="row" style="margin-top:8px"><button class="btn wide" id="k-close">Fermer</button></div>
+</div>
+
+<!-- Onboarding : UNE fois, à la première ouverture d'un exercice. -->
+<div class="sheet" id="sh-onb">
+  <h2>💪 Les exos d'entraînement</h2>
+  <p class="zlbl">Trois modes, et c'est tout :</p>
+  <div class="row"><span class="zlbl">🧰 <b>Atelier</b> — le terrain, ses extensions, les ballons, les plots, les zones.</span></div>
+  <div class="row"><span class="zlbl">👆 <b>Outils</b> — déplacements, écrans, passes, tirs, en posant les temps.</span></div>
+  <div class="row"><span class="zlbl">▶ <b>Lecture</b> — la vue joueuse, en boucle.</span></div>
+  <p class="zlbl" style="margin-top:8px">Le terrain reste toujours officiel : ce sont les <b>extensions</b> qui te donnent de la place autour, et les paniers d'atelier s'y posent.</p>
+  <div class="row" style="margin-top:8px"><button class="btn wide" id="onb-ok">C'est parti</button></div>
 </div>
 
 <div class="sheet" id="sh-acc">
@@ -1294,11 +1355,12 @@
     // dans un telephone sans le tourner. Le repere est le paysage historique
     // tourne de -90 degres : (x, y) -> (y, 304 - x).
     full: { vb: '0 0 174 304', w: 174, h: 304, hoop: { x: 87, y: 27.75 } },
-    // v.225 - TERRAIN D'ENTRAINEMENT (jalon 5). Seul mode dont les dimensions
-    // ne sont PAS une constante : elles sortent de doc.courtSize (en metres) et
-    // sont recalculees par tmSync() avant chaque rendu. Echelle identique au
-    // plein terrain : 1 m = 10 unites, + 12 unites de marge de chaque cote
-    // (15 x 28 m -> 174 x 304, exactement les nombres du plein terrain).
+    // v.227 - TERRAIN D'ENTRAINEMENT. Le terrain lui-meme n'est PAS reglable :
+    // un terrain de basket a toujours la meme taille. Ce qui varie, ce sont les
+    // EXTENSIONS - des marges de travail collees autour du terrain officiel,
+    // reglees en metres (doc.ext) et recalculees par tmSync() avant chaque
+    // rendu. La toile vaut donc base + extensions, la base etant bit pour bit
+    // celle de 'full' (174 x 304) ou de 'half' (174 x 164).
     training: { vb: '0 0 174 304', w: 174, h: 304, hoop: { x: 87, y: 27.75 } }
   };
 
@@ -1650,6 +1712,13 @@
   // dans la couche TERRAIN, donc toujours SOUS les jetons.
   function hoopsOf(m) {
     var h = (MODES[m] || MODES.half).hoop;
+    // v.227 : en entrainement les paniers officiels sont ceux de la base,
+    // decales de l'extension haute/gauche. Deux si la base est un plein terrain.
+    if (m === 'training') {
+      var dm = tmDims(), o = [ { x: h.x, y: h.y, base: dm.et + 12 } ];
+      if (dm.base === 'full') o.push({ x: h.x, y: dm.et + dm.bh - 27.75, base: dm.et + dm.bh - 12 });
+      return o;
+    }
     if (m !== 'full') return [ { x: h.x, y: h.y, base: 12 } ];
     return [ { x: h.x, y: h.y, base: 12 }, { x: h.x, y: 304 - h.y, base: 292 } ];
   }
@@ -1768,7 +1837,8 @@
       // qui permet a reviveDoc() de reboucher un brouillon d'avant la v.225
       // sans un seul cas particulier. Tant que doc.mode !== 'training' elles
       // ne sont ni lues au rendu, ni publiees dans le JSON.
-      courtSize: { w: 15, h: 28 },   // en METRES
+      courtBase: 'full',             // terrain OFFICIEL : 'full' (28x15) ou 'half' (14x15)
+      ext: { l: 0, r: 0, t: 0, b: 0 },// extensions laterales, en METRES (0-20)
       extraBaskets: [],              // jusqu'a TM_BASKET_MAX paniers d'atelier
       players: baseTokens(),         // jusqu'a MAX_PLAYERS, cote libre
       balls: [],                     // jusqu'a BALL_CAP ballons
@@ -1974,7 +2044,12 @@
   // tous les plays déjà enregistrés, dont le tokenSize serait retombé sur 1.
   // Effet visible : S 0,60 · M 0,80 · L 1,00.
   var TOKEN_SHRINK = 0.8;
-  function radiusFor(m) { return MODES[m].w / 19 * (doc && doc.tokenSize || 1) * TOKEN_SHRINK; }
+  // v.227 - en entrainement, le rayon suit la largeur du TERRAIN OFFICIEL, pas
+  // celle de la toile : sinon ajouter une extension gonflerait les jetons.
+  function radiusFor(m) {
+    var w = (m === 'training') ? tmDims().bw : MODES[m].w;
+    return w / 19 * (doc && doc.tokenSize || 1) * TOKEN_SHRINK;
+  }
 
   // Sortie d'un temps = sa photo à laquelle on applique ses déplacements.
   // Sert à fabriquer le temps suivant et à détecter les décalages.
@@ -2692,18 +2767,41 @@
   }
 
   // ── Dimensions ───────────────────────────────────────────────────────
-  // Stockées en MÈTRES (ce que le coach mesure au décamètre), rendues en
-  // unités terrain (ce que le SVG dessine). 1 m = 10 unités + 12 de marge de
-  // chaque côté : 15 × 28 m retombe exactement sur le 174 × 304 du plein
-  // terrain, donc PR, les pointes de flèche et les zones gardent leur échelle.
+  // v.227 — LE TERRAIN NE SE RÈGLE PAS. Un terrain de basket a toujours la
+  // même taille : la base est le plein terrain officiel (28 × 15 m) ou le
+  // demi (14 × 15 m), et elle est reprise TELLE QUELLE de MODES.full /
+  // MODES.half — mêmes 174 × 304 et 174 × 164, mêmes lignes FIBA, même
+  // échelle (1 m = 10 unités, 12 unités de marge de touche).
+  //
+  // Ce qui varie, ce sont les EXTENSIONS : quatre marges de travail, en
+  // mètres, collées à l'extérieur du terrain. Elles agrandissent la TOILE
+  // sans toucher au terrain — d'où le décalage (el, et) appliqué une fois,
+  // au <g> qui porte le dessin officiel, et jamais recalculé ailleurs.
+  var TM_BASE = { full: { w: 174, h: 304 }, half: { w: 174, h: 164 } };
+  var TM_EXT_MAX = 20;                       // 20 m de rab par côté, large
+  function tmBaseOf(d) { return ((d || doc) && (d || doc).courtBase === 'half') ? 'half' : 'full'; }
+  // Normalisation UNIQUE des extensions : tout ce qui entre (JSON importé,
+  // vieux document, slider) passe par ici, jamais par une lecture directe.
+  function tmExtNorm(e) {
+    function v(a, b) {
+      var x = +(e && (e[a] !== undefined ? e[a] : e[b]));
+      if (!isFinite(x) || x < 0) x = 0;
+      return Math.min(TM_EXT_MAX, Math.round(x));
+    }
+    return { l: v('l', 'left'), r: v('r', 'right'), t: v('t', 'top'), b: v('b', 'bottom') };
+  }
   function tmDims(d) {
     d = d || doc;
-    var cs = (d && d.courtSize) || {}, w = +cs.w, h = +cs.h;
-    if (!isFinite(w)) w = 15;
-    if (!isFinite(h)) h = 28;
-    w = Math.min(30, Math.max(8, Math.round(w)));
-    h = Math.min(40, Math.max(10, Math.round(h)));
-    return { mw: w, mh: h, w: w * 10 + 24, h: h * 10 + 24 };
+    var bk = tmBaseOf(d), B = TM_BASE[bk], e = tmExtNorm(d && d.ext);
+    var el = e.l * 10, er = e.r * 10, et = e.t * 10, eb = e.b * 10;
+    return {
+      base: bk, bw: B.w, bh: B.h,          // terrain OFFICIEL, en unités
+      el: el, er: er, et: et, eb: eb,      // extensions, en unités
+      ml: e.l, mr: e.r, mt: e.t, mb: e.b,  // extensions, en mètres
+      bmw: 15, bmh: bk === 'full' ? 28 : 14,
+      w: B.w + el + er, h: B.h + et + eb,  // la TOILE
+      mw: 15 + e.l + e.r, mh: (bk === 'full' ? 28 : 14) + e.t + e.b
+    };
   }
   // MODES.training est un objet MUTÉ, pas remplacé : tout ce qui en garde une
   // référence (isoOf, zVb, radiusFor) lit donc toujours les bonnes valeurs.
@@ -2712,8 +2810,42 @@
     var M = MODES.training;
     M.w = dim.w; M.h = dim.h;
     M.vb = '0 0 ' + dim.w + ' ' + dim.h;
-    M.hoop = { x: dim.w / 2, y: 27.75 };
+    M.hoop = { x: dim.el + dim.bw / 2, y: dim.et + 27.75 };
     return dim;
+  }
+  // Rectangle du terrain OFFICIEL (aire de jeu lignée, marge de touche
+  // comprise dans la base mais exclue ici : un panier d'atelier ne se pose
+  // pas non plus sur la touche).
+  function tmCourtRect(d) {
+    var dim = tmDims(d);
+    return { x0: dim.el + 12, y0: dim.et + 12, x1: dim.el + dim.bw - 12, y1: dim.et + dim.bh - 12 };
+  }
+  // Pousse un point HORS du terrain officiel, dans la bande d'extension la
+  // plus proche. Renvoie le point inchangé s'il est déjà dehors — ou s'il
+  // n'existe aucune extension (auquel cas il n'y a nulle part où le mettre,
+  // et l'ajout de panier est déjà refusé en amont).
+  function tmPushOut(p, d) {
+    if (!p || !isFinite(+p.x) || !isFinite(+p.y)) return p;
+    var R = tmCourtRect(d), dim = tmDims(d);
+    if (p.x < R.x0 || p.x > R.x1 || p.y < R.y0 || p.y > R.y1) return p;
+    var c = [];
+    if (dim.el > 0) c.push({ x: dim.el / 2, y: p.y, d: p.x - R.x0 });
+    if (dim.er > 0) c.push({ x: dim.w - dim.er / 2, y: p.y, d: R.x1 - p.x });
+    if (dim.et > 0) c.push({ x: p.x, y: dim.et / 2, d: p.y - R.y0 });
+    if (dim.eb > 0) c.push({ x: p.x, y: dim.h - dim.eb / 2, d: R.y1 - p.y });
+    if (!c.length) return p;
+    c.sort(function (a, b) { return a.d - b.d; });
+    p.x = f(c[0].x); p.y = f(c[0].y);
+    return p;
+  }
+  function tmHasExt(d) { var dm = tmDims(d); return (dm.el + dm.er + dm.et + dm.eb) > 0; }
+  // Un panier d'atelier ne vit QUE sur une extension. L'invariant est tenu
+  // ici, au même endroit pour l'ajout, le glissé et le changement de marge.
+  function tmSnapBaskets(d) {
+    d = d || doc;
+    var l = Array.isArray(d.extraBaskets) ? d.extraBaskets : [], i;
+    if (!tmHasExt(d)) return;
+    for (i = 0; i < l.length; i++) tmPushOut(l[i], d);
   }
 
   // ── Paniers ──────────────────────────────────────────────────────────
@@ -2722,7 +2854,7 @@
   // terrain sans aucun panier — un tir doit toujours avoir une cible.
   function tmBaskets(d) {
     d = d || doc;
-    var dim = tmDims(d), out = [ { id: 'main', x: dim.w / 2, y: 27.75, a: 0, main: true } ];
+    var dim = tmDims(d), out = [ { id: 'main', x: dim.el + dim.bw / 2, y: dim.et + 27.75, a: 0, main: true } ];
     var l = Array.isArray(d.extraBaskets) ? d.extraBaskets : [], i, b;
     for (i = 0; i < l.length && out.length <= TM_BASKET_MAX; i++) {
       b = l[i];
@@ -2758,17 +2890,24 @@
   // Volontairement NU : bord, médiane, rond central, les paniers. Pas de
   // raquette ni d'arc à 3 points — sur un terrain de 12 × 18 m ces marques
   // seraient fausses, et une marque fausse est pire qu'une marque absente.
+  // v.227 — le terrain officiel n'est PAS redessiné : c'est halfCourt() /
+  // fullCourt(), le dessin FIBA déjà en place, glissé de (el, et) sous un
+  // <g transform>. Une seule source de vérité pour la géométrie — même
+  // leçon qu'en v.211 pour le plein terrain en portrait. Ce qui l'entoure
+  // est du parquet NU : pas une ligne, parce qu'aucune ligne n'y serait vraie.
   function trainingCourt() {
-    var dim = tmSync(), W = dim.w, H = dim.h, iw = W - 24, ih = H - 24, i, s = '';
+    var dim = tmSync(), W = dim.w, H = dim.h, i, s = '';
+    tmSnapBaskets();
     s += '<rect class="out" x="0" y="0" width="' + f(W) + '" height="' + f(H) + '"/>'
-      +  '<rect class="court" x="12" y="12" width="' + f(iw) + '" height="' + f(ih) + '"/>'
-      +  '<rect class="ln strong" x="12" y="12" width="' + f(iw) + '" height="' + f(ih) + '"/>'
-      +  '<line class="ln" x1="12" y1="' + f(H / 2) + '" x2="' + f(W - 12) + '" y2="' + f(H / 2) + '"/>'
-      +  '<circle class="ln" cx="' + f(W / 2) + '" cy="' + f(H / 2) + '" r="18"/>';
+      +  '<rect class="court tmext" x="0" y="0" width="' + f(W) + '" height="' + f(H) + '"/>'
+      +  (tmHasExt() ? '<rect class="tmextln" x="1" y="1" width="' + f(W - 2) + '" height="' + f(H - 2) + '"/>' : '')
+      +  '<g transform="translate(' + f(dim.el) + ' ' + f(dim.et) + ')">'
+      +    (dim.base === 'full' ? fullCourt() : halfCourt())
+      +  '</g>';
+    // Le panier principal est déjà dessiné par le terrain officiel : on ne
+    // repasse par-dessus que les paniers d'ATELIER.
     var bk = tmBaskets();
-    for (i = 0; i < bk.length; i++) s += tmBasketMarkup(bk[i]);
-    s += courtLogo(W / 2, H / 2, 18)
-      +  '<rect class="sheen" x="12" y="12" width="' + f(iw) + '" height="' + f(ih) + '"/>';
+    for (i = 0; i < bk.length; i++) if (!bk[i].main) s += tmBasketMarkup(bk[i]);
     return s;
   }
 
@@ -2778,14 +2917,14 @@
   // même à 20 — la contrainte du LAYOUT historique, tenue par le calcul.
   function tmStartPos(d) {
     d = d || doc;
-    var dim = tmDims(d), W = dim.w, H = dim.h, p = {}, i, r, c;
+    var dim = tmDims(d), W = dim.bw, H = dim.bh, ox = dim.el, oy = dim.et, p = {}, i, r, c;
     var list = (d && Array.isArray(d.players) && d.players.length) ? d.players : baseTokens();
     var cols = 5, rows = Math.max(1, Math.ceil(list.length / cols));
     var y0 = H * 0.44, dy = Math.min(H * 0.12, (H * 0.5 - 14) / Math.max(1, rows));
     for (i = 0; i < list.length; i++) {
       if (!list[i] || !list[i].id) continue;
       r = Math.floor(i / cols); c = i % cols;
-      p[list[i].id] = { x: f(22 + (W - 44) * (c / (cols - 1))), y: f(y0 + r * dy) };
+      p[list[i].id] = { x: f(ox + 22 + (W - 44) * (c / (cols - 1))), y: f(oy + y0 + r * dy) };
     }
     return p;
   }
@@ -2886,6 +3025,7 @@
     });
     var eb = Array.isArray(doc.extraBaskets) ? doc.extraBaskets : [];
     for (i = 0; i < eb.length; i++) cl(eb[i]);
+    tmSnapBaskets();
     var ac = Array.isArray(doc.accessories) ? doc.accessories : [];
     for (i = 0; i < ac.length; i++) cl(ac[i]);
   }
@@ -3176,9 +3316,19 @@
       document.getElementById('a-publish').textContent = '💾 Enregistrer l\'exercice';
       document.getElementById('a-delete').textContent = '🗑 Supprimer l\'exercice';
       document.getElementById('row-exo-back').hidden = false;
+      // Onboarding : une seule fois, jamais rappelé.
+      try {
+        if (localStorage.getItem('pb_exo_onboard') !== '1') {
+          localStorage.setItem('pb_exo_onboard', '1');
+          setTimeout(function () { openSheet('sh-onb'); }, 500);
+        }
+      } catch (e) {}
     }
     var tm = on && mode() === 'training', els = document.querySelectorAll('.tmonly'), i;
     for (i = 0; i < els.length; i++) els[i].hidden = !tm;
+    // 🎨 vit dans le hub en atelier : le garder AUSSI dans la barre, c'est
+    // exactement le doublon que la v.227 retire.
+    var bz = document.getElementById('b-zone'); if (bz) bz.hidden = tm;
     document.getElementById('m-half').classList.toggle('on', mode() === 'half');
     document.getElementById('m-full').classList.toggle('on', mode() === 'full');
     document.getElementById('m-train').classList.toggle('on', mode() === 'training');
@@ -3189,10 +3339,15 @@
 
   function tmSheetSync() {
     var dim = tmDims(), i;
-    document.getElementById('tm-w').value = dim.mw;
-    document.getElementById('tm-h').value = dim.mh;
-    document.getElementById('tm-wv').textContent = dim.mw + ' m';
-    document.getElementById('tm-hv').textContent = dim.mh + ' m';
+    var E = { l: dim.ml, r: dim.mr, t: dim.mt, b: dim.mb };
+    ['l', 'r', 't', 'b'].forEach(function (k) {
+      document.getElementById('tm-ext-' + k).value = E[k];
+      document.getElementById('tm-ext-' + k + 'v').textContent = E[k] + ' m';
+    });
+    var tot = E.l + E.r + E.t + E.b;
+    document.getElementById('tm-extn').textContent = tot ? (tot + ' m au total') : 'aucune';
+    document.getElementById('tm-base-full').classList.toggle('on', dim.base === 'full');
+    document.getElementById('tm-base-half').classList.toggle('on', dim.base === 'half');
     var eb = Array.isArray(doc.extraBaskets) ? doc.extraBaskets : [];
     document.getElementById('tm-bkn').textContent = String(eb.length);
     document.getElementById('tm-bkadd').disabled = eb.length >= TM_BASKET_MAX;
@@ -3264,6 +3419,21 @@
       if (dirty && !confirm('Des modifications ne sont pas enregistrées.\nQuitter quand même ?')) return;
       history.back();
     });
+    // Sortir des modes concurrents AVANT d'en ouvrir un : la barre
+    // d'accessoires et la sélection de ballon sont des états visibles, les
+    // laisser derrière soi produisait exactement l'empilement illisible que
+    // le hub corrige.
+    function tmExclusive() {
+      try { accBarClose(); } catch (e) {}
+      if (tbSel) { tbSel = null; try { tbListSync(); } catch (e) {} }
+    }
+    document.getElementById('b-kit').addEventListener('click', function () { openSheet('sh-kit'); });
+    document.getElementById('k-close').addEventListener('click', closeSheets);
+    document.getElementById('onb-ok').addEventListener('click', closeSheets);
+    document.getElementById('k-train').addEventListener('click', function () { tmExclusive(); tmSheetSync(); openSheet('sh-train'); });
+    document.getElementById('k-balls').addEventListener('click', function () { tmExclusive(); tbListSync(); openSheet('sh-balls'); });
+    document.getElementById('k-acc').addEventListener('click', function () { tmExclusive(); openSheet('sh-acc'); });
+    document.getElementById('k-zone').addEventListener('click', function () { tmExclusive(); document.getElementById('b-zone').click(); });
     document.getElementById('b-train').addEventListener('click', function () { tmSheetSync(); openSheet('sh-train'); });
     document.getElementById('b-acc').addEventListener('click', function () { openSheet('sh-acc'); });
     document.getElementById('b-balls').addEventListener('click', function () { tbListSync(); openSheet('sh-balls'); });
@@ -3271,19 +3441,42 @@
     document.getElementById('ac-close').addEventListener('click', closeSheets);
     document.getElementById('tb-close').addEventListener('click', closeSheets);
 
-    function dims(w, h2) {
-      doc.courtSize = { w: w, h: h2 };
-      tmClampAll();
-      drawAll(); tmSheetSync(); touch();
+    // v.227 — une extension change la TOILE, donc les coordonnées de tout ce
+    // qui est posé : on repasse par tmClampAll(), qui recadre ET repousse les
+    // paniers d'atelier hors du terrain officiel.
+    function tmApply() { tmClampAll(); drawAll(); tmSheetSync(); touch(); }
+    function setExt(k, v) {
+      doc.ext = tmExtNorm(doc.ext);
+      doc.ext[k] = Math.min(TM_EXT_MAX, Math.max(0, Math.round(+v || 0)));
+      tmApply();
     }
-    document.getElementById('tm-w').addEventListener('input', function () { dims(+this.value, tmDims().mh); });
-    document.getElementById('tm-h').addEventListener('input', function () { dims(tmDims().mw, +this.value); });
+    ['l', 'r', 't', 'b'].forEach(function (k) {
+      document.getElementById('tm-ext-' + k).addEventListener('input', function () { setExt(k, this.value); });
+    });
+    document.getElementById('tm-ext-clear').addEventListener('click', function () {
+      doc.ext = { l: 0, r: 0, t: 0, b: 0 }; tmApply();
+    });
+    function setBase(b) {
+      if (tmBaseOf(doc) === b) return;
+      doc.courtBase = b; tmApply();
+      toast(b === 'full' ? '▭ Plein terrain officiel.' : '½ Demi-terrain officiel.', 'ok');
+    }
+    document.getElementById('tm-base-full').addEventListener('click', function () { setBase('full'); });
+    document.getElementById('tm-base-half').addEventListener('click', function () { setBase('half'); });
 
     document.getElementById('tm-bkadd').addEventListener('click', function () {
       var l = Array.isArray(doc.extraBaskets) ? doc.extraBaskets : (doc.extraBaskets = []);
       if (l.length >= TM_BASKET_MAX) { toast('10 paniers d\'atelier maximum.', 'err'); return; }
-      var dim = tmDims();
-      l.push({ id: uid('bk'), x: f(30 + (l.length % 3) * (dim.w - 60) / 2), y: f(dim.h * 0.5 + (l.length % 4) * 22), a: 0 });
+      // Un panier d'atelier ne se pose QUE sur une extension : sans marge,
+      // il n'y a nulle part où le mettre, et le dire vaut mieux que le
+      // laisser atterrir au milieu du terrain officiel.
+      if (!tmHasExt()) { toast('Ajoute d\'abord une extension (📐 Terrain) — un panier d\'atelier s\'y pose.', 'err'); return; }
+      var dim = tmDims(), np = { id: uid('bk'), a: 0 };
+      if (dim.el > 0)      { np.x = f(dim.el / 2);            np.y = f(dim.et + dim.bh * (0.3 + 0.2 * (l.length % 3))); }
+      else if (dim.er > 0) { np.x = f(dim.w - dim.er / 2);    np.y = f(dim.et + dim.bh * (0.3 + 0.2 * (l.length % 3))); }
+      else if (dim.et > 0) { np.x = f(dim.el + dim.bw * (0.3 + 0.2 * (l.length % 3))); np.y = f(dim.et / 2); }
+      else                 { np.x = f(dim.el + dim.bw * (0.3 + 0.2 * (l.length % 3))); np.y = f(dim.h - dim.eb / 2); }
+      l.push(np);
       drawAll(); tmSheetSync(); touch();
     });
     document.getElementById('tm-bklist').addEventListener('input', function (e) {
@@ -5408,7 +5601,7 @@
   // 11. FEUILLES (métadonnées, menu, plays)
   // ─────────────────────────────────────────────────────────────────────
   var scrim = document.getElementById('scrim');
-  var SHEETS = ['sh-meta', 'sh-menu', 'sh-plays', 'sh-note', 'sh-zone', 'sh-train', 'sh-acc', 'sh-balls'];
+  var SHEETS = ['sh-meta', 'sh-menu', 'sh-plays', 'sh-note', 'sh-zone', 'sh-train', 'sh-acc', 'sh-balls', 'sh-kit', 'sh-onb'];
   function closeSheets() {
     SHEETS.forEach(function (k) { var el = document.getElementById(k); if (el) el.classList.remove('show'); });
     scrim.classList.remove('show');
@@ -5656,7 +5849,12 @@
     if (doc.mode === 'training') {
       var dim = tmDims();
       tm = {
-        court_size: { w: dim.mw, h: dim.mh },
+        // `court_size` reste le terrain OFFICIEL : un lecteur écrit avant la
+        // v.227 y trouve toujours des dimensions de terrain crédibles, et les
+        // extensions lui sont simplement invisibles.
+        court_base: dim.base,
+        court_size: { w: dim.bmw, h: dim.bmh },
+        extensions: { left: dim.ml, right: dim.mr, top: dim.mt, bottom: dim.mb },
         extra_baskets: (Array.isArray(doc.extraBaskets) ? doc.extraBaskets : []).slice(0, TM_BASKET_MAX)
           .map(function (b) { return { id: String(b.id), x: f(+b.x), y: f(+b.y), angle: f(+b.a || 0) }; }),
         accessories: (Array.isArray(doc.accessories) ? doc.accessories : []).map(function (a) {
@@ -5700,7 +5898,8 @@
     // profondeur, même si un brouillon en avait apporté.
     if (exoMode()) {
       base.format = 'pb-exo/1';
-      base.terrain_config = { court_size: base.court_size, extra_baskets: base.extra_baskets };
+      base.terrain_config = { court_base: base.court_base, court_size: base.court_size,
+                              extensions: base.extensions, extra_baskets: base.extra_baskets };
       base.notes = doc.description || '';
       (function strip(l) {
         for (var i = 0; i < l.length; i++) { if (l[i].branches) { strip([].concat.apply([], l[i].branches.map(function (b) { return b.steps || []; }))); delete l[i].branches; } }
@@ -5785,8 +5984,15 @@
     // précédent, et une joueuse « n7 » y serait lue comme inconnue, donc
     // silencieusement jetée avec toutes ses flèches.
     if (m === 'training') {
+      // RÉTROCOMPAT v.225/226 : ces exos n'ont qu'un `court_size` libre. On
+      // n'essaie pas de le reproduire — un terrain de 12 × 18 m n'existe
+      // pas — on choisit la base officielle la plus proche (≥ 21 m de long =
+      // plein terrain) et on part SANS extension. Un exo ancien s'ouvre donc
+      // sur un vrai terrain, ses jetons à leur place.
       var cs = pick(o, 'court_size', 'courtSize') || {};
-      d.courtSize = { w: +cs.w || 15, h: +cs.h || 28 };
+      var cb = pick(o, 'court_base', 'courtBase');
+      d.courtBase = (cb === 'half' || cb === 'full') ? cb : ((+cs.h || 28) >= 21 ? 'full' : 'half');
+      d.ext = tmExtNorm(pick(o, 'extensions', 'ext'));
       d.extraBaskets = (pick(o, 'extra_baskets', 'extraBaskets') || []).slice(0, TM_BASKET_MAX)
         .filter(function (b) { return b && isFinite(+b.x) && isFinite(+b.y); })
         .map(function (b, k) { return { id: String(b.id || ('bk' + k)), x: +b.x, y: +b.y, a: +(b.angle !== undefined ? b.angle : b.a) || 0 }; });
@@ -6722,7 +6928,8 @@
     if (!Array.isArray(d.accessories)) d.accessories = [];
     if (!Array.isArray(d.balls)) d.balls = [];
     d.balls = d.balls.slice(0, BALL_CAP);
-    if (!d.courtSize || !isFinite(+d.courtSize.w)) d.courtSize = { w: 15, h: 28 };
+    d.courtBase = (d.courtBase === 'half') ? 'half' : 'full';
+    d.ext = tmExtNorm(d.ext);
     ['half', 'full', 'training'].forEach(function (m) {
       function sp0() { return m === 'training' ? tmStartPos(d) : startPos(m); }
       if (!d[m] || !Array.isArray(d[m].steps) || !d[m].steps.length) d[m] = { steps: [ makeStep(sp0()) ] };
