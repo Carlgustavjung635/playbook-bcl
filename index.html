@@ -16225,7 +16225,6 @@ function renderPlays() {
           <div class="eyebrow-muted">${items.length} ${items.length > 1 ? 'plays' : 'play'}${orphanItems.length > 0 ? ' · ' + orphanItems.length + ' dispo' : ''}</div>
           <h2 class="display-lg mt-2">Playbook</h2>
           ${isCoach ? _pbEditorV2Row() : ''}
-          ${_trexEntryRow()}
         </div>
         ${isCoach && canEditSharedLibrary() ? `<button class="btn btn-primary" onclick="editPlay()">+ NOUVEAU</button>` : ''}
       </div>
@@ -16404,6 +16403,11 @@ function _pbEditorV2Row() {
 // avec un ↻ explicite — même choix que `players` (v.155), et la même
 // vigilance : base fraîche + écran figé ⇒ le bug est dans la LECTURE.
 const TREX = { list: null, loading: false, err: null, at: 0 };
+// v.231 — `const` est SCOPÉ À SON <script>, et la modale ⇄ Alternative vit
+// dans un autre bloc (celui du plan d'entraînement). Sans cette ligne, elle
+// lèverait un ReferenceError sur TREX. L'objet n'est jamais RÉASSIGNÉ (que
+// muté par propriété) : la référence exportée reste donc la bonne.
+window.TREX = TREX;
 function _trexEsc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -16480,16 +16484,12 @@ function _trexCount(row) {
   if (ac) bits.push(ac + ' 🎪');
   return bits.join(' · ');
 }
-// Point d'entrée posé sur la page Playbook, pour les deux rôles : la section
-// existe et est routable (#/exos) mais n'entre PAS dans la barre de nav —
-// y ajouter un 6e onglet redessinerait la nav de tout le monde pour une
-// feature qui débute.
-function _trexEntryRow() {
-  return `
-    <div style="margin-top:10px">
-      <button class="btn btn-secondary" style="font-size:12px" onclick="goSection('exos')">🏋️ Exercices d'entraînement →</button>
-    </div>`;
-}
+// v.231 — PAS DE SECTION #/exos. La bibliothèque d'exercices n'a jamais eu
+// besoin d'une page à elle : un exercice se dessine et se relit là où il
+// SERT — depuis un play, depuis un exo d'un plan d'entraînement. Une page
+// de plus, c'était un troisième endroit où chercher la même chose. Les
+// portes qui restent : `_exoRefEditorBlock` (attacher / créer / éditer) et
+// la modale ⇄ Alternative, toutes les deux dans le plan d'entraînement.
 // ── LIEN PLAN ↔ BIBLIOTHÈQUE D'EXOS (v.226) ──────────────────────────────
 // Un exo de plan (`trainingPlan.exercises[]`, sérialisé dans le jsonb
 // `training_plans.plan`) peut désormais POINTER vers un exercice de la
@@ -16688,44 +16688,7 @@ function _exoRefPlayerBlock(ex) {
       <div style="font-family:'JetBrains Mono';font-size:10px;color:var(--orange)">▶ VOIR</div>
     </div>`;
 }
-function renderTrainingExos() {
-  const isCoach = state.auth.role === 'coach';
-  if (TREX.list === null && !TREX.loading && !TREX.err) trexFetch();
-  const rows = TREX.list || [];
-  const body = TREX.loading && !rows.length
-    ? `<div class="empty-state">Chargement…</div>`
-    : TREX.err
-      ? `<div class="empty-state">⚠️ ${_trexEsc(TREX.err)}</div>`
-      : !rows.length
-        ? `<div class="empty-state">Aucun exercice pour l'instant.${isCoach ? '<br>« 🆕 Nouvel exercice » pour en dessiner un.' : ''}</div>`
-        : rows.map(r => `
-            <div class="card" style="margin:0 18px 10px;padding:14px">
-              <div style="display:flex;align-items:center;gap:10px">
-                <div style="flex:1;min-width:0">
-                  <div style="font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_trexEsc(r.title || 'Sans titre')}</div>
-                  <div class="eyebrow-muted" style="margin-top:3px">${_trexEsc(_trexCount(r))}</div>
-                </div>
-                <button class="btn btn-secondary" style="font-size:12px" onclick="openTrainingExoEditor('${_trexEsc(r.id)}','view')">▶ Voir</button>
-                ${isCoach ? `<button class="btn btn-secondary" style="font-size:12px" onclick="openTrainingExoEditor('${_trexEsc(r.id)}')">✏️</button>
-                <button class="btn btn-secondary" style="font-size:12px" onclick="deleteTrainingExo('${_trexEsc(r.id)}')">🗑</button>` : ''}
-              </div>
-            </div>`).join('');
-  return `
-    <div class="fade-up">
-      <div class="section-header">
-        <div>
-          <div class="eyebrow-muted">${rows.length} exercice${rows.length > 1 ? 's' : ''}</div>
-          <h2 class="display-lg mt-2">🏋️ Entraînement</h2>
-        </div>
-        ${isCoach ? `<button class="btn btn-primary" onclick="createTrainingExo()">🆕 NOUVEL EXERCICE</button>` : ''}
-      </div>
-      <div style="padding:0 18px 10px;display:flex;gap:8px">
-        <button class="btn btn-secondary" style="font-size:12px" onclick="trexFetch(true)">↻ Rafraîchir</button>
-        <button class="btn btn-secondary" style="font-size:12px" onclick="goSection('plays')">← Playbook</button>
-      </div>
-      ${body}
-    </div>`;
-}
+// v.231 — renderTrainingExos() retiré avec la section #/exos.
 
 function toggleShowInactivePlays() {
   state._showInactivePlays = !state._showInactivePlays;
@@ -40892,7 +40855,16 @@ function altSet(ex, alt) {
   if (!ex || !alt) return null;
   const title = String(alt.title || '').trim();
   if (!title) return null;
-  ex.alt = { title: title, description: String(alt.description || '').trim(), exoTemplateId: alt.exoTemplateId || null };
+  ex.alt = {
+    title: title,
+    description: String(alt.description || '').trim(),
+    exoTemplateId: alt.exoTemplateId || null,
+    // v.231 — l'alternative est un EXERCICE D'ENTRAÎNEMENT, comme l'exo
+    // actif : elle porte donc la même référence dessinée. Sans ce champ,
+    // basculer laissait l'animation de l'exo principal sous le titre de
+    // l'alternative — deux exos, une seule animation.
+    exercise_ref_id: alt.exercise_ref_id || null
+  };
   if (!ex.activeVariant) ex.activeVariant = 'main';
   return ex.alt;
 }
@@ -40900,10 +40872,18 @@ function altSet(ex, alt) {
 // côté joueuse sans toucher une seule ligne des écrans joueuse.
 function altSwap(ex) {
   const alt = _altOf(ex); if (!alt) return false;
-  const mainSnap = { title: ex.title, description: ex.description || '', exoTemplateId: ex.exoTemplateId || null };
+  const mainSnap = {
+    title: ex.title, description: ex.description || '',
+    exoTemplateId: ex.exoTemplateId || null,
+    exercise_ref_id: ex.exercise_ref_id || null
+  };
   ex.title = alt.title;
   ex.description = alt.description || '';
   ex.exoTemplateId = alt.exoTemplateId || null;
+  // L'animation suit son titre. `delete` plutôt que `= null` : un exo sans
+  // référence doit être indiscernable d'un exo inline d'avant la v.226.
+  if (alt.exercise_ref_id) ex.exercise_ref_id = alt.exercise_ref_id;
+  else delete ex.exercise_ref_id;
   ex.alt = mainSnap;
   ex.activeVariant = (ex.activeVariant === 'alt') ? 'main' : 'alt';
   return true;
@@ -40927,9 +40907,10 @@ function altRowHtml(ex, idx) {
     <div style="border-top:1px dashed var(--border-soft);background:var(--bg-3)">
       <div style="text-align:center;font-family:'JetBrains Mono';font-size:8px;letter-spacing:0.12em;color:var(--ink-4);padding:3px 0;text-transform:uppercase">─── ou ─── 👁️ privé coach</div>
       <div style="display:flex;align-items:center;gap:8px;padding:5px 10px 7px;opacity:0.6">
-        <span style="font-size:12px">💪</span>
+        <span style="font-size:12px">🏋️</span>
         <div style="flex:1;min-width:0">
           <div style="font-family:'Anton';font-size:11px;text-transform:uppercase;line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(alt.title)}</div>
+          ${alt.exercise_ref_id ? `<div style="font-size:9px;font-family:'JetBrains Mono';color:var(--orange)">🔗 EXERCICE DESSINÉ</div>` : ''}
           ${alt.description ? `<div style="font-size:10px;color:var(--ink-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(pbPlainWithMentions(alt.description))}</div>` : ''}
         </div>
         <button class="btn btn-ghost" style="font-size:10px;padding:3px 8px" onclick="event.stopPropagation();altSwapExercise(${idx})">⇄ Basculer</button>
@@ -40968,9 +40949,17 @@ function _altQ(v) { if (state._altBuf) { state._altBuf.q = v; renderAltExoModal(
 function renderAltExoModal() {
   const b = state._altBuf; if (!b) return;
   const ex = _altExAt(b.idx);
-  const lib = (typeof exoTemplates === 'function' ? exoTemplates() : (state.exoTemplates || []).filter(e => e && !e.deletedAt));
+  // v.231 — la biblio d'ici, c'est celle des EXERCICES D'ENTRAÎNEMENT (les
+  // exos dessinés dans l'éditeur, `training_exercises`), pas le pool de la
+  // prépa PHYSIQUE (`exoTemplates`). Une alternative, c'est deux fois la
+  // même chose : un exercice d'entraînement contre un autre. Proposer des
+  // pompes en remplacement d'un 3-contre-2 n'a jamais été le sujet.
+  if (TREX.list === null) {
+    _exoRefFetch().then(() => { if (state._altBuf === b) renderAltExoModal(); });
+  }
+  const lib = TREX.list || [];
   const q = (b.q || '').toLowerCase();
-  const hits = lib.filter(e => !q || String(e.name || '').toLowerCase().includes(q)).slice(0, 40);
+  const hits = lib.filter(e => !q || String(e.title || '').toLowerCase().includes(q)).slice(0, 40);
   openModal(`
     <div class="modal-header">
       <div>
@@ -40983,32 +40972,56 @@ function renderAltExoModal() {
       <div style="font-size:10px;color:var(--ink-3);margin-bottom:8px">👁️ L'alternative reste privée : les joueuses ne voient que l'exercice actif.</div>
       <div style="display:flex;gap:6px;margin-bottom:9px">
         <button class="btn ${b.tab === 'lib' ? 'btn-primary' : 'btn-ghost'}" style="flex:1;font-size:11px;padding:6px" onclick="_altTab('lib')">📚 Depuis la biblio</button>
-        <button class="btn ${b.tab === 'custom' ? 'btn-primary' : 'btn-ghost'}" style="flex:1;font-size:11px;padding:6px" onclick="_altTab('custom')">✏️ Custom à la volée</button>
+        <button class="btn ${b.tab === 'custom' ? 'btn-primary' : 'btn-ghost'}" style="flex:1;font-size:11px;padding:6px" onclick="_altTab('custom')">✏️ À la volée</button>
       </div>
       ${b.tab === 'lib' ? `
-        <input id="alt-q" value="${esc(b.q || '')}" placeholder="Rechercher un exo…" oninput="_altQ(this.value)"
+        <input id="alt-q" value="${esc(b.q || '')}" placeholder="Rechercher un exercice…" oninput="_altQ(this.value)"
           style="width:100%;background:var(--bg-2);border:1px solid var(--border-soft);border-radius:6px;padding:7px;font-size:12px;color:var(--ink);margin-bottom:8px">
-        ${lib.length === 0 ? '<div style="font-size:11px;color:var(--ink-4);text-align:center;padding:12px">Bibliothèque vide. Ajoute des exos dans 🏋 Biblio.</div>' : ''}
-        ${hits.map(e => `<div onclick="_altPickTemplate('${esc(e.id)}')" style="padding:8px;border:1px solid var(--border-soft);border-radius:6px;margin-bottom:5px;cursor:pointer">
-            <div style="font-family:'Anton';font-size:12px;text-transform:uppercase">${esc(e.name || 'Exercice')}</div>
-            ${e.description ? `<div style="font-size:10px;color:var(--ink-3);margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${esc(mdToPlain(e.description))}</div>` : ''}
+        ${TREX.list === null ? '<div style="font-size:11px;color:var(--ink-4);text-align:center;padding:12px">Chargement de la bibliothèque…</div>' : ''}
+        ${TREX.list !== null && TREX.err ? `<div style="font-size:11px;color:var(--ink-4);text-align:center;padding:12px">⚠️ ${esc(TREX.err)}</div>` : ''}
+        ${TREX.list !== null && !TREX.err && lib.length === 0 ? '<div style="font-size:11px;color:var(--ink-4);text-align:center;padding:12px">Aucun exercice dessiné pour l’instant.<br>« ✏️ À la volée » pour en créer un.</div>' : ''}
+        ${hits.map(e => `<div onclick="_altPickExo('${esc(e.id)}')" style="padding:8px;border:1px solid var(--border-soft);border-radius:6px;margin-bottom:5px;cursor:pointer">
+            <div style="font-family:'Anton';font-size:12px;text-transform:uppercase">🏋️ ${esc(e.title || 'Exercice')}</div>
+            <div style="font-size:10px;color:var(--ink-3);margin-top:2px">${esc(_trexCount(e))}</div>
           </div>`).join('')}
       ` : `
         <input id="alt-name" value="${esc(b.name || '')}" placeholder="Nom de l'exercice"
           style="width:100%;background:var(--bg-2);border:1px solid var(--border-soft);border-radius:6px;padding:8px;font-size:12px;color:var(--ink);margin-bottom:7px">
-        <textarea id="alt-desc" rows="4" placeholder="Description / dose (ex : 4×12, repos 30 s)"
+        <textarea id="alt-desc" rows="4" placeholder="Consigne (facultatif)"
           style="width:100%;background:var(--bg-2);border:1px solid var(--border-soft);border-radius:6px;padding:8px;font-size:12px;color:var(--ink);resize:vertical">${esc(b.desc || '')}</textarea>
         <button class="btn btn-primary btn-block" style="margin-top:9px" onclick="_altValidateCustom()">Valider</button>
+        <button class="btn btn-secondary btn-block" style="margin-top:6px" onclick="_altDrawNew()">🆕 Valider et dessiner l'exercice</button>
+        <div style="font-size:10px;color:var(--ink-4);margin-top:6px;line-height:1.5">« Dessiner » ouvre l'éditeur : l'alternative devient un exercice animé, exactement comme l'exo actif.</div>
       `}
     </div>`);
 }
-function _altPickTemplate(tid) {
+// Piocher un EXERCICE D'ENTRAÎNEMENT dessiné. L'alternative en garde la
+// RÉFÉRENCE (`exercise_ref_id`), pas une copie : éditer l'exercice met à jour
+// tous les plans qui le citent, ici comme pour l'exo actif (v.226).
+function _altPickExo(rid) {
   const b = state._altBuf; if (!b) return;
-  const t = (state.exoTemplates || []).find(e => e && e.id === tid); if (!t) return;
+  const row = (TREX.list || []).find(e => e && String(e.id) === String(rid)); if (!row) return;
   const ex = _altExAt(b.idx); if (!ex) return;
-  altSet(ex, { title: t.name || 'Exercice', description: t.description || '', exoTemplateId: t.id });
+  altSet(ex, { title: row.title || 'Exercice', description: '', exercise_ref_id: row.id });
   persist(); try { PbSync.flushNow(state); } catch (e) {}
   closeModal(); state._altBuf = null; setTimeout(() => renderTrainingPlanEditor(), 50);
+}
+// Créer l'alternative ET l'ouvrir dans l'éditeur. Même convention d'id que
+// `createExoRefForPlan` : la LIGNE naît au premier enregistrement, donc
+// abandonner l'éditeur ne laisse aucun exercice fantôme en base.
+function _altDrawNew() {
+  const b = state._altBuf; if (!b) return;
+  const name = String((document.getElementById('alt-name') || {}).value || '').trim();
+  const desc = String((document.getElementById('alt-desc') || {}).value || '');
+  if (!name) { alert("Donne un nom à l'exercice alternatif."); return; }
+  const ex = _altExAt(b.idx); if (!ex) return;
+  const id = 'exo-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+  altSet(ex, { title: name, description: desc, exercise_ref_id: id });
+  persist(); try { PbSync.flushNow(state); } catch (e) {}
+  try { _saveTrainingPlanNow(); } catch (e) {}
+  state._altBuf = null; TREX.list = null;
+  closeModal();
+  openTrainingExoEditor(id);
 }
 function _altValidateCustom() {
   const b = state._altBuf; if (!b) return;
@@ -53219,7 +53232,6 @@ function _renderBody() {
   if (role === 'coach') {
     if (state.section === 'home') content = renderHomeCoach();
     else if (state.section === 'plays') content = renderPlays();
-    else if (state.section === 'exos') content = renderTrainingExos();
     else if (state.section === 'matches') content = renderMatches();
     else if (state.section === 'team') content = renderTeam();
     else if (state.section === 'inspire') content = renderInspire();
@@ -53243,7 +53255,6 @@ function _renderBody() {
     else if (state.view && state.view.type === 'ffbb') content = renderFFBB();  // Feature 2 : dashboard FFBB lecture seule
     else if (state.section === 'home') content = renderHomePlayer();
     else if (state.section === 'plays') content = renderPlays();
-    else if (state.section === 'exos') content = renderTrainingExos();
     else if (state.section === 'challenges') content = renderPlayerChallenges();
     else if (state.section === 'match') content = renderPlayerMatches();
     else if (state.section === 'calendrier') content = renderPlayerCalendrier();
@@ -53297,7 +53308,7 @@ var _pbModalDepth = 0;       // 1 si une modal a une entrée d'historique, 0 sin
 var _pbSuppressPop = false;  // ignore le prochain popstate (close programmatique)
 var _pbInPop = false;        // true pendant le traitement d'un popstate (anti-boucle)
 
-var _PB_SECTIONS = ['home','plays','exos','matches','team','inspire','ffbb','live','challenges','match','calendrier','programme'];
+var _PB_SECTIONS = ['home','plays','matches','team','inspire','ffbb','live','challenges','match','calendrier','programme'];
 function _pbIsValidSection(id) { return _PB_SECTIONS.indexOf(id) !== -1; }
 function _pbHashSection() { var h = (location.hash || '').replace(/^#\/?/, '').trim(); return h || null; }
 function _pbModalOpen() { var r = document.getElementById('modal-root'); return !!(r && r.innerHTML.trim() !== ''); }
@@ -53488,7 +53499,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.230';
+const APP_VERSION = '2026-08-19.231';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
