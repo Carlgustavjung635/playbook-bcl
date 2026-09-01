@@ -3116,10 +3116,17 @@
   }
   var TM_PREFIX = { atk: 'a', def: 'd', neu: 'n' };
   function bibOf(t) { return (t && t.bib && BIBS[t.bib]) ? BIBS[t.bib] : null; }
+  // v.234 — ATELIER = LE TERRAIN, PAS L'HÔTE. Les chasubles étaient gardées
+  // par `exoMode()`, c'est-à-dire par la table où l'animation est rangée :
+  // sur un play ouvert en mode Entraînement, le coach retrouvait donc
+  // attaque/défense (du bleu, du gris) et aucun nuancier. Or il n'y a pas
+  // d'attaque ni de défense sur un atelier, quel que soit l'endroit où il
+  // est enregistré. Le vrai critère, c'est le TERRAIN.
+  function tmWorkshop() { return exoMode() || mode() === 'training'; }
   function tmAddPlayer(side) {
     var l = tmPlayers();
     if (l.length >= MAX_PLAYERS) { toast('20 joueuses maximum sur un atelier.', 'err'); return; }
-    if (exoMode()) {
+    if (tmWorkshop()) {
       var used = {}, k2, nn = 1;
       for (k2 = 0; k2 < l.length; k2++) used[l[k2].n] = 1;
       while (used[nn] && nn <= MAX_PLAYERS) nn++;
@@ -3589,7 +3596,7 @@
     document.getElementById('tm-pn').textContent = String(pl.length);
     h = '';
     var SIDE = { atk: 'Attaque', def: 'Défense', neu: 'Neutre' };
-    var _ex = exoMode();
+    var _ex = tmWorkshop();
     // En exercice, la ligne d'une joueuse n'affiche plus un côté (il n'y en a
     // pas) mais son nuancier de chasubles — un tap suffit à la changer.
     document.getElementById('tm-padd-atk').hidden = _ex;
@@ -5532,7 +5539,12 @@
     if (m === mode()) return;
     if (document.body.classList.contains('playing')) exitPlay();
     doc.mode = m;
-    if (m === 'training') tmSync();
+    // v.234 — passer au terrain d'entraînement, c'est passer à l'atelier :
+    // plus d'attaque ni de défense, des chasubles. `exoNeutralize` ne touche
+    // QUE `doc.players` (side/n/bib) — les ids sont intacts, donc positions
+    // et flèches suivent, et les modes ½/▭ retrouvent leurs jetons a1…d5
+    // puisque `rebuildTokens` y repart de `baseTokens()`.
+    if (m === 'training') { tmSync(); exoNeutralize(doc); }
     rebuildTokens();
     accSel = null; tbSel = null; bkSel = null;
     bpath = [];   // chaque mode a SES temps, donc SES branches
@@ -6541,7 +6553,11 @@
     bpath = [];
     cur = 0; pStep = 0; pU = 0; active = null; pending = null;
     accSel = null; tbSel = null; bkSel = null;
-    if (doc.mode === 'training') tmSync();
+    // Même règle au CHARGEMENT qu'à la bascule (cf. setMode) : une animation
+    // d'atelier écrite avant la v.234 porte encore des atk/def, elle doit
+    // s'ouvrir en chasubles comme les autres. Avant `rebuildTokens`, sinon
+    // TOKENS garderait les côtés de l'ancien document.
+    if (doc.mode === 'training') { tmSync(); exoNeutralize(doc); }
     rebuildTokens();
     document.getElementById('b-def').classList.toggle('on', !!doc.defOn);
     syncSizeButtons(); syncLabelButton();
