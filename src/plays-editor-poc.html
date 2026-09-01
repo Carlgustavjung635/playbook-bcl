@@ -2041,7 +2041,14 @@
     if (!t) return null;
     var q = (p || pos())[id];
     if (!q) return null;
-    return { id: t.id, side: t.side, n: t.n, x: q.x, y: q.y };
+    // v.235 — ⚠️ CETTE PROJECTION EST LA SEULE VUE D'UN JETON AU RENDU
+    // (`drawTokens` fait `tokById(TOKENS[i].id)`), donc tout ce qu'elle
+    // n'emporte pas n'existe pas à l'écran. `bib` manquait : les chasubles
+    // étaient bien enregistrées, bien cochées dans le nuancier, et
+    // silencieusement perdues ici — d'où des jetons qui restaient gris
+    // (neutre) ou bleus (attaque) quelle que soit la couleur choisie.
+    // Toute propriété d'apparence ajoutée à un jeton doit passer par ici.
+    return { id: t.id, side: t.side, n: t.n, bib: t.bib || null, color: t.color || null, x: q.x, y: q.y };
   }
   // ── ÉTIQUETTE D'UN JETON (v.175) ─────────────────────────────────────
   // LE seul endroit qui décide de ce qui est écrit sur une pastille.
