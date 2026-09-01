@@ -16173,40 +16173,41 @@ function renderPlays() {
   const isCoach = state.auth.role === 'coach';
   const readOnly = isCurrentSeasonReadOnly();
 
-  // SAISON : filtre les plays par saison via state.seasonPlays. Si aucune
-  // liaison n'existe pour la saison courante (cas migration : DB pas encore
-  // poussée), on retombe sur state.plays complet (mode legacy). Le coach
-  // peut basculer state._showInactivePlays pour voir aussi les plays
-  // désactivés sur cette saison (badge "inactif").
-  const includeInactive = isCoach && !!state._showInactivePlays;
+  // SAISON — v.232 : UN SEUL AXE. Un play est DANS le playbook de la saison,
+  // ou il n'y est pas. Il y avait deux façons de ne pas y être — lien
+  // `season_plays.active = false` (« inactif ») et absence de lien
+  // (« disponible ») — deux sections, deux libellés, deux gris, pour une
+  // seule réalité côté coach : les joueuses ne le voient pas. La différence
+  // est un détail de stockage, elle a cessé d'être une différence à l'écran.
+  //
+  // Règle unique : HORS PLAYBOOK = tout play qui n'a pas de lien ACTIF sur
+  // la saison courante. Le lien inactif et l'absence de lien tombent
+  // ensemble, et `toggleSeasonPlayActive` sait déjà traiter les deux (il
+  // crée le lien s'il manque, le rebascule s'il existe).
   const seasonId = state.currentSeasonId;
   const hasSeasonLinks = !!seasonId && (state.seasonPlays || []).some(sp => sp.seasonId === seasonId);
+  const showOut = isCoach && !!state._showInactivePlays;
 
-  // Plays "linkés" (présents dans season_plays pour cette saison) — actifs
-  // et éventuellement inactifs. On utilise getSeasonPlays qui ajoute
-  // _seasonActive sur chaque play.
+  // Le playbook de la saison : les liens ACTIFS, et rien d'autre.
   const linkedPlays = hasSeasonLinks
-    ? getSeasonPlays(seasonId, { includeInactive })
+    ? getSeasonPlays(seasonId)
     : (state.plays || []);
 
-  // Plays orphelins : pas de link season_plays pour cette saison. Surfacés
-  // au coach uniquement, dans une section dédiée "Plays disponibles".
-  // Cas typique : un play créé après la saison, ou non cloné.
-  let orphanPlays = [];
+  let outPlays = [];
   if (isCoach && hasSeasonLinks && _seasonsLoaded()) {
-    const linkedIds = new Set(
+    const activeIds = new Set(
       (state.seasonPlays || [])
-        .filter(sp => sp.seasonId === seasonId)
+        .filter(sp => sp.seasonId === seasonId && sp.active !== false)
         .map(sp => sp.playId)
     );
-    orphanPlays = (state.plays || []).filter(p => !linkedIds.has(p.id));
+    outPlays = (state.plays || []).filter(p => !activeIds.has(p.id));
   }
 
   let items = linkedPlays.filter(p => p.cat === state.playsCat);
   if (state.playsTag) items = items.filter(p => (p.tags || []).includes(state.playsTag));
 
-  let orphanItems = orphanPlays.filter(p => p.cat === state.playsCat);
-  if (state.playsTag) orphanItems = orphanItems.filter(p => (p.tags || []).includes(state.playsTag));
+  let outItems = outPlays.filter(p => p.cat === state.playsCat);
+  if (state.playsTag) outItems = outItems.filter(p => (p.tags || []).includes(state.playsTag));
 
   // Tags pertinents seulement pour la catégorie courante (basé sur le pool saison)
   const usedTags = [...new Set(linkedPlays.filter(p => p.cat === state.playsCat).flatMap(p => p.tags || []))].sort();
@@ -16222,7 +16223,7 @@ function renderPlays() {
       ${isCoach ? `<div style="padding:0 18px">${_archivedSeasonBanner()}</div>` : ''}
       <div class="section-header">
         <div>
-          <div class="eyebrow-muted">${items.length} ${items.length > 1 ? 'plays' : 'play'}${orphanItems.length > 0 ? ' · ' + orphanItems.length + ' dispo' : ''}</div>
+          <div class="eyebrow-muted">${items.length} ${items.length > 1 ? 'plays' : 'play'}${isCoach && outItems.length > 0 ? ' · ' + outItems.length + ' hors playbook' : ''}</div>
           <h2 class="display-lg mt-2">Playbook</h2>
         </div>
         ${isCoach && canEditSharedLibrary() ? `<button class="btn btn-primary" onclick="editPlay()">+ NOUVEAU</button>` : ''}
@@ -16234,11 +16235,11 @@ function renderPlays() {
         `).join('')}
       </div>
 
-      ${isCoach && hasSeasonLinks ? `
+      ${isCoach && hasSeasonLinks && !readOnly && canEditSharedLibrary() && outItems.length > 0 ? `
         <div style="padding:0 18px 10px">
           <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em">
             <input type="checkbox" ${state._showInactivePlays ? 'checked' : ''} onchange="toggleShowInactivePlays()">
-            <span>Afficher les plays inactifs</span>
+            <span>Afficher les plays hors playbook${outItems.length ? ' (' + outItems.length + ')' : ''}</span>
           </label>
         </div>
       ` : ''}
@@ -16261,28 +16262,29 @@ function renderPlays() {
       ` : `
         <div class="plays-grid">
           ${items.map(p => playTile(p, {
-            seasonActive: p._seasonActive,
-            dimmed: hasSeasonLinks && p._seasonActive === false
+            // La grille principale ne contient QUE le playbook de la saison :
+            // plus rien n'y est grisé, donc plus de badge de statut à lire.
             // NB: pas de toggle « Dans le playbook » ici — il vivait en pied de
             // carte et se faisait mis-tapper (désactivation accidentelle). Le
             // statut saison se règle UNIQUEMENT depuis l'édition du play
             // (renderPlayEditor → togglePlayEditorSeasonActive).
+            seasonActive: true
           })).join('')}
         </div>
       `}
 
-      ${isCoach && orphanItems.length > 0 && !readOnly && canEditSharedLibrary() ? `
+      ${isCoach && showOut && outItems.length > 0 && !readOnly && canEditSharedLibrary() ? `
         <div class="section-header" style="margin-top:18px">
           <div>
-            <div class="eyebrow-muted">Hors playbook de la saison</div>
-            <h2 class="display-md mt-2">Plays disponibles</h2>
+            <div class="eyebrow-muted">Invisibles pour les joueuses</div>
+            <h2 class="display-md mt-2">Hors playbook</h2>
           </div>
         </div>
         <div style="padding:0 18px 10px;font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';line-height:1.5">
           Ces plays existent dans le catalogue mais ne sont pas dans le playbook de la saison courante. Ajoute-les pour les rendre visibles aux joueuses.
         </div>
         <div class="plays-grid">
-          ${orphanItems.map(p => playTile(p, {
+          ${outItems.map(p => playTile(p, {
             seasonOrphan: true,
             dimmed: true,
             seasonToggleBtn: _playbookToggleBtn(p.id, false, true)
@@ -16821,13 +16823,15 @@ async function _autoDetectVimeoOrientations(playId) {
 // play courant. Pas de wrapping (bords = flèche grisée).
 function _playNavList(cur) {
   const isCoach = state.auth && state.auth.role === 'coach';
-  const includeInactive = isCoach && !!state._showInactivePlays;
+  // v.232 — MÊME RÈGLE QUE LA GRILLE, sinon les flèches ◀▶ traversent des
+  // plays que l'écran d'où l'on vient n'affichait pas.
+  const showOut = isCoach && !!state._showInactivePlays;
   const seasonId = state.currentSeasonId;
   const hasSeasonLinks = !!seasonId && (state.seasonPlays || []).some(sp => sp.seasonId === seasonId);
-  let pool = hasSeasonLinks ? getSeasonPlays(seasonId, { includeInactive }) : (state.plays || []);
-  if (isCoach && hasSeasonLinks && _seasonsLoaded()) {
-    const linkedIds = new Set((state.seasonPlays || []).filter(sp => sp.seasonId === seasonId).map(sp => sp.playId));
-    pool = pool.concat((state.plays || []).filter(p => !linkedIds.has(p.id)));
+  let pool = hasSeasonLinks ? getSeasonPlays(seasonId) : (state.plays || []);
+  if (isCoach && showOut && hasSeasonLinks && _seasonsLoaded()) {
+    const activeIds = new Set((state.seasonPlays || []).filter(sp => sp.seasonId === seasonId && sp.active !== false).map(sp => sp.playId));
+    pool = pool.concat((state.plays || []).filter(p => !activeIds.has(p.id)));
   }
   let list = pool.filter(x => x.cat === cur.cat);
   if (state.playsTag && (cur.tags || []).includes(state.playsTag)) {
@@ -53503,7 +53507,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.232';
+const APP_VERSION = '2026-08-19.233';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
