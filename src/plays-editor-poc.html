@@ -2787,7 +2787,12 @@
   // exotique). Un exercice d'entraînement, lui, EST un atelier : le drapeau
   // n'a rien à y dire, sinon un coach qui ouvre son exo depuis la liste
   // tomberait sur un demi-terrain vide sans comprendre pourquoi.
-  function tmAvailable() { return !!trexId || tmEnabled(); }
+  // v.232 — `wantTrain` (play de catégorie « Exercice ») ouvre le mode au même
+  // titre que `trexId` : dans les deux cas c'est l'HÔTE qui sait qu'on dessine
+  // un atelier, et lui demander en plus de cocher un drapeau local serait lui
+  // faire deviner. NB : les deux vars sont déclarées plus bas — hoistées à
+  // `undefined` ici, donc falsy, jamais une exception.
+  function tmAvailable() { return !!trexId || !!wantTrain || tmEnabled(); }
   // Mode EXERCICE : le terrain est imposé, l'arbre de variantes n'existe pas.
   function exoMode() { return !!trexId; }
   // Aplatir = retirer `branches` partout, pas seulement à la racine. Un
@@ -7046,6 +7051,12 @@
   var playId = Q.get('play') || null;      // le play auquel on est rattaché
   var wantAnim = Q.get('anim') || null;    // l'animation à ouvrir, s'il y en a
   var wantView = Q.get('mode') === 'view'; // ouvrir directement en lecture
+  // v.232 — `train=1` : l'HÔTE demande le terrain d'entraînement. Posé par
+  // l'app quand le play est de catégorie « Exercice ». Ce n'est pas un
+  // troisième hôte (l'animation vit toujours dans plays.animations), juste le
+  // terrain par DÉFAUT d'une animation neuve — et l'autorisation d'y revenir
+  // sans passer par le drapeau local `pb_training_mode`.
+  var wantTrain = Q.get('train') === '1';
   // JALON 4.5 — mode « exo d'un plan d'entraînement ». Même éditeur, autre
   // hôte : l'animation vit alors dans training_plans.plan.exercises[].animation
   // (jsonb déjà existant, aucune migration). Un exo porte N animations, et
@@ -8450,6 +8461,14 @@
     offerDraft();
   } else {
     setContext(planId ? 'chargement de l\'exercice…' : 'chargement du play…');
+    // v.232 — animation NEUVE d'un play « Exercice » : on démarre sur le
+    // terrain d'entraînement. Jamais quand `anim=` est là — le mode d'une
+    // animation existante est dans son JSON, et l'écraser ici retournerait
+    // un atelier déjà dessiné en demi-terrain sous les doigts du coach.
+    // `setMode` ne resynchronise PAS la barre (le 🧰 est en `.tmonly`, donc
+    // piloté par `mode()`) : sans ce second appel, l'atelier serait ouvert
+    // mais son bouton resterait caché.
+    if (wantTrain && !wantAnim) { try { setMode('training'); tmChromeSync(); } catch (e) {} }
     // mode=view : on masque l'éditeur AVANT le fetch. Sinon la joueuse voit la
     // barre d'outils clignoter le temps du chargement — et surtout elle peut
     // la toucher.

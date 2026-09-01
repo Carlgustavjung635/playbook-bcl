@@ -16224,7 +16224,6 @@ function renderPlays() {
         <div>
           <div class="eyebrow-muted">${items.length} ${items.length > 1 ? 'plays' : 'play'}${orphanItems.length > 0 ? ' · ' + orphanItems.length + ' dispo' : ''}</div>
           <h2 class="display-lg mt-2">Playbook</h2>
-          ${isCoach ? _pbEditorV2Row() : ''}
         </div>
         ${isCoach && canEditSharedLibrary() ? `<button class="btn btn-primary" onclick="editPlay()">+ NOUVEAU</button>` : ''}
       </div>
@@ -16321,6 +16320,14 @@ function openPbEditorV2(playId, animId, mode) {
   if (playId) q.push('play=' + encodeURIComponent(playId));
   if (animId) q.push('anim=' + encodeURIComponent(animId));
   if (mode) q.push('mode=' + encodeURIComponent(mode));
+  // v.232 — UN PLAY DE CATÉGORIE « EXERCICE » EST UN ATELIER, pas une
+  // combinaison : son éditeur s'ouvre en mode Entraînement (paniers
+  // d'atelier, jusqu'à 20 joueuses, multi-ballon, plots, chasubles). C'est la
+  // porte que le coach cherchait dans l'onglet EXERCICE du Playbook.
+  // `train=1` n'est qu'un DÉFAUT d'ouverture : une animation déjà dessinée
+  // porte son terrain dans son propre JSON, et `fromJSON` reste seul juge.
+  const _p = (typeof state !== 'undefined' && state.plays || []).find(x => x && x.id === playId);
+  if (_p && _p.cat === 'exo') q.push('train=1');
   _pbEditorThemeParams(q);
   location.href = '/src/plays-editor-poc.html' + (q.length ? '?' + q.join('&') : '');
 }
@@ -16378,17 +16385,13 @@ function _pbEditorThemeParams(q) {
     }
   } catch (_) {}
 }
-function _pbEditorV2Row() {
-  const on = pbEditorV2Enabled();
-  return `
-    <div style="margin-top:10px;display:flex;flex-wrap:wrap;align-items:center;gap:10px">
-      <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.05em">
-        <input type="checkbox" ${on ? 'checked' : ''} onchange="togglePbEditorV2(this.checked)">
-        <span>Éditeur de plays v2 (beta)</span>
-      </label>
-      ${on ? `<button class="btn btn-secondary" style="font-size:12px" onclick="openPbEditorV2()">🆕 Nouvel éditeur (beta)</button>` : ''}
-    </div>`;
-}
+// v.232 — `_pbEditorV2Row()` retiré. La case « éditeur v2 (beta) » et son
+// raccourci bac à sable n'ouvraient RIEN d'utile : une animation se crée
+// depuis la fiche du play qui la portera (« 🆕 Créer une animation »), et le
+// bac à sable ne pouvait rien publier. Un réglage qui ne règle plus rien +
+// un bouton en cul-de-sac, en tête de la page la plus lue de l'app.
+// `pbEditorV2Enabled` / `togglePbEditorV2` survivent : d'autres réglages
+// pourront les rallumer, mais plus personne ne les lit au rendu.
 
 // ── EXERCICES D'ENTRAÎNEMENT (v.225) ─────────────────────────────────────
 // Même éditeur que les plays, autre HÔTE : la table `training_exercises`
@@ -16642,11 +16645,12 @@ function _exoRefEditorBlock(ex) {
   if (lk.state === 'none') {
     return `
       <div style="margin:14px 0;padding:11px 12px;background:var(--bg-2);border:1px dashed var(--border);border-radius:8px">
-        <div style="font-size:10px;font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em;color:var(--ink-3);margin-bottom:8px">Bibliothèque d'exercices</div>
+        <div style="font-size:10px;font-family:'JetBrains Mono';text-transform:uppercase;letter-spacing:0.06em;color:var(--ink-3);margin-bottom:8px">🏋️ Exercice dessiné</div>
         <div style="display:flex;flex-wrap:wrap;gap:6px">
-          <button class="btn btn-secondary" style="font-size:11px" onclick="openExoRefPicker()">🔗 Attacher un exercice de la bibliothèque</button>
-          <button class="btn btn-secondary" style="font-size:11px" onclick="createExoRefForPlan()">🆕 Créer un nouvel exercice</button>
+          <button class="btn btn-primary" style="font-size:11px" onclick="createExoRefForPlan()">🏋️ Dessiner cet exercice</button>
+          <button class="btn btn-secondary" style="font-size:11px" onclick="openExoRefPicker()">🔗 En reprendre un</button>
         </div>
+        <div style="font-size:10px;color:var(--ink-4);margin-top:7px;line-height:1.5">Ouvre l'éditeur d'entraînement : terrain, paniers d'atelier, jusqu'à 20 joueuses, plots et chasubles.</div>
       </div>`;
   }
   const missing = lk.state === 'missing';
@@ -53499,7 +53503,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-08-19.231';
+const APP_VERSION = '2026-08-19.232';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
