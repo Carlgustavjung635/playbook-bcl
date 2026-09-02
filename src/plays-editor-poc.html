@@ -430,6 +430,10 @@
      cran (80 %). Une opacité, pas un filtre : gratuit au compositing. */
   .token.active .halo{opacity:.9}
   #lay-tok.has-active .token:not(.active){opacity:.8}
+  /* v.237 — outil Passe en atelier : une passe part FORCÉMENT d'un ballon,
+     donc les mains vides sont grisées tant que la passeuse n'est pas choisie.
+     Porté par #lay-tok pour l'emporter sur la règle .has-active ci-dessus. */
+  #lay-tok .token.nopass{opacity:.3}
   /* Retour visuel au doigt : halo violet, aucune transition (une transition
      ajouterait de la latence perçue pendant le déplacement). */
   .token.drag{cursor:grabbing}
@@ -3371,11 +3375,20 @@
     toast('🏀 → ' + (String(target).charAt(0) === '@' ? 'panier' : labelOf(target)), 'ok');
     return true;
   }
-  // Passe d'un ballon d'atelier de `from` vers `to`. Renvoie false SEULEMENT
-  // quand la passe est refusée (receveuse pleine) : la flèche n'est alors pas
-  // tracée non plus, sinon le dessin dirait une passe qui n'a pas eu lieu.
-  // Une passeuse sans ballon renvoie true — la flèche reste un dessin licite,
-  // c'est ce qu'on trace pour préparer un enchaînement.
+  // Nombre de ballons d'atelier dans les mains de `id` AU TEMPS COURANT.
+  // `m` (l'état ballon déjà calculé) est optionnel : le passer évite de
+  // rembobiner tous les temps une fois par jeton dans syncPassable().
+  function tmBallsOf(id, m) {
+    var l = tmBallList(), n = 0, i;
+    if (!m) m = ballsAt(cur);
+    for (i = 0; i < l.length; i++) if (m[l[i].id] === id) n++;
+    return n;
+  }
+  // Passe d'un ballon d'atelier de `from` vers `to`. Renvoie false quand la
+  // passe est refusée — passeuse les mains vides ou receveuse déjà pleine :
+  // la flèche n'est alors pas tracée non plus, sinon le dessin dirait une
+  // passe qui n'a pas eu lieu. Le ballon est TRANSFÉRÉ (une clé ballon n'a
+  // qu'une valeur : l'écrire chez la receveuse le retire de la passeuse).
   function tmPassBall(from, to) {
     if (!from || !to || from === to) return true;
     var m = ballsAt(cur), list = tmBallList(), mine = [], n2 = 0, i, bid;
@@ -3384,7 +3397,10 @@
       if (m[bid] === from) mine.push(bid);
       else if (m[bid] === to) n2++;
     }
-    if (!mine.length) return true;
+    if (!mine.length) {
+      toast(labelOf(from) + " n'a pas de ballon : rien à passer.", 'err');
+      return false;
+    }
     if (n2 >= BALL_PER_PLAYER) {
       toast(labelOf(to) + ' tient déjà 2 ballons.', 'err');
       return false;
@@ -3394,7 +3410,11 @@
     var pick = (tbSel && mine.indexOf(tbSel) >= 0) ? tbSel : mine[0];
     stBalls(step())[pick] = to;
     drawTrainBalls(); tbListSync();
-    toast('🏀 ' + labelOf(from) + ' → ' + labelOf(to), 'ok');
+    // UNE passe = UN ballon. Une joueuse qui en tient deux doit donc en faire
+    // deux pour avoir les mains vides : le reste-t-il est dit tout de suite,
+    // sinon le coach croirait la passeuse libérée alors qu'elle porte encore.
+    var left = mine.length - 1;
+    toast('🏀 ' + labelOf(from) + ' → ' + labelOf(to) + (left ? ' (il lui en reste ' + left + ')' : ''), 'ok');
     return true;
   }
   function tbShoot() {
@@ -3438,6 +3458,7 @@
         + '<text class="tb-n" x="' + f(sp.x + 1) + '" y="' + f(sp.y + 10.5) + '">×' + byB[k].length + '</text>';
     }
     layB.innerHTML = html;
+    syncPassable();
   }
   var tbRaf = 0;
   function tbSoon() {
@@ -4118,13 +4139,21 @@
     }
   }
 
+  // Grise les jetons qui ne peuvent pas être passeuses. Rejoué à chaque
+  // changement d'outil, de temps et d'état ballon : un grisé périmé mentirait.
+  function syncPassable() {
+    var on = (tool === 'pass' && !pending && !playing && mode() === 'training');
+    var m = on ? ballsAt(cur) : null, id;
+    for (id in tokEl) tokEl[id].classList.toggle('nopass', !!(on && !tmBallsOf(id, m)));
+  }
+
   function syncSelection() {
     var id;
     for (id in tokEl) {
       tokEl[id].classList.toggle('active', id === active);
       tokEl[id].classList.toggle('pending', id === pending);
     }
-    syncHl();
+    syncHl(); syncPassable();
     if (layT) layT.classList.toggle('has-active', !!(active && tokEl[active]));
     document.getElementById('b-ball').disabled = !(active && tokEl[active]) || playing;
   }
@@ -4134,6 +4163,7 @@
   function syncBall() {
     var h = holderAt(cur), id;
     for (id in tokEl) tokEl[id].classList.toggle('has-ball', id === h);
+    syncPassable();
     syncHl();   // syncBall() est rejoué à CHAQUE changement de temps : c'est le
                 // seul point d'accroche qui garantit une pastille jamais périmée.
   }
@@ -4582,6 +4612,12 @@
       // Un seul tir par temps : re-taper la tireuse annule le tir.
       step().shot = (step().shot === id) ? null : id;
       drawArrows(); syncInfo(); syncBall(); renderTimeline(); touch(); setHint();
+      return;
+    }
+    // v.237 — en atelier, la passeuse doit tenir un ballon : on refuse dès la
+    // DÉSIGNATION (le jeton est d'ailleurs grisé), pas au moment du transfert.
+    if (!pending && tool === 'pass' && mode() === 'training' && !tmBallsOf(id)) {
+      toast(labelOf(id) + " n'a pas de ballon.", 'err');
       return;
     }
     if (!pending) { pending = id; syncSelection(); setHint(); return; }
