@@ -3342,6 +3342,7 @@
     // Il naît au panier principal : un ballon qui apparaîtrait dans les mains
     // d'une joueuse choisie au hasard ferait mentir le compteur « 2 max ».
     stBalls(rootSteps()[0])[b.id] = '@main';
+    setTool('select');
     tbSel = b.id;
     drawTrainBalls(); tbListSync(); touch();
   }
@@ -3924,7 +3925,7 @@
     document.getElementById('tb-add').addEventListener('click', tbAdd);
     document.getElementById('tb-list').addEventListener('click', function (e) {
       var el = e.target, id = el.getAttribute && el.getAttribute('data-bsel');
-      if (id) { tbSel = (tbSel === id) ? null : id; tbListSync(); setHint(); return; }
+      if (id) { var arm = (tbSel === id) ? null : id; if (arm) setTool('select'); tbSel = arm; tbListSync(); setHint(); return; }
       id = el.getAttribute && el.getAttribute('data-bshoot');
       if (id) { tbSel = id; tbShoot(); return; }
       id = el.getAttribute && el.getAttribute('data-bdel');
@@ -4559,7 +4560,11 @@
   function onTokenClick(id) {
     // v.225 — un ballon armé dans le panneau 🏀 capte le tap suivant : « ce
     // ballon, à elle ». Il ne salit aucun outil existant, et se désarme après.
-    if (tbSel && mode() === 'training') { if (tbAssign(id)) tbSel = null; tbListSync(); setHint(); return; }
+    // v.236 — l'interception ne vaut QUE sous l'outil Sélection. Armée sous
+    // l'outil Passe, elle mangeait le 1er tap (le ballon se posait sur la
+    // passeuse au lieu de la désigner), `pending` restait vide et la passe ne
+    // partait jamais : le bug « les passes multi-ballon ne marchent pas ».
+    if (tbSel && tool === 'select' && mode() === 'training') { if (tbAssign(id)) tbSel = null; tbListSync(); setHint(); return; }
     if (playing) return;
     if (tool === 'select') {
       active = (active === id) ? null : id;
@@ -5504,6 +5509,10 @@
   function setTool(t) {
     if (playing || document.body.classList.contains('playing')) exitPlay();
     tool = t;
+    // Un ballon reste armé tant qu'on ne l'a pas posé ; prendre un outil de
+    // dessin dit « je dessine », pas « je pose » — on le désarme donc ici,
+    // sinon il capterait le tap destiné à l'outil (cf. onTokenClick).
+    if (t !== 'select' && tbSel) { tbSel = null; try { tbListSync(); } catch (_) {} }
     pending = null;
     if (t !== 'select') active = null;
     document.body.setAttribute('data-tool', t);
