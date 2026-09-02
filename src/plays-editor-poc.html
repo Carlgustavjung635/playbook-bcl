@@ -871,8 +871,11 @@
      l'est pas est libre. */
   .tmext { opacity: .42; }
   /* Panier d'atelier sélectionné : liseré pointillé + anneau accentué. */
-  #lay-court .tb.sel .hp { stroke: var(--acc, #22D3EE); }
-  #lay-court .tb .bksel { fill: none; stroke: var(--acc, #22D3EE); stroke-width: .9; stroke-dasharray: 2.5 2; opacity: .95; }
+  /* v.238 — les paniers vivent dans #lay-court (3D) OU dans #lay-bk (2D, remontes
+     au-dessus de tout) : chaque regle doit couvrir LES DEUX, sinon deplacer le
+     panier tuerait sa selection et surtout son .hit (donc son glisser). */
+  #lay-court .tb.sel .hp, #lay-bk .tb.sel .hp { stroke: var(--acc, #22D3EE); }
+  #lay-court .tb .bksel, #lay-bk .tb .bksel { fill: none; stroke: var(--acc, #22D3EE); stroke-width: .9; stroke-dasharray: 2.5 2; opacity: .95; }
   /* Nuancier de chasubles dans la liste des joueuses. */
   .tmlist .bibs { display: flex; gap: 3px; align-items: center; }
   .tmlist .bsw { width: 16px; height: 16px; border-radius: 50%; padding: 0; cursor: pointer;
@@ -900,8 +903,8 @@
 .token.neu .halo { stroke: var(--player); }
 #lay-acc .acc { cursor: move; }
 #lay-acc .acc.sel .selring { stroke: var(--acc, #22D3EE); stroke-width: 1.4; }
-#lay-court .tb .hit, #lay-acc .acc .hit { pointer-events: all; }
-#lay-court .tb:not(.main) { cursor: move; }
+#lay-court .tb .hit, #lay-bk .tb .hit, #lay-acc .acc .hit { pointer-events: all; }
+#lay-court .tb:not(.main), #lay-bk .tb:not(.main) { cursor: move; }
 #lay-ball .tb-n { font-size: 7px; font-weight: 800; fill: var(--ink, #E6EDF6); paint-order: stroke;
   stroke: rgba(0,0,0,.55); stroke-width: 1.6; }
 </style>
@@ -3526,10 +3529,20 @@
       els = layX.querySelectorAll('.acc');
       for (i = 0; i < els.length; i++) tmBindOne(els[i], 'acc', els[i].getAttribute('data-acc'));
     }
-    if (layC) {
-      els = layC.querySelectorAll('.tb:not(.main)');
-      for (i = 0; i < els.length; i++) tmBindOne(els[i], 'bk', els[i].getAttribute('data-bk'));
+    // v.238 — en 2D les paniers sont REMONTÉS au-dessus de tout. Ils sont
+    // écrits par courtOf(), donc ils naissent dans #lay-court (le parquet) et
+    // chaque repeinte du terrain les y ramène. Les relever ICI couvre d'un
+    // seul geste les six endroits qui repeignent le terrain — en oublier un
+    // laisserait un panier fantôme sous les joueuses. #lay-bk n'existe qu'en
+    // 2D, où floorTf() est l'identité : rien à transformer.
+    var bkTop = document.getElementById('lay-bk');
+    if (bkTop && layC) {
+      bkTop.innerHTML = '';   // sinon la repeinte du terrain les DUPLIQUE
+      els = layC.querySelectorAll('.tb');
+      for (i = 0; i < els.length; i++) bkTop.appendChild(els[i]);
     }
+    els = svg.querySelectorAll('.tb:not(.main)');
+    for (i = 0; i < els.length; i++) tmBindOne(els[i], 'bk', els[i].getAttribute('data-bk'));
   }
   function tmBindOne(el, kind, id) {
     if (el._tmb) return;
@@ -3969,13 +3982,24 @@
     document.documentElement.style.setProperty('--dribble-y', f(PR * 0.30) + 'px');
     svg.setAttribute('viewBox', MODES[mode()].vb);
     svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    // v.238 — L'ORDRE DES CALQUES DÉPEND DE LA VUE.
+    //   3D : accessoires PEINTS AU SOL (v.225) — sous les flèches et sous les
+    //        jetons. C'est la profondeur qui parle : un plot est du matériel
+    //        posé sur le parquet, pas un acteur, et le survoler le trahirait.
+    //   2D : vue du dessus, aucune profondeur à rendre — ce qui compte est de
+    //        VOIR le matériel. Accessoires et ballons passent donc au-dessus
+    //        des joueuses, et les paniers au-dessus de tout (#lay-bk, que
+    //        tmAttach() remplit en les remontant de #lay-court).
+    // Les plays existants sont donc rendus à l'identique en 3D.
+    var flat2d = (view === '2d');
     svg.innerHTML = defs()
       + '<g id="lay-court">' + VIEWS[view].court(mode()) + '</g>'
       + '<g id="lay-zone"></g>'
-      // v.225 — les accessoires sont PEINTS AU SOL (sous les flèches, sous les
-      // jetons) : un plot est du matériel posé sur le parquet, pas un acteur.
-      + '<g id="lay-acc"></g>'
-      + '<g id="lay-arw"></g><g id="lay-tok"></g><g id="lay-ball"></g><g id="lay-play"></g>'
+      + (flat2d ? '' : '<g id="lay-acc"></g>')
+      + '<g id="lay-arw"></g><g id="lay-tok"></g>'
+      + (flat2d ? '<g id="lay-acc"></g>' : '')
+      + '<g id="lay-ball"></g><g id="lay-play"></g>'
+      + (flat2d ? '<g id="lay-bk"></g>' : '')
       // Poignées de zone ET légende du viewer : au-DESSUS de tout, sinon un
       // jeton posé sur la poignée la rendrait impossible à attraper.
       + '<g id="lay-zh"></g>'
