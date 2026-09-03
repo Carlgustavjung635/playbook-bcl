@@ -905,6 +905,32 @@
 #lay-acc .acc.sel .selring { stroke: var(--acc, #22D3EE); stroke-width: 1.4; }
 #lay-court .tb .hit, #lay-bk .tb .hit, #lay-acc .acc .hit { pointer-events: all; }
 #lay-court .tb:not(.main), #lay-bk .tb:not(.main) { cursor: move; }
+/* v.239 — CIBLE DE TIR. Un atelier porte jusqu'a 11 paniers : le tir ne peut
+   pas deviner lequel. La zone de tap d'un panier n'existe donc QUE pendant
+   qu'un tir attend sa cible (body.bkpick), sinon elle volerait les taps
+   destines aux joueuses postees sous le cercle — les paniers sont le calque
+   du DESSUS en 2D depuis la v.238. */
+#lay-court .tb .bkhit, #lay-bk .tb .bkhit { pointer-events: none; }
+body.bkpick #lay-court .tb .bkhit, body.bkpick #lay-bk .tb .bkhit { pointer-events: all; }
+body.bkpick #lay-court .tb .hp, body.bkpick #lay-bk .tb .hp { stroke: var(--acc, #22D3EE); }
+/* Le panier principal n'a pas de .hp (il est dessine par le terrain) : c'est
+   cet anneau-la qui le montre comme cible pendant le choix. */
+#lay-court .tb .bkring, #lay-bk .tb .bkring { fill: none; stroke: var(--acc, #22D3EE);
+  stroke-width: .9; stroke-dasharray: 2.5 2; opacity: 0; pointer-events: none; }
+body.bkpick #lay-court .tb .bkring, body.bkpick #lay-bk .tb .bkring { opacity: .95; }
+/* Selecteur flottant (quel ballon ? quel panier ?) : en HTML AU-DESSUS du SVG,
+   jamais dans un calque — un menu doit rester lisible quelle que soit
+   l'echelle du terrain, et un <foreignObject> ne survit pas a l'export. */
+#bp-bd { position: fixed; inset: 0; z-index: 78; background: transparent; }
+#bp { position: fixed; z-index: 79; display: flex; gap: 6px; padding: 6px; border-radius: 12px;
+  background: var(--card, #131A24); border: 1px solid rgba(255,255,255,.14);
+  box-shadow: 0 10px 26px rgba(0,0,0,.5); }
+#bp button { min-width: 46px; height: 40px; font-size: 15px; font-weight: 800; border-radius: 10px;
+  border: 1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.07);
+  color: var(--ink, #E6EDF6); cursor: pointer; }
+#bp button:active { transform: scale(.95); }
+/* [hidden] par defaut ne pese rien face a display:flex : il faut le dire. */
+#bp[hidden], #bp-bd[hidden] { display: none; }
 #lay-ball .tb-n { font-size: 7px; font-weight: 800; fill: var(--ink, #E6EDF6); paint-order: stroke;
   stroke: rgba(0,0,0,.55); stroke-width: 1.6; }
 </style>
@@ -1215,6 +1241,11 @@
   <div class="accgrid" id="ac-grid"></div>
   <div class="row" style="margin-top:8px"><button class="btn wide" id="ac-close">Fermer</button></div>
 </div>
+
+<!-- v.239 — Sélecteur flottant : quel ballon part ? Le voile capte le tap
+     hors menu pour refermer sans rien choisir. -->
+<div id="bp-bd" hidden></div>
+<div id="bp" hidden></div>
 
 <div class="sheet" id="sh-balls">
   <h2>🏀 Ballons de l'atelier</h2>
@@ -2028,6 +2059,19 @@
   // Terrain complet : on tire sur le panier le PLUS PROCHE de la tireuse.
   // Sans ça, un play basculé par le miroir (⇋) continuerait d'attaquer le
   // panier de droite et le tir traverserait tout le terrain.
+  // Cible du tir du temps `st` : le panier DESIGNE par le coach quand il y en
+  // a un (atelier, v.239), sinon la regle historique — le plus proche a
+  // l'entrainement, le panier du camp en plein terrain. Un shotBk qui ne
+  // designe plus aucun panier (panier supprime) retombe donc proprement sur
+  // l'ancien comportement au lieu de viser un point qui n'existe plus.
+  function shotHoop(st, from) {
+    if (mode() === 'training' && st && st.shotBk) {
+      var l = tmBaskets(), i;
+      for (i = 0; i < l.length; i++)
+        if (String(l[i].id) === String(st.shotBk)) return { x: l[i].x, y: l[i].y };
+    }
+    return hoop(from);
+  }
   function hoop(from) {
     var m = MODES[mode()];
     // v.225 — a l'entrainement il y a de 1 a 11 paniers : on vise le plus
@@ -3049,13 +3093,22 @@
   // cercle à l'origine) : la même géométrie que le demi-terrain, mais posable
   // n'importe où et orientable — c'est tout ce qui distingue un panier
   // d'atelier d'un panier officiel.
+  function tmBasketHit(b) {
+    return '<g class="tb main" data-bk="' + b.id + '"'
+      + ' transform="translate(' + f(b.x) + ' ' + f(b.y) + ')">'
+      + '<circle class="bkring" r="7"/>'
+      + '<circle class="bkhit" r="10" fill="transparent"/></g>';
+  }
   function tmBasketMarkup(b) {
     return '<g class="tb' + (b.main ? ' main' : '') + (bkSel === b.id ? ' sel' : '') + '" data-bk="' + b.id + '"'
       + ' transform="translate(' + f(b.x) + ' ' + f(b.y) + ') rotate(' + f(b.a) + ')">'
       + '<line class="hp" x1="-9" y1="-3.75" x2="9" y2="-3.75"/>'
       + '<line class="hp" x1="0" y1="-3.75" x2="0" y2="-2.25"/>'
       + '<circle class="hp" cx="0" cy="0" r="2.25"/>'
-      + (b.main ? '' : '<circle class="hit" r="10" fill="transparent"/>')
+      // v.239 — le panier principal n'est pas deplacable (pas de .hit) mais il
+      // reste une CIBLE de tir legitime : il lui faut donc sa propre zone de
+      // tap, neutralisee hors choix de cible par le CSS (.bkhit).
+      + (b.main ? '<circle class="bkhit" r="10" fill="transparent"/>' : '<circle class="hit" r="10" fill="transparent"/>')
       + (!b.main && bkSel === b.id ? '<circle class="bksel" r="11"/>' : '')
       + '</g>';
   }
@@ -3079,8 +3132,12 @@
       +  '</g>';
     // Le panier principal est déjà dessiné par le terrain officiel : on ne
     // repasse par-dessus que les paniers d'ATELIER.
+    // v.239 — mais il doit être VISABLE comme les autres : il reçoit donc une
+    // cible de tap invisible, portant la même classe .tb que les paniers
+    // d'atelier (même liaison, même remontée de calque en 2D, même
+    // neutralisation hors choix de cible).
     var bk = tmBaskets();
-    for (i = 0; i < bk.length; i++) if (!bk[i].main) s += tmBasketMarkup(bk[i]);
+    for (i = 0; i < bk.length; i++) s += bk[i].main ? tmBasketHit(bk[i]) : tmBasketMarkup(bk[i]);
     return s;
   }
 
@@ -3184,7 +3241,7 @@
     tmWalkSteps(function (st) {
       delete st.pos[id];
       st.arw = (st.arw || []).filter(function (a) { return a.from !== id && a.to !== id; });
-      if (st.shot === id) st.shot = null;
+      if (st.shot === id) { st.shot = null; delete st.shotBk; }
       if (Array.isArray(st.highlights)) st.highlights = st.highlights.filter(function (h) { return h && h.player !== id; });
       if (st.balls) for (var k in st.balls) if (st.balls[k] === id) delete st.balls[k];
     });
@@ -3412,6 +3469,8 @@
     // de la passeuse, c'est CELUI-LÀ qui part : le coach a désigné lequel.
     var pick = (tbSel && mine.indexOf(tbSel) >= 0) ? tbSel : mine[0];
     stBalls(step())[pick] = to;
+    // Le ballon est parti : le laisser armé le ferait re-partir au tap suivant.
+    tbSel = null;
     drawTrainBalls(); tbListSync();
     // UNE passe = UN ballon. Une joueuse qui en tient deux doit donc en faire
     // deux pour avoir les mains vides : le reste-t-il est dit tout de suite,
@@ -3420,13 +3479,110 @@
     toast('🏀 ' + labelOf(from) + ' → ' + labelOf(to) + (left ? ' (il lui en reste ' + left + ')' : ''), 'ok');
     return true;
   }
+  // ── Choisir : quel ballon ? quel panier ? ────────────────────────────
+  // v.239 — la passe et le tir prenaient « le premier ballon » et « le panier
+  // le plus proche ». Ce n'etaient pas des choix, c'etaient des devinettes :
+  // une joueuse peut tenir DEUX ballons, un atelier porter ONZE paniers. Des
+  // qu'il y a un choix, on le POSE au coach ; quand il n'y en a pas, aucun
+  // clic de plus (choisir entre une seule chose est une friction pure).
+  var bpEl = null, bpBd = null;
+  function bpClose() { if (bpEl) bpEl.hidden = true; if (bpBd) bpBd.hidden = true; }
+  function bpOpen(anchor, items, cb) {
+    if (!bpEl) { bpEl = document.getElementById('bp'); bpBd = document.getElementById('bp-bd'); }
+    if (!bpEl || !bpBd) { cb(items[0].v); return; }   // sans menu, on ne bloque pas le geste
+    var h = '', i;
+    for (i = 0; i < items.length; i++)
+      h += '<button type="button" data-i="' + i + '">' + items[i].lbl + '</button>';
+    bpEl.innerHTML = h;
+    bpEl.hidden = false; bpBd.hidden = false;
+    // Pose AU-DESSUS du jeton, rabattu dessous s'il n'y a pas la place, et
+    // toujours borne a la fenetre : un menu hors ecran est un menu perdu.
+    var r = anchor && anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : null;
+    var bw = bpEl.offsetWidth, bh = bpEl.offsetHeight;
+    var x = r ? r.left + r.width / 2 - bw / 2 : (window.innerWidth - bw) / 2;
+    var y = r ? r.top - bh - 10 : (window.innerHeight - bh) / 2;
+    if (r && y < 8) y = r.bottom + 10;
+    bpEl.style.left = Math.round(clamp(x, 8, Math.max(8, window.innerWidth - bw - 8))) + 'px';
+    bpEl.style.top = Math.round(clamp(y, 8, Math.max(8, window.innerHeight - bh - 8))) + 'px';
+    bpEl.onclick = function (e) {
+      var k = e.target && e.target.getAttribute ? e.target.getAttribute('data-i') : null;
+      if (k === null) return;
+      bpClose(); cb(items[+k].v);
+    };
+    bpBd.onclick = bpClose;
+  }
+  // Ballons tenus par `id` au temps courant, NUMEROTES comme dans le panneau
+  // 🏀 (l'ordre de doc.balls) : le coach lit « ballon 2 » aux deux endroits.
+  function tmHeldBalls(id) {
+    var m = ballsAt(cur), l = tmBallList(), out = [], i;
+    for (i = 0; i < l.length; i++)
+      if (m[l[i].id] === id) out.push({ v: l[i].id, lbl: '🏀 ' + (i + 1) });
+    return out;
+  }
+  // Arme le ballon qui va partir, en demandant LEQUEL s'il y a le choix.
+  // Renvoie false quand la joueuse n'a pas de ballon — c'est le refus de la
+  // regle « une passe / un tir part FORCEMENT d'un ballon ».
+  function tmArmBall(id, cb) {
+    var held = tmHeldBalls(id);
+    if (!held.length) return false;
+    if (held.length === 1) { tbSel = held[0].v; tbListSync(); if (cb) cb(); return true; }
+    bpOpen(tokEl[id], held, function (bid) {
+      tbSel = bid; tbListSync(); setHint(); if (cb) cb();
+    });
+    return true;
+  }
+
+  // ── Tir d'atelier : deux temps, tireuse puis PANIER ──────────────────
+  var tmShotFrom = null;
+  function tmShotArm(id) {
+    tmShotFrom = id || null;
+    // Le CSS suit cet etat : les paniers s'accentuent et deviennent tapables
+    // UNIQUEMENT tant qu'un tir attend sa cible.
+    document.body.classList.toggle('bkpick', !!tmShotFrom);
+    syncPassable(); setHint();
+  }
+  function tmShotTap(id) {
+    var st = step();
+    if (st.shot === id) {
+      st.shot = null; delete st.shotBk; tmShotArm(null); tbSel = null; tbListSync();
+      drawArrows(); syncInfo(); syncBall(); renderTimeline(); touch();
+      toast('Tir annulé — le ballon reste où il est.', 'ok');
+      return;
+    }
+    if (!tmArmBall(id, null)) { toast(labelOf(id) + " n'a pas de ballon : rien à tirer.", 'err'); return; }
+    tmShotArm(id);
+    toast('🎯 ' + labelOf(id) + ' — tape le panier visé.', 'ok');
+  }
+  // Tap sur un panier. Renvoie true quand le tap a ete CONSOMME (un tir
+  // attendait sa cible) : le glisser du panier ne doit alors pas demarrer.
+  function tmBasketTap(bkId) {
+    if (!tmShotFrom || playing || mode() !== 'training') return false;
+    var from = tmShotFrom, held = tmHeldBalls(from), st = step(), l = tmBaskets(), i, pick = null, n = 0;
+    tmShotArm(null);
+    if (!held.length) { toast(labelOf(from) + " n'a plus de ballon.", 'err'); return true; }
+    for (i = 0; i < held.length; i++) if (held[i].v === tbSel) pick = tbSel;
+    if (!pick) pick = held[0].v;
+    for (i = 0; i < l.length; i++) if (String(l[i].id) === String(bkId)) n = i + 1;
+    st.shot = from;
+    st.shotBk = String(bkId);          // LA cible, plus « le plus proche »
+    stBalls(st)[pick] = '@' + bkId;    // le ballon part : il atterrit dans CE panier
+    tbSel = null;
+    drawArrows(); drawTrainBalls(); tbListSync(); syncInfo(); syncBall(); renderTimeline(); touch(); setHint();
+    toast('🎯 ' + labelOf(from) + ' → ' + (n === 1 ? 'panier principal' : 'panier ' + n), 'ok');
+    return true;
+  }
+  // Le 🎯 du panneau ballon arme le MEME parcours : ce ballon-la, et on attend
+  // le panier. Il ne visait « le plus proche » que faute de savoir demander.
   function tbShoot() {
-    if (!tbSel) { toast('Choisis d\'abord un ballon.', 'err'); return; }
-    var m = ballsAt(cur), v = m[tbSel], q = null;
-    if (v && String(v).charAt(0) !== '@') q = pos()[v];
-    var bk = tmBaskets(), best = bk[0], bd = Infinity, i, dx, dy, s2;
-    if (q) for (i = 0; i < bk.length; i++) { dx = bk[i].x - q.x; dy = bk[i].y - q.y; s2 = dx * dx + dy * dy; if (s2 < bd) { bd = s2; best = bk[i]; } }
-    tbAssign('@' + best.id);
+    if (!tbSel) { toast("Choisis d'abord un ballon.", 'err'); return; }
+    var v = ballsAt(cur)[tbSel], bid = tbSel;
+    if (!v) { toast('Ce ballon n\'est nulle part.', 'err'); return; }
+    if (String(v).charAt(0) === '@') { toast('Ce ballon est déjà au panier.', 'err'); return; }
+    closeSheets();
+    setTool('shot');        // ⚠️ setTool DESARME le ballon (v.236) : on le ré-arme après
+    tbSel = bid; tbListSync();
+    tmShotArm(v);
+    toast('🎯 ' + labelOf(v) + ' — tape le panier visé.', 'ok');
   }
   var tbSel = null;
   function tbBallMarkup(x, y, r) {
@@ -3541,13 +3697,21 @@
       els = layC.querySelectorAll('.tb');
       for (i = 0; i < els.length; i++) bkTop.appendChild(els[i]);
     }
-    els = svg.querySelectorAll('.tb:not(.main)');
+    // v.239 — TOUS les paniers sont lies, le principal compris : il n'est pas
+    // deplacable (tmDragStart le refuse, il n'est pas dans extraBaskets) mais
+    // il doit pouvoir etre TAPE comme cible de tir.
+    els = svg.querySelectorAll('.tb');
     for (i = 0; i < els.length; i++) tmBindOne(els[i], 'bk', els[i].getAttribute('data-bk'));
   }
   function tmBindOne(el, kind, id) {
     if (el._tmb) return;
     el._tmb = 1;
-    el.addEventListener('pointerdown', function (e) { tmDragStart(e, kind, id); });
+    el.addEventListener('pointerdown', function (e) {
+      // v.239 — quand un tir attend sa cible, le tap sur un panier VAUT la
+      // cible : il ne doit pas demarrer un glisser par-dessus.
+      if (kind === 'bk' && tmBasketTap(id)) { e.preventDefault(); e.stopPropagation(); return; }
+      tmDragStart(e, kind, id);
+    });
   }
 
   // ── Panneaux ─────────────────────────────────────────────────────────
@@ -4166,7 +4330,8 @@
   // Grise les jetons qui ne peuvent pas être passeuses. Rejoué à chaque
   // changement d'outil, de temps et d'état ballon : un grisé périmé mentirait.
   function syncPassable() {
-    var on = (tool === 'pass' && !pending && !playing && mode() === 'training');
+    var on = ((tool === 'pass' && !pending) || (tool === 'shot' && !tmShotFrom))
+             && !playing && mode() === 'training';
     var m = on ? ballsAt(cur) : null, id;
     for (id in tokEl) tokEl[id].classList.toggle('nopass', !!(on && !tmBallsOf(id, m)));
   }
@@ -4310,7 +4475,7 @@
     if (id === '__shot') {
       var s = tokById(step().shot);
       if (!s) return;
-      var h = hoop(s);
+      var h = shotHoop(step(), s);
       a = { kind: 'shot', to: null };
       p = [{ x: s.x, y: s.y }, { x: h.x, y: h.y }];
       endPad = 2.6;
@@ -4633,6 +4798,10 @@
     }
     if (tool === 'erase') return;   // la gomme ne touche qu'aux flèches
     if (tool === 'shot') {
+      // v.239 — en atelier le tir se joue en DEUX temps (tireuse, puis le
+      // panier vise). Hors atelier il n'y a qu'un panier a viser : rien ne
+      // change, le tir se pose d'un seul tap.
+      if (mode() === 'training') { tmShotTap(id); return; }
       // Un seul tir par temps : re-taper la tireuse annule le tir.
       step().shot = (step().shot === id) ? null : id;
       drawArrows(); syncInfo(); syncBall(); renderTimeline(); touch(); setHint();
@@ -4640,9 +4809,10 @@
     }
     // v.237 — en atelier, la passeuse doit tenir un ballon : on refuse dès la
     // DÉSIGNATION (le jeton est d'ailleurs grisé), pas au moment du transfert.
-    if (!pending && tool === 'pass' && mode() === 'training' && !tmBallsOf(id)) {
-      toast(labelOf(id) + " n'a pas de ballon.", 'err');
-      return;
+    // v.239 — et on demande LEQUEL de ses ballons part, s'il y a le choix.
+    if (!pending && tool === 'pass' && mode() === 'training') {
+      if (!tmArmBall(id, null)) { toast(labelOf(id) + " n'a pas de ballon.", 'err'); return; }
+      pending = id; syncSelection(); setHint(); return;
     }
     if (!pending) { pending = id; syncSelection(); setHint(); return; }
     if (pending === id) { pending = null; syncSelection(); setHint(); return; }
@@ -4695,7 +4865,7 @@
   }
 
   function removeArrow(id) {
-    if (id === '__shot') { step().shot = null; }
+    if (id === '__shot') { step().shot = null; delete step().shotBk; }
     else {
       var l = step().arw, i;
       for (i = 0; i < l.length; i++) if (l[i].id === id) { l.splice(i, 1); break; }
@@ -5074,7 +5244,11 @@
       // reste un anneau AU SOL, comme les anneaux de highlight.
       var air = airLayer();
       (air || layP).appendChild(sl); layP.appendChild(pu);
-      pPaths.shot = { id: st.shot, el: sl, pulse: pu, ball: flyingBall(air) };
+      // La cible est figee A LA CONSTRUCTION du temps : pendant la lecture les
+      // paniers ne bougent pas, et la relire a chaque frame couterait un
+      // parcours de tmBaskets() par frame pour un resultat constant.
+      pPaths.shot = { id: st.shot, el: sl, pulse: pu, ball: flyingBall(air),
+                      hoop: shotHoop(st, tokById(st.shot, p0)) };
     }
 
     // Highlights : un anneau par joueuse marquée, monté UNE fois par temps —
@@ -5212,7 +5386,7 @@
     // 3) tir
     var sh = pPaths.shot;
     if (sh) {
-      var sf = win(u, PLAY.shot), S = live[sh.id], H = hoop(S);
+      var sf = win(u, PLAY.shot), S = live[sh.id], H = sh.hoop || hoop(S);
       if (S) {
         // Halo qui respire sur la tireuse pendant la première moitié.
         var pulseT = clamp(sf / 0.45, 0, 1);
@@ -5543,13 +5717,18 @@
     move:   'Tape la joueuse qui se déplace, <b>puis l\'endroit où elle va</b>. Flèche pleine.',
     screen: 'Tape la <b>poseuse d\'écran</b>, puis <b>où elle pose son écran</b>. Flèche de déplacement + le mur à l\'arrivée.',
     pass:   'Tape la <b>passeuse</b>, puis la <b>réceptionneuse</b>. Flèche pointillée.',
-    shot:   'Tape la joueuse qui <b>tire</b> à la fin de ce temps. Re-tape pour annuler.',
+    shot:   'Tape la joueuse qui <b>tire</b>, puis — en atelier — le <b>panier visé</b>. Re-tape pour annuler.',
     erase:  'Tape une flèche pour la <b>supprimer</b>, un point de passage pour le <b>retirer</b>.'
   };
   function setHint() {
     var h = HINTS[tool];
     if (playing || document.body.classList.contains('playing')) {
       elHint.innerHTML = 'Lecture — temps <b>' + (pStep + 1) + '</b> / ' + steps().length + '. Glisse la barre pour te déplacer.';
+      return;
+    }
+    if (tmShotFrom) {
+      elHint.innerHTML = 'Tir de <b>' + labelOf(tmShotFrom) + '</b> — <b>tape le panier visé</b>'
+        + ' (principal ou une extension). Re-tape la tireuse pour annuler.';
       return;
     }
     if (pending) {
@@ -6214,7 +6393,8 @@
       }
       var positions = {};
       for (id in s.pos) positions[id] = pt(s.pos[id]);
-      if (s.shot && flat) flat.push({ step: i, kind: 'shot', from: numOf(s.shot) });
+      if (s.shot && flat) flat.push({ step: i, kind: 'shot', from: numOf(s.shot),
+        basket: s.shotBk ? String(s.shotBk) : null });
       var o = {
         n: i + 1, note: s.note || '', explanation: s.explanation || '', explanation_ovr: !!s.explOvr,
         moves: moves,
@@ -6237,6 +6417,9 @@
       // n'a changé de main ici : c'est le cas de 100 % des plays d'avant, et
       // le format ne grossit donc pas d'un octet pour eux.
       if (s.balls && Object.keys(s.balls).length) o.balls = JSON.parse(JSON.stringify(s.balls));
+      // v.239 — le panier VISE. Clé absente = « le plus proche », soit tous les
+      // plays et tous les ateliers d'avant : le format ne grossit pas pour eux.
+      if (s.shot && s.shotBk) o.shot_basket = String(s.shotBk);
       if (depth < BR_DEPTH_MAX && Array.isArray(s.branches) && s.branches.length) {
         o.branches = s.branches.slice(0, BR_PER_STEP).map(function (b) {
           return {
@@ -6508,6 +6691,11 @@
         st.arw.push({ id: uid('w'), kind: 'pass', from: pf, to: ptTo, via: (Array.isArray(pa.via) ? pa.via : []).map(refPoint).filter(Boolean) });
       }
       st.shot = refId(s.shot);
+      // v.239 — panier visé. On ne le valide PAS ici (les paniers ne sont pas
+      // encore chargés) : shotHoop() retombe de lui-même sur « le plus proche »
+      // si l'id ne désigne plus rien.
+      var sbk = pick(s, 'shot_basket', 'shotBk');
+      if (st.shot && sbk) st.shotBk = String(sbk);
       // v.225 — événements ballon. Une valeur qui ne désigne ni une joueuse
       // connue ni un panier est JETÉE : mieux vaut un ballon manquant qu'un
       // ballon accroché à un id fantôme que rien ne pourra plus détacher.
@@ -7379,6 +7567,9 @@
           if (s.balls && typeof s.balls !== 'object') delete s.balls;
           if (!Array.isArray(s.arw)) s.arw = [];
           if (s.shot === undefined) s.shot = null;
+          // Un panier visé sans tir ne veut rien dire, et un shotBk non-chaîne
+          // ferait mentir la comparaison d'id dans shotHoop().
+          if (!s.shot || typeof s.shotBk !== 'string') delete s.shotBk;
           s.highlights = (Array.isArray(s.highlights) ? s.highlights : [])
             .filter(function (h) { return h && h.player; });
           s.arw.forEach(function (a) { if (!Array.isArray(a.via)) a.via = []; });
