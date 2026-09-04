@@ -3249,7 +3249,7 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
     tmWalkSteps(function (st) {
       delete st.pos[id];
       st.arw = (st.arw || []).filter(function (a) { return a.from !== id && a.to !== id; });
-      if (st.shot === id) { st.shot = null; delete st.shotBk; }
+      if (st.shot === id) { st.shot = null; delete st.shotBk; delete st.shotBall; }
       if (Array.isArray(st.highlights)) st.highlights = st.highlights.filter(function (h) { return h && h.player !== id; });
       if (st.balls) for (var k in st.balls) if (st.balls[k] === id) delete st.balls[k];
     });
@@ -3433,7 +3433,11 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
   function tbRemove(id) {
     var l = tmBallList(), i;
     for (i = 0; i < l.length; i++) if (l[i].id === id) { l.splice(i, 1); break; }
-    tmWalkSteps(function (st) { if (st.balls) delete st.balls[id]; });
+    tmWalkSteps(function (st) {
+      if (st.balls) delete st.balls[id];
+      // Un tir qui designe un ballon supprime ferait voler un fantome.
+      if (st.shotBall === id) delete st.shotBall;
+    });
     if (tbSel === id) tbSel = null;
     drawTrainBalls(); tbListSync(); touch();
   }
@@ -3596,7 +3600,7 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
   function tmShotTap(id) {
     var st = step();
     if (st.shot === id) {
-      st.shot = null; delete st.shotBk; tmShotArm(null); tbSel = null; tbListSync();
+      st.shot = null; delete st.shotBk; delete st.shotBall; tmShotArm(null); tbSel = null; tbListSync();
       drawArrows(); syncInfo(); syncBall(); renderTimeline(); touch();
       toast('Tir annulé — le ballon reste où il est.', 'ok');
       return;
@@ -3637,6 +3641,8 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
     for (i = 0; i < l.length; i++) if (String(l[i].id) === String(bkId)) n = i + 1;
     st.shot = from;
     st.shotBk = String(bkId);          // LA cible, plus « le plus proche »
+    st.shotBall = pick;                // ET quel ballon vole : la lecture doit
+                                       // savoir lequel decoller des mains
     stBalls(st)[pick] = '@' + bkId;    // le ballon part : il atterrit dans CE panier
     tbSel = null;
     drawArrows(); drawTrainBalls(); tbListSync(); syncInfo(); syncBall(); renderTimeline(); touch(); setHint();
@@ -3657,16 +3663,35 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
     toast('🎯 ' + labelOf(v) + ' — tape le panier visé.', 'ok');
   }
   var tbSel = null;
-  function tbBallMarkup(x, y, r) {
-    return '<g class="tbb">'
-      + '<circle cx="' + f(x) + '" cy="' + f(y) + '" r="' + f(r) + '" fill="#F97316" stroke="#7C2D12" stroke-width="' + f(r * 0.18) + '"/>'
-      + '<path d="M ' + f(x - r) + ' ' + f(y) + ' H ' + f(x + r) + ' M ' + f(x) + ' ' + f(y - r) + ' V ' + f(y + r) + '"'
+  // v.241 — le ballon est dessine A L'ORIGINE et POSE par un `transform` : une
+  // frame de lecture n'a plus qu'un attribut a reecrire pour le faire suivre sa
+  // porteuse, au lieu de reconstruire le calque (`innerHTML`) 60 fois par
+  // seconde. `tag` porte l'identite (quel ballon, chez qui, a quel decalage) :
+  // sans elle, renderFrame() ne saurait pas QUOI deplacer.
+  function tbBallMarkup(x, y, r, tag) {
+    return '<g class="tbb"' + (tag || '') + ' transform="translate(' + f(x) + ' ' + f(y) + ')">'
+      + '<circle cx="0" cy="0" r="' + f(r) + '" fill="#F97316" stroke="#7C2D12" stroke-width="' + f(r * 0.18) + '"/>'
+      + '<path d="M ' + f(-r) + ' 0 H ' + f(r) + ' M 0 ' + f(-r) + ' V ' + f(r) + '"'
       + ' stroke="#7C2D12" stroke-width="' + f(r * 0.16) + '"/></g>';
   }
-  function drawTrainBalls() {
+  // `k` = le temps a peindre (defaut : le temps d'edition). La lecture le
+  // passe explicitement : sans ca, jouer le temps 3 montrait les ballons du
+  // temps ou le coach avait laisse le curseur.
+  function drawTrainBalls(k0) {
     if (!layB) return;
     if (mode() !== 'training') { layB.innerHTML = ''; return; }
-    var m = ballsAt(cur), list = tmBallList(), byP = {}, byB = {}, i, b, v, k, j;
+    var kk = (k0 === undefined || k0 === null) ? cur : k0;
+    var stK = steps()[kk] || step();
+    var m = ballsAt(kk), list = tmBallList(), byP = {}, byB = {}, i, b, v, k, j;
+    var P = stK.pos || pos();
+    // v.241 — LE TIR N'A PAS ENCORE EU LIEU AU DEBUT DU TEMPS. L'evenement est
+    // range dans le temps ou le tir part (le ballon est donc au panier des ce
+    // temps-la dans le modele), mais la fleche 🎯 decrit ce qui se PASSE
+    // pendant ce temps : au depart, le ballon est encore dans les mains. On ne
+    // touche pas au modele — c'est le RENDU de ce seul temps qui le remet a sa
+    // place, et le temps suivant le retrouve au panier tout seul.
+    if (stK.shot && stK.shotBall && m[stK.shotBall] && String(m[stK.shotBall]).charAt(0) === '@')
+      m[stK.shotBall] = stK.shot;
     for (i = 0; i < list.length; i++) {
       b = list[i]; v = m[b.id];
       if (!v) continue;
@@ -3676,10 +3701,15 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
     var html = '', q, sp, bk = tmBaskets(), bkm = {};
     for (i = 0; i < bk.length; i++) bkm[bk[i].id] = bk[i];
     for (k in byP) {
-      q = pos()[k]; if (!q || !TOKMAP[k] || !visible(TOKMAP[k])) continue;
+      q = P[k]; if (!q || !TOKMAP[k] || !visible(TOKMAP[k])) continue;
       sp = VIEWS[view].project(q);
       for (j = 0; j < byP[k].length && j < BALL_PER_PLAYER; j++) {
-        html += tbBallMarkup(sp.x - PR * 0.9 - j * PR * 0.7, sp.y + PR * 0.9, PR * 0.34);
+        // Le decalage par rapport au jeton est GARDE sur le noeud : la frame
+        // rejoue `position projetee de la porteuse + ce decalage`, donc le
+        // ballon reste colle au numero meme quand elle court.
+        var ox = -PR * 0.9 - j * PR * 0.7, oy = PR * 0.9;
+        html += tbBallMarkup(sp.x + ox, sp.y + oy, PR * 0.34,
+          ' data-bb="' + byP[k][j] + '" data-bh="' + k + '" data-bo="' + f(ox) + ',' + f(oy) + '"');
       }
     }
     for (k in byB) {
@@ -4951,7 +4981,7 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
   }
 
   function removeArrow(id) {
-    if (id === '__shot') { step().shot = null; delete step().shotBk; }
+    if (id === '__shot') { step().shot = null; delete step().shotBk; delete step().shotBall; }
     else {
       var l = step().arw, i;
       for (i = 0; i < l.length; i++) if (l[i].id === id) { l.splice(i, 1); break; }
@@ -5068,7 +5098,11 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
     cur = i;
     active = null; pending = null;
     if (!keepTool) { /* l'outil courant reste actif d'un temps à l'autre */ }
-    drawZones(); drawTokens(); drawArrows(); renderTimeline(); syncInfo(); setHint();
+    // v.241 — le calque des ballons fait partie de la PHOTO d un temps :
+    // sans lui ici, changer de temps gardait les ballons du temps precedent, et
+    // sortir d une lecture laissait les pastilles la ou la derniere frame les
+    // avait posees (transform ET display).
+    drawZones(); drawTokens(); drawArrows(); drawTrainBalls(); renderTimeline(); syncInfo(); setHint();
   }
 
   function addStep() {
@@ -5255,6 +5289,10 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
     // temps precedent survivait et restait affichee en permanence sur des
     // joueuses non marquees au temps courant. Un st nul retire tout.
     syncHl(st || null);
+    // v.241 — meme raisonnement que syncHl ci-dessus : prepare() est le seul
+    // point traverse a chaque changement de temps, edition ET lecture. C'est
+    // donc ici que le calque des ballons d'atelier se recale sur le temps joue.
+    drawTrainBalls(k);
     if (!st) return;
     var p0 = st.pos, i;
 
@@ -5391,6 +5429,38 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
   var TRAIL_OP_MIN = 0.25, TRAIL_OP_MAX = 0.9;
   var REDUCED_MOTION = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
+  // v.241 — Les ballons d'atelier pendant la lecture. Trois etats, un seul par
+  // ballon : colle a sa porteuse, EN VOL (c'est alors le ballon anime du tir
+  // qui le represente, on masque la pastille), ou pose au panier a l'arrivee.
+  // Ecrit UNIQUEMENT des attributs — les noeuds datent de drawTrainBalls().
+  function tbFrame(live, k, rf) {
+    if (!layB || mode() !== 'training') return;
+    var st = steps()[k], fly = (st && st.shot) ? st.shotBall : null;
+    var els = layB.querySelectorAll('.tbb[data-bh]'), i, el, o, q, sp, isFly;
+    for (i = 0; i < els.length; i++) {
+      el = els[i];
+      isFly = fly && el.getAttribute('data-bb') === fly;
+      // Seuil a 0.99 et non 1 : un scrub s'arrete a 0.999, jamais pile a 1.
+      // Mieux vaut une image ou le ballon en vol et la pastille se superposent
+      // AU PANIER qu'une image ou le ballon n'est nulle part.
+      if (isFly && rf > 0 && rf < 0.99) { el.style.display = 'none'; continue; }
+      el.style.display = '';
+      if (isFly && rf >= 0.99 && pPaths && pPaths.shot && pPaths.shot.hoop) {
+        // Arrivee : le ballon anime s'efface, la pastille prend le relais au
+        // panier — sinon le dernier temps d'un exo finirait sans ballon nulle
+        // part (il n'y a pas de temps suivant pour le redessiner).
+        sp = VIEWS[view].project(pPaths.shot.hoop);
+        el.setAttribute('transform', 'translate(' + f(sp.x - PR * 0.30) + ' ' + f(sp.y + PR * 1.05) + ')');
+        continue;
+      }
+      q = live[el.getAttribute('data-bh')];
+      if (!q) continue;
+      o = (el.getAttribute('data-bo') || '0,0').split(',');
+      sp = VIEWS[view].project(q);
+      el.setAttribute('transform', 'translate(' + f(sp.x + (+o[0])) + ' ' + f(sp.y + (+o[1])) + ')');
+    }
+  }
+
   // Rend la frame (temps k, fraction u). Écrit UNIQUEMENT des attributs.
   function renderFrame(k, u) {
     var st = steps()[k];
@@ -5470,7 +5540,7 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
     }
 
     // 3) tir
-    var sh = pPaths.shot;
+    var sh = pPaths.shot, shotRf = 0;
     if (sh) {
       var sf = win(u, PLAY.shot), S = live[sh.id], H = sh.hoop || hoop(S);
       if (S) {
@@ -5485,6 +5555,7 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
         var arc = (view === '3d') ? shotArc3(S, H) : shotArc(S, H);
         sh.el.setAttribute('d', arc.d);
         var rf = clamp((sf - 0.4) / 0.6, 0, 1);
+        shotRf = rf;
         sh.el.setAttribute('stroke-dasharray', f(arc.len * rf) + ' ' + f(arc.len));
         sh.el.setAttribute('opacity', rf > 0 ? 1 : 0);
         if (rf > 0 && rf < 1) {
@@ -5513,6 +5584,7 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
       }
     }
     for (id in tokEl) tokEl[id].classList.toggle('dribbling', drib && id === holder);
+    tbFrame(live, k, shotRf);
     updateProgress(k, u);
   }
 
@@ -6518,6 +6590,7 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
       // v.239 — le panier VISE. Clé absente = « le plus proche », soit tous les
       // plays et tous les ateliers d'avant : le format ne grossit pas pour eux.
       if (s.shot && s.shotBk) o.shot_basket = String(s.shotBk);
+      if (s.shot && s.shotBall) o.shot_ball = String(s.shotBall);
       if (depth < BR_DEPTH_MAX && Array.isArray(s.branches) && s.branches.length) {
         o.branches = s.branches.slice(0, BR_PER_STEP).map(function (b) {
           return {
@@ -6794,6 +6867,8 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
       // si l'id ne désigne plus rien.
       var sbk = pick(s, 'shot_basket', 'shotBk');
       if (st.shot && sbk) st.shotBk = String(sbk);
+      var sbl = pick(s, 'shot_ball', 'shotBall');
+      if (st.shot && sbl) st.shotBall = String(sbl);
       // v.225 — événements ballon. Une valeur qui ne désigne ni une joueuse
       // connue ni un panier est JETÉE : mieux vaut un ballon manquant qu'un
       // ballon accroché à un id fantôme que rien ne pourra plus détacher.
@@ -7673,6 +7748,7 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
           // Un panier visé sans tir ne veut rien dire, et un shotBk non-chaîne
           // ferait mentir la comparaison d'id dans shotHoop().
           if (!s.shot || typeof s.shotBk !== 'string') delete s.shotBk;
+          if (!s.shot || typeof s.shotBall !== 'string') delete s.shotBall;
           s.highlights = (Array.isArray(s.highlights) ? s.highlights : [])
             .filter(function (h) { return h && h.player; });
           s.arw.forEach(function (a) { if (!Array.isArray(a.via)) a.via = []; });
@@ -7837,7 +7913,11 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
     bpath = p;
     cur = 0; pStep = 0; pU = 0; pPrepared = -1;
     active = null; pending = null;
-    drawZones(); drawTokens(); drawArrows(); renderTimeline(); syncInfo(); setHint();
+    // v.241 — le calque des ballons fait partie de la PHOTO d un temps :
+    // sans lui ici, changer de temps gardait les ballons du temps precedent, et
+    // sortir d une lecture laissait les pastilles la ou la derniere frame les
+    // avait posees (transform ET display).
+    drawZones(); drawTokens(); drawArrows(); drawTrainBalls(); renderTimeline(); syncInfo(); setHint();
   }
 
   // Création d'une branche : à la FIN du temps courant, jamais au milieu. Son
