@@ -911,13 +911,17 @@
    destines aux joueuses postees sous le cercle — les paniers sont le calque
    du DESSUS en 2D depuis la v.238. */
 #lay-court .tb .bkhit, #lay-bk .tb .bkhit { pointer-events: none; }
-body.bkpick #lay-court .tb .bkhit, body.bkpick #lay-bk .tb .bkhit { pointer-events: all; }
+body.bkpick #lay-court .tb .bkhit, body.bkpick #lay-bk .tb .bkhit,
+body[data-tool="ball"] #lay-court .tb .bkhit, body[data-tool="ball"] #lay-bk .tb .bkhit { pointer-events: all; }
 body.bkpick #lay-court .tb .hp, body.bkpick #lay-bk .tb .hp { stroke: var(--acc, #22D3EE); }
 /* Le panier principal n'a pas de .hp (il est dessine par le terrain) : c'est
    cet anneau-la qui le montre comme cible pendant le choix. */
 #lay-court .tb .bkring, #lay-bk .tb .bkring { fill: none; stroke: var(--acc, #22D3EE);
   stroke-width: .9; stroke-dasharray: 2.5 2; opacity: 0; pointer-events: none; }
-body.bkpick #lay-court .tb .bkring, body.bkpick #lay-bk .tb .bkring { opacity: .95; }
+body.bkpick #lay-court .tb .bkring, body.bkpick #lay-bk .tb .bkring,
+body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .tb .bkring { opacity: .95; }
+/* Recapitulatif en tete du panneau 🏀 : combien de ballons, et ou ils sont. */
+#tb-list .tbsum { font-size: 11px; opacity: .72; padding: 2px 2px 6px; }
 /* Selecteur flottant (quel ballon ? quel panier ?) : en HTML AU-DESSUS du SVG,
    jamais dans un calque — un menu doit rester lisible quelle que soit
    l'echelle du terrain, et un <foreignObject> ne survit pas a l'export. */
@@ -993,6 +997,10 @@ body.bkpick #lay-court .tb .bkring, body.bkpick #lay-bk .tb .bkring { opacity: .
     <button class="btn sm"    id="t-shot"   title="Tir">🎯</button>
     <button class="btn sm"    id="t-hl"    title="Highlight — halo qui pulse sur la joueuse pendant tout ce temps">✨</button>
     <button class="btn sm"    id="t-erase"  title="Supprimer flèche / point de passage">🚫</button>
+    <!-- v.240 — outil BALLONS, atelier seulement (.tmonly). Prendre un ballon
+         là où il est, le poser où on tape : c'est le geste qui manquait pour
+         sortir un ballon d'un panier sans ouvrir un panneau. -->
+    <button class="btn sm tmonly" id="t-ball" hidden title="Ballons : prendre au panier, poser dans les mains">🏀</button>
   </div>
   <div class="sep"></div>
   <div class="seg">
@@ -3398,6 +3406,18 @@ body.bkpick #lay-court .tb .bkring, body.bkpick #lay-bk .tb .bkring { opacity: .
     }
     return m;
   }
+  // v.240 — RETROCOMPAT du ballon unique. En atelier il n'est plus peint :
+  // s'il y a un porteur et aucun ballon d'atelier, il DEVIENT le ballon 1,
+  // dans les mains de la même joueuse. `doc.ballStart` n'est PAS effacé —
+  // le document peut retourner en ½ / ▭, où il reste la seule vérité.
+  // Appelé aux TRANSITIONS (chargement, changement de mode), jamais au rendu.
+  function tmAdoptBallStart() {
+    if (mode() !== 'training' || !doc.ballStart) return;
+    if (tmBallList().length || !TOKMAP[doc.ballStart]) return;
+    var b = { id: 'b1-' + Math.random().toString(36).slice(2, 5) };
+    tmBallList().push(b);
+    stBalls(rootSteps()[0])[b.id] = doc.ballStart;
+  }
   function tbAdd() {
     var l = tmBallList();
     if (l.length >= BALL_CAP) { toast('6 ballons maximum sur un atelier.', 'err'); return; }
@@ -3532,6 +3552,38 @@ body.bkpick #lay-court .tb .bkring, body.bkpick #lay-bk .tb .bkring { opacity: .
     return true;
   }
 
+  // ── Outil 🏀 : prendre un ballon, le poser ───────────────────────────
+  // Aucun ballon n'est « principal » : on prend CELUI qu'on désigne, et le
+  // même geste marche dans les deux sens (panier → mains, mains → panier,
+  // mains → mains). Le ballon armé est l'état de travail de l'outil.
+  function tmBallToolTap(id) {
+    if (tbSel) {
+      if (tbAssign(id)) { tbSel = null; tbListSync(); }
+      setHint(); return;
+    }
+    if (!tmArmBall(id, function () { toast('🏀 en main — tape où le poser.', 'ok'); }))
+      toast(labelOf(id) + " n'a pas de ballon.", 'err');
+    setHint();
+  }
+  // Étiquette d'un ballon = son rang dans doc.balls, le même numéro qu'au
+  // panneau 🏀 et que dans le sélecteur.
+  function tbLabel(bid) {
+    var l = tmBallList(), i;
+    for (i = 0; i < l.length; i++) if (l[i].id === bid) return '🏀 ' + (i + 1);
+    return '🏀';
+  }
+  // « 3 ballons — 2 aux paniers, 1 dans les mains » : le compte que le coach
+  // fait de tête sinon, à chaque fois, en regardant le terrain.
+  function tbSummary() {
+    var m = ballsAt(cur), l = tmBallList(), bk = 0, hd = 0, i, v;
+    for (i = 0; i < l.length; i++) {
+      v = m[l[i].id]; if (!v) continue;
+      if (String(v).charAt(0) === '@') bk++; else hd++;
+    }
+    return l.length + (l.length > 1 ? ' ballons' : ' ballon')
+      + ' — ' + bk + ' aux paniers, ' + hd + ' dans les mains';
+  }
+
   // ── Tir d'atelier : deux temps, tireuse puis PANIER ──────────────────
   var tmShotFrom = null;
   function tmShotArm(id) {
@@ -3556,6 +3608,26 @@ body.bkpick #lay-court .tb .bkring, body.bkpick #lay-bk .tb .bkring { opacity: .
   // Tap sur un panier. Renvoie true quand le tap a ete CONSOMME (un tir
   // attendait sa cible) : le glisser du panier ne doit alors pas demarrer.
   function tmBasketTap(bkId) {
+    // v.240 — sous l'outil 🏀 le panier est un RANGEMENT : on y prend un
+    // ballon, on l'y repose. C'était la porte manquante — sortir un ballon
+    // d'un panier demandait d'ouvrir un panneau et de deviner lequel.
+    if (mode() === 'training' && tool === 'ball' && !playing) {
+      if (tbSel) {
+        if (tbAssign('@' + bkId)) { tbSel = null; tbListSync(); }
+        setHint(); return true;
+      }
+      var inBk = tmHeldBalls('@' + bkId);
+      if (!inBk.length) { toast('Ce panier est vide.', 'err'); return true; }
+      var anchor = document.querySelector('.tb[data-bk="' + bkId + '"]');
+      if (inBk.length === 1) {
+        tbSel = inBk[0].v; tbListSync(); setHint();
+        toast(tbLabel(tbSel) + ' en main — tape la joueuse.', 'ok');
+      } else bpOpen(anchor, inBk, function (bid) {
+        tbSel = bid; tbListSync(); setHint();
+        toast(tbLabel(bid) + ' en main — tape la joueuse.', 'ok');
+      });
+      return true;
+    }
     if (!tmShotFrom || playing || mode() !== 'training') return false;
     var from = tmShotFrom, held = tmHeldBalls(from), st = step(), l = tmBaskets(), i, pick = null, n = 0;
     tmShotArm(null);
@@ -3613,8 +3685,12 @@ body.bkpick #lay-court .tb .bkring, body.bkpick #lay-bk .tb .bkring { opacity: .
     for (k in byB) {
       b = bkm[k]; if (!b) continue;
       sp = VIEWS[view].project({ x: b.x, y: b.y });
-      html += tbBallMarkup(sp.x - 4, sp.y + 8, 3)
-        + '<text class="tb-n" x="' + f(sp.x + 1) + '" y="' + f(sp.y + 10.5) + '">×' + byB[k].length + '</text>';
+      // v.240 — le badge était écrit en unités FIXES (r=3, +8 px) alors que
+      // tout le reste suit PR : sur un grand terrain il devenait illisible,
+      // et c'est justement là que les ballons s'entassent.
+      html += tbBallMarkup(sp.x - PR * 0.30, sp.y + PR * 1.05, PR * 0.34)
+        + '<text class="tb-n" x="' + f(sp.x + PR * 0.22) + '" y="' + f(sp.y + PR * 1.34) + '"'
+        + ' style="font-size:' + f(PR * 0.78) + 'px">×' + byB[k].length + '</text>';
     }
     layB.innerHTML = html;
     syncPassable();
@@ -3757,6 +3833,9 @@ body.bkpick #lay-court .tb .bkring, body.bkpick #lay-bk .tb .bkring { opacity: .
     // 🎨 vit dans le hub en atelier : le garder AUSSI dans la barre, c'est
     // exactement le doublon que la v.227 retire.
     var bz = document.getElementById('b-zone'); if (bz) bz.hidden = tm;
+    // v.240 — le 🏀 « donner le ballon » pose doc.ballStart, le ballon UNIQUE :
+    // en atelier il ferait un deuxième système de ballons à l'écran.
+    var bb = document.getElementById('b-ball'); if (bb) bb.hidden = tm;
     document.getElementById('m-half').classList.toggle('on', mode() === 'half');
     document.getElementById('m-full').classList.toggle('on', mode() === 'full');
     document.getElementById('m-train').classList.toggle('on', mode() === 'training');
@@ -3839,7 +3918,9 @@ body.bkpick #lay-court .tb .bkring, body.bkpick #lay-bk .tb .bkring { opacity: .
         + '<button class="btn xs danger" data-bdel="' + l[i].id + '">🗑</button></div>';
     }
     var host = document.getElementById('tb-list');
-    if (host) host.innerHTML = h || '<div class="empty">Aucun ballon. ➕ pour en poser un.</div>';
+    if (host) host.innerHTML = l.length
+      ? '<div class="tbsum">' + tbSummary() + '</div>' + h
+      : '<div class="empty">Aucun ballon. ➕ pour en poser un.</div>';
     document.getElementById('tb-add').disabled = l.length >= BALL_CAP;
   }
 
@@ -4350,7 +4431,11 @@ body.bkpick #lay-court .tb .bkring, body.bkpick #lay-bk .tb .bkring { opacity: .
   // Le porteur affiché dépend du TEMPS COURANT : au temps 3 c'est la dernière
   // réceptionneuse, pas la porteuse du temps 0.
   function syncBall() {
-    var h = holderAt(cur), id;
+    // v.240 — en ATELIER il n'y a pas de ballon « principal » : le ballon
+    // unique des plays (doc.ballStart) n'est plus peint, sinon deux systèmes
+    // de ballons cohabitaient à l'écran et le coach ne savait plus lequel
+    // ses gestes déplaçaient. Il reste la vérité des modes ½ / ▭.
+    var h = mode() === 'training' ? null : holderAt(cur), id;
     for (id in tokEl) tokEl[id].classList.toggle('has-ball', id === h);
     syncPassable();
     syncHl();   // syncBall() est rejoué à CHAQUE changement de temps : c'est le
@@ -4785,6 +4870,7 @@ body.bkpick #lay-court .tb .bkring, body.bkpick #lay-bk .tb .bkring { opacity: .
     // partait jamais : le bug « les passes multi-ballon ne marchent pas ».
     if (tbSel && tool === 'select' && mode() === 'training') { if (tbAssign(id)) tbSel = null; tbListSync(); setHint(); return; }
     if (playing) return;
+    if (tool === 'ball' && mode() === 'training') { tmBallToolTap(id); return; }
     if (tool === 'select') {
       active = (active === id) ? null : id;
       pending = null;
@@ -5411,7 +5497,7 @@ body.bkpick #lay-court .tb .bkring, body.bkpick #lay-bk .tb .bkring { opacity: .
       }
     }
 
-    for (id in tokEl) tokEl[id].classList.toggle('has-ball', !flying && id === holder);
+    for (id in tokEl) tokEl[id].classList.toggle('has-ball', !flying && id === holder && mode() !== 'training');
 
     // Dribble : uniquement si la porteuse a une VRAIE courbe dans ce temps et
     // qu'on est dans la fenêtre de déplacement. Ballon en vol (passe ou tir) →
@@ -5718,12 +5804,19 @@ body.bkpick #lay-court .tb .bkring, body.bkpick #lay-bk .tb .bkring { opacity: .
     screen: 'Tape la <b>poseuse d\'écran</b>, puis <b>où elle pose son écran</b>. Flèche de déplacement + le mur à l\'arrivée.',
     pass:   'Tape la <b>passeuse</b>, puis la <b>réceptionneuse</b>. Flèche pointillée.',
     shot:   'Tape la joueuse qui <b>tire</b>, puis — en atelier — le <b>panier visé</b>. Re-tape pour annuler.',
-    erase:  'Tape une flèche pour la <b>supprimer</b>, un point de passage pour le <b>retirer</b>.'
+    erase:  'Tape une flèche pour la <b>supprimer</b>, un point de passage pour le <b>retirer</b>.',
+    ball:   'Tape un <b>panier</b> ou une <b>joueuse</b> pour prendre un ballon, puis <b>où le poser</b>.'
   };
   function setHint() {
     var h = HINTS[tool];
     if (playing || document.body.classList.contains('playing')) {
       elHint.innerHTML = 'Lecture — temps <b>' + (pStep + 1) + '</b> / ' + steps().length + '. Glisse la barre pour te déplacer.';
+      return;
+    }
+    if (tool === 'ball' && mode() === 'training') {
+      elHint.innerHTML = tbSel
+        ? '<b>' + tbLabel(tbSel) + '</b> en main — tape une <b>joueuse</b> (2 max) ou un <b>panier</b> pour le ranger.'
+        : 'Tape un <b>panier</b> ou une <b>joueuse</b> pour prendre un ballon. · ' + tbSummary();
       return;
     }
     if (tmShotFrom) {
@@ -5744,14 +5837,15 @@ body.bkpick #lay-court .tb .bkring, body.bkpick #lay-bk .tb .bkring { opacity: .
   // ─────────────────────────────────────────────────────────────────────
   // 10. UI — outils, terrain, vue
   // ─────────────────────────────────────────────────────────────────────
-  var TOOLS = ['select', 'move', 'screen', 'pass', 'shot', 'hl', 'erase'];
+  var TOOLS = ['select', 'move', 'screen', 'pass', 'shot', 'hl', 'erase', 'ball'];
   function setTool(t) {
     if (playing || document.body.classList.contains('playing')) exitPlay();
     tool = t;
     // Un ballon reste armé tant qu'on ne l'a pas posé ; prendre un outil de
     // dessin dit « je dessine », pas « je pose » — on le désarme donc ici,
     // sinon il capterait le tap destiné à l'outil (cf. onTokenClick).
-    if (t !== 'select' && tbSel) { tbSel = null; try { tbListSync(); } catch (_) {} }
+    // v.240 — sauf vers l'outil 🏀, dont le ballon armé EST l'état de travail.
+    if (t !== 'select' && t !== 'ball' && tbSel) { tbSel = null; try { tbListSync(); } catch (_) {} }
     pending = null;
     if (t !== 'select') active = null;
     document.body.setAttribute('data-tool', t);
@@ -5801,6 +5895,10 @@ body.bkpick #lay-court .tb .bkring, body.bkpick #lay-bk .tb .bkring { opacity: .
     // puisque `rebuildTokens` y repart de `baseTokens()`.
     if (m === 'training') { tmSync(); exoNeutralize(doc); }
     rebuildTokens();
+    // Le ballon unique devient le ballon 1 de l'atelier (et l'outil 🏀, qui
+    // n'existe qu'en atelier, ne peut pas rester actif en le quittant).
+    tmAdoptBallStart();
+    if (m !== 'training' && tool === 'ball') setTool('select');
     accSel = null; tbSel = null; bkSel = null;
     bpath = [];   // chaque mode a SES temps, donc SES branches
     cur = 0; active = null; pending = null;
@@ -6823,6 +6921,11 @@ body.bkpick #lay-court .tb .bkring, body.bkpick #lay-bk .tb .bkring { opacity: .
     // TOKENS garderait les côtés de l'ancien document.
     if (doc.mode === 'training') { tmSync(); exoNeutralize(doc); }
     rebuildTokens();
+    // Après rebuildTokens : tmAdoptBallStart() vérifie que le porteur existe
+    // encore dans CE document. C'est la 2e des deux transitions (avec setMode)
+    // où le ballon unique devient le ballon 1 de l'atelier.
+    tmAdoptBallStart();
+    if (doc.mode !== 'training' && tool === 'ball') setTool('select');
     document.getElementById('b-def').classList.toggle('on', !!doc.defOn);
     syncSizeButtons(); syncLabelButton();
     metaToForm(); syncTitle();
