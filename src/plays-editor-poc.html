@@ -922,6 +922,28 @@ body.bkpick #lay-court .tb .bkring, body.bkpick #lay-bk .tb .bkring,
 body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .tb .bkring { opacity: .95; }
 /* Recapitulatif en tete du panneau 🏀 : combien de ballons, et ou ils sont. */
 #tb-list .tbsum { font-size: 11px; opacity: .72; padding: 2px 2px 6px; }
+/* ── MODES D'EDITION (v.244) ─────────────────────────────────────────────
+   L'attribut data-em ne vit QUE sur un terrain d'atelier : hors atelier
+   aucune de ces regles ne s'applique, les plays sont intacts. */
+body[data-em="court"]   .toolbtn:not([data-em~="court"]),
+body[data-em="players"] .toolbtn:not([data-em~="players"]),
+body[data-em="balls"]   .toolbtn:not([data-em~="balls"]),
+body[data-em="zones"]   .toolbtn:not([data-em~="zones"]),
+body[data-em="notes"]   .toolbtn:not([data-em~="notes"]) { display: none; }
+/* Ce que le mode ne touche pas est VERROUILLE : grise, et insensible au
+   doigt. Un decor grise se lit encore (on compose avec), il ne se deplace
+   simplement plus par accident. */
+body[data-em="court"] #lay-tok { pointer-events: none; opacity: .45; }
+body[data-em="court"] #lay-ball { opacity: .45; }
+body:not([data-em="court"]) #lay-acc { pointer-events: none; }
+body[data-em="players"] #lay-acc, body[data-em="notes"] #lay-acc { opacity: .7; }
+/* Le GLISSER d'un panier n'appartient qu'au mode Terrain. Sa zone de TAP
+   (.bkhit) reste, elle, pilotee par les outils 🏀 / 🎯 : viser un panier
+   pour un tir n'est pas le deplacer. */
+body:not([data-em="court"]) #lay-court .tb .hit,
+body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
+#ac-list .li { display: flex; gap: 6px; align-items: center; margin: 4px 0; }
+#ac-list .nm { flex: 1; font-size: 12px; opacity: .8; }
 /* Selecteur flottant (quel ballon ? quel panier ?) : en HTML AU-DESSUS du SVG,
    jamais dans un calque — un menu doit rester lisible quelle que soit
    l'echelle du terrain, et un <foreignObject> ne survit pas a l'export. */
@@ -990,17 +1012,29 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
 <!-- Barre unique — OUTILS · TERRAIN · VUE · INFOS -->
 <div class="bar">
   <div class="seg">
-    <button class="btn sm on" id="t-select" title="Sélection / déplacement">👆</button>
-    <button class="btn sm"    id="t-move"   title="Flèche de déplacement">→</button>
-    <button class="btn sm"    id="t-screen" title="Écran (screen) — trait terminé par une barre">⊥</button>
-    <button class="btn sm"    id="t-pass"   title="Flèche de passe">⇢</button>
-    <button class="btn sm"    id="t-shot"   title="Tir">🎯</button>
-    <button class="btn sm"    id="t-hl"    title="Highlight — halo qui pulse sur la joueuse pendant tout ce temps">✨</button>
-    <button class="btn sm"    id="t-erase"  title="Supprimer flèche / point de passage">🚫</button>
+    <button class="btn sm on toolbtn" data-em="players" id="t-select" title="Sélection / déplacement">👆</button>
+    <button class="btn sm toolbtn" data-em="players" id="t-move"   title="Flèche de déplacement">→</button>
+    <button class="btn sm toolbtn" data-em="players" id="t-screen" title="Écran (screen) — trait terminé par une barre">⊥</button>
+    <button class="btn sm toolbtn" data-em="balls" id="t-pass"   title="Flèche de passe">⇢</button>
+    <button class="btn sm toolbtn" data-em="balls" id="t-shot"   title="Tir">🎯</button>
+    <button class="btn sm toolbtn" data-em="notes" id="t-hl"    title="Highlight — halo qui pulse sur la joueuse pendant tout ce temps">✨</button>
+    <button class="btn sm toolbtn" data-em="players balls notes" id="t-erase"  title="Supprimer flèche / point de passage">🚫</button>
     <!-- v.240 — outil BALLONS, atelier seulement (.tmonly). Prendre un ballon
          là où il est, le poser où on tape : c'est le geste qui manquait pour
          sortir un ballon d'un panier sans ouvrir un panneau. -->
-    <button class="btn sm tmonly" id="t-ball" hidden title="Ballons : prendre au panier, poser dans les mains">🏀</button>
+    <button class="btn sm tmonly toolbtn" data-em="balls" id="t-ball" hidden title="Ballons : prendre au panier, poser dans les mains">🏀</button>
+  </div>
+  <div class="sep"></div>
+  <!-- v.244 — MODES D'EDITION EXCLUSIFS (atelier). Un seul chantier ouvert a
+       la fois : ce qui n'est pas le chantier courant est grise et insensible
+       au doigt. C'est ce qui empeche de deplacer un panier en visant une
+       joueuse — le reproche exact du coach. -->
+  <div class="seg tmonly" id="emseg" hidden>
+    <button class="btn sm" id="em-court"   title="Terrain : paniers et accessoires">🏋️</button>
+    <button class="btn sm on" id="em-players" title="Joueuses : positions, courses, écrans">👥</button>
+    <button class="btn sm" id="em-balls"   title="Ballons : poser, passer, tirer">🏀</button>
+    <button class="btn sm" id="em-zones"   title="Zones peintes">🎨</button>
+    <button class="btn sm" id="em-notes"   title="Annotations : halos et notes">📝</button>
   </div>
   <div class="sep"></div>
   <div class="seg">
@@ -1247,6 +1281,11 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
   <div class="zrow"><span class="zlbl">Taille</span><input type="range" id="ac-size" min="5" max="30" step="1"><b class="zlbl" id="ac-sizev">10</b></div>
   <p class="zlbl">Pose au centre du terrain, puis glisse-le où tu veux</p>
   <div class="accgrid" id="ac-grid"></div>
+  <!-- v.244 — la liste de ce qui est POSE. La barre flottante ne s'ouvre que
+       si on retrouve l'accessoire au doigt ; ici il est toujours atteignable,
+       et donc toujours supprimable. -->
+  <p class="zlbl">Posés sur le terrain</p>
+  <div id="ac-list"></div>
   <div class="row" style="margin-top:8px"><button class="btn wide" id="ac-close">Fermer</button></div>
 </div>
 
@@ -3116,7 +3155,12 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
       // v.239 — le panier principal n'est pas deplacable (pas de .hit) mais il
       // reste une CIBLE de tir legitime : il lui faut donc sa propre zone de
       // tap, neutralisee hors choix de cible par le CSS (.bkhit).
-      + (b.main ? '<circle class="bkhit" r="10" fill="transparent"/>' : '<circle class="hit" r="10" fill="transparent"/>')
+      // v.244 — DEUX zones, deux usages : .hit sert le GLISSER (mode Terrain
+      // seulement), .bkhit sert le TAP (viser un tir, prendre un ballon).
+      // Les confondre rendait un panier intapable des qu'on verrouille le
+      // decor — ou deplacable des qu'on veut juste tirer dessus.
+      + (b.main ? '' : '<circle class="hit" r="10" fill="transparent"/>')
+      + '<circle class="bkhit" r="10" fill="transparent"/>'
       + (!b.main && bkSel === b.id ? '<circle class="bksel" r="11"/>' : '')
       + '</g>';
   }
@@ -3373,6 +3417,7 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
     var l = accList(), html = '', i;
     for (i = 0; i < l.length; i++) html += accMarkup(l[i]);
     layX.innerHTML = html;
+    accListSync();
   }
   function accAdd(t, sub) {
     var dim = tmSync(), l = accList();
@@ -3929,7 +3974,7 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
       // officiel et le longe, au lieu d'être corrigé une fois le doigt levé.
       if (kind === 'bk') tmPushOut(o);
       moved = true;
-      if (kind === 'acc') { drawAcc(); tmAttach(); }
+      if (kind === 'acc') { drawAcc(); tmAttach(); accListSync(); }
       else { layC.innerHTML = courtOf('training'); applyLogo(); tmAttach(); tbSoon(); }
     }
     function up(ev) {
@@ -4005,7 +4050,10 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
     // En mode exercice il n'y a qu'UN terrain : les trois bascules et le
     // miroir disparaissent plutôt que de proposer un choix qui n'existe pas.
     var ex = exoMode();
-    ['m-half', 'm-full', 'b-mirror', 'm-train'].forEach(function (k) {
+    // v.244 — le MIROIR reste, lui, disponible en exercice : retourner tout
+    // l atelier d un coup est utile (le meme exo cote gauche), alors que les
+    // trois bascules de terrain n ont pas de sens la ou il n y a qu un terrain.
+    ['m-half', 'm-full', 'm-train'].forEach(function (k) {
       var el = document.getElementById(k); if (el) el.hidden = ex;
     });
     // Structure PLATE : ni bifurcation, ni tiroir d'arbre.
@@ -4042,6 +4090,11 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
     // v.240 — le 🏀 « donner le ballon » pose doc.ballStart, le ballon UNIQUE :
     // en atelier il ferait un deuxième système de ballons à l'écran.
     var bb = document.getElementById('b-ball'); if (bb) bb.hidden = tm;
+    // Les modes d'edition n'existent que sur un terrain d'atelier : hors
+    // atelier l'attribut disparait, donc aucune regle de verrouillage ne
+    // s'applique et les plays retrouvent exactement leur barre d'avant.
+    if (tm) document.body.setAttribute('data-em', emode);
+    else document.body.removeAttribute('data-em');
     document.getElementById('m-half').classList.toggle('on', mode() === 'half');
     document.getElementById('m-full').classList.toggle('on', mode() === 'full');
     document.getElementById('m-train').classList.toggle('on', mode() === 'training');
@@ -4130,6 +4183,21 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
     document.getElementById('tb-add').disabled = l.length >= BALL_CAP;
   }
 
+  // Liste des accessoires POSES : tape le numero pour le selectionner (la
+  // barre flottante s'ouvre), la corbeille pour le retirer. C'est la porte de
+  // sortie qui manquait — un accessoire mal place et deselectionne n'etait
+  // plus supprimable qu'en le retrouvant exactement au doigt.
+  function accListSync() {
+    var host = document.getElementById('ac-list'); if (!host) return;
+    var l = accList(), h = '', i, a;
+    for (i = 0; i < l.length; i++) {
+      a = l[i];
+      h += '<div class="li"><button class="btn xs' + (accSel === a.id ? ' on' : '') + '" data-asel="' + a.id + '">' + (i + 1) + '</button>'
+        + '<span class="nm">' + a.type + (a.subtype ? ' · ' + a.subtype : '') + '</span>'
+        + '<button class="btn xs danger" data-adel="' + a.id + '">🗑</button></div>';
+    }
+    host.innerHTML = h || '<div class="empty">Aucun accessoire posé.</div>';
+  }
   function accBarSync() {
     var bar = document.getElementById('abar');
     // v.228 — la MÊME barre sert les paniers d'atelier : sélection → poignée
@@ -4407,6 +4475,19 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
     });
     document.getElementById('ac-ok').addEventListener('click', accBarClose);
 
+    document.getElementById('ac-list').addEventListener('click', function (e) {
+      var el = e.target, id = el.getAttribute && el.getAttribute('data-adel');
+      if (id) {
+        var l = accList(), j;
+        for (j = 0; j < l.length; j++) if (l[j].id === id) { l.splice(j, 1); break; }
+        if (accSel === id) { accSel = null; accBarClose(); }
+        drawAcc(); tmAttach(); accListSync(); touch();
+        toast('Accessoire supprimé.', 'ok');
+        return;
+      }
+      id = el.getAttribute && el.getAttribute('data-asel');
+      if (id) { accSel = id; bkSel = null; drawAcc(); tmAttach(); accBarSync(); accListSync(); }
+    });
     document.getElementById('tb-add').addEventListener('click', tbAdd);
     document.getElementById('tb-list').addEventListener('click', function (e) {
       var el = e.target, id = el.getAttribute && el.getAttribute('data-bsel');
@@ -6078,6 +6159,34 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
   // ─────────────────────────────────────────────────────────────────────
   // 10. UI — outils, terrain, vue
   // ─────────────────────────────────────────────────────────────────────
+  // ── MODES D'EDITION (v.244) ──────────────────────────────────────────
+  // Un chantier a la fois. Le mode dit quels outils existent ET ce qui est
+  // verrouille (le reste du CSS s'en occupe, via body[data-em]). L'outil et
+  // le mode ne peuvent pas se contredire : prendre un outil par une autre
+  // porte (panneau 🏀, raccourci) ramene son mode avec lui.
+  var emode = 'players';
+  var EM_LIST = ['court', 'players', 'balls', 'zones', 'notes'];
+  var EM_TOOLS = { court: ['select'], players: ['select', 'move', 'screen', 'erase'],
+                   balls: ['ball', 'pass', 'shot', 'erase'], zones: ['select'], notes: ['hl', 'erase'] };
+  var EM_DEF = { court: 'select', players: 'select', balls: 'ball', zones: 'select', notes: 'hl' };
+  var EM_OF = { select: null, erase: null, move: 'players', screen: 'players',
+                ball: 'balls', pass: 'balls', shot: 'balls', hl: 'notes' };
+  function setEMode(m, fromTool) {
+    if (EM_LIST.indexOf(m) < 0) m = 'players';
+    emode = m;
+    document.body.setAttribute('data-em', m);
+    EM_LIST.forEach(function (k) {
+      var el = document.getElementById('em-' + k); if (el) el.classList.toggle('on', k === m);
+    });
+    // Une selection de decor n'a plus de sens hors du mode Terrain : la garder
+    // laisserait une barre flottante agir sur ce qu'on vient de verrouiller.
+    if (m !== 'court') { accSel = null; bkSel = null; try { accBarClose(); } catch (_) {} }
+    if (m !== 'balls' && tbSel) { tbSel = null; try { tbListSync(); } catch (_) {} }
+    if (!fromTool && EM_TOOLS[m].indexOf(tool) < 0) setTool(EM_DEF[m]);
+    if (m === 'zones') { try { document.getElementById('b-zone').click(); } catch (_) {} }
+    try { drawAcc(); tmAttach(); drawTrainBalls(); } catch (_) {}
+    syncSelection(); setHint();
+  }
   var TOOLS = ['select', 'move', 'screen', 'pass', 'shot', 'hl', 'erase', 'ball'];
   function setTool(t) {
     if (playing || document.body.classList.contains('playing')) exitPlay();
@@ -6087,6 +6196,9 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
     // sinon il capterait le tap destiné à l'outil (cf. onTokenClick).
     // v.240 — sauf vers l'outil 🏀, dont le ballon armé EST l'état de travail.
     if (t !== 'select' && t !== 'ball' && tbSel) { tbSel = null; try { tbListSync(); } catch (_) {} }
+    // v.244 — l'outil ramene son mode d'edition (jamais l'inverse ici : c'est
+    // setEMode qui appelle setTool, avec fromTool pour couper la boucle).
+    if (mode() === 'training' && EM_OF[t] && EM_OF[t] !== emode) setEMode(EM_OF[t], true);
     pending = null;
     if (t !== 'select') active = null;
     document.body.setAttribute('data-tool', t);
@@ -6095,6 +6207,10 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
   }
   TOOLS.forEach(function (k) {
     document.getElementById('t-' + k).addEventListener('click', function () { setTool(k); });
+  });
+  EM_LIST.forEach(function (k) {
+    var el = document.getElementById('em-' + k);
+    if (el) el.addEventListener('click', function () { setEMode(k); });
   });
 
   // Ballon : un seul porteur AU TEMPS 0. Re-cliquer sur la porteuse le retire
@@ -6185,6 +6301,29 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
       }
     }
     mzl(doc);
+    // v.244 — LE MIROIR EMPORTE TOUT LE DECOR D'ATELIER. Sans ca la scene se
+    // contredit : les joueuses passent a droite et les plots restent a gauche.
+    // Les ballons, eux, n'ont AUCUNE coordonnee — ils designent une joueuse ou
+    // un panier — donc ils suivent leur porteur sans une ligne de plus.
+    if (mode() === 'training') {
+      // Les extensions s'ECHANGENT : la toile garde sa largeur, mais le
+      // terrain officiel doit retomber a sa place miroir dedans, sinon tout
+      // glisserait d'un bord (x → W − x suppose la toile retournee EN ENTIER).
+      var E = doc.ext;
+      if (E && typeof E === 'object') { var sw = E.l; E.l = E.r; E.r = sw; }
+      var al = Array.isArray(doc.accessories) ? doc.accessories : [], ai;
+      for (ai = 0; ai < al.length; ai++) {
+        if (!al[ai]) continue;
+        if (typeof al[ai].x === 'number') al[ai].x = f(W - al[ai].x);
+        if (al[ai].rot) al[ai].rot = f(-(+al[ai].rot || 0));
+      }
+      var bl = Array.isArray(doc.extraBaskets) ? doc.extraBaskets : [], bi;
+      for (bi = 0; bi < bl.length; bi++) {
+        if (!bl[bi]) continue;
+        if (typeof bl[bi].x === 'number') bl[bi].x = f(W - bl[bi].x);
+        if (bl[bi].a) bl[bi].a = f(-(+bl[bi].a || 0));
+      }
+    }
     (function walk(l) {
       var i, j, k;
       for (i = 0; i < l.length; i++) {
@@ -6201,8 +6340,12 @@ body[data-tool="ball"] #lay-court .tb .bkring, body[data-tool="ball"] #lay-bk .t
     // Côté joueuse le miroir est un CONFORT de lecture : il ne salit pas le
     // document (pas de touch(), donc pas de brouillon, pas de publication).
     if (vwOn) { drawZones(); vwRedraw(); vwLegendSync(); return; }
+    // En atelier, tmSync() (appele par drawAll) recalcule le terrain depuis
+    // les extensions echangees : le parquet se retourne avec le reste.
     drawZones(); drawAll(); renderTimeline(); setHint(); touch();
-    toast(mode() === 'half' ? 'Play basculé sur l\'autre demi-terrain.' : 'Play basculé sur l\'autre panier.', 'ok');
+    toast(mode() === 'half' ? 'Play basculé sur l\'autre demi-terrain.'
+        : mode() === 'training' ? 'Atelier retourné — joueuses, plots, paniers et extensions.'
+        : 'Play basculé sur l\'autre panier.', 'ok');
   }
   document.getElementById('b-mirror').addEventListener('click', mirrorMode);
 
