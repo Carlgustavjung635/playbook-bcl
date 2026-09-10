@@ -1299,7 +1299,7 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
   <p class="zlbl">6 ballons maximum · 2 par joueuse</p>
   <div class="row"><button class="btn wide" id="tb-add">➕ Ajouter un ballon</button></div>
   <div id="tb-list" class="tmlist"></div>
-  <p class="zlbl" style="margin-top:8px">Sélectionne un ballon, puis une joueuse sur le parquet (👉), ou envoie-le au panier le plus proche (🎯). Chaque geste s'applique <b>à partir du temps courant</b>.</p>
+  <p class="zlbl" style="margin-top:8px">Sélectionne un ballon, puis tape une joueuse ou un panier pour l'affecter. Pour tirer (🎯), choisis ensuite le panier visé sur le terrain. Chaque geste s'applique <b>à partir du temps courant</b>.</p>
   <div class="row"><button class="btn wide" id="tb-close">Fermer</button></div>
 </div>
 
@@ -3641,7 +3641,7 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
     // Il naît au panier principal : un ballon qui apparaîtrait dans les mains
     // d'une joueuse choisie au hasard ferait mentir le compteur « 2 max ».
     ballInit()[b.id] = '@main';        // affectation INITIALE, pas un evenement
-    setTool('select');
+    setTool('ball');
     tbSel = b.id;
     drawTrainBalls(); tbListSync(); touch();
   }
@@ -3829,9 +3829,10 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
       toast('Tir annulé — le ballon reste où il est.', 'ok');
       return;
     }
-    if (!tmArmBall(id, null)) { toast(labelOf(id) + " n'a pas de ballon : rien à tirer.", 'err'); return; }
-    tmShotArm(id);
-    toast('🎯 ' + labelOf(id) + ' — tape le panier visé.', 'ok');
+    if (!tmArmBall(id, function () {
+      tmShotArm(id);
+      toast('🎯 ' + labelOf(id) + ' — tape le panier visé.', 'ok');
+    })) { toast(labelOf(id) + " n'a pas de ballon : rien à tirer.", 'err'); return; }
   }
   // Tap sur un panier. Renvoie true quand le tap a ete CONSOMME (un tir
   // attendait sa cible) : le glisser du panier ne doit alors pas demarrer.
@@ -4047,9 +4048,13 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
     // 2D, où floorTf() est l'identité : rien à transformer.
     var bkTop = document.getElementById('lay-bk');
     if (bkTop && layC) {
-      bkTop.innerHTML = '';   // sinon la repeinte du terrain les DUPLIQUE
       els = layC.querySelectorAll('.tb');
-      for (i = 0; i < els.length; i++) bkTop.appendChild(els[i]);
+      // Sans repeinte du parquet, les paniers sont déjà dans le calque haut.
+      // Un simple changement d'outil ne doit pas les supprimer.
+      if (els.length) {
+        bkTop.innerHTML = '';
+        for (i = 0; i < els.length; i++) bkTop.appendChild(els[i]);
+      }
     }
     // v.239 — TOUS les paniers sont lies, le principal compris : il n'est pas
     // deplacable (tmDragStart le refuse, il n'est pas dans extraBaskets) mais
@@ -4518,7 +4523,7 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
     document.getElementById('tb-add').addEventListener('click', tbAdd);
     document.getElementById('tb-list').addEventListener('click', function (e) {
       var el = e.target, id = el.getAttribute && el.getAttribute('data-bsel');
-      if (id) { var arm = (tbSel === id) ? null : id; if (arm) setTool('select'); tbSel = arm; tbListSync(); setHint(); return; }
+      if (id) { tbSelect(id); return; }
       id = el.getAttribute && el.getAttribute('data-bshoot');
       if (id) { tbSel = id; tbShoot(); return; }
       id = el.getAttribute && el.getAttribute('data-bdel');
@@ -6226,9 +6231,15 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
     syncSelection(); setHint();
   }
   var TOOLS = ['select', 'move', 'screen', 'pass', 'shot', 'hl', 'erase', 'ball'];
+  function tbSelect(id) {
+    var arm = tbSel === id ? null : id;
+    if (arm) { setTool('ball'); closeSheets(); }
+    tbSel = arm; tbListSync(); setHint();
+  }
   function setTool(t) {
     if (playing || document.body.classList.contains('playing')) exitPlay();
     tool = t;
+    if (t !== 'shot' && tmShotFrom) tmShotArm(null);
     // Un ballon reste armé tant qu'on ne l'a pas posé ; prendre un outil de
     // dessin dit « je dessine », pas « je pose » — on le désarme donc ici,
     // sinon il capterait le tap destiné à l'outil (cf. onTokenClick).

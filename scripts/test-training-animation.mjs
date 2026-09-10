@@ -17,7 +17,7 @@ const names = ['clonePos','isMoveKind','endPos','pullPos','recomputeList','recom
   'tmBallList','ballInit','stEv','evWin','evSet','ballStateAt','evPlan','evApply','ballLegsAt','ballWalk','ballsAt',
   'evRemoveArrow','clearTrainingShot','tmBallsOf','tmPassBall','addArrow','removeArrow','tbAssign',
   'tmShotTap','tmBasketTap','tmHeldBalls','tmArmBall','framePositions','tbSlotPos','ballViewAt','lerpPts',
-  'encSteps','decSteps','placeToken'];
+  'encSteps','decSteps','placeToken','tbAdd','tbSelect','tmAttach','setTool','setEMode'];
 function context() {
   const c = {
     doc: { mode: 'training', balls: [{ id:'b1' }], ballInit:{b1:'a1'}, training:{steps:[{pos:{a1:{x:0,y:0},a2:{x:100,y:0},a3:{x:200,y:0}}, arw:[] }]} },
@@ -101,5 +101,39 @@ test('Export/import conserve les chaînes et leur lien avec les flèches',()=>{
  const c=context();pass(c,'a1','a2');pass(c,'a2','a3');const serialized=c.encSteps(c.steps(),[],0);
  c.doc.training.steps=c.decSteps(JSON.parse(JSON.stringify(serialized)),c.step().pos,0);
  assert.equal(c.ballsAt(0).b1,'a3');c.removeArrow(c.step().arw[0].id);assert.equal(c.ballsAt(0).b1,'a1');
+});
+function editorContext() {
+ const c=context(), body={};
+ c.document.body.setAttribute=(k,v)=>body[k]=v;
+ c.document.getElementById=()=>({classList:{toggle(){}}});
+ Object.assign(c,{BALL_CAP:6,emode:'court',EM_LIST:['court','players','balls','zones','notes'],
+  EM_OF:{ball:'balls',shot:'balls'},TOOLS:['select','ball','shot'],layX:null,layC:null,
+  svg:{querySelectorAll:()=>[]},drawAcc(){},accBarClose(){},syncSelection(){},closeSheets(){}});
+ c.body=body; return c;
+}
+test('Ajout depuis Terrain : trois ballons affectables sans déplacer les joueuses',()=>{
+ const c=editorContext();
+ for(const id of ['a1','a2','a3']) { c.tbAdd(); assert.equal(c.emode,'balls'); assert.equal(c.tool,'ball'); assert.equal(c.tbAssign(id),true); }
+ assert.equal(c.tmBallsOf('a1'),2);assert.equal(c.tmBallsOf('a2'),1);assert.equal(c.tmBallsOf('a3'),1);
+});
+test('Sélection dans la liste : ferme le panneau et active Ballons depuis Terrain',()=>{
+ const c=editorContext();let closed=0;c.closeSheets=()=>closed++;
+ c.tbSelect('b1');assert.equal(c.tbSel,'b1');assert.equal(c.tool,'ball');assert.equal(c.emode,'balls');assert.equal(closed,1);
+});
+test('Rattacher les paniers sans redessiner le terrain conserve les cibles',()=>{
+ const c=context(), baskets=[{id:'main'},{id:'extra'}];let floor=baskets.slice(),top=[];
+ const layer={set innerHTML(v){top=[];},appendChild(el){top.push(el);floor=floor.filter(x=>x!==el);}};
+ c.layX=null;c.layC={querySelectorAll:()=>floor.slice()};c.document.getElementById=()=>layer;
+ c.svg={querySelectorAll:()=>[]};c.tmAttach();c.tmAttach();c.tmAttach();assert.deepEqual(top,baskets);
+ floor=[{id:'new-main'},{id:'new-extra'}];c.tmAttach();assert.equal(top.length,2);assert.equal(top[1].id,'new-extra');
+});
+test('Tir avec deux ballons : choisir le ballon avant de sélectionner le panier additionnel',()=>{
+ const c=context();c.doc.balls.push({id:'b2'});c.doc.ballInit.b2='a1';let choose;
+ c.bpOpen=(anchor,items,cb)=>choose=cb;c.tmBaskets=()=>[{id:'main'},{id:'extra'}];
+ c.tmShotTap('a1');assert.equal(c.tmShotFrom,null);choose('b2');assert.equal(c.tmShotFrom,'a1');
+ c.tmBasketTap('extra');assert.equal(c.step().shotBk,'extra');assert.equal(c.ballsAt(0).b2,'@extra');assert.equal(c.ballsAt(0).b1,'a1');
+});
+test('Quitter Tir désarme la sélection du panier',()=>{
+ const c=editorContext();c.tmShotFrom='a1';c.setTool('ball');assert.equal(c.tmShotFrom,null);
 });
 console.log(`${passed} scénarios réussis`);
