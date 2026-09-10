@@ -136,4 +136,29 @@ test('Tir avec deux ballons : choisir le ballon avant de sélectionner le panier
 test('Quitter Tir désarme la sélection du panier',()=>{
  const c=editorContext();c.tmShotFrom='a1';c.setTool('ball');assert.equal(c.tmShotFrom,null);
 });
+test('Cliquer le dernier ballon ajouté confirme son affectation',()=>{
+ const c=editorContext();c.tbAdd();const bid=c.tbSel;c.tbSelect(bid);
+ assert.equal(c.tbSel,bid);assert.equal(c.tbAssign('a2'),true);assert.equal(c.ballsAt(0)[bid],'a2');
+});
+test('Six ballons peuvent être affectés et transférés indépendamment',()=>{
+ const c=editorContext();c.doc.balls=[];c.doc.ballInit={};
+ for(let i=0;i<6;i++)c.tbAdd();
+ const ids=c.doc.balls.map(b=>b.id);
+ ids.forEach((id,i)=>{c.tbSelect(id);assert.equal(c.tbAssign('a'+(1+Math.floor(i/2))),true);});
+ ids.forEach((id,i)=>{c.tbSelect(id);assert.equal(c.tbAssign('@main'),true);assert.equal(c.ballsAt(0)[id],'@main');});
+ assert.equal(new Set(ids).size,6);
+});
+test('Les deux paniers officiels et les dix paniers additionnels sont des cibles',()=>{
+ const c=context();vm.runInContext(extract('tmBaskets'),c);c.TM_BASKET_MAX=10;
+ c.tmDims=()=>({base:'full',el:60,et:20,bw:174,bh:304});
+ c.doc.extraBaskets=Array.from({length:10},(_,i)=>({id:'extra'+i,x:15,y:40+i*20}));
+ const b=c.tmBaskets();assert.equal(b.length,12);assert.equal(b[0].id,'main');assert.equal(b[1].id,'opposite');
+ assert.equal(b[0].y,47.75);assert.equal(b[1].y,296.25);
+ c.tmShotFrom='a1';c.tbSel='b1';c.tmBasketTap('opposite');assert.equal(c.ballsAt(0).b1,'@opposite');
+ c.tmDims=()=>({base:'half',el:0,et:0,bw:174,bh:164});assert.equal(c.tmBaskets().length,11);
+});
+test('Les ballons rangés dans un panier ne se superposent pas',()=>{
+ const c=context();const a=c.tbSlotPos('@main',0,c.step().pos),b=c.tbSlotPos('@main',1,c.step().pos);
+ assert.notEqual(a.x,b.x);assert.equal(a.y,b.y);
+});
 console.log(`${passed} scénarios réussis`);

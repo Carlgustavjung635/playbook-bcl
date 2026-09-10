@@ -3120,8 +3120,11 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
   function tmBaskets(d) {
     d = d || doc;
     var dim = tmDims(d), out = [ { id: 'main', x: dim.el + dim.bw / 2, y: dim.et + 27.75, a: 0, main: true } ];
+    // Le plein terrain comporte deux paniers officiels, tous deux visables.
+    if (dim.base === 'full') out.push({ id: 'opposite', x: dim.el + dim.bw / 2,
+      y: dim.et + dim.bh - 27.75, a: 180, main: true });
     var l = Array.isArray(d.extraBaskets) ? d.extraBaskets : [], i, b;
-    for (i = 0; i < l.length && out.length <= TM_BASKET_MAX; i++) {
+    for (i = 0; i < l.length && i < TM_BASKET_MAX; i++) {
       b = l[i];
       if (!b || !isFinite(+b.x) || !isFinite(+b.y)) continue;
       out.push({ id: String(b.id), x: +b.x, y: +b.y, a: +b.a || 0, main: false });
@@ -3913,7 +3916,7 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
       bk = tmBaskets();
       for (i = 0; i < bk.length; i++) if (String(bk[i].id) === String(holder).slice(1)) {
         sp = VIEWS[view].project({ x: bk[i].x, y: bk[i].y });
-        return { x: sp.x - PR * 0.30, y: sp.y + PR * 1.05 };
+        return { x: sp.x - PR * 0.30 + slot * PR * 0.85, y: sp.y + PR * 1.05 };
       }
       return null;
     }
@@ -6232,9 +6235,10 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
   }
   var TOOLS = ['select', 'move', 'screen', 'pass', 'shot', 'hl', 'erase', 'ball'];
   function tbSelect(id) {
-    var arm = tbSel === id ? null : id;
-    if (arm) { setTool('ball'); closeSheets(); }
-    tbSel = arm; tbListSync(); setHint();
+    // Le dernier ballon ajouté est déjà armé : cliquer sa ligne confirme
+    // ce choix et ouvre le terrain, au lieu d'annuler silencieusement.
+    setTool('ball'); closeSheets();
+    tbSel = id; tbListSync(); setHint();
   }
   function setTool(t) {
     if (playing || document.body.classList.contains('playing')) exitPlay();
