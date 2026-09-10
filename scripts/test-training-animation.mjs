@@ -161,4 +161,16 @@ test('Les ballons rangés dans un panier ne se superposent pas',()=>{
  const c=context();const a=c.tbSlotPos('@main',0,c.step().pos),b=c.tbSlotPos('@main',1,c.step().pos);
  assert.notEqual(a.x,b.x);assert.equal(a.y,b.y);
 });
+test('Terrain → mouvements joueuse → Ballons conserve tous les paniers',()=>{
+ const c=editorContext(), baskets=[{id:'main'},{id:'opposite'},{id:'extra'}];
+ let floor=baskets.slice(),top=[];
+ const layer={set innerHTML(v){top=[];},appendChild(el){top.push(el);floor=floor.filter(x=>x!==el);}};
+ const get=c.document.getElementById;c.document.getElementById=id=>id==='lay-bk'?layer:get(id);
+ c.layC={querySelectorAll:()=>floor.slice()};c.EM_OF.move='players';
+ c.EM_TOOLS={players:['select','move'],court:['select'],balls:['ball','shot']};
+ c.EM_DEF={players:'select',court:'select',balls:'ball'};
+ c.tmAttach();c.setEMode('players');c.setTool('move');
+ assert.equal(c.tool,'move');assert.deepEqual(top,baskets);
+ c.setEMode('balls');assert.deepEqual(top,baskets);
+});
 console.log(`${passed} scénarios réussis`);
