@@ -2214,7 +2214,8 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
     for (i = 0; i < st.arw.length; i++) {
       a = st.arw[i];
       if (!isMoveKind(a.kind)) continue;
-      var d = typeof a.to === 'string' ? p[a.to] : a.to;
+      // Les destinations se lisent dans la photo de départ : mouvements simultanés.
+      var d = typeof a.to === 'string' ? st.pos[a.to] : a.to;
       if (d && p[a.from]) p[a.from] = { x: d.x, y: d.y };
     }
     return p;
@@ -3471,17 +3472,16 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
     for (i = 0; i < l.length; i++) if (l[i] && l[i].b) n[l[i].b] = (n[l[i].b] || 0) + 1;
     return n;
   }
-  // Ecrit l'evenement de `bid` dans ce temps : UN seul par ballon et par
-  // action, sinon un aller-retour du coach empilerait des trajets fantomes.
-  function evSet(st, bid, to, t) {
-    var l = stEv(st), i, from = null;
-    for (i = l.length - 1; i >= 0; i--) if (l[i].b === bid) { from = l[i].from; l.splice(i, 1); }
-    if (from === null || from === undefined) from = ballStateAt(cur - 1, 1)[bid] || null;
-    // Reposer un ballon la ou il est deja n est pas un evenement : ecrire ce
-    // no-op salirait la chaine sans rien changer a l etat.
-    if (t === 'set' && from === to) return null;
-    l.push({ t: t, b: bid, from: from, to: to });
-    return l[l.length - 1];
+  // Chaque geste ajoute une action au ballon ; la flèche identifie l'action
+  // à retirer quand le coach l'efface, sans détruire le reste de la chaîne.
+  function evSet(st, bid, to, t, from) {
+    var l = stEv(st), current = ballsAt(cur)[bid] || null;
+    if (from === undefined) from = current;
+    if (!to || from === to) return null;
+    // Une nouvelle action prolonge la chaîne ; elle ne remplace pas la réception.
+    var e = { t: t, b: bid, from: from, to: to };
+    l.push(e);
+    return e;
   }
   // ETAT DES BALLONS a l'instant (k, u) — LA source unique de verite.
   // On part de l'init, on rejoue tous les temps d'avant en ENTIER, puis le
@@ -3502,30 +3502,53 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
   // Un ballon EN VOL n'appartient a personne : sa destination ne devient la
   // verite qu'une fois la fenetre consommee. C'est ce qui rend la sequence
   // « il part / il arrive » lisible sans etat intermediaire a inventer.
-  function evApply(m, st, u) {
-    var l = Array.isArray(st.ballEv) ? st.ballEv : [], n = evCount(st), c = {}, i, e, w, idx;
-    for (i = 0; i < l.length; i++) {
-      e = l[i]; if (!e || !e.b || !e.to) continue;
-      idx = c[e.b] || 0; c[e.b] = idx + 1;
-      w = evWin(e, idx, n[e.b]);
-      if (!w) { m[e.b] = e.to; continue; }        // `set` : vrai des u = 0
-      if (u >= w[1]) m[e.b] = e.to;
-    }
-  }
-  // Le detail du temps k : par ballon, la suite des trajets a jouer.
-  function ballLegsAt(k) {
-    var entry = ballStateAt(k - 1, 1), st = steps()[k] || step();
-    var l = Array.isArray(st.ballEv) ? st.ballEv : [], n = evCount(st), c = {}, i, e, idx, w;
-    var here = {}, legs = {}, key;
+  function evPlan(st, entry) {
+    var here = {}, legs = {}, list = Array.isArray(st.ballEv) ? st.ballEv : [], i, e, from, key;
     for (key in entry) here[key] = entry[key];
-    for (i = 0; i < l.length; i++) {
-      e = l[i]; if (!e || !e.b || !e.to) continue;
-      idx = c[e.b] || 0; c[e.b] = idx + 1;
-      w = evWin(e, idx, n[e.b]);
-      (legs[e.b] = legs[e.b] || []).push({ from: e.from || here[e.b] || e.to, to: e.to, t: e.t, win: w });
+    for (i = 0; i < list.length; i++) {
+      e = list[i]; if (!e || !e.b || !e.to) continue;
+      from = here[e.b] || null;
+      // Une passe devenue impossible après édition ne crée pas un ballon chez sa destinataire.
+      if (e.t !== 'set' && (!from || (e.from && e.from !== from))) continue;
+      if (from === e.to) continue;
+      (legs[e.b] = legs[e.b] || []).push({ from: from, to: e.to, t: e.t, arrow: e.arrow || null });
       here[e.b] = e.to;
     }
+    for (key in legs) {
+      var n = legs[key].filter(function (leg) { return leg.t !== 'set'; }).length, ix = 0;
+      for (i = 0; i < legs[key].length; i++) {
+        e = legs[key][i]; e.win = evWin(e, ix, n);
+        if (e.t !== 'set') ix++;
+      }
+    }
     return { entry: entry, legs: legs };
+  }
+  function evApply(m, st, u) {
+    var plan = evPlan(st, m), key, r;
+    for (key in plan.legs) {
+      r = ballWalk(key, plan, u);
+      m[key] = r.holder || null; // En vol : aucune joueuse ne possède le ballon.
+    }
+  }
+  function ballLegsAt(k) {
+    return evPlan(steps()[k] || step(), ballStateAt(k - 1, 1));
+  }
+  function evRemoveArrow(st, arrow) {
+    if (!arrow || arrow.kind !== 'pass' || !Array.isArray(st.ballEv)) return;
+    // Les anciens documents n'ont pas de lien explicite : apparier une seule action.
+    var fallback = -1, i, e;
+    for (i = 0; i < st.ballEv.length; i++) {
+      e = st.ballEv[i];
+      if (e.arrow === arrow.id) { st.ballEv.splice(i, 1); return; }
+      if (fallback < 0 && !e.arrow && e.t === 'pass' && e.from === arrow.from && e.to === arrow.to) fallback = i;
+    }
+    if (fallback >= 0) st.ballEv.splice(fallback, 1);
+  }
+  function clearTrainingShot(st) {
+    var list = Array.isArray(st.ballEv) ? st.ballEv : [];
+    for (var i = list.length - 1; i >= 0; i--)
+      if (list[i].t === 'shot' && (st.shotBall ? list[i].b === st.shotBall : list[i].from === st.shot)) list.splice(i, 1);
+    st.shot = null; delete st.shotBk; delete st.shotBall;
   }
   // Ou est CE ballon a la fraction u : chez quelqu'un (`holder`), ou en vol
   // entre deux points (`fly`). Aucun appelant ne decide plus tout seul.
@@ -3651,9 +3674,9 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
     // AU TEMPS 1 c'est l'affectation INITIALE (le decor de depart) ; ensuite
     // c'est un evenement — et s'il venait d'ailleurs, c'en est un qui SE VOIT
     // (rebond, ramassage, depot), pas une teleportation.
-    if (cur === 0 && !bpath.length) ballInit()[tbSel] = target;
+    if (cur === 0 && !bpath.length && !stEv(step()).some(function (e) { return e.b === tbSel; })) ballInit()[tbSel] = target;
     else {
-      var was = ballStateAt(cur - 1, 1)[tbSel] || null;
+      var was = ballsAt(cur)[tbSel] || null;
       evSet(step(), tbSel, target, (was && was !== target) ? 'move' : 'set');
     }
     drawTrainBalls(); tbListSync(); touch();
@@ -3675,7 +3698,7 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
   // passe qui n'a pas eu lieu. Le ballon est TRANSFÉRÉ (une clé ballon n'a
   // qu'une valeur : l'écrire chez la receveuse le retire de la passeuse).
   function tmPassBall(from, to) {
-    if (!from || !to || from === to) return true;
+    if (!from || !to || from === to) return false;
     var m = ballsAt(cur), list = tmBallList(), mine = [], n2 = 0, i, bid;
     for (i = 0; i < list.length; i++) {
       bid = list[i].id;
@@ -3693,7 +3716,7 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
     // Si un ballon est armé dans le panneau et qu'il est bien dans les mains
     // de la passeuse, c'est CELUI-LÀ qui part : le coach a désigné lequel.
     var pick = (tbSel && mine.indexOf(tbSel) >= 0) ? tbSel : mine[0];
-    evSet(step(), pick, to, 'pass');
+    var event = evSet(step(), pick, to, 'pass', from);
     // Le ballon est parti : le laisser armé le ferait re-partir au tap suivant.
     tbSel = null;
     drawTrainBalls(); tbListSync();
@@ -3702,7 +3725,7 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
     // sinon le coach croirait la passeuse libérée alors qu'elle porte encore.
     var left = mine.length - 1;
     toast('🏀 ' + labelOf(from) + ' → ' + labelOf(to) + (left ? ' (il lui en reste ' + left + ')' : ''), 'ok');
-    return true;
+    return event;
   }
   // ── Choisir : quel ballon ? quel panier ? ────────────────────────────
   // v.239 — la passe et le tir prenaient « le premier ballon » et « le panier
@@ -3801,7 +3824,7 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
   function tmShotTap(id) {
     var st = step();
     if (st.shot === id) {
-      st.shot = null; delete st.shotBk; delete st.shotBall; tmShotArm(null); tbSel = null; tbListSync();
+      clearTrainingShot(st); tmShotArm(null); tbSel = null; drawTrainBalls(); tbListSync();
       drawArrows(); syncInfo(); syncBall(); renderTimeline(); touch();
       toast('Tir annulé — le ballon reste où il est.', 'ok');
       return;
@@ -3840,11 +3863,12 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
     for (i = 0; i < held.length; i++) if (held[i].v === tbSel) pick = tbSel;
     if (!pick) pick = held[0].v;
     for (i = 0; i < l.length; i++) if (String(l[i].id) === String(bkId)) n = i + 1;
+    clearTrainingShot(st);
     st.shot = from;
     st.shotBk = String(bkId);          // LA cible, plus « le plus proche »
     st.shotBall = pick;                // ET quel ballon vole : la lecture doit
                                        // savoir lequel decoller des mains
-    evSet(st, pick, '@' + bkId, 'shot');   // il part de ses mains vers CE panier
+    evSet(st, pick, '@' + bkId, 'shot', from);   // il part de ses mains vers CE panier
     tbSel = null;
     drawArrows(); drawTrainBalls(); tbListSync(); syncInfo(); syncBall(); renderTimeline(); touch(); setHint();
     toast('🎯 ' + labelOf(from) + ' → ' + (n === 1 ? 'panier principal' : 'panier ' + n), 'ok');
@@ -3913,7 +3937,10 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
     for (i = 0; i < out.length; i++) {
       r = out[i].r;
       if (r.holder) { out[i].pt = tbSlotPos(r.holder, r.slot, Q); out[i].at = r.holder; continue; }
-      A = tbSlotPos(r.fly.from, 0, Q); B = tbSlotPos(r.fly.to, 0, Q);
+      if (!r.fly) { out[i].pt = null; continue; }
+      // Le ballon quitte un point fixe ; il ne reste pas attaché à la passeuse en vol.
+      A = tbSlotPos(r.fly.from, 0, framePositions(k, r.fly.win[0]));
+      B = tbSlotPos(r.fly.to, 0, framePositions(k, r.fly.win[1]));
       if (!A || !B) { out[i].pt = A || B; continue; }
       // Un tir MONTE (cloche haute), une passe file presque droit : meme
       // quadratique, seule la hauteur du point de controle change.
@@ -4651,7 +4678,9 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
     // Les ballons multiples vivent dans leur PROPRE calque (ils peuvent être
     // au panier, sans porteuse) : ils ne suivent donc pas le <g> du jeton et
     // doivent être re-posés. Une frame de rAF, un seul jeton en mouvement.
-    if (doc.mode === 'training') tbSoon();
+    // renderFrame fournit p et pose les ballons via tbFrame : un redessin
+    // différé ici les ramènerait à u=0 après CHAQUE frame, y compris la dernière.
+    if (doc.mode === 'training' && !p && !document.body.classList.contains('playing')) tbSoon();
   }
 
   // ── Highlights ───────────────────────────────────────────────────────
@@ -5194,8 +5223,9 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
       // est celle du terrain : la passeuse doit en tenir un, la receveuse
       // peut déjà en tenir un (elle finit à deux) mais jamais trois. Le cap
       // se vérifie sur l'état RÉSULTANT du temps courant, comme tbAssign().
-      if (mode() === 'training' && !tmPassBall(pending, id)) { pending = null; syncSelection(); setHint(); return; }
-      addArrow('pass', pending, id); pending = null; syncSelection(); return;
+      var ballEvent = mode() === 'training' ? tmPassBall(pending, id) : null;
+      if (mode() === 'training' && !ballEvent) { pending = null; syncSelection(); setHint(); return; }
+      addArrow('pass', pending, id, ballEvent); pending = null; syncSelection(); return;
     }
     // Déplacement / écran : cliquer un autre jeton vaut « va à cet endroit ».
     // On s ARRETE AU CONTACT, jamais sur le centre de l autre : arriver
@@ -5225,7 +5255,7 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
     if (pending || active) { pending = null; active = null; syncSelection(); setHint(); }
   }
 
-  function addArrow(kind, from, to) {
+  function addArrow(kind, from, to, ballEvent) {
     // Une seule flèche de déplacement par joueuse et par temps : deux
     // destinations pour la même joueuse au même moment ne veut rien dire, et
     // l'animation devrait en choisir une au hasard. La nouvelle remplace.
@@ -5233,7 +5263,9 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
     if (isMoveKind(kind)) {
       for (i = l.length - 1; i >= 0; i--) if (isMoveKind(l[i].kind) && l[i].from === from) l.splice(i, 1);
     }
-    l.push({ id: uid('w'), kind: kind, from: from, to: to, via: [] });
+    var arrow = { id: uid('w'), kind: kind, from: from, to: to, via: [] };
+    l.push(arrow);
+    if (ballEvent) ballEvent.arrow = arrow.id;
     // v.242 — les fleches FONT le plan de vol des ballons (une passe A→B dit
     // que le ballon PART de A). tmPassBall() repeint avant que la fleche
     // n existe : sans ce repeint-ci, le ballon s affichait deja arrive.
@@ -5241,10 +5273,10 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
   }
 
   function removeArrow(id) {
-    if (id === '__shot') { step().shot = null; delete step().shotBk; delete step().shotBall; }
+    if (id === '__shot') { clearTrainingShot(step()); }
     else {
       var l = step().arw, i;
-      for (i = 0; i < l.length; i++) if (l[i].id === id) { l.splice(i, 1); break; }
+      for (i = 0; i < l.length; i++) if (l[i].id === id) { evRemoveArrow(step(), l[i]); l.splice(i, 1); break; }
     }
     // Retirer une fleche retire aussi le trajet qu elle decrivait.
     drawArrows(); drawTrainBalls(); syncInfo(); syncBall(); renderTimeline(); touch();
@@ -5711,6 +5743,16 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
     }
   }
 
+  function framePositions(k, u) {
+    var st = steps()[k], live = clonePos(st.pos), mu = ease(win(u, PLAY.move)), i, m, q;
+    if (pPrepared !== k || !pPaths) return live;
+    for (i = 0; i < pPaths.moves.length; i++) {
+      m = pPaths.moves[i];
+      if (m.len > 0.01) { q = m.el.getPointAtLength(m.len * mu); live[m.id] = { x: q.x, y: q.y }; }
+    }
+    return live;
+  }
+
   // Rend la frame (temps k, fraction u). Écrit UNIQUEMENT des attributs.
   function renderFrame(k, u) {
     var st = steps()[k];
@@ -5719,15 +5761,10 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
     var p0 = st.pos, id, i;
 
     // 1) positions — la joueuse suit sa courbe, les autres restent en place
-    var live = {};
-    for (id in p0) live[id] = { x: p0[id].x, y: p0[id].y };
+    var live = framePositions(k, u);
     var mu = ease(win(u, PLAY.move));
     for (i = 0; i < pPaths.moves.length; i++) {
       var m = pPaths.moves[i];
-      if (m.len > 0.01) {
-        var q = m.el.getPointAtLength(m.len * mu);
-        live[m.id] = { x: q.x, y: q.y };
-      }
       m.trail.setAttribute('stroke-dashoffset', f(m.len * (1 - mu)));
       // Le trait se colore au rythme du déplacement : 0.25 → 0.9 (linéaire).
       if (!REDUCED_MOTION)
@@ -5936,6 +5973,7 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
   }
 
   function enterPlay() {
+    if (tbRaf) { cancelAnimationFrame(tbRaf); tbRaf = 0; }
     document.body.classList.add('playing');
     active = null; pending = null;
     syncSelection();
@@ -6870,7 +6908,7 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
           if (a.kind === 'screen') screens.push(rec); else moves.push(rec);
           if (flat) flat.push({ step: i, kind: a.kind, from: numOf(a.from), to: pt(d), via: via });
         } else {
-          passes.push({ from: numOf(a.from), to: typeof a.to === 'string' ? numOf(a.to) : pt(a.to), via: via });
+          passes.push({ id: a.id, from: numOf(a.from), to: typeof a.to === 'string' ? numOf(a.to) : pt(a.to), via: via });
           if (flat) flat.push({ step: i, kind: 'pass', from: numOf(a.from), to: typeof a.to === 'string' ? numOf(a.to) : pt(a.to), via: via });
         }
       }
@@ -6904,7 +6942,7 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
       // totalite des temps, et le format ne grossit pas pour eux.
       if (Array.isArray(s.ballEv) && s.ballEv.length)
         o.ball_events = s.ballEv.map(function (e) {
-          return { type: e.t, ball: e.b, from: e.from || null, to: e.to };
+          return { type: e.t, ball: e.b, from: e.from || null, to: e.to, arrow_id: e.arrow || null };
         });
       // v.239 — le panier VISE. Clé absente = « le plus proche », soit tous les
       // plays et tous les ateliers d'avant : le format ne grossit pas pour eux.
@@ -7189,7 +7227,7 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
         var pf = refId(pick(pa, 'from', 'passer'));
         var ptTo = refId(pick(pa, 'to', 'receiver')) || refPoint(pick(pa, 'to'));
         if (!pf || !ptTo) continue;
-        st.arw.push({ id: uid('w'), kind: 'pass', from: pf, to: ptTo, via: (Array.isArray(pa.via) ? pa.via : []).map(refPoint).filter(Boolean) });
+        st.arw.push({ id: typeof pa.id === 'string' && /^[-a-zA-Z0-9_]+$/.test(pa.id) ? pa.id : uid('w'), kind: 'pass', from: pf, to: ptTo, via: (Array.isArray(pa.via) ? pa.via : []).map(refPoint).filter(Boolean) });
       }
       st.shot = refId(s.shot);
       // v.239 — panier visé. On ne le valide PAS ici (les paniers ne sont pas
@@ -7229,7 +7267,7 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
           qf = (typeof q.from === 'string' && q.from)
             ? (q.from.charAt(0) === '@' ? q.from : (refId(q.from) || (TOKMAP[q.from] ? q.from : null)))
             : null;
-          evs.push({ t: qt, b: String(q.ball), from: qf, to: qto });
+          evs.push({ t: qt, b: String(q.ball), from: qf, to: qto, arrow: typeof q.arrow_id === 'string' ? q.arrow_id : null });
         }
         if (evs.length) st.ballEv = evs;
       }
