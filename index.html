@@ -4122,6 +4122,43 @@ html[data-coach-ui="beta"] .coach-life > summary { padding:16px;font-size:13px;c
 html[data-coach-ui="beta"] :is(button,summary,input,select,textarea):focus-visible { outline:2px solid var(--orange);outline-offset:3px; }
 @media(min-width:640px) { html[data-coach-ui="beta"] .modal { border-radius:20px; } }
 
+
+/* Coach home: dedicated composition approved by the user. */
+html[data-coach-ui="beta"]:has(.coach-home-review) .topbar { padding:14px 20px 0;gap:10px; }
+html[data-coach-ui="beta"]:has(.coach-home-review) .topbar-actions .tb-act { font-size:18px; }
+html[data-coach-ui="beta"]:has(.coach-home-review) .coach-context { padding:0;gap:4px;border-top:0; }
+html[data-coach-ui="beta"]:has(.coach-home-review) .coach-beta-banner { min-height:30px; }
+html[data-coach-ui="beta"]:has(.coach-home-review) .coach-beta-banner .btn { min-height:30px!important;font-weight:400; }
+html[data-coach-ui="beta"]:has(.coach-home-review) .nav-btn.active { background:transparent; }
+html[data-coach-ui="beta"] .coach-home-review { padding:22px 20px 12px;font:14px/1.45 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+html[data-coach-ui="beta"] .hr-heading h1 { margin:0;font-size:27px;line-height:1.18;letter-spacing:-.7px!important;font-weight:600; }
+html[data-coach-ui="beta"] .hr-heading p { margin:8px 0 0;color:var(--ink-3);font-size:12px; }
+html[data-coach-ui="beta"] .hr-feature { margin-top:20px;padding:20px;background:#242c36;border-radius:15px;color:#fff; }
+html[data-coach-ui="beta"] .hr-kicker { font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#d4dae1; }
+html[data-coach-ui="beta"] .hr-feature h2 { margin:10px 0 4px;font-size:23px;line-height:1.25;font-weight:600;letter-spacing:-.4px!important; }
+html[data-coach-ui="beta"] .hr-feature p { margin:0;font-size:12px;line-height:1.6;color:#d4dae1; }
+html[data-coach-ui="beta"] .hr-location { display:flex;align-items:center;gap:7px;margin-top:12px;font-size:11px;color:#d4dae1; }
+html[data-coach-ui="beta"] .hr-location svg { width:14px;height:14px; }
+html[data-coach-ui="beta"] .hr-primary { margin-top:18px;min-height:44px;padding:12px 14px;border:0;border-radius:9px;background:#fff;color:#242c36;display:flex;align-items:center;justify-content:space-between;width:100%;font-size:13px;font-weight:600;cursor:pointer; }
+html[data-coach-ui="beta"] .hr-section { margin-top:22px; }
+html[data-coach-ui="beta"] .hr-section > h2 { font-size:14px;line-height:1.4;font-weight:600;margin:0 0 10px; }
+html[data-coach-ui="beta"] .hr-list { border:1px solid var(--border);background:var(--surface);border-radius:13px;overflow:hidden; }
+html[data-coach-ui="beta"] .hr-row { width:100%;display:flex;gap:11px;align-items:center;text-align:left;border:0;background:var(--surface);color:var(--ink);min-height:67px;padding:13px 14px;cursor:pointer; }
+html[data-coach-ui="beta"] .hr-row + .hr-row { border-top:1px solid var(--border-soft); }
+html[data-coach-ui="beta"] .hr-row > svg { color:var(--ink-3);width:19px;height:19px; }
+html[data-coach-ui="beta"] .hr-row > span { flex:1;min-width:0; }
+html[data-coach-ui="beta"] .hr-row strong { display:block;font-size:13px;font-weight:600; }
+html[data-coach-ui="beta"] .hr-row small { display:block;margin-top:4px;font-size:10px;color:var(--ink-3);line-height:1.5; }
+html[data-coach-ui="beta"] .hr-row .hr-chevron { flex:0;color:var(--ink-3); }
+html[data-coach-ui="beta"] .hr-actions { display:flex;gap:8px; }
+html[data-coach-ui="beta"] .hr-actions button { min-height:44px;flex:1;border:1px solid var(--border);border-radius:10px;background:var(--surface);color:var(--ink);display:flex;align-items:center;justify-content:center;gap:6px;font-size:12px;cursor:pointer; }
+html[data-coach-ui="beta"] .hr-actions svg { width:16px;height:16px; }
+html[data-coach-ui="beta"] .hr-games #gamification-menu { margin:0!important; }
+html[data-coach-ui="beta"] .hr-games #gamification-menu > summary { min-height:64px!important; }
+html[data-coach-ui="beta"] .hr-more { margin:16px 0 0;background:transparent;border:0;border-top:1px solid var(--border-soft);border-radius:0; }
+html[data-coach-ui="beta"] .hr-more > summary { padding:14px 0;font-size:11px;color:var(--ink-3);list-style:none;display:flex;justify-content:space-between; }
+html[data-coach-ui="beta"] .hr-more > summary::-webkit-details-marker { display:none; }
+
 </style>
 </head>
 <body>
@@ -10921,13 +10958,19 @@ function _coachBetaAction(action) {
 }
 function renderCoachBetaHome() {
   const today=new Date();today.setHours(0,0,0,0);
-  const upcoming=getAllEventsBetween(isoDate(today),isoDate(new Date(today.getTime()+21*86400000)));
-  return '<div class="coach-beta-home fade-up">'+_coachBetaTitle('Le prochain rendez-vous',formatDate(isoDate(today),'long'))+
-    _coachBetaFeature(upcoming[0])+renderOverdueTrainingsBanner()+
-    '<section class="coach-section"><h2>Actions rapides</h2><div class="coach-quick"><button class="btn btn-secondary" data-beta-action="event" onclick="_coachBetaAction(this.dataset.betaAction)">+ Séance</button><button class="btn btn-secondary" data-beta-action="message" onclick="_coachBetaAction(this.dataset.betaAction)">Message à l’équipe</button></div></section>'+
-    _coachBetaSection('Préparer et suivre',_coachBetaRow('planning','Planning & présences','Rendez-vous, réponses et convocations')+_coachBetaRow('basket','Préparer mes séances','Exercices, systèmes et préparation physique'))+
-    renderGamificationMenu()+
-    '<details class="coach-life"><summary>Actualités & autres outils</summary>'+_coachBetaRow('broadcasts','Messages & sondages','Communications et réponses de l’équipe')+_coachBetaRow('legacy','Tous les outils de l’accueil','Fil, bilans et accueil complet')+'</details></div>';
+  const ev=getAllEventsBetween(isoDate(today),isoDate(new Date(today.getTime()+21*86400000)))[0];
+  const id=ev&&(ev._parentId||ev.id),date=ev&&(ev._instanceDate||ev.date);
+  const openEvent=ev?'data-event="'+esc(id)+'" data-date="'+esc(date)+'" onclick="openEventInstance(this.dataset.event,this.dataset.date)"':'data-beta-action="event" onclick="_coachBetaAction(this.dataset.betaAction)"';
+  const eventType=ev ? (ev.type==='match'?'Match':ev.type==='training'?'Entraînement':'Rendez-vous') : 'Votre prochaine séance';
+  const row=(icon,title,sub,attrs)=>'<button class="hr-row" '+attrs+'>'+_coachIcon(icon)+'<span><strong>'+esc(title)+'</strong><small>'+esc(sub)+'</small></span><span class="hr-chevron" aria-hidden="true">›</span></button>';
+  return '<div class="coach-beta-home coach-home-review">'+
+    '<div class="hr-heading"><h1>Le prochain rendez-vous</h1><p>'+esc(formatDate(isoDate(today),'long'))+'</p></div>'+
+    '<section class="hr-feature"><div class="hr-kicker">'+(ev?esc(formatDate(ev.date,'short'))+(ev.time?' · '+esc(ev.time):''):'À planifier')+'</div><h2>'+eventType+'</h2><p>'+(ev?esc(ev.title):'Construisez la prochaine séance de votre équipe.')+'</p>'+(ev&&ev.location?'<div class="hr-location">'+_coachIcon('planning')+'<span>'+esc(ev.location)+'</span></div>':'')+'<button class="hr-primary" '+openEvent+'>'+(ev?(ev.type==='match'?'Préparer le match':'Préparer la séance'):'+ Planifier une séance')+'<span aria-hidden="true">→</span></button></section>'+
+    '<section class="hr-section"><h2>À suivre</h2><div class="hr-list">'+row('team','Présences & convocations',ev?'Consulter les réponses au prochain rendez-vous':'Anticiper les disponibilités de l’équipe',ev?openEvent:'data-beta-action="planning" onclick="_coachBetaAction(this.dataset.betaAction)"')+row('message','Messages & sondages','Retrouver les échanges et les réponses','data-beta-action="broadcasts" onclick="_coachBetaAction(this.dataset.betaAction)"')+'</div></section>'+
+    renderOverdueTrainingsBanner()+
+    '<section class="hr-section"><h2>Actions rapides</h2><div class="hr-actions"><button data-beta-action="event" onclick="_coachBetaAction(this.dataset.betaAction)"><span aria-hidden="true">＋</span> Séance</button><button data-beta-action="message" onclick="_coachBetaAction(this.dataset.betaAction)">'+_coachIcon('message')+' Message à l’équipe</button></div></section>'+
+    '<section class="hr-section hr-games"><h2>Vie d’équipe</h2>'+renderGamificationMenu()+'</section>'+
+    '<details class="hr-more coach-life"><summary>Actualités & autres outils <span aria-hidden="true">＋</span></summary>'+_coachBetaRow('basket','Préparer mes séances','Playbook, exercices et programmes')+_coachBetaRow('legacy','Tous les outils de l’accueil','Fil, bilans et accueil complet')+'</details></div>';
 }
 function renderCoachBetaPlanning() {
   return '<div class="coach-beta-planning fade-up">'+_coachBetaTitle('Planning','Les rendez-vous et les présences au même endroit.')+renderConvocs()+'</div>';
@@ -53838,7 +53881,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-09-11.253';
+const APP_VERSION = '2026-09-11.254';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
