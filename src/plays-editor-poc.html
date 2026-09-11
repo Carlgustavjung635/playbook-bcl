@@ -957,8 +957,13 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
 #bp button:active { transform: scale(.95); }
 /* [hidden] par defaut ne pese rien face a display:flex : il faut le dire. */
 #bp[hidden], #bp-bd[hidden] { display: none; }
-#lay-ball .tb-n { font-size: 7px; font-weight: 800; fill: var(--ink, #E6EDF6); paint-order: stroke;
-  stroke: rgba(0,0,0,.55); stroke-width: 1.6; }
+#lay-ball .tb-n { font-size: 7px; font-weight: 800; fill: #0f172a; paint-order: stroke;
+  stroke: #fff; stroke-width: .65; stroke-linejoin: round; }
+  #sh-balls .zlbl { white-space:normal; line-height:1.45; }
+  #sh-balls .tb-give { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin:8px 0 12px; }
+  #sh-balls .tb-give .btn { min-height:44px; white-space:normal; }
+  #sh-balls .tb-destination { min-width:0; flex:1; min-height:44px; font:inherit; border:1px solid var(--line,#cbd5e1); border-radius:9px; background:var(--bg,#fff); color:inherit; }
+  #sh-balls .li .btn { min-height:44px; min-width:40px; }
 </style>
 <!-- THÈME HÔTE (v.186) — en mode viewer (?mode=view), l'app passe les tokens
      résolus de son thème perso : fond, panneau, texte, bordure, accent. On les
@@ -1297,9 +1302,11 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
 <div class="sheet" id="sh-balls">
   <h2>🏀 Ballons de l'atelier</h2>
   <p class="zlbl">6 ballons maximum · 2 par joueuse</p>
-  <div class="row"><button class="btn wide" id="tb-add">➕ Ajouter un ballon</button></div>
+  <p class="zlbl">Donner un nouveau ballon à une joueuse :</p>
+  <div id="tb-give" class="tb-give"></div>
+  <div class="row"><button class="btn wide" id="tb-add">➕ Ajouter au panier principal</button></div>
   <div id="tb-list" class="tmlist"></div>
-  <p class="zlbl" style="margin-top:8px">Sélectionne un ballon, puis tape une joueuse ou un panier pour l'affecter. Pour tirer (🎯), choisis ensuite le panier visé sur le terrain. Chaque geste s'applique <b>à partir du temps courant</b>.</p>
+  <p class="zlbl" style="margin-top:8px">Touche une joueuse ci-dessus pour lui donner un nouveau ballon. Pour déplacer un ballon existant, choisis sa destination dans la liste. Pour tirer (🎯), choisis ensuite le panier visé sur le terrain. Chaque geste s'applique <b>à partir du temps courant</b>.</p>
   <div class="row"><button class="btn wide" id="tb-close">Fermer</button></div>
 </div>
 
@@ -3674,6 +3681,18 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
     tbSel = b.id;
     drawTrainBalls(); tbListSync(); touch();
   }
+  function tbGive(id) {
+    if (!TOKMAP[id] || !visible(TOKMAP[id])) return false;
+    var l = tmBallList();
+    if (l.length >= BALL_CAP || tmBallsOf(id) >= BALL_PER_PLAYER) return false;
+    var b = { id: uid('b') }; l.push(b);
+    if (cur === 0 && !bpath.length) ballInit()[b.id] = id;
+    else stEv(step()).push({ t: 'set', b: b.id, from: null, to: id });
+    tbSel = null;
+    drawTrainBalls(); tbListSync(); syncInfo(); touch();
+    toast('🏀 donné à ' + labelOf(id), 'ok');
+    return true;
+  }
   function tbRemove(id) {
     var l = tmBallList(), i;
     for (i = 0; i < l.length; i++) if (l[i].id === id) { l.splice(i, 1); break; }
@@ -4002,24 +4021,44 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
     if (mode() !== 'training') { layB.innerHTML = ''; return; }
     var kk = (k0 === undefined || k0 === null) ? cur : k0;
     var stK = steps()[kk] || step(), Q = stK.pos || pos();
-    var v = ballViewAt(kk, 0, Q), html = '', i, nBk = {}, bkPt = {}, pt;
+    var v = ballViewAt(kk, 0, Q), html = '', i, pt;
     for (i = 0; i < v.length; i++) {
       pt = v[i].pt; if (!pt) continue;
-      if (v[i].at && String(v[i].at).charAt(0) === '@') { nBk[v[i].at] = (nBk[v[i].at] || 0) + 1; bkPt[v[i].at] = pt; }
       html += tbBallMarkup(pt.x, pt.y, PR * 0.34, ' data-bb="' + v[i].id + '"');
     }
-    for (var key in nBk) {
-      pt = bkPt[key];
-      html += '<text class="tb-n" x="' + f(pt.x + PR * 0.52) + '" y="' + f(pt.y + PR * 0.29) + '"'
-        + ' style="font-size:' + f(PR * 0.78) + 'px">×' + nBk[key] + '</text>';
-    }
+    var baskets = tmBaskets();
+    for (i = 0; i < baskets.length; i++)
+      html += '<text class="tb-n" data-bcount="' + baskets[i].id + '" style="display:none;font-size:' + f(PR * 0.78) + 'px"></text>';
     layB.innerHTML = html;
+    tbUpdateCounts(v);
     syncPassable();
+  }
+  // Le compteur appartient au panier et suit la même frame que les ballons.
+  function tbUpdateCounts(v) {
+    if (!layB) return;
+    var counts = {}, i, at, pt, labels = layB.querySelectorAll('[data-bcount]');
+    for (i = 0; i < v.length; i++) {
+      at = v[i].at;
+      if (at && at.charAt(0) === '@') counts[at.slice(1)] = (counts[at.slice(1)] || 0) + 1;
+    }
+    for (i = 0; i < labels.length; i++) {
+      var id = labels[i].getAttribute('data-bcount'), n = counts[id] || 0;
+      pt = tbSlotPos('@' + id, 0, {});
+      labels[i].style.display = n > 1 && pt ? '' : 'none';
+      if (!pt || n < 2) continue;
+      labels[i].textContent = '×' + n;
+      labels[i].setAttribute('x', f(pt.x + PR * 1.5));
+      labels[i].setAttribute('y', f(pt.y - PR * 0.7));
+    }
   }
   var tbRaf = 0;
   function tbSoon() {
     if (tbRaf) return;
-    tbRaf = requestAnimationFrame(function () { tbRaf = 0; drawTrainBalls(); });
+    tbRaf = requestAnimationFrame(function () {
+      tbRaf = 0;
+      if (vwOn || document.body.classList.contains('playing')) tbFrame(framePositions(pStep, pU), pStep, pU);
+      else drawTrainBalls();
+    });
   }
 
   // ── Glisser un accessoire / un panier d'atelier ──────────────────────
@@ -4241,12 +4280,21 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
   }
 
   function tbListSync() {
-    var l = tmBallList(), m = ballsAt(cur), h = '', i, v, who;
+    var l = tmBallList(), m = ballsAt(cur), h = '', i, v;
+    var players = TOKENS.filter(function (t) { return visible(t); }), baskets = tmBaskets();
+    var give = document.getElementById('tb-give');
+    if (give) give.innerHTML = players.map(function (t) {
+      var n = tmBallsOf(t.id, m);
+      return '<button class="btn" data-bgive="' + t.id + '"' + (n >= BALL_PER_PLAYER || l.length >= BALL_CAP ? ' disabled' : '')
+        + '>＋ 🏀 ' + labelOf(t.id) + ' <small>(' + n + '/2)</small></button>';
+    }).join('');
     for (i = 0; i < l.length; i++) {
       v = m[l[i].id];
-      who = !v ? '—' : (String(v).charAt(0) === '@' ? '🏀 panier' : '👤 ' + labelOf(v));
       h += '<div class="li"><button class="btn xs' + (tbSel === l[i].id ? ' on' : '') + '" data-bsel="' + l[i].id + '">🏀 ' + (i + 1) + '</button>'
-        + '<span class="nm">' + who + '</span>'
+        + '<select class="tb-destination" data-bassign="' + l[i].id + '" aria-label="Destination du ballon ' + (i + 1) + '">'
+        + (!v ? '<option value="">Choisir une destination</option>' : '')
+        + players.map(function (t) { return '<option value="' + t.id + '"' + (v === t.id ? ' selected' : '') + '>Joueuse ' + labelOf(t.id) + '</option>'; }).join('')
+        + baskets.map(function (b, bi) { return '<option value="@' + b.id + '"' + (v === '@' + b.id ? ' selected' : '') + '>Panier ' + (bi + 1) + '</option>'; }).join('') + '</select>'
         + '<button class="btn xs" data-bshoot="' + l[i].id + '">🎯</button>'
         + '<button class="btn xs danger" data-bdel="' + l[i].id + '">🗑</button></div>';
     }
@@ -4563,6 +4611,15 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
       if (id) { accSel = id; bkSel = null; drawAcc(); tmAttach(); accBarSync(); accListSync(); }
     });
     document.getElementById('tb-add').addEventListener('click', tbAdd);
+    document.getElementById('tb-give').addEventListener('click', function (e) {
+      var button = e.target.closest('[data-bgive]');
+      if (button) tbGive(button.getAttribute('data-bgive'));
+    });
+    document.getElementById('tb-list').addEventListener('change', function (e) {
+      var id = e.target.getAttribute('data-bassign');
+      if (!id || !e.target.value) return;
+      tbSel = id; tbAssign(e.target.value); tbSel = null; tbListSync(); syncInfo();
+    });
     document.getElementById('tb-list').addEventListener('click', function (e) {
       var el = e.target, id = el.getAttribute && el.getAttribute('data-bsel');
       if (id) { tbSelect(id); return; }
@@ -5795,6 +5852,7 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
       el.style.display = '';
       el.setAttribute('transform', 'translate(' + f(v[i].pt.x) + ' ' + f(v[i].pt.y) + ')');
     }
+    tbUpdateCounts(v);
   }
 
   function framePositions(k, u) {
@@ -6547,7 +6605,13 @@ body:not([data-em="court"]) #lay-bk .tb .hit { pointer-events: none; }
     }
     // Pendant la lecture, c'est renderFrame() qui repose les jetons à la frame
     // suivante : y toucher ici ferait sauter l'interpolation en cours.
-    if (!playing) { for (var id in tokEl) placeToken(id); }
+    if (vwOn || document.body.classList.contains('playing')) {
+      // Une pause conserve la frame : attendre le prochain tick laisse les ballons en l'air.
+      renderFrame(pStep, pU);
+    } else {
+      for (var id in tokEl) placeToken(id);
+      drawTrainBalls();
+    }
   }
   function camBadge() {
     var b = document.getElementById('v3d-badge');

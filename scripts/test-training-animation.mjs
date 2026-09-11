@@ -237,4 +237,27 @@ test('Le tir unique historique garde son rendu et son annulation',()=>{
  const c=context();c.step().shot='a1';delete c.step().ballEv;assert.equal(c.stepShots(c.step())[0].id,'__shot');
  c.removeArrow('__shot');assert.equal(c.step().shot,null);
 });
+
+test('Un tap donne un ballon directement à la joueuse, sans dépasser deux',()=>{
+ const c=context();c.BALL_CAP=6;c.uid=(()=>{let n=100;return ()=> 'b'+(++n)})();vm.runInContext(extract('tbGive'),c);
+ assert.equal(c.tbGive('a2'),true);assert.equal(c.tmBallsOf('a2'),1);assert.equal(c.tbSel,null);
+ assert.equal(c.tbGive('a2'),true);assert.equal(c.tbGive('a2'),false);assert.equal(c.tmBallsOf('a2'),2);
+});
+test('Ajouter au temps suivant ne crée aucun ballon dans le passé',()=>{
+ const c=context();c.BALL_CAP=6;c.uid=(()=>{let n=100;return ()=> 'b'+(++n)})();vm.runInContext(extract('tbGive'),c);c.steps().push({pos:c.step().pos,arw:[]});c.cur=1;
+ assert.equal(c.tbGive('a2'),true);const bid=c.doc.balls.at(-1).id;
+ assert.equal(c.ballsAt(0)[bid],undefined);assert.equal(c.ballsAt(1)[bid],'a2');
+});
+test('Les compteurs suivent le panier, ignorent les ballons en vol et masquent ×1',()=>{
+ const c=context();vm.runInContext(extract('tbUpdateCounts'),c);
+ const label={style:{},getAttribute:()=> 'main',setAttribute(k,v){this[k]=v;}};c.layB={querySelectorAll:()=>[label]};
+ c.tbUpdateCounts([{at:'@main'},{at:'@main'},{at:'a1'}]);assert.equal(label.textContent,'×2');assert.equal(label.style.display,'');const x=label.x;
+ c.tmBaskets=()=>[{id:'main',x:150,y:160}];c.tbUpdateCounts([{at:'@main'},{at:'@main'}]);assert.notEqual(label.x,x);
+ c.tbUpdateCounts([{at:'@main'},{pt:{x:0,y:0}}]);assert.equal(label.style.display,'none');
+});
+test('La caméra recalcule la frame courante en pause, sans replacer les joueuses au départ',()=>{
+ const c=context();vm.runInContext(extract('cam3dApply'),c);c.view='3d';c.vwOn=true;c.playing=false;c.pStep=1;c.pU=.85;
+ c.isoMatrix=()=>'';c.layC={querySelector:()=>null};c.layA=null;c.layZ=null;c.layP=null;c.placeToken=()=>{throw Error('Retour au départ');};
+ let frame;c.renderFrame=(k,u)=>frame=[k,u];c.cam3dApply();assert.deepEqual(frame,[1,.85]);
+});
 console.log(passed + ' scénarios réussis');
