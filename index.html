@@ -4050,6 +4050,78 @@
   .mt-3 { margin-top: 12px; }
   .w-full { width: 100%; }
   .text-center { text-align: center; }
+
+/* Coach beta: shared visual system, deliberately scoped away from other roles.
+   Existing theme tokens and business renderers remain the source of truth. */
+html[data-coach-ui="beta"] { --coach-font: -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+html[data-coach-ui="beta"] :is(.app,.modal,.bottom-nav) { font-family:var(--coach-font); }
+html[data-coach-ui="beta"] :is(.app,.modal,.bottom-nav) :is(h1,h2,h3,h4,button,input,select,textarea,label,.font-display,.font-mono,[class*="display-"],[class*="title"],[class*="label"],[class*="eyebrow"],.chip,.role-badge,[style*="font-family"]) { font-family:var(--coach-font)!important;text-transform:none!important;letter-spacing:normal!important; }
+html[data-coach-ui="beta"] .app { max-width:720px; }
+html[data-coach-ui="beta"] .app > main { padding-top:0; padding-bottom:24px; }
+html[data-coach-ui="beta"] .topbar { flex-wrap:wrap;background:var(--surface);gap:12px;padding-bottom:10px; }
+html[data-coach-ui="beta"] .topbar-logo { flex:1; }
+html[data-coach-ui="beta"] .topbar-orb { width:48px;height:48px;background:none;box-shadow:none;flex-shrink:0;border-radius:0; }
+html[data-coach-ui="beta"] .topbar-orb .brand-logo { width:48px;height:48px;object-fit:contain; }
+html[data-coach-ui="beta"] .topbar-title { font-size:18px;font-weight:700; }
+html[data-coach-ui="beta"] .topbar-sub { font-family:var(--coach-font);font-size:10px;color:var(--ink-3);margin-top:3px;text-transform:none;letter-spacing:normal; }
+html[data-coach-ui="beta"] .topbar-actions .tb-act { min-width:42px;min-height:42px;justify-content:center;border-radius:11px;background:var(--surface);color:var(--ink);border-color:var(--border); }
+html[data-coach-ui="beta"] .coach-context { display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;flex-basis:100%;border-top:1px solid var(--border-soft);padding-top:8px;font-size:11px;color:var(--ink-3); }
+html[data-coach-ui="beta"] .coach-context .tb-act { font-size:11px;min-height:36px; }
+html[data-coach-ui="beta"] .coach-beta-banner { flex:1;padding:0!important;margin:0!important;background:transparent!important; }
+html[data-coach-ui="beta"] .coach-page-heading { padding-top:20px!important; }
+html[data-coach-ui="beta"] .coach-page-heading h1 { margin:0; }
+html[data-coach-ui="beta"] .coach-page-heading p { margin-bottom:0;line-height:1.6; }
+html[data-coach-ui="beta"] .coach-beta-banner > span { font-size:10px!important; }
+html[data-coach-ui="beta"] .coach-beta-banner .btn { min-height:36px!important;font-size:10px!important; }
+html[data-coach-ui="beta"] :is(.display-lg,.display-xl) { font-size:27px;line-height:1.2;font-weight:650;letter-spacing:-.7px!important; }
+html[data-coach-ui="beta"] :is(.display-md,.modal-title) { font-size:21px;font-weight:650;line-height:1.3; }
+html[data-coach-ui="beta"] :is(.list-row-title,.card-title,.section-title) { font-size:14px;font-weight:600;line-height:1.4; }
+html[data-coach-ui="beta"] .section-header { gap:12px;flex-wrap:wrap; }
+html[data-coach-ui="beta"] .btn { border-radius:10px;min-height:44px;font-size:13px;font-weight:600;line-height:1.35;white-space:normal;box-shadow:none; }
+html[data-coach-ui="beta"] .btn-secondary { background:var(--surface);border:1px solid var(--border);color:var(--ink); }
+html[data-coach-ui="beta"]:is([data-theme="bcl"],[data-theme="chalk"],[data-theme="bloom"]) :is(.btn-primary,.segmented-btn.active) { color:#fff; }
+html[data-coach-ui="beta"] .btn-primary:hover { background:var(--orange); }
+html[data-coach-ui="beta"] :is(.segmented,.tabs) { border-radius:10px; }
+html[data-coach-ui="beta"] :is(.segmented-btn,.tab-btn) { min-height:44px;font-size:12px;border-radius:8px; }
+html[data-coach-ui="beta"] :is(.list-section,.card,.stat-tile) { border-radius:13px;box-shadow:none; }
+html[data-coach-ui="beta"] .list-row { min-height:62px;padding:14px; }
+html[data-coach-ui="beta"] .list-row-icon { background:transparent; }
+html[data-coach-ui="beta"] .stat-tile-value { font-family:var(--coach-font);font-size:26px;font-weight:650; }
+html[data-coach-ui="beta"] .modal { background:var(--bg);border-radius:20px 20px 0 0; }
+html[data-coach-ui="beta"] :is(.modal-header,.modal-footer) { background:var(--surface);box-shadow:none; }
+html[data-coach-ui="beta"] .modal-title { max-width:calc(100% - 54px); }
+html[data-coach-ui="beta"] .modal-close { width:44px;height:44px;flex-shrink:0;border-radius:11px; }
+html[data-coach-ui="beta"] :is(input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=color]),select,textarea) { border-radius:9px;min-height:44px;font-size:16px;background:var(--surface);color:var(--ink);border:1px solid var(--border); }
+html[data-coach-ui="beta"] .bottom-nav { max-width:720px;left:50%;right:auto;width:100%;transform:translateX(-50%);background:var(--surface); }
+html[data-coach-ui="beta"] .nav-btn { gap:6px;min-height:54px; }
+html[data-coach-ui="beta"] .nav-btn-label { font-size:10px; }
+html[data-coach-ui="beta"] .nav-btn.active { background:var(--orange-soft);border-radius:10px; }
+html[data-coach-ui="beta"] .coach-icon { width:21px;height:21px;flex-shrink:0;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round; }
+html[data-coach-ui="beta"] .coach-section { margin:18px; }
+html[data-coach-ui="beta"] .coach-section h2 { font-size:15px;font-weight:650;margin-bottom:10px; }
+html[data-coach-ui="beta"] .coach-list { background:var(--surface);border:1px solid var(--border);border-radius:13px;overflow:hidden; }
+html[data-coach-ui="beta"] .coach-row { width:100%;display:flex;align-items:center;gap:12px;text-align:left;padding:14px;min-height:68px;background:var(--surface);color:var(--ink);border:0;cursor:pointer; }
+html[data-coach-ui="beta"] .coach-row + .coach-row { border-top:1px solid var(--border-soft); }
+html[data-coach-ui="beta"] .coach-row > span { flex:1;min-width:0; }
+html[data-coach-ui="beta"] .coach-row strong { display:block;font-size:13px;font-weight:600; }
+html[data-coach-ui="beta"] .coach-row small { display:block;font-size:11px;color:var(--ink-3);margin-top:4px;line-height:1.5; }
+html[data-coach-ui="beta"] .coach-row > .coach-icon { color:var(--ink-3); }
+html[data-coach-ui="beta"] .coach-row > b { font-weight:400;color:var(--ink-3); }
+html[data-coach-ui="beta"] .coach-quick { display:flex;gap:8px; }
+html[data-coach-ui="beta"] .coach-quick > button { flex:1; }
+html[data-coach-ui="beta"] .coach-feature { background:#242c36;color:white;border-radius:15px;padding:19px;margin:18px; }
+html[data-coach-ui="beta"] .coach-feature h2 { font-size:23px;line-height:1.3;font-weight:650;margin:8px 0; }
+html[data-coach-ui="beta"] .coach-feature p { color:#d4dae1;font-size:12px;line-height:1.6;margin-top:8px; }
+html[data-coach-ui="beta"] .coach-feature .coach-kicker { color:#d4dae1;font-size:11px; }
+html[data-coach-ui="beta"] .coach-feature .btn { width:100%;margin-top:15px;background:white;color:#242c36;border:0; }
+html[data-coach-ui="beta"] #gamification-menu { border-radius:13px!important; }
+html[data-coach-ui="beta"] #gamification-menu > summary { font-size:13px;padding:14px!important;min-height:68px!important; }
+html[data-coach-ui="beta"] #gamification-menu > summary > span:last-child { font-size:11px!important; }
+html[data-coach-ui="beta"] .coach-life { margin:18px;border:1px solid var(--border);background:var(--surface);border-radius:13px; }
+html[data-coach-ui="beta"] .coach-life > summary { padding:16px;font-size:13px;cursor:pointer; }
+html[data-coach-ui="beta"] :is(button,summary,input,select,textarea):focus-visible { outline:2px solid var(--orange);outline-offset:3px; }
+@media(min-width:640px) { html[data-coach-ui="beta"] .modal { border-radius:20px; } }
+
 </style>
 </head>
 <body>
@@ -10783,6 +10855,34 @@ function openCoachInterfaceSettings() {
       <p style="font-size:12px;color:var(--ink-3);line-height:1.6;margin-top:14px">L’accueil et les accès sont réorganisés. Les outils et formulaires existants restent disponibles, avec la personnalisation et un retour à l’interface actuelle.</p>
     </div>`);
 }
+function _coachIcon(name) {
+  const paths = {
+    home:'<path d="m3 10 9-7 9 7v10H3z"/><path d="M9 20v-7h6v7"/>',
+    planning:'<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4m10-4v4M3 11h18m-13 4h2m4 0h2"/>',
+    basket:'<rect x="4" y="3" width="16" height="18" rx="2"/><path d="m10 8 6 4-6 4z"/>',
+    matches:'<path d="M6 21V3m0 1h14l-3 5 3 5H6"/>',
+    team:'<circle cx="9" cy="8" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3m1-16a3 3 0 0 1 0 6m2 4a5 5 0 0 1 3 5"/>',
+    message:'<path d="M4 4h16v12H9l-5 4z"/><path d="M8 8h8m-8 4h5"/>',
+    library:'<path d="M4 3h4v18H4zm6 0h4v18h-4zm6 2 4-1 3 16-4 1z"/>',
+    chrono:'<circle cx="12" cy="14" r="8"/><path d="M9 2h6m-3 0v4m0 4v5l3 2"/>',
+    wellbeing:'<path d="M20 5a5 5 0 0 0-8 1 5 5 0 0 0-8-1c-4 4 2 9 8 15 6-6 12-11 8-15z"/>',
+    settings:'<path d="M4 7h16M4 17h16"/><circle cx="8" cy="7" r="3"/><circle cx="16" cy="17" r="3"/>',
+    programs:'<path d="M3 12h4l3-8 4 16 3-8h4"/>',
+    lineups:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>'
+  };
+  const key=({ 'coach-planning':'planning','coach-basket':'basket','coach-team':'team',plays:'basket',event:'planning',convocs:'planning',roster:'team',broadcasts:'message',ffbb:'matches',drills:'programs',legacy:'home',theme:'settings',challenges:'matches' })[name] || name;
+  return '<svg class="coach-icon" viewBox="0 0 24 24" aria-hidden="true">'+(paths[key]||paths.basket)+'</svg>';
+}
+function _coachBetaSection(title,body) { return '<section class="coach-section"><h2>'+esc(title)+'</h2><div class="coach-list">'+body+'</div></section>'; }
+function _coachBetaFeature(ev) {
+  if (!ev) return '<section class="coach-feature"><span class="coach-kicker">Votre prochain rendez-vous</span><h2>Une séance à préparer ?</h2><p>Planifiez un entraînement, un match ou un événement pour l’équipe.</p><button class="btn" data-beta-action="event" onclick="_coachBetaAction(this.dataset.betaAction)">+ Planifier une séance</button></section>';
+  const id=ev._parentId||ev.id,date=ev._instanceDate||ev.date;
+  const conv=state.convocations.find(c=>c.id===id)||null;
+  const roster=convocInstanceRoster(conv,date);
+  const absent=roster.filter(p=>_convocResp(conv,date,p.id).status==='absent').length;
+  return '<section class="coach-feature"><span class="coach-kicker">'+esc(formatDate(ev.date,'long'))+(ev.time?' · '+esc(ev.time):'')+'</span><h2>'+esc(ev.title)+'</h2>'+(ev.location?'<p>'+esc(ev.location)+'</p>':'')+(roster.length?'<p>'+roster.length+' convoquées · '+absent+' absente'+(absent>1?'s':'')+'</p>':'')+'<button class="btn" data-event="'+esc(id)+'" data-date="'+esc(date)+'" onclick="openEventInstance(this.dataset.event,this.dataset.date)">'+(ev.type==='match'?'Préparer le match':'Préparer la séance')+'</button></section>';
+}
+
 function _coachBetaSections() {
   return [{id:'home',icon:'H',label:'Accueil'},{id:'coach-planning',icon:'A',label:'Planning'},
     {id:'coach-basket',icon:'P',label:'Basket'},{id:'matches',icon:'M',label:'Matchs'},
@@ -10800,10 +10900,9 @@ function _coachBetaBanner() {
   </div>`;
 }
 function _coachBetaRow(action, title, sub) {
-  return `<button class="btn btn-secondary btn-block" data-beta-action="${action}" onclick="_coachBetaAction(this.dataset.betaAction)" style="display:flex;align-items:center;justify-content:space-between;gap:12px;text-align:left;white-space:normal;padding:14px;margin-bottom:8px;min-height:64px;font-family:system-ui,sans-serif;text-transform:none;letter-spacing:normal">
-    <span style="min-width:0"><span style="display:block;font-family:inherit;font-size:14px">${esc(title)}</span><span style="display:block;font-size:11px;color:var(--ink-3);font-weight:400;margin-top:4px;line-height:1.5">${esc(sub)}</span></span><span aria-hidden="true">›</span></button>`;
+  return '<button class="coach-row" data-beta-action="'+action+'" onclick="_coachBetaAction(this.dataset.betaAction)">'+_coachIcon(action)+'<span><strong>'+esc(title)+'</strong><small>'+esc(sub)+'</small></span><b aria-hidden="true">›</b></button>';
 }
-function _coachBetaTitle(title, sub) { return `<div class="px" style="padding-top:12px;margin-bottom:18px"><h1 class="display-lg" style="font-size:28px;font-family:system-ui,sans-serif;text-transform:none;letter-spacing:-0.5px;font-weight:650">${esc(title)}</h1><p style="font-size:12px;color:var(--ink-3);margin-top:6px">${esc(sub)}</p></div>`; }
+function _coachBetaTitle(title, sub) { return `<div class="px coach-page-heading" style="padding-top:12px;margin-bottom:18px"><h1 class="display-lg" style="font-size:28px;font-family:system-ui,sans-serif;text-transform:none;letter-spacing:-0.5px;font-weight:650">${esc(title)}</h1><p style="font-size:12px;color:var(--ink-3);margin-top:6px">${esc(sub)}</p></div>`; }
 function _coachBetaAction(action) {
   if (!coachBetaEnabled()) return;
   const actions = {
@@ -10815,47 +10914,34 @@ function _coachBetaAction(action) {
     roster:()=>openEffectif('season'), broadcasts:()=>openBroadcastManager(),
     message:()=>openBroadcastComposer(), event:()=>editConvoc(),
     wellbeing:()=>openTeamReviewsDashboard(), ffbb:()=>goSection('ffbb'),
-    settings:()=>openSettings(), theme:()=>openThemePicker(),
+    settings:()=>openSettings(), theme:()=>openThemePicker(), chrono:()=>openChrono(), drills:()=>openDrillLibrary(),
     legacy:()=>{state.section='home';state.view=null;window._coachBetaLegacyHome=true;render();_scrollTopApp();}
   };
   if (actions[action]) actions[action]();
 }
 function renderCoachBetaHome() {
-  const today = new Date(); today.setHours(0,0,0,0);
-  const upcoming = getAllEventsBetween(isoDate(today), isoDate(new Date(today.getTime()+21*86400000)));
-  return `<div class="coach-beta-home fade-up">${_coachBetaTitle('Le prochain rendez-vous','Séances, présences et suivi de l’équipe')}
-    ${upcoming[0] ? heroCard(upcoming[0]) : `<div class="px">${_coachBetaRow('event','Planifier un rendez-vous','Créer un entraînement ou un événement')}</div>`}
-    ${renderOverdueTrainingsBanner()}
-    <div class="px" style="margin:18px 0"><h2 style="font-size:15px;margin-bottom:10px">Préparer et communiquer</h2>
-      ${_coachBetaRow('planning','Planning & présences','Les rendez-vous, les réponses et les convocations')}
-      ${_coachBetaRow('basket','Préparer mes séances','Bibliothèque, playbook et préparation physique')}
-      ${_coachBetaRow('broadcasts','Messages & sondages','Consignes, réponses et communications archivées')}
-    </div>
-    ${renderGamificationMenu()}
-    <div class="px" style="margin:16px 0">${_coachBetaRow('legacy','Tous les outils de l’accueil','Retrouver l’accueil complet, le fil et les bilans')}</div>
-  </div>`;
+  const today=new Date();today.setHours(0,0,0,0);
+  const upcoming=getAllEventsBetween(isoDate(today),isoDate(new Date(today.getTime()+21*86400000)));
+  return '<div class="coach-beta-home fade-up">'+_coachBetaTitle('Le prochain rendez-vous',formatDate(isoDate(today),'long'))+
+    _coachBetaFeature(upcoming[0])+renderOverdueTrainingsBanner()+
+    '<section class="coach-section"><h2>Actions rapides</h2><div class="coach-quick"><button class="btn btn-secondary" data-beta-action="event" onclick="_coachBetaAction(this.dataset.betaAction)">+ Séance</button><button class="btn btn-secondary" data-beta-action="message" onclick="_coachBetaAction(this.dataset.betaAction)">Message à l’équipe</button></div></section>'+
+    _coachBetaSection('Préparer et suivre',_coachBetaRow('planning','Planning & présences','Rendez-vous, réponses et convocations')+_coachBetaRow('basket','Préparer mes séances','Exercices, systèmes et préparation physique'))+
+    renderGamificationMenu()+
+    '<details class="coach-life"><summary>Actualités & autres outils</summary>'+_coachBetaRow('broadcasts','Messages & sondages','Communications et réponses de l’équipe')+_coachBetaRow('legacy','Tous les outils de l’accueil','Fil, bilans et accueil complet')+'</details></div>';
 }
 function renderCoachBetaPlanning() {
-  return `<div class="coach-beta-planning fade-up">${_coachBetaTitle('Planning','Entraînements, matchs, événements et réponses')}${renderConvocs()}</div>`;
+  return '<div class="coach-beta-planning fade-up">'+_coachBetaTitle('Planning','Les rendez-vous et les présences au même endroit.')+renderConvocs()+'</div>';
 }
 function renderCoachBetaBasket() {
-  return `<div class="coach-beta-basket fade-up">${_coachBetaTitle('Basket','Préparer, expliquer, faire progresser')}
-    <div class="px">${_coachBetaRow('plays','Playbook de l’équipe','Systèmes, animations, variantes et contenus de saison')}
-      ${_coachBetaRow('library','Bibliothèque d’exercices','Basket, physique, guidages et fiches de sanction')}
-      ${_coachBetaRow('programs','Préparation physique','Programmes, affectations et suivi des séances')}
-      ${_coachBetaRow('lineups','Compositions tactiques','Mes groupes et mes cinq de départ')}
-    </div></div>`;
+  return '<div class="coach-beta-basket fade-up">'+_coachBetaTitle('Basket','Préparer, expliquer, faire progresser.')+
+    _coachBetaSection('Mes outils',_coachBetaRow('plays','Playbook de l’équipe','Systèmes, animations et variantes de saison')+_coachBetaRow('library','Bibliothèque d’exercices','Basket, physique, guidages et sanctions')+_coachBetaRow('programs','Préparation physique','Programmes, affectations et suivi des séances')+_coachBetaRow('lineups','Compositions tactiques','Mes groupes et mes cinq de départ'))+
+    _coachBetaSection('Sur le terrain',_coachBetaRow('chrono','Chronomètre','Lancer ou reprendre un entraînement chronométré')+_coachBetaRow('drills','Drills de réaction','Guidages visuels et sonores'))+'</div>';
 }
 function renderCoachBetaTeam() {
-  return `<div class="coach-beta-team fade-up">${_coachBetaTitle('Mon équipe','Accompagnement et vie du groupe')}
-    <div class="px">${_coachBetaRow('roster','Effectif','Joueuses, fiches et effectif de saison')}
-      ${_coachBetaRow('broadcasts','Messages & sondages','Diffusions et réponses')}
-      ${_coachBetaRow('wellbeing','Ressenti des joueuses','Réponses individuelles et tableau de suivi')}
-      ${_coachBetaRow('challenges','Challenges sportifs','Objectifs individuels et collectifs de saison')}
-    </div>
-    ${renderGamificationMenu()}${renderBirthdayCoachCard()}${renderActivityFeed()}
-    <div class="px" style="margin:16px 0">${_coachBetaRow('settings','Réglages & personnalisation','Couleurs, sons, notifications, profil et administration')}</div>
-  </div>`;
+  return '<div class="coach-beta-team fade-up">'+_coachBetaTitle('Mon équipe','Accompagnement et vie du groupe')+
+    _coachBetaSection('Accompagner',_coachBetaRow('roster','Effectif','Fiches joueuses et effectif de saison')+_coachBetaRow('broadcasts','Messages & sondages','Communiquer avec l’équipe')+_coachBetaRow('wellbeing','Ressenti des joueuses','Réponses individuelles et suivi'))+
+    renderGamificationMenu()+'<details class="coach-life"><summary>Actualités & anniversaires</summary>'+renderBirthdayCoachCard()+renderActivityFeed()+'</details>'+
+    _coachBetaSection('Mon espace',_coachBetaRow('settings','Réglages & personnalisation','Couleurs, sons, notifications et administration'))+'</div>';
 }
 
 function currentSections() {
@@ -11624,11 +11710,12 @@ function renderTopbar() {
       </div>
       <div class="topbar-actions">
         ${isCoach && activeLive ? `<button class="role-badge tb-act" style="background:#ff2222;color:white;border-color:#ff2222;cursor:pointer;animation:pulseGlow 2s infinite" onclick="openMatch('${activeLive.id}')" aria-label="Live en cours — gérer">🔴 LIVE</button>` : ''}
-        ${renderTeamPill()}
-        ${isCoach && isAdminCoach() ? renderSeasonSwitcher() : ''}
+        ${coachBetaEnabled() ? '' : renderTeamPill()}
+        ${isCoach && isAdminCoach() && !coachBetaEnabled() ? renderSeasonSwitcher() : ''}
         ${renderNotifBell()}
         <button class="role-badge tb-act" style="cursor:pointer" onclick="openSettings()" title="Menu" aria-label="Menu${player ? ' — #' + player.num + ' ' + esc(player.name) : ''}" aria-haspopup="menu">${player ? '<span class="tb-act-label">#' + player.num + ' ' + esc(player.name) + '</span> ' : ''}⚙</button>
       </div>
+      ${coachBetaEnabled() ? `<div class="coach-context">${_coachBetaBanner()}<div style="display:flex;gap:8px;align-items:center">${renderTeamPill()}${isAdminCoach() ? renderSeasonSwitcher() : ''}</div></div>` : ''}
     </header>
   `;
 }
@@ -13194,7 +13281,7 @@ function renderNav() {
     <nav class="bottom-nav">
       ${sections.map(s => `
         <button class="nav-btn ${_coachBetaNavSection() === s.id ? 'active' : ''}" onclick="goSection('${s.id}')">
-          <span class="nav-btn-icon">${s.icon}</span>
+          <span class="nav-btn-icon">${coachBetaEnabled() ? _coachIcon(s.id) : s.icon}</span>
           <span class="nav-btn-label">${s.label}</span>
         </button>
       `).join('')}
@@ -18274,7 +18361,7 @@ function renderMatches() {
       <div class="section-header">
         <div>
           <div class="eyebrow-muted">${upcoming.length} à venir · ${played.length} joué${played.length > 1 ? 's' : ''}</div>
-          <h2 class="display-lg mt-2">Saison</h2>
+          <h2 class="display-lg mt-2">${coachBetaEnabled() ? 'Matchs' : 'Saison'}</h2>
         </div>
         <div style="display:flex;gap:6px">
           ${matches.length > 0 ? `<button class="btn btn-secondary" onclick="openDashboard()" style="font-size:11px">📊 Dashboard</button>` : ''}
@@ -53399,6 +53486,7 @@ function _scrollTopApp() {
 }
 
 function _renderBody() {
+  document.documentElement.dataset.coachUi = coachBetaEnabled() && window.location.hash !== '#public' ? 'beta' : 'current';
   _bootCleanupOnce();
   // Sync effectif au premier render (idempotent : flag interne)
   _initPlayersSync();
@@ -53484,8 +53572,7 @@ function _renderBody() {
     else if (state.section === 'inspire') content = renderInspire();
     else if (state.section === 'ffbb') content = renderFFBB();
     if (coachBetaEnabled()) {
-      if (state.section === 'matches' && !state.view) content = `<div class="px">${_coachBetaRow('ffbb','Championnat FFBB','Calendrier, résultats et classement')}</div>` + content;
-      content = _coachBetaBanner() + content;
+      if (state.section === 'matches' && !state.view) content += _coachBetaSection('Championnat',_coachBetaRow('ffbb','Championnat FFBB','Calendrier, résultats et classement'));
     }
   } else if (role === 'stat') {
     if (state.section === 'live') content = renderLive();
@@ -53523,8 +53610,8 @@ function _renderBody() {
       <main>${content}</main>
     </div>
     ${renderNav()}
-    ${renderChronoFab()}
-    ${renderDrillFab()}
+    ${coachBetaEnabled() ? '' : renderChronoFab()}
+    ${coachBetaEnabled() ? '' : renderDrillFab()}
   `;
 
   // CHANTIER D : filet pour la joueuse qui se connecte EN COURS de session
@@ -53751,7 +53838,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-09-11.252';
+const APP_VERSION = '2026-09-11.253';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
