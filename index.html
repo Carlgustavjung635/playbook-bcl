@@ -13603,6 +13603,62 @@ function moderateBirthdayMessage(id) {
   return true;
 }
 
+// Jeux & défis : accès regroupés, règles et états métier inchangés.
+function _gameMenuState() {
+  const a = state.auth || {}, key = [a.role,a.playerId || a.coachId || ''].join(':');
+  if (!window._gameMenu || window._gameMenu.key !== key) window._gameMenu = {key, open:{}};
+  return window._gameMenu.open;
+}
+function _gameMenuToggle(key, el) {
+  _gameMenuState()[key] = el.open;
+  if (el.open && (key === 'menu' || key === 'points')) _pointsCheckGain();
+}
+function _gameMenuStatus() {
+  const a = state.auth || {}, coach = a.role === 'coach';
+  const status = {gages:0, ardoise:0, pintade:0, points:0, urgent:''};
+  if (coach) {
+    const season = getActiveSeasonId();
+    status.gages = currentSeasonGages().filter(g => g.status === 'pending').length
+      + (state.gageDraws || []).filter(d => d.status === 'player_done' && (!_seasonsLoaded() || !season || !d.seasonId || d.seasonId === season)).length;
+    status.ardoise = ardoisePendingProofs().length;
+    status.pintade = pintadeAlertPending() || pintadeCoachPickPending() ? 1 : 0;
+    if (status.pintade) status.urgent = 'Pintade : décision attendue';
+  } else if (a.role === 'player' && a.playerId) {
+    status.gages = _seasonGageDraws(a.playerId).filter(d => ['owed','accepted','player_done'].includes(d.status)).length;
+    status.ardoise = ardoiseDebtCount(a.playerId);
+    status.pintade = _pintadeIsHolder() ? 1 : 0;
+    status.points = Math.max(0, playerPointsSplit(a.playerId, state.currentSeasonId || getActiveSeasonId()).bank);
+    if (status.pintade && pintadeActiveRequest()) status.urgent = 'Pintade : preuve demandée';
+    else if (ardoiseIsOverdue(ardoiseCurrentDebt(a.playerId))) status.urgent = 'Ardoise en retard';
+  }
+  return status;
+}
+function renderGamificationMenu() {
+  const role = (state.auth || {}).role;
+  if (role !== 'coach' && role !== 'player') return '';
+  const coach = role === 'coach', s = _gameMenuStatus(), open = _gameMenuState();
+  const count = [s.gages,s.ardoise,s.pintade].filter(n => n > 0).length;
+  const subtitle = s.urgent || (count ? count + ' rubrique' + (count > 1 ? 's' : '') + ' à suivre' : s.points ? s.points + ' points à récolter' : 'Points, challenges, gages, Pintade et Ardoise');
+  const section = (key,title,n,html) => `<details data-game-section="${key}" ${open[key] ? 'open' : ''} ontoggle="_gameMenuToggle('${key}',this)" style="border-top:1px solid var(--border-soft)">
+    <summary style="cursor:pointer;padding:14px 12px;font-weight:600;overflow-wrap:anywhere">${title}${n ? ` <span style="font-size:11px;color:var(--orange)">· ${n} ${key === 'points' ? 'pts à récolter' : 'à suivre'}</span>` : ''}</summary>
+    <div style="padding:0 0 10px">${html}</div></details>`;
+  return `<details id="gamification-menu" ${open.menu ? 'open' : ''} ontoggle="_gameMenuToggle('menu',this)" style="margin:0 18px 14px;border:1px solid var(--border);border-radius:12px;background:var(--surface)">
+    <summary style="cursor:pointer;padding:12px 14px;min-height:44px;overflow-wrap:anywhere">
+      <span style="font-weight:600">🎮 Jeux & défis${count ? ` <span style="color:var(--orange);font-size:12px">· ${count}</span>` : ''}</span>
+      <span style="display:block;font-size:12px;color:${s.urgent ? 'var(--orange)' : 'var(--ink-3)'};margin-top:4px">${esc(subtitle)}</span>
+    </summary>
+    <div id="gamification-menu-content">
+      ${section('points','🏆 Points & palmarès',s.points,coach
+        ? '<button class="btn btn-secondary btn-block" onclick="openPointsRanking()">Classement de l’équipe</button>'
+        : renderPointsPlayerCard() + '<button class="btn btn-secondary btn-block" onclick="openAllBadges()">Mes trophées</button>')}
+      ${section('challenges','🎯 Challenges sportifs',0,`<p style="font-size:12px;color:var(--ink-3);padding:0 12px">Objectifs individuels et collectifs de la saison.</p><button class="btn btn-secondary btn-block" onclick="${coach ? "state.teamTab='challenges';goSection('team')" : "goSection('challenges')"}">Voir les challenges</button>`)}
+      ${section('gages','🎁 Gages, sanctions & défis individuels',s.gages,coach ? renderGageCoachHomeCard() : renderPlayerGageReminder() + renderPlayerKindReminders() + renderGageHomeCard())}
+      ${section('pintade','🕊 La Pintade',s.pintade,renderPintadeHomeCard() || '<button class="btn btn-secondary btn-block" onclick="openPintadeScreen()">Voir la Pintade et ses règles</button>')}
+      ${section('ardoise','🎰 L’Ardoise',s.ardoise,coach ? renderArdoiseCoachCard() : renderArdoisePlayerCard() || '<button class="btn btn-secondary btn-block" onclick="openArdoiseScreen()">Voir mes ardoises</button>')}
+    </div>
+  </details>`;
+}
+
 function renderHomeCoach() {
   const today = new Date(); today.setHours(0,0,0,0);
   const todayStr = isoDate(today);
@@ -13625,9 +13681,7 @@ function renderHomeCoach() {
       <button class="btn btn-secondary btn-block mb-3" onclick="openExerciseLibrary()">📚 Bibliothèque d’exercices</button>
       ${renderOverdueTrainingsBanner()}
       ${renderBroadcastCoachCard()}
-      ${renderGageCoachHomeCard()}
-      ${renderPintadeHomeCard()}
-      ${renderArdoiseCoachCard()}
+      ${renderGamificationMenu()}
       ${renderBirthdayCoachCard()}
       ${nextEvent ? heroCard(nextEvent) : ''}
 
@@ -14177,6 +14231,8 @@ function _pointsCheckGain() {
     // touche PAS au filigrane. Le gain sera annoncé quand elle reviendra sur son
     // accueil, au lieu d'être consommé dans le vide.
     if (!document.getElementById('pts-card')) return;
+    const games = document.getElementById('gamification-menu');
+    if (games && (!games.open || !games.querySelector('[data-game-section="points"]').open)) return;
     const sid = state.currentSeasonId || getActiveSeasonId();
     const total = playerPointsTotal(pid, sid);
     const seen = _pointsSeenTotal(pid, sid);
@@ -15037,9 +15093,6 @@ function renderHomePlayer() {
     .sort((a,b) => b.date.localeCompare(a.date));
   const lastStats = myMatches.length > 0 ? myMatches[0].playerStats[p.id] : null;
 
-  // Challenges actifs (non clôturés) — saison COURANTE uniquement (sinon la home
-  // remonte les anciens scores de la saison passée). Filtre !badgesAwarded conservé.
-  const myActiveChallenges = currentSeasonChallenges().filter(c => !c.badgesAwarded).slice(0, 3);
   const myBadgesCount = (p.badges || []).length;
 
   // Carrousel plays récents
@@ -15071,10 +15124,8 @@ function renderHomePlayer() {
         </div>
       `}
 
-      <!-- 1bis-0. Mon score de saison. Placé HAUT et juste après le prochain
-           événement : c'est le seul écran qui répond à « où j'en suis », et
-           l'animation « +X pts » n'a de sens que si la carte est vue. -->
-      ${renderPointsPlayerCard()}
+      <!-- Accès compact aux jeux, points et rappels de gamification. -->
+      ${renderGamificationMenu()}
 
       <!-- 1bis. Inbox messages (diffusions/sondages reçus) — audit #4 -->
       ${renderPlayerInbox()}
@@ -15092,17 +15143,6 @@ function renderHomePlayer() {
            La fonction elle-même est inchangée. -->
       ${teamReviewCta(p)}
 
-      <!-- 1ter. Boîte à gages : point d'entrée visible pour proposer -->
-      ${renderGageHomeCard()}
-
-      <!-- 1ter-2. La pintade : qui la porte, et le bouton pour la piéger -->
-      ${renderPintadeHomeCard()}
-
-      <!-- 1ter-3. L'Ardoise : les dettes sportives à consommer. Muette si elle
-           n'en a aucune — rappeler la sanction à celles qui n'en ont pas
-           n'apporte rien. -->
-      ${renderArdoisePlayerCard()}
-
       <!-- 1quater. Prépa physique : séance du jour / anticipation 24 h / rattrapage 48 h -->
       ${renderTrainingPlayerCard()}
       ${renderUnavailPlayerBanner()}
@@ -15115,20 +15155,6 @@ function renderHomePlayer() {
       <!-- 1sexies. Le mur du groupe : ce que les autres ont fait de bien ces
            dernières semaines. Rigoureusement la même vue que chez le coach. -->
       ${renderActivityFeed()}
-
-      <!-- 2. Challenges actifs (preview 2-3, lien Tout → onglet) -->
-      ${myActiveChallenges.length > 0 ? `
-        <div class="section-header">
-          <div>
-            <div class="eyebrow">Défis en cours</div>
-            <h2 class="display-md mt-2">Challenges</h2>
-          </div>
-          <button class="section-action" onclick="goSection('challenges')">Tout →</button>
-        </div>
-        <div style="padding:0 18px;display:flex;flex-direction:column;gap:8px;margin-bottom:18px">
-          ${myActiveChallenges.map(c => playerChallengeRow(c, p.id)).join('')}
-        </div>
-      ` : ''}
 
       <!-- 3. Carrousel plays récents (lien → onglet Plays) -->
       <div class="section-header">
@@ -15162,19 +15188,7 @@ function renderHomePlayer() {
             <div class="stat-tile-sub">${myBadgesCount} trophée${myBadgesCount>1?'s':''}</div>
           </div>
         </div>
-      ` : (myBadgesCount > 0 ? `
-        <div style="padding:0 18px;margin-bottom:18px">
-          <div onclick="openAllBadges()" style="padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);display:flex;align-items:center;gap:10px;cursor:pointer">
-            <div style="font-size:28px">🏆</div>
-            <div style="flex:1">
-              <div style="font-family:'Anton';font-size:14px;text-transform:uppercase">Mon palmarès</div>
-              <div style="font-size:11px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${myBadgesCount} trophée${myBadgesCount>1?'s':''}</div>
-            </div>
-            <div style="color:var(--orange);font-family:'Anton';font-size:18px">›</div>
-          </div>
-        </div>
-      ` : '')}
-
+      ` : ''}
       ${renderHomePlayerFFBB()}
 
     </div>
@@ -53376,7 +53390,8 @@ function _renderBody() {
     else content = renderHomePlayer();
     // Rappel PERSISTANT (non bloquant) en tête tant qu'un gage accepté n'est pas
     // marqué « fait » (l'overlay bloquant reste réservé au tirage owed).
-    content = renderPlayerGageReminder() + renderPlayerKindReminders() + content;
+    // Sur l’accueil, les rappels restent accessibles dans Jeux & défis.
+    if (state.section !== 'home' || state.view) content = renderPlayerGageReminder() + renderPlayerKindReminders() + content;
   }
 
   document.getElementById('root').innerHTML = `
@@ -53613,7 +53628,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-09-11.250';
+const APP_VERSION = '2026-09-11.251';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
