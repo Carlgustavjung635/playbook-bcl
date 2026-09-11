@@ -10749,9 +10749,118 @@ function getCatShort(cat) {
   return { off: 'OFF', def: 'DÉF', rem: 'REM', sp: 'SP', exo: 'EXO', con: 'CON' }[cat] || 'OFF';
 }
 
+// Interface coach optionnelle. Préférence locale indépendante de PbSync.
+function _coachInterfaceKey() {
+  const a = state.auth;
+  return a && a.role === 'coach' ? 'pb_coach_interface_v1:' + (a.coachId || 'legacy') : null;
+}
+function coachBetaEnabled() {
+  const key = _coachInterfaceKey();
+  if (!key) return false;
+  try { return localStorage.getItem(key) === 'beta'; } catch (e) { return false; }
+}
+function setCoachInterface(beta) {
+  const key = _coachInterfaceKey();
+  if (!key) return;
+  try {
+    if (beta) localStorage.setItem(key, 'beta'); else localStorage.removeItem(key);
+  } catch (e) { showToast('Impossible de mémoriser ce choix sur cet appareil.'); return; }
+  window._coachBetaLegacyHome = false;
+  // Changer d’interface ne déclenche ni persist(), ni synchronisation métier.
+  closeModal();
+  state.section = 'home'; state.view = null; _pbViewActive = false;
+  _pbGoSectionHistory('home', true);
+  render(); _scrollTopApp();
+}
+function openCoachInterfaceSettings() {
+  if (!_coachInterfaceKey()) return;
+  const beta = coachBetaEnabled();
+  openModal(`<div class="modal-header"><div class="modal-title">Interface coach</div><button class="modal-close" onclick="closeModal()" aria-label="Fermer">✕</button></div>
+    <div class="modal-body">
+      <p style="font-size:13px;line-height:1.6;margin-bottom:16px">Teste la nouvelle navigation sur cet appareil. Les deux interfaces partagent les mêmes données : une modification dans l’une est visible dans l’autre. Le choix ne change pas l’interface des joueuses ni du Stat’man.</p>
+      <button class="btn ${beta ? 'btn-secondary' : 'btn-primary'} btn-block mb-2" aria-pressed="${!beta}" onclick="setCoachInterface(false)">Interface actuelle${beta ? '' : ' · active'}</button>
+      <button class="btn ${beta ? 'btn-primary' : 'btn-secondary'} btn-block mb-2" aria-pressed="${beta}" onclick="setCoachInterface(true)">Nouvelle interface · Bêta${beta ? ' · active' : ''}</button>
+      <p style="font-size:12px;color:var(--ink-3);line-height:1.6;margin-top:14px">L’accueil et les accès sont réorganisés. Les outils et formulaires existants restent disponibles, avec la personnalisation et un retour à l’interface actuelle.</p>
+    </div>`);
+}
+function _coachBetaSections() {
+  return [{id:'home',icon:'H',label:'Accueil'},{id:'coach-planning',icon:'A',label:'Planning'},
+    {id:'coach-basket',icon:'P',label:'Basket'},{id:'matches',icon:'M',label:'Matchs'},
+    {id:'coach-team',icon:'T',label:'Équipe'}];
+}
+function _coachBetaNavSection() {
+  if (!coachBetaEnabled()) return state.section;
+  return ({plays:'coach-basket',inspire:'coach-basket',team:'coach-team',ffbb:'matches'})[state.section] || state.section;
+}
+function _coachBetaBanner() {
+  if (!coachBetaEnabled()) return '';
+  return `<div class="coach-beta-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;padding:8px 18px;margin-bottom:10px;background:var(--bg-3)">
+    <span style="font-size:11px;color:var(--ink-3)">Interface coach · Bêta</span>
+    <button class="btn btn-ghost" style="font-size:11px;min-height:36px;padding:6px 8px" onclick="setCoachInterface(false)">↩ Interface actuelle</button>
+  </div>`;
+}
+function _coachBetaRow(action, title, sub) {
+  return `<button class="btn btn-secondary btn-block" data-beta-action="${action}" onclick="_coachBetaAction(this.dataset.betaAction)" style="display:flex;align-items:center;justify-content:space-between;gap:12px;text-align:left;white-space:normal;padding:14px;margin-bottom:8px;min-height:64px;font-family:system-ui,sans-serif;text-transform:none;letter-spacing:normal">
+    <span style="min-width:0"><span style="display:block;font-family:inherit;font-size:14px">${esc(title)}</span><span style="display:block;font-size:11px;color:var(--ink-3);font-weight:400;margin-top:4px;line-height:1.5">${esc(sub)}</span></span><span aria-hidden="true">›</span></button>`;
+}
+function _coachBetaTitle(title, sub) { return `<div class="px" style="padding-top:12px;margin-bottom:18px"><h1 class="display-lg" style="font-size:28px;font-family:system-ui,sans-serif;text-transform:none;letter-spacing:-0.5px;font-weight:650">${esc(title)}</h1><p style="font-size:12px;color:var(--ink-3);margin-top:6px">${esc(sub)}</p></div>`; }
+function _coachBetaAction(action) {
+  if (!coachBetaEnabled()) return;
+  const actions = {
+    planning:()=>goSection('coach-planning'), basket:()=>goSection('coach-basket'),
+    plays:()=>goSection('plays'), library:()=>openExerciseLibrary(), programs:()=>openTrainingPrograms(),
+    lineups:()=>{state.teamTab='lineups';goSection('team');},
+    challenges:()=>{state.teamTab='challenges';goSection('team');},
+    convocs:()=>{state.teamTab='convoc';goSection('team');},
+    roster:()=>openEffectif('season'), broadcasts:()=>openBroadcastManager(),
+    message:()=>openBroadcastComposer(), event:()=>editConvoc(),
+    wellbeing:()=>openTeamReviewsDashboard(), ffbb:()=>goSection('ffbb'),
+    settings:()=>openSettings(), theme:()=>openThemePicker(),
+    legacy:()=>{state.section='home';state.view=null;window._coachBetaLegacyHome=true;render();_scrollTopApp();}
+  };
+  if (actions[action]) actions[action]();
+}
+function renderCoachBetaHome() {
+  const today = new Date(); today.setHours(0,0,0,0);
+  const upcoming = getAllEventsBetween(isoDate(today), isoDate(new Date(today.getTime()+21*86400000)));
+  return `<div class="coach-beta-home fade-up">${_coachBetaTitle('Le prochain rendez-vous','Séances, présences et suivi de l’équipe')}
+    ${upcoming[0] ? heroCard(upcoming[0]) : `<div class="px">${_coachBetaRow('event','Planifier un rendez-vous','Créer un entraînement ou un événement')}</div>`}
+    ${renderOverdueTrainingsBanner()}
+    <div class="px" style="margin:18px 0"><h2 style="font-size:15px;margin-bottom:10px">Préparer et communiquer</h2>
+      ${_coachBetaRow('planning','Planning & présences','Les rendez-vous, les réponses et les convocations')}
+      ${_coachBetaRow('basket','Préparer mes séances','Bibliothèque, playbook et préparation physique')}
+      ${_coachBetaRow('broadcasts','Messages & sondages','Consignes, réponses et communications archivées')}
+    </div>
+    ${renderGamificationMenu()}
+    <div class="px" style="margin:16px 0">${_coachBetaRow('legacy','Tous les outils de l’accueil','Retrouver l’accueil complet, le fil et les bilans')}</div>
+  </div>`;
+}
+function renderCoachBetaPlanning() {
+  return `<div class="coach-beta-planning fade-up">${_coachBetaTitle('Planning','Entraînements, matchs, événements et réponses')}${renderConvocs()}</div>`;
+}
+function renderCoachBetaBasket() {
+  return `<div class="coach-beta-basket fade-up">${_coachBetaTitle('Basket','Préparer, expliquer, faire progresser')}
+    <div class="px">${_coachBetaRow('plays','Playbook de l’équipe','Systèmes, animations, variantes et contenus de saison')}
+      ${_coachBetaRow('library','Bibliothèque d’exercices','Basket, physique, guidages et fiches de sanction')}
+      ${_coachBetaRow('programs','Préparation physique','Programmes, affectations et suivi des séances')}
+      ${_coachBetaRow('lineups','Compositions tactiques','Mes groupes et mes cinq de départ')}
+    </div></div>`;
+}
+function renderCoachBetaTeam() {
+  return `<div class="coach-beta-team fade-up">${_coachBetaTitle('Mon équipe','Accompagnement et vie du groupe')}
+    <div class="px">${_coachBetaRow('roster','Effectif','Joueuses, fiches et effectif de saison')}
+      ${_coachBetaRow('broadcasts','Messages & sondages','Diffusions et réponses')}
+      ${_coachBetaRow('wellbeing','Ressenti des joueuses','Réponses individuelles et tableau de suivi')}
+      ${_coachBetaRow('challenges','Challenges sportifs','Objectifs individuels et collectifs de saison')}
+    </div>
+    ${renderGamificationMenu()}${renderBirthdayCoachCard()}${renderActivityFeed()}
+    <div class="px" style="margin:16px 0">${_coachBetaRow('settings','Réglages & personnalisation','Couleurs, sons, notifications, profil et administration')}</div>
+  </div>`;
+}
+
 function currentSections() {
   if (!state.auth) return [];
-  if (state.auth.role === 'coach') return SECTIONS_COACH;
+  if (state.auth.role === 'coach') return coachBetaEnabled() ? _coachBetaSections() : SECTIONS_COACH;
   if (state.auth.role === 'stat') return SECTIONS_STAT;
   return SECTIONS_PLAYER;
 }
@@ -12672,6 +12781,8 @@ function openSettings() {
         🔒 Changer mon code PIN
       </button>
 
+      ${role === 'coach' ? `<button class="btn btn-secondary btn-block mb-2" onclick="openCoachInterfaceSettings()">🧭 Interface coach · ${coachBetaEnabled() ? 'Bêta' : 'Actuelle'}</button>` : ''}
+
       <button class="btn btn-secondary btn-block mb-2" onclick="closeModal();setTimeout(()=>openThemePicker(),50)">
         🎨 Personnalisation (couleur + son)
       </button>
@@ -13082,7 +13193,7 @@ function renderNav() {
   return `
     <nav class="bottom-nav">
       ${sections.map(s => `
-        <button class="nav-btn ${state.section === s.id ? 'active' : ''}" onclick="goSection('${s.id}')">
+        <button class="nav-btn ${_coachBetaNavSection() === s.id ? 'active' : ''}" onclick="goSection('${s.id}')">
           <span class="nav-btn-icon">${s.icon}</span>
           <span class="nav-btn-label">${s.label}</span>
         </button>
@@ -13092,6 +13203,7 @@ function renderNav() {
 }
 
 function goSection(id) {
+  window._coachBetaLegacyHome = false;
   // BACK BUTTON : hash routing des onglets. On pose _pbViewActive=false
   // pour que le hook de render() ne déclenche pas un history.back parasite.
   const _pbChanged = state.section !== id;
@@ -53340,6 +53452,9 @@ function _renderBody() {
   }
 
   const role = state.auth.role;
+  if (!coachBetaEnabled() && /^coach-(planning|basket|team)$/.test(state.section || '')) {
+    state.section = 'home'; state.view = null;
+  }
 
   // Cycle de vie gages : invalide (NEUTRE) les gages à durée limitée échus avant
   // de peindre (mutation locale + sync ; ne re-render pas, on est déjà en rendu).
@@ -53358,12 +53473,20 @@ function _renderBody() {
   let content = '';
 
   if (role === 'coach') {
-    if (state.section === 'home') content = renderHomeCoach();
+    if (coachBetaEnabled() && state.section === 'home' && !window._coachBetaLegacyHome) content = renderCoachBetaHome();
+    else if (coachBetaEnabled() && state.section === 'coach-planning') content = renderCoachBetaPlanning();
+    else if (coachBetaEnabled() && state.section === 'coach-basket') content = renderCoachBetaBasket();
+    else if (coachBetaEnabled() && state.section === 'coach-team') content = renderCoachBetaTeam();
+    else if (state.section === 'home') content = renderHomeCoach();
     else if (state.section === 'plays') content = renderPlays();
     else if (state.section === 'matches') content = renderMatches();
     else if (state.section === 'team') content = renderTeam();
     else if (state.section === 'inspire') content = renderInspire();
     else if (state.section === 'ffbb') content = renderFFBB();
+    if (coachBetaEnabled()) {
+      if (state.section === 'matches' && !state.view) content = `<div class="px">${_coachBetaRow('ffbb','Championnat FFBB','Calendrier, résultats et classement')}</div>` + content;
+      content = _coachBetaBanner() + content;
+    }
   } else if (role === 'stat') {
     if (state.section === 'live') content = renderLive();
     else if (state.section === 'matches') content = renderMatches();
@@ -53437,7 +53560,7 @@ var _pbModalDepth = 0;       // 1 si une modal a une entrée d'historique, 0 sin
 var _pbSuppressPop = false;  // ignore le prochain popstate (close programmatique)
 var _pbInPop = false;        // true pendant le traitement d'un popstate (anti-boucle)
 
-var _PB_SECTIONS = ['home','plays','matches','team','inspire','ffbb','live','challenges','match','calendrier','programme'];
+var _PB_SECTIONS = ['home','plays','matches','team','inspire','ffbb','live','challenges','match','calendrier','programme','coach-planning','coach-basket','coach-team'];
 function _pbIsValidSection(id) { return _PB_SECTIONS.indexOf(id) !== -1; }
 function _pbHashSection() { var h = (location.hash || '').replace(/^#\/?/, '').trim(); return h || null; }
 function _pbModalOpen() { var r = document.getElementById('modal-root'); return !!(r && r.innerHTML.trim() !== ''); }
@@ -53628,7 +53751,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-09-11.251';
+const APP_VERSION = '2026-09-11.252';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
