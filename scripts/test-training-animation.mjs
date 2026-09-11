@@ -15,8 +15,8 @@ function extract(name) {
 }
 const names = ['clonePos','isMoveKind','endPos','pullPos','recomputeList','recomputeTree',
   'tmBallList','ballInit','stEv','evWin','evSet','ballStateAt','evPlan','evApply','ballLegsAt','ballWalk','ballsAt',
-  'evRemoveArrow','clearTrainingShot','tmBallsOf','tmPassBall','addArrow','removeArrow','tbAssign',
-  'tmShotTap','tmBasketTap','tmHeldBalls','tmArmBall','framePositions','tbSlotPos','ballViewAt','lerpPts',
+  'stepShots','syncTrainingShot','evRemoveArrow','clearTrainingShot','tmBallsOf','tmPassBall','addArrow','removeArrow','tbAssign',
+  'tmShotTap','tmBasketTap','tmHeldBalls','tmArmBall','framePositions','tbSlotPos','ballViewAt','ballFlight','lerpPts',
   'encSteps','decSteps','placeToken','tbAdd','tbSelect','tmAttach','setTool','setEMode'];
 function context() {
   const c = {
@@ -173,4 +173,68 @@ test('Terrain → mouvements joueuse → Ballons conserve tous les paniers',()=>
  assert.equal(c.tool,'move');assert.deepEqual(top,baskets);
  c.setEMode('balls');assert.deepEqual(top,baskets);
 });
-console.log(`${passed} scénarios réussis`);
+
+function shoot(c, from, ball, basket) { c.tmShotFrom=from;c.tbSel=ball;assert.equal(c.tmBasketTap(basket),true); }
+function multiContext() {
+ const c=context();c.doc.balls=[{id:'b1'},{id:'b2'},{id:'b3'}];c.doc.ballInit={b1:'a1',b2:'a2',b3:'a3'};
+ c.tmBaskets=()=>[{id:'main',x:50,y:50},{id:'extra',x:150,y:70}];return c;
+}
+test('Trois joueuses tirent simultanément vers des paniers distincts ou communs',()=>{
+ const c=multiContext();shoot(c,'a1','b1','main');shoot(c,'a2','b2','extra');shoot(c,'a3','b3','main');
+ assert.equal(c.stepShots(c.step()).length,3);
+ for(const bid of ['b1','b2','b3']) {assert.equal(c.ballWalk(bid,c.ballLegsAt(0),.85).fly.t,'shot');assert.deepEqual(Array.from(c.ballLegsAt(0).legs[bid][0].win),[.7,1]);}
+ assert.equal(c.ballsAt(0).b1,'@main');assert.equal(c.ballsAt(0).b2,'@extra');assert.equal(c.ballsAt(0).b3,'@main');
+});
+test('Supprimer un tir ou retaper une tireuse préserve les autres tirs',()=>{
+ const c=multiContext();shoot(c,'a1','b1','main');shoot(c,'a2','b2','extra');shoot(c,'a3','b3','main');
+ c.removeArrow('__shot:b2');assert.equal(c.ballsAt(0).b2,'a2');assert.equal(c.stepShots(c.step()).length,2);
+ c.tmShotTap('a1');assert.equal(c.ballsAt(0).b1,'a1');assert.equal(c.ballsAt(0).b3,'@main');
+});
+test('Deux ballons chez la même joueuse peuvent chacun être tirés',()=>{
+ const c=multiContext();c.doc.ballInit.b2='a1';shoot(c,'a1','b1','main');c.tmShotTap('a1');assert.equal(c.tmShotFrom,'a1');
+ c.tmBasketTap('extra');assert.equal(c.ballsAt(0).b1,'@main');assert.equal(c.ballsAt(0).b2,'@extra');
+});
+test('Export/import préserve tous les tirs et leurs cibles',()=>{
+ const c=multiContext();shoot(c,'a1','b1','main');shoot(c,'a2','b2','extra');const flat=[];
+ const data=c.encSteps(c.steps(),flat,0);assert.equal(flat.filter(x=>x.kind==='shot').length,2);
+ c.doc.training.steps=c.decSteps(JSON.parse(JSON.stringify(data)),c.step().pos,0);
+ assert.equal(c.stepShots(c.step()).length,2);assert.equal(c.ballsAt(0).b1,'@main');assert.equal(c.ballsAt(0).b2,'@extra');
+});
+function view3Context() {
+ const c=multiContext();c.view='3d';c.PR=5;c.tokLift=()=>4.75;c.depthScale=()=>1.1;
+ c.project3=q=>({x:q.x*.8+q.y*.2,y:q.y*.5-q.x*.1});c.VIEWS['3d']={project:c.project3};c.isoOf=()=>({s:.8,sy:.5});
+ vm.runInContext(extract('rimPt'),c);return c;
+}
+test('En 3D, deux ballons restent aux côtés du jeton et au-dessus de ses pieds',()=>{
+ const c=view3Context();c.doc.ballInit.b2='a1';const Q={a1:{x:100,y:120},a2:{x:80,y:90},a3:{x:50,y:50}};
+ const foot=c.project3(Q.a1), a=c.tbSlotPos('a1',0,Q),b=c.tbSlotPos('a1',1,Q);
+ assert.ok(a.x>foot.x && b.x<foot.x);assert.equal(a.y,foot.y-(4.75+5*.78)*1.1);assert.equal(a.y,b.y);
+ assert.equal(c.ballViewAt(0,0,Q)[1].pt.x,b.x);
+});
+test('Les tirs 3D partent du bon ballon et arrivent à hauteur du cercle',()=>{
+ const c=view3Context();c.doc.ballInit.b2='a1';shoot(c,'a1','b1','main');shoot(c,'a1','b2','extra');
+ const leg=c.ballLegsAt(0).legs.b2[0], arc=c.ballFlight(leg,0,'b2');
+ assert.equal(arc.a.x,c.tbSlotPos('a1',1,c.step().pos).x);assert.equal(arc.b.y,c.rimPt(c.tmBaskets()[1]).y);
+ assert.ok(c.quadAt(arc.a,arc.c,arc.b,.5).y<Math.min(arc.a.y,arc.b.y));
+});
+test('Tous les paniers 3D sont en élévation avec une planche verticale orientée',()=>{
+ const c=view3Context();c.MODES={training:{hoop:{x:50,y:50}},half:{}};c.mode=()=> 'training';
+ vm.runInContext(['hoopsOf','hoop3','decorFront3','tmBasketMarkup','tmBasketHit'].map(extract).join('\n'),c);
+ const hoops=c.hoopsOf('training');assert.equal(hoops.length,2);
+ const html=c.decorFront3('training');assert.equal((html.match(/class="rim3"/g)||[]).length,2);
+ assert.equal(c.tmBasketMarkup({id:'extra'}),'');assert.equal(c.tmBasketHit({id:'main'}),'');
+ const a=c.hoop3({id:'extra',x:150,y:70,a:0}),b=c.hoop3({id:'extra',x:150,y:70,a:90});assert.notEqual(a,b);
+ assert.ok(a.includes('class="bb3" d="M'));assert.ok(a.includes('cy="'+c.rimPt({x:150,y:70}).y+'"'));
+});
+
+test('Supprimer une tireuse ou un panier recale uniquement les tirs concernés',()=>{
+ const c=multiContext();c.tmWalkSteps=cb=>c.steps().forEach(cb);vm.runInContext(extract('tmReholder'),c);
+ shoot(c,'a1','b1','main');shoot(c,'a2','b2','extra');
+ c.tmReholder('@extra','@main');assert.equal(c.ballsAt(0).b2,'@main');
+ c.tmReholder('a2',null);assert.equal(c.stepShots(c.step()).length,1);assert.equal(c.step().shot,'a1');assert.equal(c.ballsAt(0).b1,'@main');
+});
+test('Le tir unique historique garde son rendu et son annulation',()=>{
+ const c=context();c.step().shot='a1';delete c.step().ballEv;assert.equal(c.stepShots(c.step())[0].id,'__shot');
+ c.removeArrow('__shot');assert.equal(c.step().shot,null);
+});
+console.log(passed + ' scénarios réussis');
