@@ -12510,8 +12510,8 @@ function _adminPanelBody() {
     <button class="btn btn-secondary btn-block mb-2" style="text-align:left" onclick="closeModal();setTimeout(()=>openArdoiseCoach('debts'),50)">
       🍽 Gérer l'Ardoise${ardoiseProofs ? ` <span style="color:var(--orange);font-family:'JetBrains Mono';font-size:11px">· ${ardoiseProofs} preuve(s) à valider</span>` : ''}
     </button>
-    <button class="btn btn-secondary btn-block mb-2" style="text-align:left" onclick="closeModal();setTimeout(()=>openArdoiseCoach('exos'),50)">
-      🏋 Bibliothèque d'exos (partagée avec la prépa)
+    <button class="btn btn-secondary btn-block mb-2" style="text-align:left" onclick="closeModal();setTimeout(()=>openExerciseLibrary(),50)">
+      📚 Bibliothèque d’exercices
     </button>
     <button class="btn btn-secondary btn-block mb-3" style="text-align:left" onclick="closeModal();setTimeout(()=>openArdoiseCoach('config'),50)">
       ⚙️ Règles de l'Ardoise
@@ -13622,6 +13622,7 @@ function renderHomeCoach() {
 
   return `
     <div class="fade-up">
+      <button class="btn btn-secondary btn-block mb-3" onclick="openExerciseLibrary()">📚 Bibliothèque d’exercices</button>
       ${renderOverdueTrainingsBanner()}
       ${renderBroadcastCoachCard()}
       ${renderGageCoachHomeCard()}
@@ -16356,6 +16357,157 @@ const TREX = { list: null, loading: false, err: null, at: 0 };
 // lèverait un ReferenceError sur TREX. L'objet n'est jamais RÉASSIGNÉ (que
 // muté par propriété) : la référence exportée reste donc la bonne.
 window.TREX = TREX;
+// ── BIBLIOTHÈQUE COMMUNE : navigation uniquement, aucune migration ──────
+function _exerciseLibraryState() {
+  if (!window._exerciseLibrary) {
+    let saved = {};
+    try { saved = JSON.parse(sessionStorage.getItem('pb_exercise_library_ui') || '{}'); } catch (e) {}
+    window._exerciseLibrary = { q: String(saved.q || '').slice(0, 80), cat: saved.cat || 'all', basket: null, at: 0, loading: false, error: false };
+  }
+  return window._exerciseLibrary;
+}
+const EXERCISE_LIBRARY_CATS = [['all', 'Tous'], ['basket', 'Basket'], ['physical', 'Physique'], ['guide', 'Guidages'], ['sanction', 'Sanctions']];
+function _exerciseLibraryRemember() {
+  const s = _exerciseLibraryState();
+  try { sessionStorage.setItem('pb_exercise_library_ui', JSON.stringify({q:s.q, cat:s.cat})); } catch (e) {}
+}
+function _exerciseLibraryRows() {
+  // Les identités restent (source, id). Un homonyme ou un id identique n'est
+  // jamais une raison de fusionner des fiches ni de changer leurs liens.
+  const s = _exerciseLibraryState();
+  const basket = s.basket === null ? (TREX.list || []) : s.basket;
+  return [
+    ...basket.filter(e => e && !e.deleted_at).map(e => ({source:'basket', id:e.id, name:e.title || 'Exercice basket', detail:_trexCount(e), usage:'Animation · entraînement', row:e})),
+    ...exoTemplates().map(e => ({source:'physical', id:e.id, name:e.name || 'Exercice physique', detail:_ardDoseLabel({sets:e.defaultSets, reps:e.defaultReps, duration_sec:e.defaultDurationSec, rest_sec:e.defaultRestSec}), usage:'Prépa physique · Ardoise', row:e, guide:_exoDrillOf(e.id)})),
+    ...drillLibraryList().map(e => ({source:'guide', id:e.id, name:e.name || 'Guidage', detail:_drillModeLabel(e), usage:'Chrono et consignes', row:e, guide:e})),
+    ...sanctionTemplatesList().map(e => ({source:'sanction', id:e.id, name:e.name || 'Exercice de sanction', detail:_sanctionDose(e), usage:'Sanction physique', row:e}))
+  ];
+}
+function _exerciseLibraryFiltered() {
+  const s = _exerciseLibraryState();
+  const terms = _drillNorm(s.q).trim().split(/\s+/).filter(Boolean);
+  return _exerciseLibraryRows().filter(e => (s.cat === 'all' || s.cat === e.source)
+    && terms.every(t => _drillNorm([e.name, e.row.category, e.detail, e.usage, e.guide && e.guide.name].join(' ')).includes(t)))
+    .sort((a,b) => a.name.localeCompare(b.name, 'fr') || a.source.localeCompare(b.source));
+}
+function openExerciseLibrary(cat) {
+  if (!_ardIsCoach()) return;
+  const s = _exerciseLibraryState();
+  if (cat) s.cat = cat;
+  if (!EXERCISE_LIBRARY_CATS.some(c => c[0] === s.cat)) s.cat = 'all';
+  _exerciseLibraryRemember();
+  openModal(`<div class="modal-header"><div class="modal-title">Bibliothèque d’exercices</div><button class="modal-close" aria-label="Fermer" onclick="closeModal()">✕</button></div>
+    <div class="modal-body" id="exercise-library">
+      <p style="font-size:12px;color:var(--ink-3);margin:0 0 12px">Retrouve une fiche, modifie-la ou lance son animation ou son guidage.</p>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px">
+        ${canEditSharedLibrary() ? '<button class="btn btn-primary" onclick="_exerciseLibraryCreate()">+ Créer un exercice</button>' : ''}
+        <button class="btn btn-secondary" onclick="_exerciseLibraryLoadBasket(true)" aria-label="Actualiser les animations basket">↻ Basket</button>
+      </div>
+      <label class="fld-label" for="exercise-library-q">Rechercher</label>
+      <input id="exercise-library-q" type="search" maxlength="80" value="${_trexEsc(s.q)}" placeholder="Nom, catégorie, type de guidage…" style="width:100%;margin-bottom:12px" oninput="_exerciseLibrarySearch(this.value)">
+      <div id="exercise-library-results" aria-live="polite">${_exerciseLibraryBody()}</div>
+    </div>`);
+  if (s.basket === null || Date.now() - s.at > 60000) _exerciseLibraryLoadBasket();
+}
+function _exerciseLibraryBody() {
+  const s = _exerciseLibraryState(), rows = _exerciseLibraryFiltered();
+  const label = source => EXERCISE_LIBRARY_CATS.find(c => c[0] === source)[1];
+  // data-* transporte les ids comme données, sans interpolation dans du JS.
+  return `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px" role="group" aria-label="Type de contenu">
+    ${EXERCISE_LIBRARY_CATS.map(([id,name]) => `<button class="btn ${s.cat === id ? 'btn-primary' : 'btn-secondary'}" style="min-height:40px;padding:6px 10px" aria-pressed="${s.cat === id}" onclick="_exerciseLibraryFilter('${id}')">${name}</button>`).join('')}
+    </div>
+    ${s.loading ? '<p role="status" style="font-size:12px">Chargement des animations basket…</p>' : ''}
+    ${s.error ? '<p role="status" style="font-size:12px;color:var(--orange)">Actualisation basket impossible. Les fiches déjà chargées restent disponibles. Réessaie avec « ↻ Basket ».</p>' : ''}
+    ${s.cat === 'sanction' ? '<p style="font-size:12px;color:var(--ink-3)">Ces fiches servent aux sanctions. Les attributions et leur suivi restent dans Gages.</p>' : ''}
+    <div style="font-size:12px;color:var(--ink-3);margin-bottom:10px">${rows.length} fiche${rows.length > 1 ? 's' : ''}${s.loading || s.error ? ' disponible(s)' : ''}</div>
+    ${rows.map(e => `<article style="border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:8px;overflow-wrap:anywhere">
+      <div style="font-size:11px;color:var(--ink-3)">${label(e.source)} · ${_trexEsc(e.usage)}</div>
+      <div style="font-weight:600;margin:5px 0">${_trexEsc(e.name)}</div>
+      <div style="font-size:12px;color:var(--ink-3)">${_trexEsc(e.detail)}${e.source === 'physical' && e.guide ? ' · Guidage : ' + _trexEsc(e.guide.name || _drillModeLabel(e.guide)) : ''}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px">
+        ${e.source === 'basket' || e.guide ? `<button class="btn btn-primary" data-source="${e.source}" data-id="${_trexEsc(e.id)}" onclick="_exerciseLibraryAction(this.dataset.source,this.dataset.id,'launch')">▶ ${e.source === 'basket' ? 'Voir l’animation' : 'Lancer'}</button>` : ''}
+        ${canEditSharedLibrary() ? `<button class="btn btn-secondary" data-source="${e.source}" data-id="${_trexEsc(e.id)}" onclick="_exerciseLibraryAction(this.dataset.source,this.dataset.id,'edit')">${e.source === 'guide' ? 'Réglages' : 'Modifier'}</button>` : ''}
+      </div></article>`).join('') || '<p style="padding:16px 0;color:var(--ink-3)">Aucune fiche ne correspond à cette recherche.</p>'}`;
+}
+function _exerciseLibraryRefresh() {
+  const el = document.getElementById('exercise-library-results');
+  if (el && _ardIsCoach()) el.innerHTML = _exerciseLibraryBody();
+}
+function _exerciseLibrarySearch(q) { _exerciseLibraryState().q = String(q || '').slice(0,80); _exerciseLibraryRemember(); _exerciseLibraryRefresh(); }
+function _exerciseLibraryFilter(cat) { _exerciseLibraryState().cat = cat; _exerciseLibraryRemember(); _exerciseLibraryRefresh(); }
+async function _exerciseLibraryLoadBasket(force) {
+  const s = _exerciseLibraryState();
+  if (!_ardIsCoach() || s.loading || (!force && s.basket !== null && Date.now() - s.at < 60000)) return;
+  s.loading = true; s.error = false; _exerciseLibraryRefresh();
+  try {
+    if (!window.sb) throw new Error('offline');
+    const rows = [];
+    // Pas de plafond silencieux à 200 fiches. Une lecture partielle ne remplace
+    // jamais le cache complet si une page échoue.
+    for (let offset = 0; ; offset += 1000) {
+      const {data, error} = await window.sb.from('training_exercises').select('id,title,data,created_by,updated_at').is('deleted_at',null).order('id').range(offset,offset+999);
+      if (error) throw error;
+      if (!Array.isArray(data)) throw new Error('invalid response');
+      rows.push(...data);
+      if (data.length < 1000) break;
+    }
+    s.basket = rows; s.at = Date.now();
+  } catch (e) { s.error = true; }
+  finally { s.loading = false; _exerciseLibraryRefresh(); }
+}
+function _exerciseLibraryAction(source, id, action) {
+  if (!_ardIsCoach()) return;
+  const entry = _exerciseLibraryRows().find(e => e.source === source && String(e.id) === String(id));
+  if (!entry) { showToast('Cette fiche n’est plus disponible.'); _exerciseLibraryRefresh(); return; }
+  if (action !== 'launch' && _denyIfScopedCoach()) return;
+  _exerciseLibraryRemember();
+  if (source === 'basket') {
+    if (action !== 'launch' && _denyIfScopedCoach()) return;
+    _exerciseLibraryBasketReturn();
+    openTrainingExoEditor(entry.id, action === 'launch' ? 'view' : undefined);
+  } else if (action === 'launch' && entry.guide) {
+    _drillReturnSet('exerciseLibrary');
+    launchDrillByMode(entry.guide.id);
+  } else if (source === 'physical') openExoEditor(entry.id, true);
+  else if (source === 'sanction') openSanctionTemplateEditor(entry.id, true);
+  else if (source === 'guide') {
+    // Réutilise les réglages existants, avec une seule fiche ciblée.
+    _drillLibState().q = entry.name; _drillLibState().cat = _drillLibMode(entry.row);
+    openDrillLibrary();
+  }
+}
+function _exerciseLibraryCreate() {
+  if (!_ardIsCoach() || _denyIfScopedCoach()) return;
+  openModal(`<div class="modal-header"><div class="modal-title">Créer un exercice</div><button class="modal-close" aria-label="Retour à la bibliothèque" onclick="openExerciseLibrary()">←</button></div>
+    <div class="modal-body" style="display:grid;gap:12px">
+      <button class="btn btn-secondary" style="white-space:normal;text-align:left;padding:16px" onclick="_exerciseLibraryNewBasket()">🏀 Basket<br>Joueuses, ballons, déplacements et tirs</button>
+      <button class="btn btn-secondary" style="white-space:normal;text-align:left;padding:16px" onclick="openExoEditor(null,true)">🏋 Physique<br>Consignes, séries et répétitions · guidage facultatif</button>
+      <details><summary style="cursor:pointer;padding:10px 0">Autres modèles</summary>
+        <button class="btn btn-secondary btn-block mb-2" onclick="openDrillLibrary()">Créer un guidage : réaction, circuit ou fractionné</button>
+        <button class="btn btn-secondary btn-block" onclick="openSanctionTemplateEditor(null,true)">Créer une fiche de sanction</button>
+      </details>
+    </div>`);
+}
+function _exerciseLibraryBasketReturn() {
+  _exerciseLibraryRemember();
+  try { sessionStorage.setItem('pb_exercise_library_return', String(Date.now())); } catch (e) {}
+}
+function _exerciseLibraryNewBasket() {
+  if (!_ardIsCoach() || _denyIfScopedCoach()) return;
+  _exerciseLibraryBasketReturn(); createTrainingExo();
+}
+function _exerciseLibraryResume() {
+  if (!_ardIsCoach()) return;
+  try {
+    const at = Number(sessionStorage.getItem('pb_exercise_library_return'));
+    if (!at) return;
+    sessionStorage.removeItem('pb_exercise_library_return');
+    if (Date.now() - at < 86400000) setTimeout(() => { openExerciseLibrary(); _exerciseLibraryLoadBasket(true); }, 0);
+  } catch (e) {}
+}
+window.addEventListener('pageshow', _exerciseLibraryResume);
+// ── FIN BIBLIOTHÈQUE COMMUNE ───────────────────────────────────────────
+
 function _trexEsc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -23363,17 +23515,18 @@ function _sanctionDose(t, mult) {
 }
 
 // --- CRUD base SANCTIONS (admin) -------------------------------------------
-function openSanctionTemplateEditor(id) {
+function openSanctionTemplateEditor(id, fromLibrary) {
   if (_denyIfScopedCoach()) return;
   const t = id ? _sanctionTplById(id) : null;
   openModal(`
     <div class="modal-header">
-      <div class="modal-title">💪 ${t ? 'Modifier' : 'Nouvel'} exo de sanction</div>
-      <button class="modal-close" onclick="closeModal()">✕</button>
+      <div class="modal-title">💪 ${t ? 'Modifier la' : 'Nouvelle'} fiche de sanction</div>
+      <button class="modal-close" onclick="${fromLibrary ? 'openExerciseLibrary()' : 'closeModal()'}">✕</button>
     </div>
     <div class="modal-body">
       <div style="font-size:12px;color:var(--ink-3);line-height:1.5;margin-bottom:10px">
-        Base <strong>dédiée aux sanctions</strong> — indépendante de la bibliothèque d'exos de l'ardoise.
+        ${fromLibrary ? '<span id="exercise-library-editor" hidden></span>' : ''}
+        Fiche utilisée pour les sanctions physiques. Les attributions et leur suivi restent dans Gages.
       </div>
       <div class="fld" style="margin-bottom:8px"><label class="fld-label">Nom</label>
         <input id="sct-name" type="text" maxlength="60" value="${t ? esc(t.name) : ''}" placeholder="Ex : Gainage planche" style="width:100%"></div>
@@ -23404,6 +23557,7 @@ function _numOrNull(id, max) {
 }
 function saveSanctionTemplate(id) {
   if (_denyIfScopedCoach()) return;
+  const fromLibrary = !!document.getElementById('exercise-library-editor');
   const name = ((document.getElementById('sct-name') || {}).value || '').trim().slice(0, 60);
   if (!name) { if (typeof showToast === 'function') showToast('Il faut un nom'); return; }
   const now = Date.now();
@@ -23420,6 +23574,7 @@ function saveSanctionTemplate(id) {
   if (cur) Object.assign(cur, patch);
   else state.sanctionTemplates.unshift(Object.assign({ id: uid(), notes: '', deletedAt: null, createdAt: now }, patch));
   persist(); _gageFlush(); closeModal(); render();
+  if (fromLibrary) setTimeout(() => openExerciseLibrary(), 60);
   if (typeof showToast === 'function') showToast('💪 Exo de sanction enregistré');
 }
 // Soft-delete : les assignations passées continuent de résoudre le nom de l'exo.
@@ -28956,7 +29111,7 @@ function _ardCoachExosTab() {
   list.forEach(e => { (byCat[e.category] = byCat[e.category] || []).push(e); });
   return `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-      <div class="eyebrow-muted">Bibliothèque (${list.length})</div>
+      <button class="btn btn-secondary" onclick="openExerciseLibrary('physical')">Bibliothèque commune →</button>
       <button class="btn btn-primary" style="min-height:34px;padding:0 11px;font-size:12px" onclick="openExoEditor()">+ Exo</button>
     </div>
     <div style="font-size:11px;color:var(--ink-3);line-height:1.5;margin-bottom:12px">
@@ -28984,14 +29139,14 @@ function _ardCoachExosTab() {
       </div>`).join('')
       : '<div style="font-size:12px;color:var(--ink-3);font-style:italic;padding:6px 2px">Bibliothèque vide. Le premier exo met un rouleau en route.</div>'}`;
 }
-function openExoEditor(id) {
+function openExoEditor(id, fromLibrary) {
   if (!_ardIsCoach()) return;
   const e = id ? exoTemplateById(id) : null;
   // Le drill choisi vit dans un BROUILLON, pas dans le <select> : le filtre par
   // nom réécrit la liste des options, et une option filtrée hors de la liste
   // perdrait la sélection en silence. Le brouillon, lui, survit au filtrage.
   window._ardExoDrill = { id: (e && e.drillId) ? e.drillId : '', q: '' };
-  const back = `closeModal();setTimeout(()=>openArdoiseCoach('exos'),50)`;
+  const back = fromLibrary ? `openExerciseLibrary()` : `closeModal();setTimeout(()=>openArdoiseCoach('exos'),50)`;
   openModal(`
     <div class="modal-header">
       <div class="modal-title">${e ? '✎ Modifier l\'exercice' : '+ Nouvel exercice'}</div>
@@ -29024,6 +29179,7 @@ function openExoEditor(id) {
       <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin:0 0 12px;line-height:1.5">
         Ce sont des SUGGESTIONS : chaque tirage fige sa propre dose. Modifier l'exo ne réécrit aucun programme déjà tiré.
       </div>
+      ${fromLibrary ? '<span id="exercise-library-editor" hidden></span>' : ''}
       ${_ardExoDrillPickerHtml(e ? e.id : null)}
       <div class="fld">
         <label class="fld-label">Description / consignes (markdown)</label>
@@ -29031,7 +29187,7 @@ function openExoEditor(id) {
       </div>
     </div>
     <div class="modal-footer" style="display:flex;gap:8px">
-      ${e ? `<button class="btn btn-ghost" style="flex:0 0 auto;color:var(--red,#ef4444)" onclick="_ardDeleteExo('${esc(e.id)}')">🗑</button>` : ''}
+      ${e && !fromLibrary ? `<button class="btn btn-ghost" style="flex:0 0 auto;color:var(--red,#ef4444)" onclick="_ardDeleteExo('${esc(e.id)}')">🗑</button>` : ''}
       <button class="btn btn-primary" style="flex:1" onclick="_ardSaveExo(${e ? "'" + esc(e.id) + "'" : 'null'})">Enregistrer</button>
     </div>`);
 }
@@ -29049,12 +29205,12 @@ function _ardExoDrillPickerHtml(exoId) {
   const lib = activeDrills().filter(d => !d.isPreset);
   return `
     <div class="fld" style="margin-bottom:12px">
-      <label class="fld-label">🎯 Associer un drill (optionnel)</label>
+      <label class="fld-label">Associer un guidage (facultatif)</label>
       ${lib.length > 6 ? `
         <input id="ard-e-drill-q" value="${esc(w.q)}" maxlength="40" placeholder="🔍 Filtrer par nom…"
           style="margin-bottom:6px" oninput="_ardExoDrillFilter(this.value)">` : ''}
       <div id="ard-e-drill-wrap">${_ardExoDrillSelectHtml()}</div>
-      <button class="btn btn-ghost btn-block" style="margin-top:6px;font-size:12px" onclick="_ardExoNewDrill(${exoId ? "'" + esc(exoId) + "'" : 'null'})">＋ Créer un nouveau drill</button>
+      <button class="btn btn-ghost btn-block" style="margin-top:6px;font-size:12px" onclick="_ardExoNewDrill(${exoId ? "'" + esc(exoId) + "'" : 'null'})">＋ Créer un guidage</button>
       <div style="font-size:10px;color:var(--ink-3);font-family:'JetBrains Mono';margin-top:5px;line-height:1.5">
         Un drill lié affiche un bouton « ▶ Lancer » sur le ticket d'ardoise et dans les blocs de prépa créés depuis cet exo.
       </div>
@@ -29095,6 +29251,7 @@ function _ardExoDrillFilter(v) {
 // le drill fraîchement créé sans rechercher sa fiche.
 function _ardExoNewDrill(exoId) {
   if (!_ardIsCoach()) return;
+  window._ardExoAfterDrillLibrary = !!document.getElementById('exercise-library-editor');
   const savedId = _ardSaveExo(exoId || null, true);
   if (!savedId) return;   // nom manquant : l'alerte a déjà parlé
   window._ardExoAfterDrill = savedId;
@@ -29103,6 +29260,7 @@ function _ardExoNewDrill(exoId) {
 }
 function _ardSaveExo(id, stay) {
   if (!_ardIsCoach()) return null;
+  const fromLibrary = !!document.getElementById('exercise-library-editor');
   const v = k => { const el = document.getElementById(k); return el ? String(el.value || '').trim() : ''; };
   const num = (k, min, max, dflt) => {
     const raw = v(k);
@@ -29146,7 +29304,7 @@ function _ardSaveExo(id, stay) {
   // `stay` : on part créer un drill, la modale sera rouverte par l'appelant.
   if (stay) { if (typeof showToast === 'function') showToast('✓ Exo enregistré — crée ton drill'); return savedId; }
   closeModal();
-  setTimeout(() => { try { openArdoiseCoach('exos'); } catch (e) {} }, 60);
+  setTimeout(() => { try { fromLibrary ? openExerciseLibrary() : openArdoiseCoach('exos'); } catch (e) {} }, 60);
   if (typeof showToast === 'function') showToast('✓ Exercice enregistré');
   return savedId;
 }
@@ -35538,6 +35696,7 @@ const DRILL_RETURN_TO = {
   // donc le coach revient exactement sur la composition qu'il était en train
   // d'écrire — tester un drill ne lui coûte pas son menu en cours.
   ardoiseMenuEditor: () => _ardRenderMenuEditor(),
+  exerciseLibrary: () => openExerciseLibrary(),
   drills: () => openDrillLibrary()
 };
 function _drillReturnSet(key) { window._drillReturnTo = (key && DRILL_RETURN_TO[key]) ? key : null; }
@@ -37177,7 +37336,7 @@ const DRILL_LIB_CATS = [
   { id: 'all',      icon: '📚', label: 'Tous' },
   { id: 'stimulus', icon: '⚡', label: 'Réaction' },
   { id: 'circuit',  icon: '🔄', label: 'Circuit' },
-  { id: 'interval', icon: '⏳', label: 'Interval' }
+  { id: 'interval', icon: '⏳', label: 'Fractionné' }
 ];
 function _drillLibState() {
   window._drillLib = window._drillLib || { q: '', cat: 'all' };
@@ -37217,10 +37376,11 @@ function openDrillLibrary() {
   const backExo = window._ardExoAfterDrill || null;
   openModal(`
     <div class="modal-header">
-      <div class="modal-title">⚡ Bibliothèque de drills</div>
+      <div class="modal-title">Guidages d’exercices</div>
       <button class="modal-close" onclick="_drillLibClose()">✕</button>
     </div>
     <div class="modal-body">
+      ${isCoach && !backExo ? '<button class="btn btn-secondary btn-block mb-2" onclick="openExerciseLibrary()">← Bibliothèque d’exercices</button>' : ''}
       ${backExo ? `<div style="padding:8px 12px;background:var(--bg-3);border-left:3px solid var(--orange);border-radius:6px;margin-bottom:10px;font-size:11px;color:var(--ink-2);line-height:1.5">
              ↩ Crée ton drill : en fermant cet écran tu reviens sur ta fiche d'exo pour l'associer.
            </div>` : ''}
@@ -37228,7 +37388,7 @@ function openDrillLibrary() {
         ? `<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:10px">
              <button class="btn btn-primary" style="font-size:12px" onclick="openDrillWizard()">+ Réaction</button>
              <button class="btn btn-primary" style="font-size:12px" onclick="openCircuitWizard()">+ Circuit</button>
-             <button class="btn btn-primary" style="font-size:12px" onclick="openIntervalWizard()">+ Interval</button>
+             <button class="btn btn-primary" style="font-size:12px" onclick="openIntervalWizard()">+ Fractionné</button>
            </div>`
         : `<div style="padding:8px 12px;background:var(--bg-3);border-radius:6px;margin-bottom:10px;font-size:11px;color:var(--ink-3);line-height:1.5">👁 Lance un drill. Tu peux <strong>ajuster les réglages avant de lancer</strong> (⚙) — sans les enregistrer.</div>`}
       ${drillLibraryList().length > 4 ? `
@@ -37295,9 +37455,11 @@ function _drillLibReset() {
 // utile du raccourci « ＋ Créer un nouveau drill ».
 function _drillLibClose() {
   const exo = window._ardExoAfterDrill;
+  const fromLibrary = window._ardExoAfterDrillLibrary;
+  window._ardExoAfterDrillLibrary = false;
   window._ardExoAfterDrill = null;
   closeModal();
-  if (exo) setTimeout(() => { try { openExoEditor(exo); } catch (e) {} }, 60);
+  if (exo) setTimeout(() => { try { openExoEditor(exo, fromLibrary); } catch (e) {} }, 60);
 }
 function _drillCardHtml(d, isCoach) {
   // Interval (fractionné) : carte dédiée (badge + résumé cycles + durée totale).
@@ -53098,6 +53260,7 @@ function render() {
     }
   }
   _doRender();
+  _exerciseLibraryResume();
 }
 
 // Scroll to top : depuis le fix scroll-past-footer, le scroll est interne au
@@ -53450,7 +53613,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-09-11.249';
+const APP_VERSION = '2026-09-11.250';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
