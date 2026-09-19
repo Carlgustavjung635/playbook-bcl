@@ -4200,6 +4200,126 @@ window.__PUSH_KILL__ = false; // ROLLBACK : passer à true + redéployer pour tu
      - Realtime : live score multi-device (#public)
      - Fallback : localStorage si Supabase indisponible
      ============================================================ -->
+<script id="pb-local-storage">
+/* LZ-String 1.5.0 — https://github.com/pieroxy/lz-string
+MIT License
+
+Copyright (c) 2013 pieroxy
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+*/
+var LZString=function(){var r=String.fromCharCode,o="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=",n="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-$",e={};function t(r,o){if(!e[r]){e[r]={};for(var n=0;n<r.length;n++)e[r][r.charAt(n)]=n}return e[r][o]}var i={compressToBase64:function(r){if(null==r)return"";var n=i._compress(r,6,function(r){return o.charAt(r)});switch(n.length%4){default:case 0:return n;case 1:return n+"===";case 2:return n+"==";case 3:return n+"="}},decompressFromBase64:function(r){return null==r?"":""==r?null:i._decompress(r.length,32,function(n){return t(o,r.charAt(n))})},compressToUTF16:function(o){return null==o?"":i._compress(o,15,function(o){return r(o+32)})+" "},decompressFromUTF16:function(r){return null==r?"":""==r?null:i._decompress(r.length,16384,function(o){return r.charCodeAt(o)-32})},compressToUint8Array:function(r){for(var o=i.compress(r),n=new Uint8Array(2*o.length),e=0,t=o.length;e<t;e++){var s=o.charCodeAt(e);n[2*e]=s>>>8,n[2*e+1]=s%256}return n},decompressFromUint8Array:function(o){if(null==o)return i.decompress(o);for(var n=new Array(o.length/2),e=0,t=n.length;e<t;e++)n[e]=256*o[2*e]+o[2*e+1];var s=[];return n.forEach(function(o){s.push(r(o))}),i.decompress(s.join(""))},compressToEncodedURIComponent:function(r){return null==r?"":i._compress(r,6,function(r){return n.charAt(r)})},decompressFromEncodedURIComponent:function(r){return null==r?"":""==r?null:(r=r.replace(/ /g,"+"),i._decompress(r.length,32,function(o){return t(n,r.charAt(o))}))},compress:function(o){return i._compress(o,16,function(o){return r(o)})},_compress:function(r,o,n){if(null==r)return"";var e,t,i,s={},u={},a="",p="",c="",l=2,f=3,h=2,d=[],m=0,v=0;for(i=0;i<r.length;i+=1)if(a=r.charAt(i),Object.prototype.hasOwnProperty.call(s,a)||(s[a]=f++,u[a]=!0),p=c+a,Object.prototype.hasOwnProperty.call(s,p))c=p;else{if(Object.prototype.hasOwnProperty.call(u,c)){if(c.charCodeAt(0)<256){for(e=0;e<h;e++)m<<=1,v==o-1?(v=0,d.push(n(m)),m=0):v++;for(t=c.charCodeAt(0),e=0;e<8;e++)m=m<<1|1&t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t>>=1}else{for(t=1,e=0;e<h;e++)m=m<<1|t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t=0;for(t=c.charCodeAt(0),e=0;e<16;e++)m=m<<1|1&t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t>>=1}0==--l&&(l=Math.pow(2,h),h++),delete u[c]}else for(t=s[c],e=0;e<h;e++)m=m<<1|1&t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t>>=1;0==--l&&(l=Math.pow(2,h),h++),s[p]=f++,c=String(a)}if(""!==c){if(Object.prototype.hasOwnProperty.call(u,c)){if(c.charCodeAt(0)<256){for(e=0;e<h;e++)m<<=1,v==o-1?(v=0,d.push(n(m)),m=0):v++;for(t=c.charCodeAt(0),e=0;e<8;e++)m=m<<1|1&t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t>>=1}else{for(t=1,e=0;e<h;e++)m=m<<1|t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t=0;for(t=c.charCodeAt(0),e=0;e<16;e++)m=m<<1|1&t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t>>=1}0==--l&&(l=Math.pow(2,h),h++),delete u[c]}else for(t=s[c],e=0;e<h;e++)m=m<<1|1&t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t>>=1;0==--l&&(l=Math.pow(2,h),h++)}for(t=2,e=0;e<h;e++)m=m<<1|1&t,v==o-1?(v=0,d.push(n(m)),m=0):v++,t>>=1;for(;;){if(m<<=1,v==o-1){d.push(n(m));break}v++}return d.join("")},decompress:function(r){return null==r?"":""==r?null:i._decompress(r.length,32768,function(o){return r.charCodeAt(o)})},_decompress:function(o,n,e){var t,i,s,u,a,p,c,l=[],f=4,h=4,d=3,m="",v=[],g={val:e(0),position:n,index:1};for(t=0;t<3;t+=1)l[t]=t;for(s=0,a=Math.pow(2,2),p=1;p!=a;)u=g.val&g.position,g.position>>=1,0==g.position&&(g.position=n,g.val=e(g.index++)),s|=(u>0?1:0)*p,p<<=1;switch(s){case 0:for(s=0,a=Math.pow(2,8),p=1;p!=a;)u=g.val&g.position,g.position>>=1,0==g.position&&(g.position=n,g.val=e(g.index++)),s|=(u>0?1:0)*p,p<<=1;c=r(s);break;case 1:for(s=0,a=Math.pow(2,16),p=1;p!=a;)u=g.val&g.position,g.position>>=1,0==g.position&&(g.position=n,g.val=e(g.index++)),s|=(u>0?1:0)*p,p<<=1;c=r(s);break;case 2:return""}for(l[3]=c,i=c,v.push(c);;){if(g.index>o)return"";for(s=0,a=Math.pow(2,d),p=1;p!=a;)u=g.val&g.position,g.position>>=1,0==g.position&&(g.position=n,g.val=e(g.index++)),s|=(u>0?1:0)*p,p<<=1;switch(c=s){case 0:for(s=0,a=Math.pow(2,8),p=1;p!=a;)u=g.val&g.position,g.position>>=1,0==g.position&&(g.position=n,g.val=e(g.index++)),s|=(u>0?1:0)*p,p<<=1;l[h++]=r(s),c=h-1,f--;break;case 1:for(s=0,a=Math.pow(2,16),p=1;p!=a;)u=g.val&g.position,g.position>>=1,0==g.position&&(g.position=n,g.val=e(g.index++)),s|=(u>0?1:0)*p,p<<=1;l[h++]=r(s),c=h-1,f--;break;case 2:return v.join("")}if(0==f&&(f=Math.pow(2,d),d++),l[c])m=l[c];else{if(c!==h)return null;m=i+i.charAt(0)}v.push(m),l[h++]=i+m.charAt(0),i=m,0==--f&&(f=Math.pow(2,d),d++)}}};return i}();"function"==typeof define&&define.amd?define(function(){return LZString}):"undefined"!=typeof module&&null!=module?module.exports=LZString:"undefined"!=typeof angular&&null!=angular&&angular.module("LZString",[]).factory("LZString",function(){return LZString});
+// Versioned, lossless local persistence. No eviction of business data or pending operations.
+(function () {
+  const prefix = 'PB-LZ1:', pendingPrefix = 'pb8_sync_pending_v1:';
+  const keys = new Set(), failed = new Map(), cache = new Map();
+  let recovering = false;
+  const managed = key => keys.has(key) || key.startsWith(pendingPrefix);
+  function decode(raw) {
+    if (raw === null || !raw.startsWith(prefix)) return raw;
+    const text = LZString.decompressFromUTF16(raw.slice(prefix.length));
+    if (text === null || text === '') throw new Error('Invalid compressed local data');
+    JSON.parse(text); // Do not silently accept a damaged payload.
+    return text;
+  }
+  function encode(raw) {
+    if (raw.length < 4096) return raw;
+    const packed = prefix + LZString.compressToUTF16(raw);
+    if (packed.length >= raw.length) return raw;
+    if (decode(packed) !== raw) throw new Error('Local compression verification failed');
+    return packed;
+  }
+  function compact() {
+    if (recovering) return;
+    recovering = true;
+    try {
+      const list = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && managed(key)) list.push(key);
+      }
+      for (const key of list) {
+        try {
+          const original = localStorage.getItem(key);
+          if (!original || original.startsWith(prefix) || original.length < 4096) continue;
+          JSON.parse(original);
+          const packed = encode(original);
+          // Atomic replacement; failures leave the original value in place.
+          if (packed.length < original.length) localStorage.setItem(key, packed);
+        } catch (_) { /* Preserve unreadable or unwritable entries. */ }
+      }
+    } finally { recovering = false; }
+  }
+  function notify() {
+    window.dispatchEvent(new CustomEvent('pb:storage_status'));
+  }
+  function writeJSON(key, value) {
+    const raw = JSON.stringify(value);
+    if (raw === undefined) throw new Error('Undefined local data');
+    let packed;
+    try {
+      const prior = cache.get(key);
+      packed = prior && prior.raw === raw ? prior.packed : (managed(key) ? encode(raw) : raw);
+      if (localStorage.getItem(key) !== packed) localStorage.setItem(key, packed);
+    } catch (first) {
+      try {
+        if (!(first && (first.name === 'QuotaExceededError' || first.code === 22))) throw first;
+        compact();
+        if (packed === undefined) packed = managed(key) ? encode(raw) : raw;
+        localStorage.setItem(key, packed);
+      } catch (error) {
+        failed.set(key, raw);
+        notify();
+        throw error;
+      }
+    }
+    if (managed(key)) cache.set(key, {raw, packed});
+    if (failed.delete(key)) notify();
+    return true;
+  }
+  window.PbLocalStore = {
+    register(list) { list.forEach(key => keys.add(key)); },
+    readJSON(key, fallback) {
+      const raw = failed.has(key) ? failed.get(key) : decode(localStorage.getItem(key));
+      return raw === null ? fallback : JSON.parse(raw);
+    },
+    writeJSON,
+    remove(key) { localStorage.removeItem(key); cache.delete(key); if (failed.delete(key)) notify(); },
+    hasUnsaved() { return failed.size > 0; },
+    retry() { for (const [key,raw] of [...failed]) { try { writeJSON(key,JSON.parse(raw)); } catch (_) {} } return !failed.size; },
+    exportBackup() {
+      const stored = {};
+      for (let i=0;i<localStorage.length;i++) {
+        const key=localStorage.key(i);
+        if (key && (managed(key) || key.startsWith('pb'))) stored[key]=localStorage.getItem(key);
+      }
+      return {format:'playbook-local-rescue-v1',createdAt:new Date().toISOString(),stored,unsaved:Object.fromEntries(failed)};
+    }
+  };
+  window.addEventListener('beforeunload', event => {
+    if (!failed.size) return;
+    event.preventDefault(); event.returnValue = '';
+  });
+})();
+
+</script>
 <script type="module">
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
@@ -7647,7 +7767,7 @@ function _pendingOps(entity) {
   const prefix = _pendingPrefix + entity.key + ':', result = {};
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i);
-    if (key && key.startsWith(prefix)) result[decodeURIComponent(key.slice(prefix.length))] = JSON.parse(localStorage.getItem(key));
+    if (key && key.startsWith(prefix)) result[decodeURIComponent(key.slice(prefix.length))] = (window.PbLocalStore ? window.PbLocalStore.readJSON(key, null) : JSON.parse(localStorage.getItem(key)));
   }
   for (const [key, op] of Object.entries(_volatileOps))
     if (key.startsWith(prefix)) result[decodeURIComponent(key.slice(prefix.length))] = op;
@@ -7657,7 +7777,7 @@ function _queueOp(entity, key, row) {
   const id = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
   const op = { id, row: row === null ? null : JSON.parse(JSON.stringify(row)) };
   const storageKey = _opKey(entity, key);
-  try { localStorage.setItem(storageKey, JSON.stringify(op)); delete _volatileOps[storageKey]; }
+  try { if (window.PbLocalStore) window.PbLocalStore.writeJSON(storageKey, op); else localStorage.setItem(storageKey, JSON.stringify(op)); delete _volatileOps[storageKey]; }
   catch (error) {
     _volatileOps[storageKey] = op;
     window.dispatchEvent(new CustomEvent('pb:storage_full', { detail: { key: storageKey, error } }));
@@ -7686,7 +7806,7 @@ function _ackOp(entity,key,op) {
   const latest = _pendingOps(entity)[key];
   // Une modification faite pendant la requête ne doit pas être acquittée avec l'ancienne.
   if (!latest || latest.id !== op.id) return;
-  localStorage.removeItem(_opKey(entity,key));
+  if (window.PbLocalStore) window.PbLocalStore.remove(_opKey(entity,key)); else localStorage.removeItem(_opKey(entity,key));
   delete _volatileOps[_opKey(entity,key)];
   _syncEpoch[entity.key] = (_syncEpoch[entity.key] || 0) + 1;
 }
@@ -8145,29 +8265,13 @@ const K = {
   birthdayCelebrated: 'pb8_bday_celebrated',       // map { "<playerId>:YYYY-MM-DD": ts } — animation du jour J déjà jouée (local, jamais sync)
   trainingRemind: 'pb8_training_remind', // map { "<role>:<playerId|->": "YYYY-MM-DD" } — filigrane anti-doublon du rappel quotidien (local)
 };
-function load(k, d) { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : d; } catch { return d; } }
-// save() : sync localStorage avec gestion explicite du QuotaExceededError.
-// Avant : setItem brut → si quota dépassé (typique : 5 MB), throw silencieux
-// remontait à persist() qui sortait sans avoir tout sauvé. Conséquence
-// utilisateur : modal de save play stays open, image dans state mémoire
-// mais perdue au reload. Le throw cassait aussi le chaînage closeModal/render.
-// Maintenant : on emet `pb:storage_full` (custom event) et on retry sans
-// le payload qui a explosé, en gardant trace dans console pour debug.
+// Auth/theme are also read by the tiny first-paint script: retain their plain JSON format.
+window.PbLocalStore.register(Object.values(K).filter(k => ![K.auth,K.theme,K.notifSnooze].includes(k)));
+function load(k, d) { try { return window.PbLocalStore.readJSON(k,d); } catch { return d; } }
 function save(k, v) {
-  try {
-    localStorage.setItem(k, JSON.stringify(v));
-    return true;
-  } catch (e) {
-    const isQuota = e && (e.name === 'QuotaExceededError' || e.code === 22 || /quota/i.test(String(e.message || '')));
-    console.warn('[storage] save failed for', k, ':', e && e.message, '(quota:', isQuota, ')');
-    if (isQuota) {
-      // Notification globale : un seul handler doit afficher l'alerte
-      // (pour éviter 10 popups sur un persist() en cascade)
-      try {
-        const evt = new CustomEvent('pb:storage_full', { detail: { key: k, error: e } });
-        window.dispatchEvent(evt);
-      } catch (_) {}
-    }
+  try { return window.PbLocalStore.writeJSON(k,v); }
+  catch (error) {
+    window.dispatchEvent(new CustomEvent('pb:storage_full', {detail:{key:k}}));
     return false;
   }
 }
@@ -8447,19 +8551,28 @@ function renderPlayerGuide() {
     </div>`;
 }
 
-// Listener global : 1 alerte max par minute pour éviter le spam
-let _lastStorageAlertAt = 0;
-window.addEventListener('pb:storage_full', () => {
-  const now = Date.now();
-  if (now - _lastStorageAlertAt < 60000) return;
-  _lastStorageAlertAt = now;
-  setTimeout(() => alert(
-    '⚠ Mémoire pleine\n\n' +
-    "Le navigateur n'accepte plus de nouvelles données. " +
-    "Tu as probablement trop d'images stockées localement.\n\n" +
-    'Pour libérer : retire des images des plays anciens ou des selfies de match.'
-  ), 0);
-});
+// Keep the warning actionable; never advise deleting unsynchronised data.
+function renderStorageWarning() {
+  const needed=window.PbLocalStore.hasUnsaved();
+  let el=document.getElementById('pb-storage-warning');
+  if(!needed){if(el)el.remove();return;}
+  if(!el){el=document.createElement('aside');el.id='pb-storage-warning';el.setAttribute('role','alert');document.body.appendChild(el);}
+  el.style.cssText='position:fixed;left:12px;right:12px;bottom:calc(82px + env(safe-area-inset-bottom));z-index:10050;max-width:560px;margin:auto;padding:16px;border:2px solid var(--orange);border-radius:14px;background:var(--surface);color:var(--ink);box-shadow:0 4px 24px #0004';
+  el.innerHTML='<strong>Enregistrement local incomplet</strong><p style="font-size:13px;line-height:1.5;margin:8px 0">Le stockage du navigateur est saturé ou indisponible. Gardez cet onglet ouvert et sauvegardez les données en attente. Ne supprimez pas les données du site.</p><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-primary" onclick="exportLocalRescue()">Sauvegarder sur cet appareil</button><button class="btn btn-secondary" onclick="retryLocalStorage()">Réessayer</button></div>';
+}
+function exportLocalRescue() {
+  const backup=window.PbLocalStore.exportBackup();
+  const blob=new Blob([JSON.stringify(backup)],{type:'application/json'});
+  const url=URL.createObjectURL(blob),a=document.createElement('a');
+  a.href=url;a.download='playbook-sauvegarde-'+new Date().toISOString().replace(/[:.]/g,'-')+'.json';document.body.appendChild(a);a.click();a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),60000);
+}
+function retryLocalStorage() {
+  window.PbLocalStore.retry();
+  persist();renderStorageWarning();
+}
+window.addEventListener('pb:storage_full',renderStorageWarning);
+window.addEventListener('pb:storage_status',renderStorageWarning);
 
 let state = {
   auth: load(K.auth, null), // { role: 'coach'|'stat'|'player', playerId: null|string }
@@ -53881,7 +53994,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-09-11.254';
+const APP_VERSION = '2026-09-19.255';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
@@ -53912,6 +54025,7 @@ let _idleReloadTimer = null;
 // localStorage et en base, un reload ne coute rien.
 function _pbBusyForReload() {
   try {
+    if (window.PbLocalStore && window.PbLocalStore.hasUnsaved()) return 'données locales non enregistrées';
     if (_hasOpenModal()) return 'modale ouverte';
     if (window._ardOverlayOpen) return 'machine ardoise';
     if (window._gageOverlayOpen) return 'tirage de gage';
@@ -53991,6 +54105,7 @@ function _hasOpenModal() {
 // HTML caché → on RECHARGE AVEC un paramètre de version (?v=) : l'URL change donc
 // Safari refetch un document frais (et donc le JS inline à jour).
 function _cacheBustReload(v) {
+  if (window.PbLocalStore && window.PbLocalStore.hasUnsaved()) { renderStorageWarning(); return; }
   try {
     const u = new URL(location.href);
     u.searchParams.set('v', v || String(Date.now()));
