@@ -21982,6 +21982,74 @@ function _lineupConflictBadge(pid, matchId) {
   }).join('');
 }
 
+// Convoc match du jour, scopée équipe : E1 et E2 peuvent chacune avoir la
+// leur à la même date, et lire celle de l'autre fausserait la disponibilité.
+// Ordre : tag exact → convoc commune ('both') → première trouvée (mono-équipe).
+function _matchDayConvoc(dateISO, teamTag) {
+  const list = (state.convocations || []).filter(c => c.type === 'match' && c.date === dateISO);
+  if (!list.length) return null;
+  return list.find(c => (c.teamTag || 'e1') === teamTag) || list.find(c => c.teamTag === 'both') || list[0];
+}
+// Joueuses partagées E1/E2 : matchs du MÊME JOUR appartenant à l'AUTRE équipe
+// où `pid` est ÉLIGIBLE — son lien de saison la fait entrer dans l'effectif d'en
+// face (tag 'both') et elle n'est pas indisponible ce jour-là.
+// ⚠️ Pas de fenêtre horaire, contrairement au conflit dur : « dispo chez les
+// deux le même jour » reste vrai si E1 joue à 14h et E2 à 20h.
+// Mono-équipe = no-op strict (tout retombe sur 'e1', donc jamais d'« autre »).
+// `myTag` 'both' (entraînement commun) → pas d'autre équipe, donc [].
+function _sharedPoolMatchesForDay(pid, dateISO, myTag, skipIds) {
+  const mine = myTag === 'e2' ? 'e2' : (!myTag || myTag === 'e1') ? 'e1' : null;
+  if (!dateISO || !mine) return [];
+  const skip = skipIds || [];
+  return (state.matches || []).filter(y => {
+    if (y.date !== dateISO || skip.indexOf(y.id) >= 0) return false;
+    const yTag = y.teamTag === 'e2' ? 'e2' : 'e1';
+    if (yTag === mine) return false;
+    const ySeasonId = y.seasonId || state.currentSeasonId;
+    if (!_seasonsLoaded() || !ySeasonId) return false;
+    if (!getSeasonPlayers(ySeasonId, { team: yTag }).some(p => p.id === pid)) return false;
+    return _convocResp(_matchDayConvoc(y.date, yTag), y.date, pid).status !== 'absent';
+  });
+}
+// Version « depuis un match ». On ne filtre PAS sur `roster.included` : le badge
+// de conflit dur ne s'affiche que dans une fenêtre de 3h, donc une joueuse déjà
+// retenue en face à 20h alors qu'on joue à 14h ne déclenchait AUCUN signal. On
+// retire donc exactement ce que l'autre badge dit vraiment, ni plus ni moins.
+function _sharedPoolMatchesFor(pid, matchId) {
+  const m = (state.matches || []).find(x => x.id === matchId);
+  if (!m) return [];
+  const hard = _lineupConflictsFor(pid, matchId).map(y => y.id);
+  return _sharedPoolMatchesForDay(pid, m.date, m.teamTag, hard.concat([matchId]));
+}
+// Libellé d'équipe court, replié sur E1/E2 quand le multi-effectif est éteint.
+function _sharedPoolTeamLabel(tag) {
+  return (typeof teamLabel === 'function' && isMultiSquad()) ? teamLabel(tag, true) : tag.toUpperCase();
+}
+// Infobulle. Un coach non-admin voit QU'ELLE est aussi dans l'autre groupe,
+// jamais contre qui ni à quelle heure : son périmètre de lecture ne change pas.
+function _sharedPoolHint(shared) {
+  if (typeof isScopedCoach === 'function' && isScopedCoach()) {
+    return "Elle est aussi dans le groupe dispo de l'autre équipe ce jour-là.";
+  }
+  return 'Dispo aussi pour : ' + shared.map(y =>
+    _sharedPoolTeamLabel(y.teamTag === 'e2' ? 'e2' : 'e1') + ' vs ' + (y.opponent || '?') + (y.time ? ' · ' + y.time : '')
+  ).join(' · ');
+}
+// Badge neutre « 👥 aussi dispo {équipe} » — écran de sélection de l'effectif.
+function _sharedPoolBadge(pid, matchId) {
+  const shared = _sharedPoolMatchesFor(pid, matchId);
+  if (!shared.length) return '';
+  const tags = [...new Set(shared.map(y => y.teamTag === 'e2' ? 'e2' : 'e1'))].map(_sharedPoolTeamLabel).join(' + ');
+  return `<div style="margin-top:4px"><span title="${esc(_sharedPoolHint(shared))}" style="font-size:8px;font-family:'JetBrains Mono';color:var(--ink-2);background:var(--bg-3);border:1px solid var(--border);padding:1px 5px;border-radius:4px;text-transform:uppercase;letter-spacing:0.04em">👥 aussi dispo ${esc(tags)}</span></div>`;
+}
+// Version compacte pour les pastilles vertes d'une fiche de convocation :
+// { mark } se colle dans le bouton, { hint } se concatène à son title (qui
+// porte déjà, le cas échéant, la réserve médicale).
+function _sharedPoolChip(pid, dateISO, teamTag) {
+  const shared = _sharedPoolMatchesForDay(pid, dateISO, teamTag, []);
+  if (!shared.length) return { mark: '', hint: '' };
+  return { mark: '<span style="margin-left:5px">👥</span>', hint: _sharedPoolHint(shared) };
+}
 function openRosterManager(matchId) {
   const m = state.matches.find(x => x.id === matchId);
   if (!m) return;
@@ -22042,6 +22110,7 @@ function openRosterManager(matchId) {
               <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"><span style="font-family:'Anton';font-size:13px;text-transform:uppercase">#${p.num} ${esc(p.name)}</span>${convBadge}</div>
               ${p.injury && p.injury.status && p.injury.status !== 'apte' ? `<div style="font-size:9px;color:var(--orange);font-family:'JetBrains Mono';margin-top:2px">⚠ ${esc((INJURY_STATUS[p.injury.status]||{}).label || '')}</div>` : ''}
               ${_lineupConflictBadge(p.id, matchId)}
+                  ${_sharedPoolBadge(p.id, matchId)}
             </div>
             <button class="btn btn-icon" onclick="toggleRosterPlayer('${matchId}','${p.id}',false)" style="color:var(--red)" title="Retirer">✕</button>
           </div>
@@ -22063,6 +22132,7 @@ function openRosterManager(matchId) {
                   <div style="font-family:'Anton';font-size:13px;text-transform:uppercase;color:var(--ink-3)">#${p.num} ${esc(p.name)}</div>
                   ${reason ? `<div style="font-size:9px;color:var(--red);font-family:'JetBrains Mono';margin-top:2px;text-transform:uppercase">${esc(reason)}</div>` : ''}
                   ${_lineupConflictBadge(p.id, matchId)}
+                  ${_sharedPoolBadge(p.id, matchId)}
                 </div>
                 <button class="btn btn-icon" onclick="toggleRosterPlayer('${matchId}','${p.id}',true)" style="color:var(--green)" title="Ajouter">+</button>
               </div>
@@ -43488,7 +43558,12 @@ function openEventInstance(parentId, dateStr) {
               const inj = p.injury;
               const atRisk = inj && inj.status && inj.status !== 'apte';
               const cfg = atRisk ? (INJURY_STATUS[inj.status] || {}) : null;
-              return `<button class="convoc-chip${atRisk ? ' convoc-chip-at-risk' : ''}" onclick="declareInstanceAbsence('${parentId}','${dateStr}','${p.id}')" title="${atRisk ? esc(inj.description || cfg.label || '') : ''}">${atRisk ? esc((cfg.icon || '') + ' ') : ''}${esc(p.name)}</button>`;
+              // 👥 = elle est AUSSI dans le groupe dispo de l'autre équipe pour
+              // un match du même jour. Les deux coachs la voient ; à eux de se
+              // parler avant de composer.
+              const shared = _sharedPoolChip(p.id, dateStr, c.teamTag);
+              const tip = [atRisk ? (inj.description || cfg.label || '') : '', shared.hint].filter(Boolean).join(' · ');
+              return `<button class="convoc-chip${atRisk ? ' convoc-chip-at-risk' : ''}" onclick="declareInstanceAbsence('${parentId}','${dateStr}','${p.id}')" title="${esc(tip)}">${atRisk ? esc((cfg.icon || '') + ' ') : ''}${esc(p.name)}${shared.mark}</button>`;
             }).join('')}
           </div>
           ${absent.length > 0 ? `
@@ -53994,7 +54069,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-09-19.255';
+const APP_VERSION = '2026-09-28.256';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.

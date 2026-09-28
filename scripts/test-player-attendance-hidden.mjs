@@ -94,6 +94,10 @@ function makeEnv(role, type) {
     _autoCloseEnabled: () => false,
     _isTrainingOverdue: () => false,
     getMatchRoster: () => [],
+    // v.256 : les pastilles de présence portent un 👥 quand la joueuse est aussi
+    // dans le groupe dispo de l'autre équipe. Rien à tester ici (cf.
+    // test-shared-squad-availability.mjs) — on neutralise juste la dépendance.
+    _sharedPoolChip: () => ({ mark: '', hint: '' }),
     getMatchRdvTime: () => '',
   };
   return { env, captured, conv };
