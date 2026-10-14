@@ -42499,15 +42499,56 @@ function renderCustomExerciseModal() {
   setTimeout(() => document.getElementById('custom-ex-title')?.focus(), 100);
 }
 
+// Media d'un exercice : on n'embarque JAMAIS le binaire dans le plan. Un plan
+// vit dans localStorage (~5 Mo sur Safari iOS) et un data: pesait 200-470 Ko par
+// photo, jusqu'a 6,7 Mo par PDF -> bandeau « Enregistrement local incomplet »,
+// et la compression LZ n'y peut rien (du base64 ne se compresse pas). Meme
+// patron que addPlayImages : on televerse, on ne garde que l'URL publique.
+// Bucket 'training-photos', deja utilise par les photos de seance.
+// Nom de fichier a plat (prefixe exo-/exodoc-) : les policies du bucket sont
+// ecrites pour la racine, un sous-dossier pourrait tomber hors de leur portee.
+async function _uploadExoMedia(file, isImage) {
+  if (!window.sb) throw new Error('hors ligne');
+  const stamp = Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+  let fname, body, type;
+  if (isImage) {
+    fname = 'exo-' + stamp + '.jpg';
+    body = await compressImageBlob(file, 1000, 0.8);
+    type = 'image/jpeg';
+  } else {
+    const safe = (file.name || 'document.pdf').replace(/[^a-zA-Z0-9._-]/g, '_').slice(-60);
+    fname = 'exodoc-' + stamp + '-' + safe;
+    body = file;
+    type = file.type || 'application/pdf';
+  }
+  const { error: upErr } = await sb.storage.from('training-photos')
+    .upload(fname, body, { contentType: type, cacheControl: '31536000', upsert: false });
+  if (upErr) throw upErr;
+  const { data: pub } = sb.storage.from('training-photos').getPublicUrl(fname);
+  const url = (pub && pub.publicUrl) || '';
+  if (!url) throw new Error('URL publique indisponible');
+  return url;
+}
+// Message commun : on ne retombe JAMAIS sur le base64 en cas d'echec, sinon on
+// recree exactement le probleme qu'on vient de corriger.
+function _exoMediaError(kind, errors) {
+  if (!errors.length) return;
+  try {
+    alert('\u26a0 Echec sur ' + errors.length + ' ' + kind + ' : ' + errors.slice(0, 3).join(', ')
+      + '\n\nRien n\'a ete ajoute. Verifie ta connexion puis recommence.');
+  } catch (e) {}
+}
+
 async function addCustomExoImages(event) {
   const files = Array.from(event.target.files || []);
+  event.target.value = '';
   if (!files.length) return;
+  const errors = [];
   for (const file of files) {
-    try {
-      const compressed = await compressImage(file, 1000, 0.8);
-      state._customExoBuffer.images.push(compressed);
-    } catch (e) { console.error(e); }
+    try { state._customExoBuffer.images.push(await _uploadExoMedia(file, true)); }
+    catch (e) { console.error('[exo image]', file.name, e && e.message ? e.message : e); errors.push(file.name); }
   }
+  _exoMediaError('photo(s)', errors);
   renderCustomExerciseModal();
 }
 
@@ -42518,28 +42559,29 @@ function removeCustomExoImage(idx) {
 
 async function addCustomExoFiles(event) {
   const files = Array.from(event.target.files || []);
+  event.target.value = '';
   if (!files.length) return;
+  const errors = [];
   for (const file of files) {
-    // Limite : 5 Mo par fichier pour éviter d'exploser localStorage
+    // Limite : 5 Mo par fichier (le binaire part dans le bucket, mais un PDF
+    // enorme reste penible a ouvrir depuis un telephone au gymnase).
     if (file.size > 5 * 1024 * 1024) {
       alert('Fichier trop volumineux : ' + file.name + ' (max 5 Mo)');
       continue;
     }
     try {
-      const dataUrl = await new Promise((resolve, reject) => {
-        const r = new FileReader();
-        r.onload = () => resolve(r.result);
-        r.onerror = reject;
-        r.readAsDataURL(file);
-      });
+      // `data` porte desormais une URL publique. Les lecteurs font tous
+      // <a href="${f.data}"> : rien a changer cote rendu, et les anciennes
+      // pieces jointes en base64 continuent de s'ouvrir.
       state._customExoBuffer.files.push({
         name: file.name,
         type: file.type || 'application/pdf',
         size: file.size,
-        data: dataUrl
+        data: await _uploadExoMedia(file, false)
       });
-    } catch (e) { console.error(e); }
+    } catch (e) { console.error('[exo pdf]', file.name, e && e.message ? e.message : e); errors.push(file.name); }
   }
+  _exoMediaError('document(s)', errors);
   renderCustomExerciseModal();
 }
 
@@ -42980,17 +43022,18 @@ function groupAllRemaining() {
 // === Édition images/PDF dans le détail exo (après création) ===
 async function addExerciseImagesInDetail(event) {
   const files = Array.from(event.target.files || []);
+  event.target.value = '';
   if (!files.length) return;
   const c = state.convocations.find(x => x.id === state._editingTraining.convocId);
   const ex = c.trainingPlan.exercises[state._editingExerciseIdx];
   if (!ex) return;
   ex.images = ex.images || [];
+  const errors = [];
   for (const file of files) {
-    try {
-      const compressed = await compressImage(file, 1000, 0.8);
-      ex.images.push(compressed);
-    } catch (e) { console.error(e); }
+    try { ex.images.push(await _uploadExoMedia(file, true)); }
+    catch (e) { console.error('[exo image]', file.name, e && e.message ? e.message : e); errors.push(file.name); }
   }
+  _exoMediaError('photo(s)', errors);
   persist();
   renderExerciseDetail();
 }
@@ -43006,31 +43049,28 @@ function removeExerciseImageInDetail(idx) {
 
 async function addExerciseFilesInDetail(event) {
   const files = Array.from(event.target.files || []);
+  event.target.value = '';
   if (!files.length) return;
   const c = state.convocations.find(x => x.id === state._editingTraining.convocId);
   const ex = c.trainingPlan.exercises[state._editingExerciseIdx];
   if (!ex) return;
   ex.attachments = ex.attachments || [];
+  const errors = [];
   for (const file of files) {
     if (file.size > 5 * 1024 * 1024) {
       alert('Fichier trop volumineux : ' + file.name + ' (max 5 Mo)');
       continue;
     }
     try {
-      const dataUrl = await new Promise((resolve, reject) => {
-        const r = new FileReader();
-        r.onload = () => resolve(r.result);
-        r.onerror = reject;
-        r.readAsDataURL(file);
-      });
       ex.attachments.push({
         name: file.name,
         type: file.type || 'application/pdf',
         size: file.size,
-        data: dataUrl
+        data: await _uploadExoMedia(file, false)
       });
-    } catch (e) { console.error(e); }
+    } catch (e) { console.error('[exo pdf]', file.name, e && e.message ? e.message : e); errors.push(file.name); }
   }
+  _exoMediaError('document(s)', errors);
   persist();
   renderExerciseDetail();
 }
@@ -54069,7 +54109,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-09-28.256';
+const APP_VERSION = '2026-10-14.257';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
