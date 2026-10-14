@@ -8797,6 +8797,28 @@ Object.defineProperty(state, 'offseason', {
   state.currentProgramId = '1';
 })();
 
+// resolveTrainingPlan fait pointer `c.trainingPlan` sur l'objet de
+// state.trainingPlans (live-binding, cf. [playbook-sync-architecture]). Le dump
+// Supabase des convocations liste ses champs un par un, donc le plan n'est PAS
+// pousse au serveur — mais save() fait un JSON.stringify de l'objet ENTIER :
+// le plan, photos base64 comprises, etait donc stocke DEUX FOIS en localStorage.
+// Sur un plafond de ~5 Mo (Safari iOS), ca comptait double pour rien.
+//
+// On ne retire le plan QUE si son exemplaire canonique existe dans
+// state.trainingPlans. Un plan legacy pas encore migre (cf.
+// _migrateLegacyTrainingPlans, qui tourne au boot) n'a pas d'autre domicile :
+// le retirer avant sa migration le detruirait.
+function _convocsForStorage() {
+  const plans = state.trainingPlans || [];
+  return (state.convocations || []).map(c => {
+    if (!c || !c.trainingPlan) return c;
+    const migre = plans.some(tp => tp.convocationId === c.id);
+    if (!migre) return c;
+    const { trainingPlan, ...rest } = c;
+    return rest;
+  });
+}
+
 function persist() {
   invalidateAutoScoreCache(); // compteurs auto recomputés à la lecture : cache à jour
   invalidatePointsCache();    // idem pour le score de saison (présences dérivées)
@@ -8807,7 +8829,7 @@ function persist() {
   save(K.matches, state.matches);
   save(K.challenges, state.challenges);
   save(K.players, state.players);
-  save(K.convocations, state.convocations);
+  save(K.convocations, _convocsForStorage());
   save(K.pins, state.pins);
   save(K.ffbb, state.ffbb);
   save(K.team, state.team);
@@ -54109,7 +54131,7 @@ async function resyncData(reason) {
 // « Nouvelle version · Recharger » qui fait location.reload() (revalidation ETag
 // → nouveau index.html servi, Cache-Control max-age=0 must-revalidate).
 // IMPORTANT : bumper version.json ET APP_VERSION à la MÊME valeur à chaque deploy.
-const APP_VERSION = '2026-10-14.257';
+const APP_VERSION = '2026-10-14.258';
 let _updateBannerShown = false;
 let _lastUpdateCheck = 0;
 // Version dont la joueuse a fermé le bandeau d'un ✕, pour CETTE session.
